@@ -2,9 +2,9 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 0.1.0 — Wave A (deliverable 8)                     |
+| เวอร์ชัน | 0.2.0 — Wave A (deliverable 8) แก้ตาม A6 review: B-10, B-11, B-12, B-13, M-03, M-04 |
 | วันที่    | 2026-09-08                                         |
-| อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md |
+| อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
 
 ---
@@ -19,7 +19,7 @@
 6. **Pagination แบบ cursor-based** — ไม่ใช้ offset บนชุดข้อมูลใหญ่ (audit log, notifications, รายงาน)
 7. **Versioning ที่ path** — `/api/v1`; breaking change = เปิด `/api/v1` เดิมคู่กับ `/api/v2` พร้อม header `Deprecation` + `Sunset` (ระยะเปลี่ยน ≥ 90 วัน, config)
 8. **Idempotency-Key บังคับสำหรับ submit ข้อสอบ** — header `Idempotency-Key: <uuid>` ที่ client สร้าง; BFF เก็บผลลัพธ์ 24 ชม. (config) ต่อ (user, endpoint) — ยิงซ้ำได้โดยไม่สร้าง attempt ใหม่
-9. **Rate limit ต่อ endpoint group** — ค่าต่างกันตามกลุ่มความไว (ดู §5) แยกค่า dev/prod ผ่าน config ห้าม hardcode (BRIEF §6)
+9. **Rate limit ต่อ endpoint group** — ค่าเดียวต่อ endpoint ใช้ทุก environment (ดู §5) อ้างผ่าน config key ห้าม hardcode (BRIEF §6)
 10. **ห้าม log PII ใน request/response** — email, เลขบัตรประชาชน, เลขที่ใบอนุญาต ห้ามปรากฏใน log/error `details` (BRIEF §8) — อ้างด้วย `user_id` เสมอ
 
 ### 1.1 Conventions
@@ -27,7 +27,7 @@
 - **Method ใช้:** `GET` (อ่าน), `POST` (สร้าง/การกระทำ), `PATCH` (แก้บางฟิลด์), `PUT` (แทนที่ทั้งชุด — ใช้เฉพาะ `/me/license`), `DELETE` ใช้น้อยมาก (soft-delete เป็นหลัก)
 - **Status codes:** `200` สำเร็จ · `201` สร้างใหม่ · `204` สำเร็จไม่มี body (ใช้เฉพาะ mark-read) · `400` validation · `401` ไม่ได้ login/session หมด · `403` ไม่มีสิทธิ์ · `404` ไม่พบ/ไม่เปิดเผยการมีอยู่ · `409` conflict/idempotency mismatch · `422` business rule · `429` rate limit · `500/503` ระบบ
 - **เวลา:** ISO 8601 UTC (`2026-09-08T10:00:00Z`)
-- **ID:** UUID (อ้างตาม DATA-DICTIONARY.md ของ worker-3 — หากเลือกแบบอื่น ยื่น DCR)
+- **ID:** **UUID v4** ทุกตาราง (ตัดสินแล้ว M-04) — เหตุผล: เป็นค่า default ของ `gen_random_uuid()` บน PostgreSQL 15/Supabase, ไม่เปิดเผยลำดับการสร้าง (ต่างจาก v7/serial), รองรับทุก client; งานที่ต้องการ sort ใช้ cursor `(created_at, id)` แทน
 - **ภาษา error:** ไทยหลัก อังกฤษรอง (เตรียม next-intl-style key)
 
 ### 1.2 Pagination (cursor-based)
@@ -88,8 +88,8 @@ Response wrapper ทุก list endpoint:
 | ERR-ASM-004 | 422 | หมดเวลาสอบแล้ว ระบบไม่รับคำตอบเพิ่ม | timeout |
 | ERR-ASM-005 | 422 | บันทึกคำตอบไม่ได้เพราะส่งข้อสอบแล้ว | attempt submitted |
 | ERR-ASM-006 | 403 | คุณไม่ใช่เจ้าของรอบการสอบนี้ | attempt ของคนอื่น |
-| ERR-CERT-001 | 404 | ไม่พบประกาศนียบัตรจากรหัสอ้างอิงนี้ | public verify |
-| ERR-CERT-002 | 410 | ประกาศนียบัตรนี้ถูกเพิกถอน | revoked (แสดง status ไม่ใช่ซ่อน) |
+| ERR-CERT-001 | 404 | ไม่พบประกาศนียบัตรจากรหัสอ้างอิงนี้ | public verify (เฉพาะรหัสไม่มีจริง) |
+| ERR-CERT-002 | 410 | ประกาศนียบัตรนี้ถูกลบออกจากระบบตามนโยบายการเก็บรักษาข้อมูล | retention purge — ใบที่ถูกเพิกถอน/แทนที่ **ไม่ใช่ 410** แต่ตอบ 200 + `status=revoked/superseded` (CRT-004) |
 | ERR-CRD-001 | 422 | กฎเครดิตนี้มีผลใช้งานแล้ว แก้ไขต้องสร้างฉบับใหม่ | immutable active rule |
 | ERR-CRD-002 | 422 | การปรับ credit ต้องระบุเหตุผล | reason required |
 | ERR-ADM-001 | 403 | การกระทำนี้ต้องใช้สิทธิ์เจ้าหน้าที่ระดับสูงขึ้น | staff sub-role ไม่พอ |
@@ -112,6 +112,12 @@ Response wrapper ทุก list endpoint:
 | POST | /auth/mfa/disable | ปิด MFA (staff ต้องมี super_admin อนุมัติ — นอก v1 ให้ block) | ทุกบทบาท | 200 | RBAC-001 |
 | POST | /auth/password-reset/request | ขอลิงก์รีเซ็ตรหัสผ่าน (ตอบเหมือนกันทุกกรณี) | guest | 202 เสมอ | RATE-001 |
 | POST | /auth/password-reset/confirm | ตั้งรหัสผ่านใหม่จาก token | guest | 200 | AUTH-005 |
+| POST | /auth/verify | ยืนยันอีเมลจาก token (เปิดใช้บัญชี) | guest | 200 | AUTH-005 |
+| POST | /auth/change-password | เปลี่ยนรหัสผ่าน (login อยู่ + รหัสเดิม) — audit `AUTH_PASSWORD_CHANGE` | ทุกบทบาทที่ login แล้ว | 200 | AUTH-002 |
+| POST | /auth/otp/request | ขอ OTP ไปอีเมล/เบอร์มือถือ | guest | 202 (ไม่เปิดเผยว่ามีบัญชี) | RATE-001 |
+| POST | /auth/otp/verify | ยืนยัน OTP (ช่วย login หรือผูกเบอร์) | guest | 200 | AUTH-002, RATE-001 |
+| POST | /auth/logout-all | ออกจากระบบทุกอุปกรณ์ (revoke ทุก session) | ทุกบทบาทที่ login แล้ว | 204 | AUTH-001 |
+| GET | /auth/mfa/backups | ขอ backup codes ชุดใหม่ (ชุดเก่าใช้ไม่ได้ทันที — ครั้งเดียวต่อการ enrolled) | ทุกบทบาทที่ login + MFA แล้ว | 200 | RBAC-001 |
 
 หมายเหตุ: login สำเร็จ/ล้มเหลว → audit `AUTH_LOGIN_OK/FAIL` เสมอ (AUDIT-LOG-DESIGN.md)
 
@@ -124,6 +130,15 @@ Response wrapper ทุก list endpoint:
 | PUT | /me/license | ผูก/แทนที่เลขที่ใบอนุญาตว่าความ (ส่งเรื่องขอยืนยัน) | citizen, lawyer | 202 (รอเจ้าหน้าที่ตรวจ) | PRF-001/002 |
 | GET | /me/credits | ยอด credit คงเหลือแยกตามรอบต่ออายุ | lawyer | 200 | AUTH-001 |
 | GET | /me/transcript | transcript รายวิชา/ผลสอบ/credit ที่สะสม | citizen, lawyer | 200 | AUTH-001 |
+
+PDPA endpoints (สิทธิของเจ้าของข้อมูล — วางใต้ `/profile/*` ตามที่ SRS/RTM อ้าง แยกจาก `/me/*` ที่เป็นข้อมูลสด):
+
+| Method | Path | คำอธิบาย | บทบาท | Success | Errors |
+| --- | --- | --- | --- | --- | --- |
+| GET | /profile/export | ขอส่งออกข้อมูลของตัวเอง (data portability — สร้าง job ส่งไฟล์ให้ตัวเอง) | ทุกบทบาทที่ login แล้ว | 202 (job) | RATE-001 |
+| POST | /profile/delete | ขอลบบัญชี/ข้อมูลส่วนบุคคล (ตาม retention ที่กฎบังคับ — ผลสอบ/audit เก็บต่อ) | ทุกบทบาทที่ login แล้ว | 202 (รอยืนยันซ้ำทางอีเมล) | RATE-001 |
+| GET | /profile/consents | ดูประวัติ consent ที่ให้ไว้ | ทุกบทบาทที่ login แล้ว | 200 | AUTH-001 |
+| PATCH | /profile/consents | ให้/ถอน consent (เช่น รับข่าวสาร) | ทุกบทบาทที่ login แล้ว | 200 | VAL-001 |
 
 ### 3.3 Catalog & Enrollment (โดเมน 2)
 
@@ -147,19 +162,26 @@ Response wrapper ทุก list endpoint:
 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
-| GET | /assessments/{id} | เริ่มสอบ: ตรวจเงื่อนไข → **สร้าง attempt** + ส่งข้อสอบ (สุ่มแล้ว) โดยไม่มีเฉลย | citizen, lawyer (ที่ผ่านเงื่อนไขจบหลักสูตร) | 201 attempt + ชุดข้อ + `serverTime` + `deadlineAt` | ASM-001/002/003 |
+| GET | /assessments/{id} | อ่านข้อมูลการสอบ + กติกา (เวลา จำนวนครั้ง เกณฑ์ผ่าน) — **read-only เสมอ ไม่สร้าง attempt** (B-10) | citizen, lawyer, instructor, staff:exam | 200 | ASM-003, NF-001 |
+| POST | /assessments/{id}/attempts | **เริ่มสอบ**: ตรวจเงื่อนไข → สร้าง attempt + ส่งข้อสอบ (สุ่มแล้ว) โดยไม่มีเฉลย | citizen, lawyer (ที่ผ่านเงื่อนไขจบหลักสูตร) | 201 attempt + ชุดข้อ + `serverTime` + `deadlineAt` | ASM-001/002/003 |
+| GET | /me/attempts | ประวัติการสอบของตัวเองทุกหลักสูตร | citizen, lawyer | 200 + pagination | AUTH-001 |
 | POST | /attempts/{id}/answers | บันทึกคำตอบทีละข้อ (autosave — เรียกบ่อย, idempotent ต่อ question) | เจ้าของ attempt | 200 (savedAt) | ASM-004/005/006 |
 | POST | /attempts/{id}/submit | ส่งข้อสอบ — **ต้องมี `Idempotency-Key`**; ตรวจคะแนน server-side ทั้งหมด | เจ้าของ attempt | 200 (status=grading) หรือ ซ้ำ → คืนผลเดิม | ASM-004/005/006, VAL-002, IDM-001 |
 | GET | /attempts/{id}/result | ผลสอบ + เฉลย (เปิดตาม config หลังสูตร) + credit ที่ได้ | เจ้าของ attempt | 200 | ASM-006, NF-001 |
 
-Flow สอบ (sequence): `GET /assessments/{id}` → ตรวจสิทธิ์/จำนวนครั้ง/หน้าต่างสอบ → สร้าง attempt (`started_at`, `deadline_at = now + duration`) → client จับเวลาจาก `serverTime` ไม่ใช่นาฬิกาตัวเอง → autosave ทุกข้อ → `submit` (idempotent) → server ตรวจ → ถ้าผ่านเกณฑ์ → งานเบื้องหลังสร้างรายการรอออกประกาศนียบัตร (registrar ออกภายหลัง — separation of duties)
+Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกาก่อนได้ (read-only) → `POST /assessments/{id}/attempts` ตรวจสิทธิ์/จำนวนครั้ง/หน้าต่างสอบ → สร้าง attempt (`started_at`, `deadline_at = now + duration`) → client จับเวลาจาก `serverTime` ไม่ใช่นาฬิกาตัวเอง → autosave ทุกข้อ → `submit` (idempotent) → server ตรวจ → ถ้าผ่านเกณฑ์ → งานเบื้องหลังสร้างรายการรอออกประกาศนียบัตร (registrar ออกภายหลัง — separation of duties)
 
 ### 3.6 Certificate (โดเมน 4)
 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
-| GET | /certificates/{code} | **ตรวจสอบสาธารณะ** ไม่ต้อง auth ไม่มี rate สูง — คืนเฉพาะ: รหัส, ชื่อบัญชีย่อ (ชื่อ-นามสกุล), ชื่อหลักสูตร, วันที่ออก, สถานะ (valid/revoked), วันที่เพิกถอน — **ห้ามคืน email/เลขใบอนุญาต/PII อื่น** | guest | 200 (แม้ revoked ก็ 200 + status) | CERT-001, RATE-001 |
+| GET | /certificates/{code} | **ตรวจสอบสาธารณะ** ไม่ต้อง auth — ตอบ **200 เสมอ** (CRT-004) ด้วย 4 ฟิลด์เท่านั้น: `{code, course_title, issued_at, status}` โดย `status ∈ valid \| revoked \| superseded` — **ไม่มีชื่อเจ้าของ** (ชื่อ-นามสกุลอยู่บน PDF ที่เจ้าของ/registrar ดาวน์โหลดเท่านั้น) | guest | 200 เสมอ | RATE-001 (410 ERR-CERT-002 เฉพาะใบที่ถูกลบตาม retention) |
 | GET | /me/certificates | ประกาศนียบัตรของตัวเอง (พร้อมลิงก์ PDF) | citizen, lawyer | 200 + pagination | AUTH-001 |
+| GET | /certificates/{id}/pdf | ดาวน์โหลด PDF ตัวจริง (id = uuid ต้อง auth — ต่างจาก public verify ที่ใช้ code) | เจ้าของใบรับรอง, staff:registrar, super_admin | 200 `application/pdf` | NF-001, RBAC-001 |
+| POST | /admin/certificates | ออกประกาศนียบัติรายใบ (จาก attempt ที่ผ่านเกณฑ์) — audit `CERT_ISSUE` | staff:registrar, super_admin | 201 | RBAC-001, VAL-001 |
+| POST | /admin/certificates/bulk | ออกเป็นชุด (รอบเดียวกัน) — 202 job + สรุปผลทาง notification | staff:registrar, super_admin | 202 (job) | RBAC-001 |
+| POST | /admin/certificates/{id}/revoke | เพิกถอน (บังคับ reason) — audit `CERT_REVOKE` | staff:registrar, super_admin | 200 | RBAC-001, VAL-001 |
+| POST | /admin/certificates/{id}/reissue | ออกใหม่แทนใบเดิม (ใบเดิมเปลี่ยน status=superseded) — CRT-007, audit `CERT_REISSUE` | staff:registrar, super_admin | 201 (ใบใหม่) | RBAC-001 |
 
 ### 3.7 Credit Bank — เจ้าหน้าที่ (โดเมน 5)
 
@@ -193,6 +215,14 @@ Flow สอบ (sequence): `GET /assessments/{id}` → ตรวจสิทธ�
 | GET | /admin/reports/credits | รายงาน credit ตามรอบ | staff:registrar, staff:viewer, super_admin | 200 | RBAC-001 |
 | GET | /admin/reports/{type}/export | ส่งออก CSV/JSON (audit `ADMIN_EXPORT`) — สูงสุดตาม §5 | staff:viewer, staff:registrar, super_admin (ตาม report) | 200 `text/csv` หรือ JSON | RBAC-001, RATE-001 |
 | GET | /admin/audit-logs | อ่าน audit log (pagination + filter) — **อ่านอย่างเดียว ไม่มี endpoint แก้/ลบ** (BRIEF §8, D6) | staff:viewer, super_admin | 200 + pagination | RBAC-001 |
+| GET | /admin/license-applications | รายการคำขอผูกเลขที่ใบอนุญาต (รอตรวจ/ตัดสินแล้ว) | staff:registrar, super_admin | 200 + pagination | RBAC-001 |
+| PATCH | /admin/license-applications/{id} | ตัดสินคำขอ (อนุมัติ/ปฏิเสธ) — audit `LICENSE_VERIFY` + อนุมัติแล้วมอบบทบาท `lawyer` อัตโนมัติ (audit `ROLE_GRANT`) | staff:registrar, super_admin | 200 | RBAC-001, VAL-001 |
+| GET | /admin/categories | หมวดหลักสูตรทุกสถานะ | staff:content, staff:viewer, super_admin | 200 | RBAC-001 |
+| POST | /admin/categories | สร้างหมวด | staff:content, super_admin | 201 | RBAC-001, VAL-001 |
+| PATCH | /admin/categories/{id} | แก้ชื่อ/เลิกใช้หมวด (มีหลักสูตรอ้างอยู่ห้ามลบ) | staff:content, super_admin | 200 | RBAC-001 |
+| GET | /admin/exams/monitoring | มอนิเตอร์ attempt ที่กำลังสอบ (จำนวน/ค้างเกินเวลา/แยกตามหลักสูตร) | staff:exam, super_admin | 200 | RBAC-001 |
+| GET | /admin/exams/statistics | สถิติผลสอบรวม (ผ่าน/ตก/คะแนนเฉลี่ย ต่อชุดข้อสอบ) | staff:exam, staff:viewer, super_admin | 200 | RBAC-001 |
+| GET | /admin/dashboard | ตัวเลขสรุปหน้าแรก admin (แสดงตามสิทธิ์ของบทบาทที่ถือ) | staff:viewer, staff:content, staff:exam, staff:registrar, super_admin | 200 | RBAC-001 |
 
 ### 3.9 Notifications (โดเมน 6)
 
@@ -200,6 +230,14 @@ Flow สอบ (sequence): `GET /assessments/{id}` → ตรวจสิทธ�
 | --- | --- | --- | --- | --- | --- |
 | GET | /me/notifications | แจ้งเตือนในระบบของตัวเอง (unreadFirst + pagination) | ทุกบทบาทที่ login แล้ว | 200 | AUTH-001 |
 | POST | /me/notifications/{id}/read | ทำเครื่องหมายอ่านแล้ว (idempotent) | เจ้าของ notification | 204 (ซ้ำก็ 204) | NF-001 |
+| GET | /me/notification-settings | ตั้งค่าช่องทาง/ประเภทแจ้งเตือนของตัวเอง | ทุกบทบาทที่ login แล้ว | 200 | AUTH-001 |
+| PATCH | /me/notification-settings | แก้การตั้งค่าแจ้งเตือน (in-app/email ต่อประเภท) | ทุกบทบาทที่ login แล้ว | 200 | VAL-001 |
+
+### 3.10 System
+
+| Method | Path | คำอธิบาย | บทบาท | Success | Errors |
+| --- | --- | --- | --- | --- | --- |
+| GET | /api/health | liveness/readiness probe — **อยู่นอก prefix `/api/v1`** เพื่อไม่ผูกกับ version; ตอบ `{ status, db, time }` ไม่มีข้อมูลอื่น | guest | 200 | — (503 เมื่อ DB ไม่พร้อม) |
 
 ---
 
@@ -261,12 +299,13 @@ export const AttemptSubmitRequest = z.object({
   unansweredQuestionIds: z.array(z.string().uuid()).max(500).default([]),
 }).strict();
 
-// 9) สร้างกฎเครดิต (config-driven, Q1)
+// 9) สร้างกฎเครดิต — mirror schema จริงของตาราง credit_rules ตาม DATA-DICTIONARY.md (M-03)
 export const CreditRuleCreateRequest = z.object({
   code: z.string().regex(/^[A-Z0-9_]{3,32}$/),
-  courseCategory: z.string().uuid().nullable(),
-  creditAmount: z.number().int().min(0).max(100),
-  validityYears: z.number().int().min(1).max(10).default(3),
+  courseId: z.string().uuid().nullable(),          // FK courses.id (null = ใช้กับทุกหลักสูตรในหมวด)
+  credits: z.string().regex(/^\d{1,4}(\.\d{1,2})?$/)
+    .refine((v) => parseFloat(v) > 0),             // numeric(6,2) ค่าเป็นบวกเท่านั้น
+  validDays: z.number().int().min(1).max(3650),    // อายุ credit เป็น "วัน" (ไม่ใช่ปี)
   renewalCycle: z.enum(["LAWYER_STANDARD"]).default("LAWYER_STANDARD"), // รอ Q1
   effectiveFrom: z.string().date(),
 });
@@ -293,15 +332,12 @@ export const PageQuery = z.object({
   cursor: z.string().max(512).optional(),
 }).strict();
 
-// 13) Response: ผลตรวจสาธารณะของประกาศนียบัตร (จำกัดฟิลด์ — ห้าม PII เกินจำเป็น)
+// 13) Response: ผลตรวจสาธารณะของประกาศนียบัตร (CRT-004) — 4 ฟิลด์เท่านั้น ไม่มีชื่อเจ้าของ
 export const CertificatePublicView = z.object({
   code: z.string(),
-  holderDisplayName: z.string(),        // ชื่อ-นามสกุลเท่านั้น
   courseTitle: z.string(),
   issuedAt: z.string().datetime(),
-  status: z.enum(["valid","revoked"]),
-  revokedAt: z.string().datetime().nullable(),
-  revokedReason: z.string().nullable(), // ระดับสาธารณะ เช่น "ออกซ้ำ"
+  status: z.enum(["valid", "revoked", "superseded"]),
 });
 
 // 14) Error envelope ขาออก (validate ทุก error response)
@@ -318,21 +354,21 @@ export const ErrorEnvelope = z.object({
 
 ## 5. Rate limit matrix
 
-Key การนับ: guest = `ip + route-group`; login แล้ว = `user_id + route-group`. บังคับ 2 ชั้น: **Cloudflare WAF/rate rule (prod) + Next.js middleware (dev/สำรอง prod)** — ค่าทั้งหมดอยู่ใน `config/rate-limit.ts` อ่านจาก env ห้าม hardcode (BRIEF §6)
+Key การนับ: guest = `ip + route-group`; login แล้ว = `user_id + route-group`. บังคับ 2 ชั้น: **Cloudflare WAF/rate rule (prod) + Next.js middleware (dev/สำรอง prod)** — **ค่าเดียวต่อ endpoint ใช้ทุก environment** (B-13) ปรับได้ที่ config key ใน `config/rate-limit.ts` (อ่านจาก env) ห้าม hardcode (BRIEF §6)
 
-| Group | ใช้กับ (ตัวอย่าง) | หน้าต่าง | Dev (default) | Prod (default) | เกิน → |
+| Group | ใช้กับ (ตัวอย่าง) | หน้าต่าง | Default | Config key | เกิน → |
 | --- | --- | --- | --- | --- | --- |
-| AUTH | /auth/login, /auth/register | 1 นาที | 30/min | 5/min/ip | 429 + Retry-After |
-| PWD_RESET | /auth/password-reset/* | 1 ชั่วโมง | 30/h | 3/h/ip | 429 |
-| MFA | /auth/mfa/* | 1 นาที | 30/min | 10/min | 429 |
-| PUBLIC_READ | /categories, /courses, /certificates/{code} | 1 นาที | 600/min | 120/min/ip | 429 |
-| READ | /me*, /me/enrollments | 1 นาที | 300/min | 120/min | 429 |
-| LEARN_WRITE | /lessons/*/progress, /lessons/*/quiz/submit | 1 นาที | 300/min | 120/min | 429 |
-| EXAM | /attempts/*/answers, /attempts/*/submit | 1 นาที | 120/min | 60/min | 429 (log WARN) |
-| STAFF_WRITE | /admin/*, /credit-* | 1 นาที | 120/min | 60/min | 429 (audit) |
-| EXPORT | /admin/reports/*/export | 1 ชั่วโมง | 60/h | 10/h | 429 |
+| AUTH | /auth/login, /auth/register, /auth/otp/* | 1 นาที | **10/min** (SRS Appendix A) | `RATE_LIMIT_AUTH_PER_MIN` | 429 + Retry-After |
+| PWD_RESET | /auth/password-reset/* | 1 ชั่วโมง | 5/h | `RATE_LIMIT_PWD_RESET_PER_HOUR` | 429 |
+| MFA | /auth/mfa/* | 1 นาที | 10/min | `RATE_LIMIT_MFA_PER_MIN` | 429 |
+| PUBLIC_READ | /categories, /courses, /certificates/{code} | 1 นาที | 120/min | `RATE_LIMIT_PUBLIC_READ_PER_MIN` | 429 |
+| READ | /me*, /profile/* | 1 นาที | 120/min | `RATE_LIMIT_READ_PER_MIN` | 429 |
+| LEARN_WRITE | /lessons/*/progress, /lessons/*/quiz/submit | 1 นาที | 120/min | `RATE_LIMIT_LEARN_WRITE_PER_MIN` | 429 |
+| EXAM | /assessments/*/attempts, /attempts/* | 1 นาที | 60/min | `RATE_LIMIT_EXAM_PER_MIN` | 429 (log WARN) |
+| STAFF_WRITE | /admin/*, /credit-* | 1 นาที | 60/min | `RATE_LIMIT_STAFF_WRITE_PER_MIN` | 429 (audit) |
+| EXPORT | /admin/reports/*/export, /profile/export | 1 ชั่วโมง | 10/h | `RATE_LIMIT_EXPORT_PER_HOUR` | 429 |
 
-- ค่า prod ออกแบบให้รองรับเป้า 5,000 คนสอบพร้อมกัน (BRIEF §7): EXAM 60/min ต่อคน > อัตรา autosave ที่ client ส่ง (throttle ที่ client 10 วินาที/ข้อ)
+- ค่า EXAM 60/min ต่อคน รองรับเป้า 5,000 คนสอบพร้อมกัน (BRIEF §7) — สูงกว่าอัตรา autosave ที่ client ส่ง (throttle ที่ client 10 วินาที/ข้อ)
 - 429 ทุกครั้ง → audit `RATE_LIMIT_HIT` (ระดับ WARN) เมื่อเป็นกลุ่ม STAFF_WRITE/EXAM
 
 ---
@@ -345,6 +381,5 @@ Key การนับ: guest = `ip + route-group`; login แล้ว = `user_i
 | จำนวนครั้งสอบ/เกณฑ์ผ่าน | ใช้ config ต่อ assessment ไม่กำหนดที่ API | รอยืนยัน Q2 |
 | Proctoring อาจเพิ่ม endpoint (เช่น /attempts/{id}/events) | จะเป็น `/api/v1` additive — non-breaking | รอยืนยัน Q4 |
 | รอบต่ออายุ+จำนวน credit | `CreditRuleCreateRequest.renewalCycle` enum | รอยืนยัน Q1 |
-| ID scheme (UUID v4/v7) | ตัวอย่าง `.uuid()` — ต้องตรง DATA-DICTIONARY.md | ประสาน worker-3 |
 
 > เอกสารนี้เป็น part ของชุด `04-api-security/` — บทบาท↔permission ที่คอลัมน์ "บทบาท" อ้างถึง นิยามเต็มอยู่ที่ RBAC-DESIGN.md; event ที่กล่าวถึง (เช่น `COURSE_PUBLISH`) นิยามอยู่ที่ AUDIT-LOG-DESIGN.md

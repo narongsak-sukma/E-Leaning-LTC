@@ -2,9 +2,9 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 0.1.0 — Wave A (deliverable 10)                 |
+| เวอร์ชัน | 0.2.1 — Wave A (deliverable 10) แก้ตาม A6 review: B-02, B-14 (§7 แก้ semantics เป็น property-based) |
 | วันที่    | 2026-09-08                                      |
-| อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน 8), §8 (security), กฎ CTO D6 · RBAC-DESIGN.md · API-SPECIFICATION.md |
+| อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน 8), §8 (security), กฎ CTO D6 · RBAC-DESIGN.md (§3.1 canonical helpers) · API-SPECIFICATION.md · SRS.md (AUD-001–005) |
 
 ---
 
@@ -36,6 +36,7 @@
 | AUTH_MFA_DISABLED | ทุกบทบาท | ผู้ดำเนินการ, เหตุผล | WARN | ลดมาตรการรักษาความปลอดภัย |
 | AUTH_PASSWORD_RESET_REQUEST | guest | ip_hash (ไม่บอกว่ามีบัญชี) | NOTICE | — |
 | AUTH_PASSWORD_RESET_DONE | ทุกบทบาท | ip_hash | NOTICE | การเปลี่ยนข้อมูลยืนยันตัวตน |
+| AUTH_PASSWORD_CHANGE | ทุกบทบาท (login อยู่) | ผ่านทาง (ตัวเอง/reset), session_id | NOTICE | การเปลี่ยนข้อมูลยืนยันตัวตน (เติมตาม AUTH-005) |
 | AUTH_LOCKOUT | ระบบ | จำนวนครั้งที่พลาด, ip_hash | WARN | — |
 | AUTH_SESSION_REVOKE | ระบบ/super_admin | session_id, สาเหตุ (role เปลี่ยน/ถอนบทบาท) | NOTICE | — |
 
@@ -62,6 +63,7 @@
 | COURSE_ARCHIVE | staff:content | course_id, reason | NOTICE | — |
 | QB_QUESTION_CREATE | instructor, staff:exam | question_bank_id, จำนวนข้อ | INFO | — |
 | QB_QUESTION_UPDATE | instructor, staff:exam | question_id, version | INFO | — |
+| QB_QUESTION_DELETE | staff:exam, super_admin | question_id, เหตุผล, จำนวนชุดข้อสอบที่อ้างอยู่ (เติมตาม ASM-001) | NOTICE | — |
 | ENROLL_CREATE | citizen, lawyer | course_id, user_id | INFO | — |
 | LESSON_COMPLETED | ระบบ (trigger จาก progress) | lesson_id, user_id | INFO | — |
 | QUIZ_SUBMIT | citizen, lawyer | lesson_id, user_id, คะแนน | INFO | — |
@@ -79,6 +81,7 @@
 | EXAM_GRADE_OVERRIDE | staff:exam | attempt_id, คะแนนเดิม→ใหม่, reason | WARN | ผลกระทบต่อสิทธิ์ของบุคคล |
 | CERT_ISSUE | staff:registrar | certificate_id, code, attempt_id, ผู้ออก | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล |
 | CERT_REVOKE | staff:registrar | certificate_id, reason | CRITICAL | เช่นเดียวกัน |
+| CERT_REISSUE | staff:registrar | certificate_id เดิม → ใหม่, เหตุผล (ใบเดิมกลายเป็น superseded — เติมตาม CRT-007) | CRITICAL | เช่นเดียวกัน |
 | CERT_VERIFY_PUBLIC | guest | code ที่ค้น, ip_hash, ผล(พบ/ไม่พบ) | INFO | บันทึกการเข้าถึงข้อมูลบุคคลแบบสาธารณะ (จำกัดฟิลด์) |
 
 ### 2.5 Credit Bank
@@ -102,7 +105,7 @@
 | AUDIT_EXPORT | super_admin | ช่วงเวลา, จำนวนแถว, รูปแบบ | CRITICAL | ส่งออกบันทึกที่มีข้อมูลบุคคล |
 | AUDIT_CHAIN_VERIFY | ระบบ (cron) | ผล (ok/broken ที่ id ใด), anchor ที่ใช้ | NOTICE (broken=CRITICAL) | พิสูจน์ความถูกต้องของบันทึก |
 
-รวม **46 event types** (นับจากตาราง §2.1–2.6)
+รวม **49 event types** (นับจากตาราง §2.1–2.6 — เพิ่มจากเดิม 46 ด้วย AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14)
 
 ---
 
@@ -117,7 +120,7 @@ create table public.audit_logs (
   event_type   text not null,              -- ตาม catalog §2 (enum check constraint)
   actor_id     uuid,                       -- null = ระบบ/anonymous
   actor_roles  text[] not null default '{}',
-  entity_type  text not null,              -- 'user' | 'course' | 'attempt' | 'certificate' | 'credit_ledger' | 'audit_log' | ...
+  entity_type  text not null,              -- 'user' | 'course' | 'assessment_attempt' | 'certificate' | 'credit_ledger_entries' | 'audit_log' | ...
   entity_id    text,                       -- uuid หรือ business key (เช่น cert code)
   request_id   text,                       -- สัมพันธ์กับ log แอปพลิเคชัน
   session_id   text,
@@ -181,8 +184,9 @@ create trigger trg_audit_immutable
   for each row execute function public.prevent_audit_mutation();
 
 -- ชั้น 3: RLS — อ่านตามบทบาท (insert ผ่าน security-definer function เท่านั้น)
+-- ใช้ canonical helper set จาก RBAC-DESIGN.md §3.1 (B-02): my_roles() / has_any_role() / is_staff()
 create policy audit_read_admin on public.audit_logs for select to authenticated
-  using (public.my_roles() && array['staff:viewer','super_admin']);
+  using (public.has_any_role(array['staff:viewer','super_admin']));
 create policy audit_read_self on public.audit_logs for select to authenticated
   using (actor_id = auth.uid());
 ```
@@ -226,24 +230,22 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 
 ---
 
-## 7. Mapping: AUD requirement ↔ event types
+## 7. Mapping: ความต้องการ SRS (AUD-001–AUD-005) — มุมมองแบบคุณสมบัติของระบบ
 
-รหัส AUD ด้านล่างคือ "ความต้องการด้าน audit" ที่ใช้อ้างจาก SRS/RTM (worker-2) — หาก SRS ใช้รหัสอื่น ยื่น DCR ปรับตารางนี้
+ความต้องการ audit ของ SRS ไม่ได้แบ่งตามหมวด event แต่เป็น **คุณสมบัติ 5 ข้อของระบบ audit โดยรวม** — การ map จึงเป็นแบบ property-based ไม่ใช่การจัดกลุ่ม event เข้าหมวด
 
-| REQ | ความต้องการ (จาก BRIEF) | Event types ที่ตอบโจทย์ |
+**AUD-001 — บันทึก audit ทุก action สำคัญ (coverage mandate):** event ทั้ง **49 ชนิดใน catalog §2 (§2.1–§2.6)** ตอบโจทย์นี้ร่วมกันทั้งหมด — ไม่มี event ใดอยู่นอก mandate และไม่มี action สำคัญใด (ตามนิยาม §2) ที่ไร้ event รองรับ; การเพิ่ม action สำคัญใหม่ = เพิ่ม event type ใน catalog โดยอ้าง AUD-001 ผ่าน DCR
+
+**AUD-002…AUD-005 — คุณสมบัติระดับระบบ พิสูจน์ที่กลไก (ไม่ใช่ที่ตัว event):**
+
+| REQ | ความต้องการ (SRS) | พิสูจน์/บังคับที่ไหน |
 | --- | --- | --- |
-| AUD-01 | บันทึกการ login ทุกครั้ง (สำเร็จ+ล้มเหลว) | AUTH_LOGIN_OK, AUTH_LOGIN_FAIL, AUTH_LOGOUT |
-| AUD-02 | บันทึกการเปลี่ยนแปลงบทบาท | ROLE_GRANT, ROLE_REVOKE |
-| AUD-03 | บันทึกการเปลี่ยนสถานะเนื้อหา | COURSE_PUBLISH/UNPUBLISH/ARCHIVE |
-| AUD-04 | บันทึกการสอบครบวงจร | EXAM_ATTEMPT_START, EXAM_SUBMIT, EXAM_TIME_LIMIT_EXCEED, EXAM_GRADE_OVERRIDE |
-| AUD-05 | บันทึกการออก/เพิกถอนประกาศนียบัตร | CERT_ISSUE, CERT_REVOKE, CERT_VERIFY_PUBLIC |
-| AUD-06 | บันทึกการปรับ credit (ทุกกรณี) | CREDIT_GRANT, CREDIT_ADJUST, CREDIT_RULE_CREATE/UPDATE |
-| AUD-07 | บันทึกการเข้าถึงข้อมูลส่วนบุคคล | PII_ACCESS (หลัก), CERT_VERIFY_PUBLIC, AUDIT_READ |
-| AUD-08 | บันทึกการส่งออกข้อมูล | ADMIN_EXPORT, AUDIT_EXPORT |
-| AUD-09 | audit ต้อง append-only + ตรวจ tamper ได้ | AUDIT_CHAIN_VERIFY (+ กลไก §4) |
-| AUD-10 | บันทึกการล็อกบัญชี/ความพยายามเข้าถึงผิดปกติ | AUTH_LOCKOUT, RATE_LIMIT_HIT |
-| AUD-11 | บันทึกการแก้ profile/ผูก-ยืนยันใบอนุญาต | USER_UPDATE, LICENSE_BIND, LICENSE_VERIFY |
-| AUD-12 | บันทึกการอ่าน audit เอง | AUDIT_READ |
+| AUD-002 | บังคับ append-only (คุณสมบัติของ storage) | §4 สามชั้น: (1) `REVOKE UPDATE, DELETE, TRUNCATE` (2) trigger `prevent_audit_mutation()` บล็อกแม้ owner/superuser (3) RLS — insert ผ่าน security-definer function เท่านั้น + ไม่มี write API เลย (RBAC-DESIGN.md §6 T14/T16) |
+| AUD-003 | ค้นหา/กรอง audit โดยเจ้าหน้าที่ | §3.1 ดัชนี `(event_type, occurred_at)` / `(actor_id, occurred_at)` / `(entity_type, entity_id)` + `GET /api/v1/admin/audit-logs` (API-SPECIFICATION.md §3.8 — pagination + filter) สิทธิ์ staff:viewer/super_admin ตาม RLS §4 — ทุกการอ่านของ staff เกิด event `AUDIT_READ` |
+| AUD-004 | ไม่บรรจุ PII ใน payload (กติกาต่อทุก event) | §3.2 กติกา payload: zod ปิด email regex + เก็บเฉพาะ "ชื่อฟิลด์ที่เปลี่ยน" ไม่ใช่ค่าเดิม/ใหม่ + §3.1 คอลัมน์อ้างคนด้วย `actor_id` (uuid), `ip_hash` ไม่เก็บ IP ตรง + คอลัมน์ PDPA กำกับทุก event ใน §2 |
+| AUD-005 | retention ≥ 5 ปี | §5 นโยบาย retention: default 5 ปี (config `AUDIT_RETENTION_YEARS`, ตาม SRS Appendix A), v1 ไม่มีการลบอัตโนมัติจนกว่าจะมีมติ, ก่อนลบต้อง export สำเนา (export-then-purge + CRITICAL event) |
+
+กฎ (คงเดิมจาก B-14): **ห้ามตั้งรหัส AUD-006+ เพิ่มเอง** — ความต้องการใหม่ต้องไปเพิ่มที่ SRS ผ่าน DCR ก่อน แล้วจึงขยาย catalog §2 หรือกลไกในตารางนี้
 
 ---
 

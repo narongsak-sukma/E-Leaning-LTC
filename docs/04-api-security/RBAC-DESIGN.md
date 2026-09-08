@@ -2,9 +2,9 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 0.1.0 — Wave A (deliverable 9)                  |
+| เวอร์ชัน | 0.2.0 — Wave A (deliverable 9) แก้ตาม A6 review: B-02, B-03, B-06, N-06 |
 | วันที่    | 2026-09-08                                      |
-| อ้างอิง  | PROJECT-BRIEF.md §4 (บทบาท seed), §5 (โดเมน), §8 (security) · API-SPECIFICATION.md · AUDIT-LOG-DESIGN.md |
+| อ้างอิง  | PROJECT-BRIEF.md §4 (บทบาท seed), §5 (โดเมน), §8 (security) · API-SPECIFICATION.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md · SRS.md (Appendix A) |
 
 ---
 
@@ -26,7 +26,7 @@
 
 ### 1.2 กฎเชิงโครงสร้าง (binding)
 
-1. **หลายบทบาทต่อบัญชีได้** — เก็บแบบ set ใน `user_roles (user_id, role, granted_by, granted_at, revoked_at)`; บัญชี "ทนายความที่เป็นวิทยากร" = `{lawyer, instructor}`
+1. **หลายบทบาทต่อบัญชีได้** — เก็บแบบ set ใน `role_assignments (user_id, role, granted_by, granted_at, revoked_at)` (ชื่อตารางตาม DATA-DICTIONARY.md); บัญชี "ทนายความที่เป็นวิทยากร" = `{lawyer, instructor}`
 2. **ไม่สืบทอดโดย implication** — การได้ `lawyer` ไม่ได้ทำให้ได้สิทธิ์ของ `citizen` โดยอัตโนมัติ; ทุกบทบาทผูก permission แบบ explicit (ตาราง §2) — ตรวจง่าย audit ได้
 3. **สิทธิ์รวมกันแบบ union** — บัญชีมีหลายบทบาท → สิทธิ์ = ยูเนียนของ permission ทุกบทบาท (ไม่มี deny-override ใน v1 — ถ้าต้องการ ยื่น DCR)
 4. **ตรวจที่ระดับ permission ไม่ใช่ชื่อบทบาท** — โค้ดเรียก `requirePermission("certificate:issue")` เท่านั้น; ห้าม `requireRole("staff:registrar")` เพื่อให้เปลี่ยนแปลงบทบาทได้โดยไม่แก้โค้ด
@@ -127,11 +127,23 @@
 ### 3.1 ตัวอย่างนโยบาย RLS (SQL — ที่มาของ migration จริง Wave B+)
 
 ```sql
--- helper กลาง: คืนบทบาทของ user ปัจจุบันเป็น array (materialize ใน JWT claims ก็ได้ — ตัดสินตอน implement)
+-- ═══ Canonical helper set (B-02) — DATA-DICTIONARY / AUDIT-LOG-DESIGN / ARCHITECTURE อ้างชุดนี้ ═══
+-- ตารางบทบาทใช้ชื่อตาม DATA-DICTIONARY.md: role_assignments (B-03)
 create or replace function public.my_roles() returns text[]
 language sql stable security definer as $$
-  select coalesce(array_agg(role), '{}') from public.user_roles
+  select coalesce(array_agg(role), '{}') from public.role_assignments
   where user_id = auth.uid() and revoked_at is null;
+$$;
+
+create or replace function public.has_any_role(roles text[]) returns boolean
+language sql stable security definer as $$
+  select public.my_roles() && roles;
+$$;
+
+create or replace function public.is_staff() returns boolean
+language sql stable security definer as $$
+  select public.has_any_role(array['staff:viewer','staff:content',
+                                  'staff:exam','staff:registrar','super_admin']);
 $$;
 
 -- (1) profiles: เจ้าของอ่าน/แก้ตัวเองได้; staff:viewer/registrar/super_admin อ่านได้ (PII_ACCESS บันทึกที่ชั้น BFF)
@@ -140,20 +152,22 @@ create policy profiles_self on public.profiles for all to authenticated
   using (id = auth.uid())
   with check (id = auth.uid());
 create policy profiles_staff_read on public.profiles for select to authenticated
-  using (my_roles() && array['staff:viewer','staff:registrar','super_admin']);
+  using (public.has_any_role(array['staff:viewer','staff:registrar','super_admin']));
 
 -- (2) courses: guest/anon อ่าน published; instructor แก้ได้เฉพาะที่ตัวเองสร้าง; staff:content ทุกแถว
 create policy courses_public_read on public.courses for select to anon, authenticated
   using (status = 'published');
 create policy courses_owner_write on public.courses for all to authenticated
-  using (created_by = auth.uid() or my_roles() && array['staff:content','super_admin'])
-  with check (created_by = auth.uid() or my_roles() && array['staff:content','super_admin']);
+  using (created_by = auth.uid()
+         or public.has_any_role(array['staff:content','super_admin']))
+  with check (created_by = auth.uid()
+         or public.has_any_role(array['staff:content','super_admin']));
 
 -- (3) enrollments: เห็น/แก้เฉพาะแถวของตัวเอง; staff อ่านได้
 create policy enrollments_self on public.enrollments for all to authenticated
   using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy enrollments_staff_read on public.enrollments for select to authenticated
-  using (my_roles() && array['staff:viewer','staff:exam','staff:registrar','super_admin']);
+  using (public.is_staff());
 
 -- (4) lesson_progress: เจ้าของเท่านั้น (แม้แต่ instructor ก็ไม่เห็นรายบุคคล — ดูได้ผ่าน report รวมเท่านั้น)
 create policy lesson_progress_self on public.lesson_progress for all to authenticated
@@ -162,39 +176,42 @@ create policy lesson_progress_self on public.lesson_progress for all to authenti
 -- (5) question_banks + questions: instructor เจ้าของ; staff:exam ทั้งหมด; ผู้เรียนไม่เห็นเด็ดขาด
 --     (ผู้เรียนได้คำถามผ่าน attempt view ที่คัดแล้วเท่านั้น)
 create policy qb_staff_exam on public.questions for all to authenticated
-  using (my_roles() && array['staff:exam','super_admin']
-         or (my_roles() && array['instructor'] and exists (
+  using (public.has_any_role(array['staff:exam','super_admin'])
+         or (public.has_any_role(array['instructor']) and exists (
               select 1 from public.question_banks qb
               where qb.id = question_bank_id and qb.created_by = auth.uid())))
-  with check (my_roles() && array['staff:exam','super_admin']);
+  with check (public.has_any_role(array['staff:exam','super_admin']));
 
--- (6) attempts: เจ้าของ; staff:exam/registrar/super_admin อ่าน — แต่ "ตอนสอบ" อ่านคำตอบไม่ได้จนกว่าจะ submit (เงื่อนไข status)
-create policy attempts_self on public.attempts for all to authenticated
+-- (6) assessment_attempts (ชื่อตาม DATA-DICTIONARY.md — B-03): เจ้าของ; staff อ่านได้
+create policy attempts_self on public.assessment_attempts for all to authenticated
   using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy attempts_staff_read on public.attempts for select to authenticated
-  using (my_roles() && array['staff:exam','staff:registrar','staff:viewer','super_admin']);
+create policy attempts_staff_read on public.assessment_attempts for select to authenticated
+  using (public.is_staff());
 
--- (7) certificates: เจ้าของเห็นของตัวเอง; registrar ทุกแถว; สาธารณะตรวจผ่าน view แยก (จำกัดคอลัมน์)
+-- (7) certificates: เจ้าของเห็นของตัวเอง; registrar ทุกแถว; สาธารณะตรวจผ่าน view แยก (จำกัดคอลัมน์ตาม CRT-004 — ไม่มีชื่อเจ้าของ)
 create policy certs_self on public.certificates for select to authenticated
-  using (user_id = auth.uid() or my_roles() && array['staff:registrar','super_admin']);
+  using (user_id = auth.uid()
+         or public.has_any_role(array['staff:registrar','super_admin']));
 create policy certs_registrar_write on public.certificates for insert to authenticated
-  with check (my_roles() && array['staff:registrar','super_admin']);
--- public verify: ผ่าน view ไม่ใช่ตาราง (ไม่เปิด RLS ตรง table)
+  with check (public.has_any_role(array['staff:registrar','super_admin']));
+-- public verify: ผ่าน view ไม่ใช่ตาราง — 4 ฟิลด์ตาม CRT-004 (B-12: ตัด holder_display_name ออก)
 create view public.certificate_public_view
   with (security_invoker = false) as
-  select code, holder_display_name, course_title, issued_at, status, revoked_at
+  select code, course_title, issued_at, status, revoked_at
   from public.certificates;
 
--- (8) credit_ledger: append-only สำหรับระบบ; เจ้าของอ่านได้; registrar/super_admin อ่านได้; ไม่มีใคร update/delete
-create policy credits_self_read on public.credit_ledger for select to authenticated
-  using (user_id = auth.uid() or my_roles() && array['staff:registrar','staff:viewer','super_admin']);
-revoke update, delete on public.credit_ledger from authenticated, anon;
+-- (8) credit_ledger_entries (ชื่อตาม DATA-DICTIONARY.md — B-03): append-only สำหรับระบบ;
+--     เจ้าของ/registrar/staff:viewer/super_admin อ่านได้; ไม่มีใคร update/delete
+create policy credits_self_read on public.credit_ledger_entries for select to authenticated
+  using (user_id = auth.uid()
+         or public.has_any_role(array['staff:registrar','staff:viewer','super_admin']));
+revoke update, delete on public.credit_ledger_entries from authenticated, anon;
 
--- (9) audit_logs: แทรกได้เฉพาะ service_role (BFF); อ่านได้ตาม §ของ AUDIT-LOG-DESIGN.md
+-- (9) audit_logs: แทรกได้เฉพาะ service_role (BFF); อ่านได้ตาม AUDIT-LOG-DESIGN.md §4
 create policy audit_insert_service on public.audit_logs for insert to authenticated
   with check (false); -- service_role ไม่ถูก RLS บังคับ — นี่ปิดฝั่ง client
 create policy audit_read_admin on public.audit_logs for select to authenticated
-  using (my_roles() && array['staff:viewer','super_admin']);
+  using (public.has_any_role(array['staff:viewer','super_admin']));
 create policy audit_read_self on public.audit_logs for select to authenticated
   using (actor_id = auth.uid());
 
@@ -219,14 +236,15 @@ create policy notif_self on public.notifications for all to authenticated
 
 ทุกการมอบ/ถอน → **audit `ROLE_GRANT`/`ROLE_REVOKE` พร้อม granted_by + reason (บังคับ)** และบังคับ session refresh ทันที (role เปลี่ยนมีผล request ถัดไป — revoke ตัด session ปัจจุบันทันที)
 
-### 4.2 Session & Lockout policy (ค่า default — config ทั้งหมด)
+### 4.2 Session & Lockout policy (ชุดที่ตัดสินแล้ว — ตรงกับ SRS Appendix A)
 
-| นโยบาย | ค่า default | หมายเหตุ |
+| นโยบาย | ค่าที่ตัดสิน | หมายเหตุ |
 | --- | --- | --- |
-| Session idle timeout | ผู้เรียน 60 นาที / staff+instructor 15 นาที | config `SESSION_IDLE_MINUTES_BY_ROLE` |
+| Session idle timeout — ผู้เรียน | **60 นาที** | config `SESSION_IDLE_MINUTES_LEARNER` |
+| Session idle timeout — staff (ทุก sub-role) | **15 นาที** | config `SESSION_IDLE_MINUTES_STAFF` |
+| MFA สำหรับ instructor / staff ทุกระดับ / super_admin | **บังคับ (TOTP)** | ไม่ผ่าน MFA = ไม่ได้ token บทบาท staff (ERR-AUTH-004) |
 | Absolute timeout | 12 ชม. (ผู้เรียน) / 8 ชม. (staff) | บังคับ login ใหม่ |
 | Lockout หลังพลาดรหัสผ่าน | 5 ครั้ง / ล็อก 15 นาที (ต่อบัญชี+IP) | ERR-AUTH-003; audit `AUTH_LOCKOUT` |
-| MFA สำหรับ staff/instructor/super_admin | บังคับ (TOTP) | ไม่ผ่าน MFA = ไม่ได้ token บทบาท staff (ERR-AUTH-004) |
 | รหัสผ่าน | ≥ 12 ตัวอักษร + ตรวจ breached-password list | นโยบายอยู่ที่ Supabase Auth config |
 
 ---
@@ -257,7 +275,7 @@ create policy notif_self on public.notifications for all to authenticated
 | T6 | instructor (เจ้าของ) | PATCH หลักสูตรของคนอื่น | 403/404 (RLS บัง) |
 | T7 | instructor | PATCH /api/v1/admin/courses/{id} (publish) | 403 ERR-RBAC-001 — ผู้เขียนอนุมัติตัวเองไม่ได้ (SoD) |
 | T8 | staff:content | POST /api/v1/credit-adjustments | 403 ERR-RBAC-001 |
-| T9 | staff:exam | POST /api/v1/certificates (issue) | 403 ERR-RBAC-001 — SoD |
+| T9 | staff:exam | POST /api/v1/admin/certificates (ออกประกาศนียบัตร) | 403 ERR-RBAC-001 — SoD |
 | T10 | staff:registrar | PATCH /api/v1/admin/question-banks/{id}/... | 403 ERR-RBAC-001 |
 | T11 | staff:viewer | PATCH /api/v1/admin/users/{id} | 403 ERR-RBAC-001 (อ่านอย่างเดียว) |
 | T12 | staff:viewer | GET /api/v1/admin/users | 200 + audit PII_ACCESS เกิด 1 รายการ |
@@ -276,4 +294,4 @@ create policy notif_self on public.notifications for all to authenticated
 | --- | --- |
 | บัญชีเจ้าหน้าที่ 1 คนถือหลาย sub-role (เช่น content+exam) — ยอมรับได้แค่ไหนในทีมเล็ก | เสนอ default: อนุญัติพร้อม flag SoD; เข้มงวดขึ้นเมื่อทีมโต (DCR) |
 | การยืนยันตัวตนทนายผ่าน SSO ระบบสมาชิกสภาฯ (Q3) จะเพิ่มบทบาท/การ map แบบใหม่ | รอยืนยัน Q3 — โครง permission ไม่กระทบ (เพิ่มที่ชั้น identity) |
-| ชื่อ permission ต้องตรงกับ DATA-DICTIONARY.md (ตาราง user_roles) | ประสาน worker-3 |
+| ชื่อตาราง/คอลัมน์ในตัวอย่าง SQL ยึด DATA-DICTIONARY.md แล้ว (B-03: role_assignments, assessment_attempts, credit_ledger_entries) — คงตรวจซ้ำอีกครั้งเมื่อ DATA-DICTIONARY เปลี่ยนเวอร์ชัน | ปิดจาก A6 review |
