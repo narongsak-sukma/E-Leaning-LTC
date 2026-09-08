@@ -120,9 +120,9 @@
 - AC: ปฏิเสธรหัสผ่านที่อยู่ในรายการรหัสผ่านที่ถูกบุกรุกบ่อย (top common/leaked list) พร้อม error ภาษาไทยชี้เหตุผล
 
 **AUTH-007 · M** — ระบบต้องบังคับ MFA (TOTP) สำหรับ `super_admin`, `staff` ทุกระดับ และ `instructor` — ใช้กฎเดียวกันกับทุกบทบาทที่บังคับ MFA
-- AC: หลังพิสูจน์ตัวตนด้วยรหัสผ่านสำเร็จ บัญชีบทบาทดังกล่าวได้รับเฉพาะ session แบบ "enrollment-only" (ใช้ได้เฉพาะปลายทางลงทะเบียน/ยืนยัน MFA และ logout เท่านั้น) จนกว่าจะลงทะเบียน MFA สำเร็จ จึงเข้าถึงฟังก์ชันอื่นของระบบได้
+- AC: หลังพิสูจน์ตัวตนด้วยรหัสผ่านสำเร็จ บัญชีบทบาทดังกล่าวได้รับเฉพาะ session แบบ "enrollment-only" — allowlist ปลายทางที่ใช้ได้ = `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/logout` และอ่านข้อมูลตนเองอย่างเดียว (`GET /me` read-only) เท่านั้น อย่างอื่นตอบ 403 — จนกว่าจะลงทะเบียน MFA สำเร็จ จึงเข้าถึงฟังก์ชันอื่นของระบบได้
 - AC: ทุก request ถัดไปที่ต้องพิสูจน์ตัวตนต้องมี MFA claim ที่ server ตรวจทุกครั้ง — token ที่ไม่มี/ไม่ผ่าน MFA claim เรียกฟังก์ชันทั่วไปไม่ได้ (ตอบ 403)
-- AC: การปิด/ถอน MFA ต้องผ่านการยืนยัน recent-MFA (พิสูจน์ MFA ครั้งล่าสุดภายในกรอบเวลาที่กำหนดเป็น config) และห้ามปิด MFA เมื่อการปิดทำให้บัญชีเหลือ factor การพิสูจน์ตัวตนเป็น 0
+- AC: การปิด MFA: ผู้ใช้ที่เปิดแบบ optional (citizen/lawyer) ปิดได้เมื่อผ่านการยืนยัน recent-MFA (พิสูจน์ MFA ครั้งล่าสุดภายในกรอบเวลาที่กำหนดเป็น config) และห้ามปิดเมื่อการปิดทำให้บัญชีเหลือ factor การพิสูจน์ตัวตนเป็น 0 · บทบาทที่บังคับ MFA (staff*/instructor/super_admin) ระบบไม่เปิดให้ปิดใน v1 (ปลายทาง disable ถูก block ตาม API)
 - AC: บัญชีที่ได้รับบทบาทที่บังคับ MFA ภายหลัง (ตาม IDENT-006) ต้องถูก force MFA enrollment ตั้งแต่การเข้าสู่ระบบครั้งถัดไป
 - AC: มี backup code 8 รหัส ใช้ได้รหัสละครั้ง; ผู้ใช้ทั่วไป (citizen/lawyer) เปิด MFA ได้เองแบบ optional
 
@@ -163,7 +163,7 @@
 - AC: หน้าสถานะแสดง สถานะ/เหตุผลการปฏิเสธ/เวลาพิจารณา; ยื่นซ้ำได้ไม่จำกัดครั้ง (ภายใต้ rate limit upload)
 
 **IDENT-006 · M** — ระบบต้องให้ `super_admin` เท่านั้นแต่งตั้ง/ถอดบทบาท `instructor` และ `staff:*` รายบุคคล
-- AC: การมอบบทบาท staff* ทำได้เฉพาะเมื่อบัญชีนั้นเปิด MFA สำเร็จแล้ว; ทุกการเปลี่ยนบทบาทถูก audit
+- AC: การมอบบทบาทที่บังคับ MFA (staff*/instructor) ให้บัญชีที่ยังไม่มี MFA **ทำได้** — แต่บัญชีนั้นเข้าสู่ session แบบ "enrollment-only" ทันทีที่เข้าสู่ระบบครั้งถัดไป จนกว่าจะลงทะเบียน MFA สำเร็จ (force enrollment — AUTH-007); ทุกการเปลี่ยนบทบาทถูก audit
 
 **IDENT-007 · M** — ระบบต้องรองรับบัญชีเดียวที่มีหลายบทบาทพร้อมกัน
 - AC: สิทธิ์ที่ได้ = union ของบทบาทที่ถูกมอบแบบ explicit เท่านั้น ตรวจสอบด้วย integration test กรณีทนายความที่เป็นวิทยากร
@@ -215,7 +215,7 @@
 - AC: แสดงในหน้าเว็บผ่าน viewer โดยไม่บังคับดาวน์โหลด; อนุญาตดาวน์โหลดเฉพาะเมื่อหลักสูตรเปิดตัวเลือก (config)
 
 **LRN-005 · M** — ระบบต้องรองรับการทำแบบทดสอบย่อย (quiz) ปลายบทเรียน
-- AC: ตรวจและแสดงผลทันทีพร้อมคะแนน เฉลย และคำอธิบาย; ทำซ้ำได้ไม่จำกัดครั้ง (config) โดยเก็บผลทุกครั้ง · คะแนนที่ใช้ประเมินเงื่อนไขผ่านบทเรียนคือคะแนนสูงสุด (default, config ได้)
+- AC: ตรวจและแสดงผลทันทีพร้อมคะแนน เฉลย และคำอธิบาย; ทำซ้ำได้ไม่จำกัดครั้ง (config) โดยเก็บผลทุกครั้ง · สถานะความคืบหน้า/complete ของบทเรียน quiz ใช้ **คะแนนสูงสุดตลอด** ที่เคยทำ (highest — ตาม `progress_pass_score_policy=highest` Appendix A) ไม่ใช่คะแนน attempt ล่าสุด และสถานะ complete ที่ได้รับแล้วไม่ถูกลดลงจากครั้งถัดไป
 
 **LRN-006 · M** — ระบบต้องบันทึกความคืบหน้าการเรียนระดับบทเรียน
 - AC: server เป็นผู้ตัดสินเงื่อนไขผ่านเพียงผู้เดียว (ค่าจาก client เป็นข้อมูลดิบ); เก็บเวลาเรียนสะสมต่อบทเรียน · แสดงผลอัปเดตภายใน 5 วินาทีหลังเงื่อนไขผ่านถูกตัดสิน
@@ -271,8 +271,9 @@
 - AC: แสดง คะแนน ผล ครั้งที่ เวลา ณ ผล; ส่งแจ้งเตือน+อีเมลภายใน 5 นาที (NTF-002) · เก็บข้อมูลข้อสอบจริงที่ได้รับ (ชุดสุ่ม) เพื่อการทบทวนและ audit
 
 **ASM-011 · S** — ระบบต้องมีมาตรการ anti-cheat พื้นฐาน (ขอบเขตรอยืนยัน Q4)
-- AC: สุ่มข้อ+ตัวเลือก (ASM-004) + จำกัดเวลา (ASM-005) + ห้ามบัญชีเดียวสอบพร้อมกัน 2 session (session ใหม่ถูก block)
+- AC: สุ่มข้อ+ตัวเลือก (ASM-004) + จำกัดเวลา (ASM-005) + ห้ามบัญชีเดียวสอบพร้อมกัน 2 session — บังคับด้วย session binding + lease (session ใหม่ถูกปฏิเสธขณะ lease ยัง active ตาม AC ถัดไป)
 - AC: ตรวจจับการสลับแท็บ/หน้าต่างระหว่างสอบ (visibility event) และบันทึกเป็น event ประกอบการสอบ; default ไม่มีการบันทึกหน้าจอ/กล้อง/ไม่ระงับการสอบอัตโนมัติ
+- AC: attempt ผูกกับ session (session binding + lease): ขณะ lease ยัง active คำขอจากอุปกรณ์/session อื่นถูกปฏิเสธ และหลังผู้เรียนขาดการเชื่อมต่อเกิน `exam_disconnect_grace_minutes` (default 5 — Appendix A) อุปกรณ์ที่สองเข้าแทนได้ (takeover) พร้อมบันทึก audit `EXAM_SESSION_TAKEOVER`
 
 **ASM-012 · S** — ระบบต้องรองรับการทบทวนข้อสอบหลังสอบ (config ต่อหลักสูตร)
 - AC: เมื่อเปิดใช้: ผู้เรียนดูข้อที่ตอบ คำตอบถูก/ผิด เฉลย และคำอธิบายของครั้งที่เลือกได้
@@ -321,9 +322,10 @@
 - AC: ทุกรายการมี ผู้เกี่ยวข้อง/เหตุการณ์/เวลา/จำนวน (+/−)/เหตุผล/อ้างอิง (certificate/attempt)
 - AC: ห้าม UPDATE/DELETE บังคับด้วย DB privileges + RLS; การแก้ยอดทำได้เพียงสร้างรายการปรับ (adjustment) ใหม่เท่านั้น
 
-**CRB-003 · M** — ระบบต้องบันทึก credit โดยอัตโนมัติเมื่อผู้เรียนผ่านหลักสูตร
-- AC: สร้าง ledger entry ตามกฎที่มีผล ณ วันผ่าน ภายใน 5 นาที; idempotent (certificate/ผลผ่านหนึ่งรายการ = credit หนึ่งชุด ไม่ซ้ำซ้อน)
-- AC: ความถูกต้องของการคำนวณมี unit test ครอบคลุม (รวมกรณีเปลี่ยนกฎ + เพิกถอนใบ)
+**CRB-003 · M** — ระบบต้องบันทึก credit โดยอัตโนมัติเมื่อผู้เรียนสอบผ่าน (assessment attempt passed)
+- AC: credit เกิดภายใน 5 นาทีหลัง **การตรวจผ่าน (attempt passed)** ไม่ใช่หลังการออกประกาศนียบัตร; idempotent (ผลผ่านหนึ่งรายการ = credit หนึ่งชุด ไม่ซ้ำซ้อน — source_type='assessment_attempt')
+- AC: กฎ credit ที่ใช้ = ฉบับที่มีผล ณ **วันที่สอบผ่าน** และรอบต่ออายุ = รอบที่ครอบคลุมวันที่สอบผ่าน (ไม่ใช่วันออกใบประกาศนียบัตร)
+- AC: การออกประกาศนียบัตรใหม่แทนใบเดิม (re-issue — CRT-007) ไม่สร้างหรือเปลี่ยนแปลง credit · ความถูกต้องของการคำนวณมี unit test ครอบคลุม (รวมกรณีเปลี่ยนกฎ + เพิกถอนใบ)
 
 **CRB-004 · M** — ระบบต้องคำนวณรอบต่ออายุ (Renewal Cycle) ของผู้ใช้แต่ละราย (ค่ารอบรอยืนยัน Q1)
 - AC: กำหนดรอบต่อบุคคลจากวันที่กำหนดตาม config (default: รายปี นับจากวันที่อนุมัติการผูกใบอนุญาต) · ผู้ใช้มองเห็นรอบปัจจุบัน/ถัดไป; การเปลี่ยน config ไม่ย้อนแปลงรอบที่ปิดแล้ว
@@ -461,6 +463,7 @@
 **SEC-010 · M** — ระบบต้องเก็บข้อมูลส่วนบุคคลน้อยที่สุดตามหลัก PDPA พร้อม consent
 - AC: ทุกฟิลด์ส่วนบุคคลมีเหตุผลการเก็บใน Data Dictionary; ข้อมูล optional เก็บเมื่อมี consent; มีหน้าแจ้งเก็บ-ใช้-เปิดเผย
 - AC: แยกชนิดบันทึกชัดเจน 2 แบบ: (ก) **notice acknowledgment** — การแจ้ง privacy notice สำหรับการประมวลผลที่จำเป็นตามสัญญา/กฎหมาย ซึ่งไม่ใช่ consent และไม่ต้องขอ consent (บันทึกเวอร์ชัน notice + เวลาแจ้ง) แยกจาก (ข) **optional consents** ที่เก็บแบบ versioned (บันทึกเวอร์ชัน + เวลาให้/เพิกถอน) เพิกถอนได้ทุกเมื่อ — การเพิกถอนต้องหยุดการประมวลผลที่อิงตาม consent นั้น (รวมถึงข้อมูลที่เก็บเพื่อวัตถุประสงค์ตาม consent ดังกล่าว)
+- AC: notice acknowledgment เก็บแยกเป็นระเบียบ versioned ในตาราง `notice_acknowledgments` (append-only — ตาม Data Dictionary) ไม่ใช่ในตาราง consents · การเพิกถอน optional consent ต้องหยุดงานที่ยังอยู่ในคิว (queued) ที่อิงตาม consent นั้นด้วย — worker ตรวจสถานะ consent ณ ตอน dispatch ทุกครั้ง (ไม่ยึดสถานะขณะ enqueue)
 
 **SEC-011 · M** — ระบบต้องรองรับสิทธิเจ้าของข้อมูล PDPA (เข้าถึง แก้ไข ลบ โอนย้าย)
 - AC: ยึด IDENT-008; คำขอที่ต้องดำเนินการโดยเจ้าหน้าที่มี SLA ตอบ ≤ 30 วันและบันทึกการดำเนินการ
@@ -624,7 +627,9 @@
 | `max_video_resolution` | 1080p | ชัดพอต่อสไลด์/เนื้อหากฎหมาย บนทุกอุปกรณ์ | รอยืนยัน Q6 |
 | `video_prevent_download` | true | ปกป้องเนื้อหาตามเจตนารมณ์เจ้าของหลักสูตร | รอยืนยัน Q6 |
 
-**พารามิเตอร์ระบบทั่วไป (default กำหนดแล้ว เปลี่ยนได้โดยไม่ต้องรอคำตอบ Q):** `password_min_length=12`, `admin_idle_timeout_minutes=15`, `learner_idle_timeout_minutes=60`, `login_lockout_threshold=5`, `login_lockout_window_minutes=15`, `login_lockout_duration_minutes=15`, `auth_rate_limit_per_min=10`, `password_reset_per_hour_per_account=5`, `public_read_rate_limit_per_min=120` (ปลายทางอ่านสาธารณะ เช่น verify/หลักสูตร), `otp_per_phone_per_hour=3`, `otp_expiry_minutes=5`, `email_verification_expiry_hours=24`, `reset_token_expiry_minutes=30`, `exam_autosave_seconds=15`, `exam_disconnect_grace_minutes=5`, `video_complete_pct=80`, `quiz_pass_percent=60`, `progress_pass_score_policy=highest`, `certificate_code_format=LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` (ยืนยันรูปแบบแล้ว — พ.ศ. เฉพาะการแสดงผลตาม I18N-003; รอยืนยันการใช้งานกับสภาฯ), `certificate_auto_issue=false`, `renewal_notify_days_before=60,30,7`, `email_retry_max=3`, `page_size_default=20`, `media_signed_url_ttl_minutes=15`, `max_upload_mb=10` (เอกสาร) / `2000` (วิดีโอ), `audit_retention_years=5`, `backup_daily_rpo_hours=24`, `rto_hours=4`
+**พารามิเตอร์ระบบทั่วไป (default กำหนดแล้ว เปลี่ยนได้โดยไม่ต้องรอคำตอบ Q):** `password_min_length=12`, `admin_idle_timeout_minutes=15`, `learner_idle_timeout_minutes=60`, `login_lockout_threshold=5`, `login_lockout_window_minutes=15`, `login_lockout_duration_minutes=15`, `auth_rate_limit_per_min=10`, `password_reset_per_hour_per_account=5`, `public_read_rate_limit_per_min=120` (ปลายทางอ่านสาธารณะ เช่น verify/หลักสูตร), `read_rate_limit_per_min=120` (อ่านหลังเข้าสู่ระบบ), `learn_write_rate_limit_per_min=120` (บันทึกความคืบหน้า/ทำ quiz), `exam_rate_limit_per_min=60`, `staff_write_rate_limit_per_min=60`, `mfa_rate_limit_per_min=10`, `export_per_hour=10`, `otp_per_phone_per_hour=3`, `otp_expiry_minutes=5`, `email_verification_expiry_hours=24`, `reset_token_expiry_minutes=30`, `exam_autosave_seconds=15`, `exam_disconnect_grace_minutes=5`, `video_complete_pct=80`, `quiz_pass_percent=60`, `progress_pass_score_policy=highest`, `certificate_code_format=LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` (ยืนยันรูปแบบแล้ว — พ.ศ. เฉพาะการแสดงผลตาม I18N-003; รอยืนยันการใช้งานกับสภาฯ), `certificate_auto_issue=false`, `renewal_notify_days_before=60,30,7`, `email_retry_max=3`, `page_size_default=20`, `media_signed_url_ttl_minutes=15`, `max_upload_mb=10` (เอกสาร) / `2000` (วิดีโอ), `audit_retention_years=5`, `backup_daily_rpo_hours=24`, `rto_hours=4`
+
+> **หมายเหตุ rate limit (F12/D12):** ทุกกลุ่ม rate limit นับ **IP คู่ขนาน (cumulative) ร่วมกับ user key เสมอ** (เมื่อกฎหลายกลุ่มชนกัน ให้กฎที่ specific ที่สุดชนะ — AUTH-011) · ก่อนเข้าสู่ระบบ (ยังไม่มี user_id) ใช้ key = อีเมลแบบ normalize (trim + lowercase) แทน user_id
 
 ### Appendix B — สถิติ requirement
 

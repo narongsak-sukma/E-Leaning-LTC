@@ -42,7 +42,7 @@
 | M2 | Catalog & Enrollment | หมวด/หลักสูตร/โมดูล/บทเรียน, ค้นหา, ลงทะเบียน, เงื่อนไขเข้าเรียน | `/categories`, `/courses`, `/courses/{id}`, `POST /courses/{id}/enroll`, `/me/enrollments` | M1 (สิทธิ์), M3 (เงื่อนไข prerequisite) |
 | M3 | Learning & Progress | ให้บริการเนื้อหาบทเรียน (วิดีโอ/เอกสาร/quiz), heartbeat, คำนวณความคืบหน้า, เกณฑ์จบบท/จบหลักสูตร | `/courses/{id}/progress`, `POST /lessons/{id}/progress`, `POST /lessons/{id}/quiz/submit` | M2, storage abstraction, media_assets |
 | M4 | Assessment & Certification | ธนาคารข้อสอบ, กติกาสอบ, exam engine (สุ่ม/จับเวลา/submit/ตรวจ), ออกประกาศนียบัตร + public verify | `/assessments/{id}`, `POST /assessments/{id}/attempts`, `/attempts/{id}/answers`, `/attempts/{id}/submit`, `/attempts/{id}/result`, `/me/attempts`, `/me/certificates`, `/certificates/{code}` (สาธารณะ), admin: `/admin/certificates/*` | M2, M3, M5 (hook หลังผ่าน), storage abstraction (PDF) |
-| M5 | Credit Bank | กฎ credit, ledger append-only, รอบต่ออายุ, ยอดรวม | `/me/credits`, `/me/transcript`, admin: `/credit-rules/*`, `/credit-adjustments`, `/users/{id}/credits`; รับ event `certificate.issued` | M4 (certificate), M1 (license) |
+| M5 | Credit Bank | กฎ credit, ledger append-only, รอบต่ออายุ, ยอดรวม | `/me/credits`, `/me/transcript`, admin: `/credit-rules/*`, `/credit-adjustments`, `/users/{id}/credits`; รับ event `assessment_attempt.passed` (credit เกิดตอนตรวจผ่าน — F15/D12; `certificate.issued` เป็นเหตุการณ์แจ้งเตือนเท่านั้น) | M4 (attempt/certificate), M1 (license) |
 | M6 | Notification | แจ้งเตือนในระบบ + อีเมล (เทมเพลตไทย), outbox + worker, ตั้งค่ารายบุคคล | `/me/notifications`, `/me/notifications/{id}/read`, `/me/notification-settings`; service `notify(userIds, topic, payload)` ให้ module อื่นเรียก | email provider abstraction (dev: console/Mailpit, prod: Resend/SMTP) |
 | M7 | Admin & Reporting | dashboard, รายงานเรียน/สอบ/credit, export CSV/JSON (job), ค้นหาผู้ใช้ | `/admin/dashboard`, `/admin/reports/*`, `/admin/reports/{type}/export`, `/admin/users/*`, `/admin/courses/*`, `/admin/exams/*` | ทุก module (อ่านผ่าน view/JOIN), M8 |
 | M8 | Audit | บันทึก action สำคัญ append-only + security events, ค้นหา audit สำหรับ admin | service `audit(actor, action, entity, before, after)`; อ่าน: `/admin/audit-logs` — ไม่มี API เขียน/แก้/ลบ | shared (rbac) — ไม่พึ่งพา module อื่น (กัน loop) |
@@ -61,6 +61,8 @@
 | `zod schemas` | schema กลางของ input ทุกจุด ใช้ร่วม API + Server Action |
 
 ## 3. การออกแบบเชิงลึก
+
+> **การเขียนของผู้เรียน = ผ่าน server functions เท่านั้น (F2/D12)** — `enroll()` / `record_lesson_progress()` / `record_quiz_attempt()` / `start_attempt()` / `save_answer()` / `submit_attempt()` (SECURITY DEFINER — owner เฉพาะ, ตรวจสิทธิ์/เงื่อนไขธุรกิจ + audit ข้างใน) — รายละเอียดครบที่ DATA-DICTIONARY §4.7; ข้อความใน §3 ที่อธิบายการเขียนลงตาราง ให้อ่านว่าเกิดภายใน functions เหล่านี้ (ผู้เรียนไม่มี INSERT/UPDATE policy บนตารางเหล่านั้น)
 
 ### 3.1 Exam Engine (M4)
 
@@ -93,11 +95,13 @@
 - แกนคือ `UPDATE assessment_attempts SET submitted_at = now() WHERE id = $1 AND submitted_at IS NULL RETURNING ...`
 - ได้ 0 แถว = submit ไปแล้ว → ตอบผลเดิม (200) ไม่ตรวจซ้ำ ไม่นับ attempt เพิ่ม — retry/ดับเบิลคลิก/เน็ตหลุดปลอดภัย
 - ตอบกลับทันทีด้วย `status=grading`; ผลละเอียด + เฉลย (ตาม `exam_review_mode` — SRS Appendix A) อ่านที่ `GET /attempts/{id}/result` — แยกชัดระหว่าง "รับ submit แล้ว" กับ "ผลตรวจละเอียด" และรองรับการเปลี่ยนเป็นตรวจแบบ job ภายหลังได้ไม่กระทบ contract
-- ตรวจคะแนน (Grader): เทียบ `selected_option_ids` กับ `question_options.is_correct` (ฝั่ง server เท่านั้น — client ไม่เคยได้รู้ is_correct), คำนวณ `score_pct`, ตั้ง status `passed`/`failed` ตาม rules.pass_pct
+- ตรวจคะแนน (Grader): เทียบ `selected_option_ids` กับ **`is_correct`/`points` ใน `attempt_answers.question_snapshot` ล้วน ๆ** (F14/D12 — ไม่อ่านตาราง questions/question_options ขณะตรวจ เพื่อกันข้อสอบถูกแก้ระหว่างสอบและให้ตรวจซ้ำได้ผลเดิมเสมอ; ฝั่ง server เท่านั้น — client ไม่เคยได้รู้ is_correct), คำนวณ `score_pct`, ตั้ง status `passed`/`failed` ตาม rules.pass_pct — ทั้งหมดภายใน `submit_attempt()` (F2)
+- ถ้าผล `passed` → INSERT event `assessment_attempt.passed` ลง `event_outbox` **ใน TX ตรวจเดียวกัน** — credit เกิดตอนตรวจผ่าน ไม่ใช่ตอนออกประกาศนียบัตร (F15/D12 — ดู §3.2b)
 
 **f) ป้องกันสอบซ้อน (concurrent attempts)**
 - partial UNIQUE index: `(assessment_id, user_id) WHERE status = 'in_progress'` — DB บังคับแม้มี bug
 - เปิดแท็บ/อุปกรณ์ที่สอง → ได้ 409 พร้อม `attempt_id` เดิมเพื่อ resume (เข้า resume ได้จนกว่าจบเวลา)
+- **lease ผูก session (F22/D12)**: attempt ผูก `session_id` (จาก JWT claim) + `lease_expires_at` — session/อุปกรณ์อื่นยิง answers/submit **ถูกปฏิเสธ 409 ขณะ lease ยัง active** (บังคับใน `save_answer()`/`submit_attempt()` เทียบ session_id + lease_expires_at); takeover ได้เมื่อ lease หมดอายุ (lease ต่อทุกครั้งที่ save answer; หลังตัดการเชื่อมรอ `exam_disconnect_grace_minutes` default 5 นาที) พร้อม audit `EXAM_SESSION_TAKEOVER`
 - attempt_no กำหนดจาก count ภายใน transaction + UNIQUE(assessment_id, user_id, attempt_no) กันแข่ง
 
 **g) Proctoring (Q4 — รอยืนยัน)**: `proctoring_mode = none | basic` default `basic` ตาม SRS Appendix A (`proctoring_mode`); `basic` = สุ่มข้อ + จับเวลา server + block session ซ้อน (ไม่บันทึกหน้าจอ/กล้องตามเหตุผลความเป็นส่วนตัว) + เก็บเหตุการณ์ client (tab blur ฯลฯ) ลง `assessment_attempts.client_events` (jsonb จำกัดขนาด, ไม่มี PII)
@@ -106,11 +110,11 @@
 
 **a) โครงสร้าง**: `credit_rules` (กฎ แก้ได้) + `renewal_cycles` (รอบต่ออายุรายคน) + `credit_ledger_entries` (รายการเคลดิต **append-only**) — ยอด credit เป็น "ผลรวมที่คำนวณ" ไม่มีการเก็บยอดคงค้างแบบแก้ไขได้
 
-**b) การเกิดรายการ (accrual) — transactional outbox (D11-17)**:
-- การออกประกาศนียบัตร INSERT ลง `certificates` **พร้อม INSERT event `certificate.issued` ลง `event_outbox` ใน transaction เดียวกัน** — ไม่เรียก M5 ตรง ๆ กลาง request (กัน event หายเมื่อ TX หลัง fail และกัน partial write)
-- worker ดึง event หลัง commit (`FOR UPDATE SKIP LOCKED`) → หา `renewal_cycles` ที่วันออกใบประกาศตกในช่วง [starts_on, ends_on]; ถ้าไม่มี → สร้างรอบใหม่ตาม config (ความยาวรอบ + จุดเริ่ม = config Q1, รอยืนยัน)
-- จับคู่ `credit_rules` แบบเจาะจงก่อน (course_id ตรง) แล้วค่อยกฎทั่วไป ตาม `priority`
-- INSERT entry: {user_id, cycle_id, type=accrual, credit_type, amount, source_type/source_id, rule_id} — **idempotent กัน event ส่งซ้ำด้วย UNIQUE(source_type, source_id, credit_type)** (partial, WHERE entry_type='accrual' — DATA-DICTIONARY `credit_ledger_entries`); สำเร็จแล้ว worker mark event `processed`
+**b) การเกิดรายการ (accrual) — เกิดตอนตรวจผ่าน (grading commit) ไม่ใช่ตอนออกประกาศนียบัตร (F15/D12) — ส่งผ่าน transactional outbox (D11-17)**:
+- **จุดเกิด credit = grading commit ที่ผล `passed`** (§3.1e): TX ตรวจข้อสอบ INSERT event `assessment_attempt.passed` ลง `event_outbox` **ใน transaction เดียวกัน** — กัน event หาย/partial write; **การออกประกาศนียบัตรภายหลังเป็นธุรกรรมงานทะเบียน ไม่มีผลกับ credit อีกต่อไป**
+- worker ดึง event หลัง commit (`FOR UPDATE SKIP LOCKED`) → หา `renewal_cycles` ที่**ครอบวันที่ผ่านสอบ** [starts_on, ends_on]; ถ้าไม่มี → สร้างรอบใหม่ตาม config (ความยาวรอบ + จุดเริ่ม = config Q1, รอยืนยัน)
+- จับคู่ `credit_rules` **เวอร์ชันที่มีผล ณ วันที่ผ่านสอบ** (effective window ครอบวัน passed) แบบเจาะจงก่อน (course_id ตรง) แล้วค่อยกฎทั่วไป ตาม `priority`
+- INSERT entry: {user_id, cycle_id, type=accrual, credit_type, amount, **source_type='assessment_attempt' (source_id = attempt_id)**, rule_id} — **idempotent กัน event ส่งซ้ำด้วย UNIQUE(source_type, source_id, credit_type)** (partial, WHERE entry_type='accrual' — DATA-DICTIONARY `credit_ledger_entries`); สำเร็จแล้ว worker mark event `processed`
 
 **c) การแก้ไข = รายการชดเชย ไม่ใช่การแก้ย้อน**:
 - ผิดพลาด → entry `reversal` (amount ติดลบ อ้าง original entry) โดย staff:registrar/super_admin เท่านั้น + เหตุผล + audit
@@ -134,7 +138,7 @@
 - seek ข้าม/เร่งความเร็วเข้าเกณฑ์ไม่ได้ เพราะช่วงที่ยาวเกิน elapsed ฝั่ง server ถูกตัดทิ้ง (การเก็บ interval map ละเอียดทุกช่วง = นอกขอบเขต v1 จดไว้ใน open questions)
 
 **c) เอกสาร**: จบบทเมื่อเปิดอ่าน + `dwell_sec >= DOC_MIN_DWELL_SEC` (default 30, config)
-**d) แบบทดสอบย่อย (quiz)**: จบบทเมื่อ quiz attempt ล่าสุด `passed` (score >= pass_pct ของ quiz นั้น — คนละเกณฑ์กับข้อสอบปลายหลักสูตร) — quiz เรียนได้ไม่จำกัดครั้งตาม config ของ quiz
+**d) แบบทดสอบย่อย (quiz)**: จบบทเมื่อ **คะแนนสูงสุดตลอดช่วง** (highest — `progress_pass_score_policy=highest` ตาม SRS Appendix A) เข้าเกณฑ์ `pass_pct` ของ quiz นั้น (คนละเกณฑ์กับข้อสอบปลายหลักสูตร) — quiz เรียนได้ไม่จำกัดครั้งตาม config; **สถานะ complete ที่ได้แล้วคงอยู่** (ทำใหม่ได้คะแนนต่ำกว่าภายหลัง ไม่ถอน completed_at ย้อนหลัง — F13/D12)
 
 **e) Rollup (denormalize เพื่อ query เร็ว — ต้นทางคือ lesson_progress)**:
 - บทเรียนครบ = ทุก lesson ของโมดูล completed → module complete
@@ -144,9 +148,9 @@
 ### 3.4 Certificate & Verification (M4)
 
 **a) การออก (หลักสิทธิ์อยู่ที่นายทะเบียน — brief §3)**:
-- รายการมีสิทธิ์ = enrollment `completed` และยังไม่มี certificate (ดูจากรายงาน `GET /admin/reports/assessments`) — UNIQUE(enrollment_id) ในตาราง certificates ทำให้ออกซ้ำไม่ได้ (idempotent)
+- รายการมีสิทธิ์ = enrollment `completed` และยังไม่มี certificate (ดูจากรายงาน `GET /admin/reports/assessments`) — **partial UNIQUE(enrollment_id) WHERE status='valid'** ในตาราง certificates ทำให้ออกซ้ำไม่ได้ (idempotent — รองรับ reissue/supersede — F16/D12)
 - `POST /admin/certificates` (staff:registrar+; มี `/bulk` สำหรับออกเป็นชุด): สร้าง `cert_no` รูปแบบ `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` ตาม SRS Appendix A `certificate_code_format` — **สุ่มด้วย CSPRNG + ตรวจ UNIQUE ซ้ำใน transaction ไม่ใช้ sequence** (sequence ถูกเดาเลขถัดไปได้; รูปแบบสุดท้ายรอยืนยันกับสภาฯ) + snapshot ชื่อ/หลักสูตร/credit ณ วันออก (เอกสารไม่เปลี่ยนตามข้อมูลที่แก้ภายหลัง)
-- ออกแล้ว trigger credit accrual (3.2) + แจ้งเตือนอีเมลพร้อมลิงก์
+- credit เกิดแล้วตั้งแต่ผลสอบเป็น `passed` (ตอน grading commit — §3.2b, F15/D12) — การออกประกาศนียบัตรไม่กระทบ credit อีก; ออกแล้วแจ้งเตือนอีเมลพร้อมลิงก์ดาวน์โหลด + QR
 
 **b) QR payload (D10)**: `https://{CERT_PUBLIC_BASE_URL}/verify/{verify_code}` — มีแค่ URL นี้ **ไม่มี PII ใด ๆ ฝังใน QR** (ไม่มีชื่อ เลขใบอนุญาต เลขบัตร) — QR ฝัง `verify_code` (nanoid 43 อักขระ, CSPRNG) เพราะเดายากกว่า `cert_no` กัน enumeration ตอนสแกน
 
@@ -171,21 +175,22 @@ sequenceDiagram
     participant A as Supabase Auth
     participant DB as Postgres + RLS
     participant M as อีเมล
-    U->>BFF: POST /api/v1/auth/signup (email + รหัสผ่าน)
-    BFF->>A: signUp
+    U->>BFF: POST /api/v1/auth/register (email + รหัสผ่าน)
+    BFF->>A: register
     A-->>BFF: uid
     Note over DB: trigger on_auth_user_created สร้าง profiles + role citizen
     A->>M: อีเมลยืนยันตัวตน
-    U->>BFF: POST /api/v1/me/licenses (เลขที่ใบอนุญาต)
-    BFF->>DB: INSERT lawyer_licenses (status=pending) + audit
-    BFF-->>U: 202 รอเจ้าหน้าที่ตรวจ
-    Note over DB: ภายหลัง staff:registrar ตรวจ (Q3)
+    U->>BFF: ยืนยันอีเมล (link จาก A)
+    U->>BFF: PUT /api/v1/me/license (เลขที่ใบอนุญาต)
+    BFF->>DB: INSERT license_applications (status=pending) + audit
+    BFF-->>U: 202 รอเจ้าหน้าที่ตัดสิน (Q3)
+    Note over DB: ภายหลัง staff:registrar ตัดสินผ่าน PATCH /api/v1/admin/license-applications/{id} (API-SPEC §3.8)
     alt อนุมัติ
-        DB->>DB: status=verified + INSERT role_assignments (lawyer)
+        DB->>DB: TX atomic: INSERT lawyer_licenses (verified) + role_assignments (lawyer) + audit ROLE_GRANT — function ตรวจ conflict license_no ก่อน grant (ERR-PRF-001)
     else ปฏิเสธ
         DB->>DB: status=rejected + เหตุผล + audit
     end
-    DB->>M: แจ้งผลการตรวจ
+    DB->>M: แจ้งผลการตัดสิน
 ```
 
 ### 4.2 ลงทะเบียนเรียน + ดูวิดีโอ
@@ -234,7 +239,7 @@ sequenceDiagram
     end
     U->>BFF: POST /api/v1/attempts/{id}/submit
     Note over BFF,DB: idempotent: UPDATE ... WHERE submitted_at IS NULL
-    DB->>DB: TX: Grader ตรวจ + score + status ผ่าน/ไม่ผ่าน + audit
+    DB->>DB: TX: Grader ตรวจจาก question_snapshot + score + status + audit (+ INSERT event_outbox assessment_attempt.passed เมื่อผ่าน — F15)
     BFF-->>U: 200 ผลสอบ (submit ซ้ำได้ผลเดิม)
 ```
 
@@ -250,9 +255,9 @@ sequenceDiagram
     R->>BFF: GET /api/v1/admin/reports/assessments (รายการมีสิทธิ์ออกใบ)
     BFF->>DB: enrollment completed + ผ่านสอบ + ยังไม่มี certificate
     R->>BFF: POST /api/v1/admin/certificates (enrollment_id)
-    BFF->>DB: TX: UNIQUE(enrollment) กันซ้ำ → INSERT certificates
+    BFF->>DB: TX: partial UNIQUE(enrollment_id) WHERE status='valid' กันซ้ำ → INSERT certificates (supersedes_cert_id เมื่อ reissue — F16)
     Note over DB: cert_no + verify_code + snapshot ชื่อ/หลักสูตร + audit
-    BFF->>DB: INSERT event_outbox (certificate.issued) — TX เดียวกับ certificates (4.5)
+    Note over BFF,DB: credit ไม่เกิดที่นี่ — เกิดแล้วตอนตรวจผ่าน (4.3/4.5 — F15/D12)
     BFF->>M: อีเมลแจ้ง + ลิงก์ดาวน์โหลด + QR (URL อย่างเดียว)
     BFF-->>R: 201 ออกประกาศนียบัตรสำเร็จ
 ```
@@ -264,15 +269,15 @@ sequenceDiagram
     autonumber
     participant W as Outbox worker
     participant DB as Postgres + RLS
-    Note over BFF,DB: TX ออกประกาศนียบัตร INSERT แถว event ลง event_outbox ด้วย (TX เดียวกัน)
+    Note over DB: TX ตรวจข้อสอบ (4.3 — grading commit ผล passed) INSERT event assessment_attempt.passed ลง event_outbox ด้วย (TX เดียวกัน — F15)
     W->>DB: ดึง event หลัง commit (FOR UPDATE SKIP LOCKED)
-    W->>DB: หา renewal_cycle ที่ครอบวันออกใบ
+    W->>DB: หา renewal_cycle ที่ครอบ "วันที่ผ่านสอบ" (ไม่ใช่วันออกใบ)
     alt ไม่มีรอบ
         W->>DB: สร้างรอบตาม config (ความยาวรอบ — รอยืนยัน Q1)
     end
-    W->>DB: จับคู่ credit_rules (เจาะจงก่อนทั่วไป ตาม priority)
-    W->>DB: INSERT credit_ledger_entries (accrual) — UNIQUE(source_type, source_id, credit_type) กันซ้ำ + audit
-    Note over DB: ยอด = SUM(entries) เท่านั้น ห้ามแก้/ลบรายการ
+    W->>DB: จับคู่ credit_rules เวอร์ชันที่มีผล ณ วันผ่าน (เจาะจงก่อนทั่วไป ตาม priority)
+    W->>DB: INSERT credit_ledger_entries (accrual, source_type='assessment_attempt', source_id=attempt_id) — UNIQUE(source_type, source_id, credit_type) กันซ้ำ + audit
+    Note over DB: ยอด = SUM(entries) เท่านั้น ห้ามแก้/ลบรายการ · ออกประกาศนียบัตรภายหลังไม่มีผลกับ credit (F15)
     W->>DB: ตรวจครบเกณฑ์ของรอบ → สร้างแจ้งเตือน
     W->>DB: mark event_outbox.processed (consumer idempotent — รันซ้ำได้)
 ```
@@ -312,7 +317,8 @@ sequenceDiagram
 ### 5.2 RLS เป็นชั้นบังคับจริง (user-first — D11-1)
 
 - **เส้นทางหลักของ request ธรรมดา = user JWT (role `authenticated`)**: BFF ส่ง JWT ของผู้ใช้ลง Postgres ตรง ๆ → RLS policy บังคับจริงทุก query (defense-in-depth แบบมีตัวตน ไม่ใช่ตกแต่ง); authorization ยังตัดสินที่ `rbac` service (`requirePermission()` — RBAC §1.2 ข้อ 4) **ก่อน** query เพื่อตอบ 403 เร็วและ log ได้ชัด
-- **`service_role` (bypass RLS) ใช้เฉพาะกิจแคบขอบเขตเท่านั้น**: (1) background job — retention purge / export worker / email worker / auto-submit scheduler, (2) server functions ที่จำเป็นจริง เช่น สร้าง attempt snapshot ตอนเริ่มสอบ, เขียน audit/append-only tables — ทุกจุดที่ใช้ต้องระบุเหตุผล + ขอบเขต query แคบ ๆ (WHERE เฉพาะงานนั้น) และผ่าน code review; **ห้ามใช้ service_role แทน user JWT ใน CRUD ทั่วไป** (RLS ไม่คุม service_role — การควบคุมทำที่การจำกัดจุดเรียกในโค้ด ไม่ใช่ที่ policy)
+- **การเขียนของผู้เรียนเป็น server functions เท่านั้น (F2/D12)**: `enroll()` / `record_lesson_progress()` / `record_quiz_attempt()` / `start_attempt()` / `save_answer()` / `submit_attempt()` — SECURITY DEFINER, owner เฉพาะ, ตรวจสิทธิ์/เงื่อนไข + audit ข้างใน (นิยามครบที่ DATA-DICTIONARY §4.7); ผู้เรียนไม่มี INSERT/UPDATE policy บนตารางเหล่านั้น
+- **`service_role` (bypass RLS) ใช้เฉพาะกิจแคบขอบเขตเท่านั้น**: (1) background job — retention purge (`purge_role` เฉพาะกิจยิ่งกว่า — DD §4.6), export worker, email worker, auto-submit scheduler, (2) เรียก SECURITY DEFINER functions ข้างต้น + audit append (`append_audit_event()` — DD §4.4) — ทุกจุดที่ใช้ต้องระบุเหตุผล + ขอบเขต query แคบ ๆ (WHERE เฉพาะงานนั้น) และผ่าน code review; **ห้ามใช้ service_role แทน user JWT ใน CRUD ทั่วไป** (RLS ไม่คุม service_role — การควบคุมทำที่การจำกัดจุดเรียกในโค้ด ไม่ใช่ที่ policy)
 - ทุกตาราง ENABLE RLS + policy ครบทุก path สำหรับ `anon`/`authenticated` เสมอ — เอกสารห้ามเขียนให้เข้าใจว่า RLS คุม service_role ได้
 - policy ใช้ helper ชุด canonical เดียวกับโค้ด (`my_roles()` / `has_any_role(text[])` / `is_staff()` — นิยามที่ RBAC-DESIGN.md §3.1) เพื่อไม่ให้สองชั้นตีความไม่ตรงกัน
 - รายละเอียด policy ทุกตารางอยู่ใน DATA-DICTIONARY.md
@@ -332,9 +338,9 @@ sequenceDiagram
 ### 5.5 Session & admin hardening (server-checked ทุก role — D11-10)
 
 - **ทุก role ผ่านการตรวจ session ฝั่ง server ทุก request เสมอ** (middleware + auth guard) — ไม่มี path ใดเชื่อสถานะจาก client
-- ผู้เรียน (citizen/lawyer): JWT อายุสั้น + refresh rotation ของ Supabase Auth — server verify JWT ทุก request; **revoke ทันทีได้** เมื่อ logout / logout-all / reset รหัสผ่าน (revoke refresh token ทั้งหมดของ user นั้น)
+- ผู้เรียน: ทุก authenticated request BFF ตรวจ **JWT `session_id` claim กับ `auth.sessions`** (pattern ทางการของ Supabase — session ต้องยัง active) **+ ตรวจสถานะบัญชี (disabled) ทุกครั้ง** — session ถูกปิดหรือบัญชีถูกปิด = ปฏิเสธทันที (F1/D12); เสริมด้วย JWT อายุสั้น + refresh rotation และ **revoke ทันทีได้** เมื่อ logout / logout-all / reset รหัสผ่าน (ปิด session ใน `auth.sessions` + revoke refresh token ทั้งหมดของ user นั้น — ผลทันทีตั้งแต่ request ถัดไป ไม่รอ JWT หมดอายุ)
 - staff/instructor/super_admin: MFA บังคับ (brief §8), idle timeout 15 นาที, absolute session 8 ชั่วโมง, lockout หลังพลาด 5 ครั้ง/15 นาที (ทุกค่าเป็น config) — lifecycle บันทึกใน `admin_sessions` + audit
-- การเพิกถอน session ทันที: flag ใน `admin_sessions` + middleware ตรวจทุก request (staff/instructor) และ revoke refresh token (ผู้เรียน)
+- การเพิกถอน session ทันที: staff/instructor — flag ใน `admin_sessions` + middleware ตรวจทุก request; ผู้เรียน — ปิดแถว session ใน `auth.sessions` + disabled flag (BFF ตรวจทุก request ตามข้อด้านบน — ผลทันทีตั้งแต่ request ถัดไป ไม่รอ JWT หมดอายุ — F1/D12)
 
 ## 6. Error Handling + Logging Policy
 

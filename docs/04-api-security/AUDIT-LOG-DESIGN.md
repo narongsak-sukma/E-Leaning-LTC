@@ -13,7 +13,7 @@
 1. **Append-only สัมบูรณ์** — ห้าม UPDATE/DELETE/**TRUNCATE** ทุกกรณี ทุกบทบาท รวมถึง super_admin (D11-7); บังคับด้วย 3 ชั้น: DB privileges (REVOKE ครบ 3 คำสั่ง) + trigger กัน + ไม่มี API write path (มีแค่ `GET /admin/audit-logs`)
 2. **บันทึก 5W** — ใคร (`actor_user_id` + snapshot `actor_roles`), ทำอะไร (`action` + `context`), กับอะไร (`entity_type` + `entity_id`), เมื่อไร (`occurred_at`), จากไหน (`request_id`, `ip_hash`) — ชื่อคอลัมน์ตาม DATA-DICTIONARY.md §3.8 เป็น canonical (D11-6)
 3. **ไม่เก็บ PII โดยตรง** — อ้างคนด้วย `actor_user_id` (uuid) เท่านั้น; ห้ามใส่ email/เลขบัตรประชาชน/เลขที่ใบอนุญาต ลง `context`/`before`/`after` (BRIEF §8) — ถ้าจำเป็นต้องอ้าง ใช้ `entity_id`
-4. **เขียนผ่าน `append_audit_event()` เท่านั้น (D11-8)** — function แบบ SECURITY DEFINER; **ห้าม direct INSERT แม้จาก `service_role`**; client/anon เขียนไม่ได้ (RLS §4)
+4. **เขียนผ่าน `append_audit_event()` เท่านั้น (D11-8 + D12-8)** — function แบบ SECURITY DEFINER (owner = `app_owner`; **EXECUTE ระบุเฉพาะ role นี้** ไม่ให้ service_role); **ห้าม direct INSERT แม้จาก `service_role`** (DD §4.4 REVOKE INSERT); client/anon เขียนไม่ได้ (RLS §4)
 5. **Atomic กับ business mutation (D11-8)** — event ที่บันทึกการเปลี่ยนแปลงข้อมูลจริงต้องเขียน audit ใน **transaction เดียวกัน** กับ mutation — ถ้า audit ล้มเหลว = rollback ทั้งรายการ (fail-closed); event ที่ไม่ได้คู่กับ mutation (เช่น AUDIT_READ, PII_ACCESS, RATE_LIMIT_HIT, CERT_VERIFY_PUBLIC) อนุญาต async ได้ (กัน latency) แต่ต้องมี retry + dead-letter
 6. **Tamper-evidence แบบ lightweight** — hash-chain ทุกแถว (§3.3) ไม่ใช้ external blockchain
 
@@ -80,6 +80,7 @@
 | EXAM_ATTEMPT_START | citizen, lawyer | attempt_id, assessment_id, deadline_at | NOTICE | — |
 | EXAM_SUBMIT | citizen, lawyer | attempt_id, จำนวนข้อที่ตอบ, submit_at vs deadline, idempotency_key | NOTICE | — |
 | EXAM_TIME_LIMIT_EXCEED | ระบบ | attempt_id, ความล่าช้า (วินาที) | WARN | — |
+| EXAM_SESSION_TAKEOVER | ระบบ (D12-21: ASM-011) | attempt_id, session_id เดิม→ใหม่, สาเหตุ (disconnect นานเกิน `exam_disconnect_grace_minutes` + lease_expires_at ครบ), ip_hash | WARN | — |
 | EXAM_GRADE_OVERRIDE | staff:exam | attempt_id, คะแนนเดิม→ใหม่, reason | WARN | ผลกระทบต่อสิทธิ์ของบุคคล |
 | CERT_ISSUE | staff:registrar | certificate_id, code, attempt_id, ผู้ออก | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล |
 | CERT_REVOKE | staff:registrar | certificate_id, reason | CRITICAL | เช่นเดียวกัน |
@@ -92,7 +93,7 @@
 | --- | --- | --- | --- | --- |
 | CREDIT_RULE_CREATE | staff:registrar, super_admin | rule_id, ค่ากฎ, effective_from | NOTICE | — |
 | CREDIT_RULE_UPDATE | staff:registrar(draft), super_admin | rule_id, version | NOTICE | — |
-| CREDIT_GRANT | ระบบ (หลังสอบผ่าน) | ledger_id, user_id, จำนวน, rule_id, attempt_id | NOTICE | คุณวุฒิของบุคคล |
+| CREDIT_ACCRUAL | ระบบ — **เกิดตอนตรวจผ่าน (grading TX) ไม่ใช่ตอนออก cert** (D12-14) | ledger_id, user_id, จำนวน, rule_id, `source_type='assessment_attempt'`, attempt_id, เกณฑ์ตัดสินตามวันที่ผ่าน | NOTICE | คุณวุฒิของบุคคล |
 | CREDIT_ADJUST | staff:registrar, super_admin | ledger_id, user_id, delta, reason, evidence | CRITICAL | การแก้ไขข้อมูลสิทธิ์โดยบุคคล |
 
 ### 2.6 การเข้าถึงข้อมูล / ระบบ
@@ -107,7 +108,7 @@
 | AUDIT_EXPORT | super_admin | ช่วงเวลา, จำนวนแถว, รูปแบบ | CRITICAL | ส่งออกบันทึกที่มีข้อมูลบุคคล |
 | AUDIT_CHAIN_VERIFY | ระบบ (cron) | ผล (ok/broken ที่ id ใด), anchor ที่ใช้ | NOTICE (broken=CRITICAL) | พิสูจน์ความถูกต้องของบันทึก |
 
-รวม **50 event types** (นับจากตาราง §2.1–2.6 — เพิ่ม AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14 และ AUTH_MFA_BACKUPS_REGENERATED ตาม D11-12)
+รวม **51 event types** (นับจากตาราง §2.1–2.6 — เพิ่ม AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14; AUTH_MFA_BACKUPS_REGENERATED ตาม D11-12; EXAM_SESSION_TAKEOVER ตาม D12-21)
 
 ---
 
@@ -132,16 +133,27 @@
 `context` ของแต่ละ event ใช้ **schema เฉพาะของ event นั้น (strict)** — ไม่มี schema กลางแบบ free-form; ฟรีเท็กซ์ (`reason`, `rejected_reason`) ต้องผ่าน `FreeText` เสมอ:
 
 ```typescript
-// sanitize ฟรีเท็กซ์ — ใช้กับทุก event ที่มีช่องฟรีเท็กซ์ (D11-9)
-const EMAIL_RE   = /\b[\w.+-]+@[\w-]+\.[\w.]{2,}\b/;
-const PHONE_RE   = /(?:\+66|66|0)\d{8,9}\b/;
-const THAI_ID_RE = /\b\d{13}\b/;  // เลขบัตร 13 หลัก (ครอบคลุมรูปแบบ X-XXXX-XXXXX-XX-X เมื่อตัดขีดแล้ว)
+// sanitize ฟรีเท็กซ์ — ใช้กับทุกฟรีเท็กซ์ฟิลด์ (reason, rejected_reason ฯลฯ) (D11-9 + D12-3 BLOCKER F9)
+// normalize ก่อน detect: ตัด whitespace/ขีด/จุด ออก เพื่อไม่ให้หลุดด้วยการเว้นวรรค/ขีดคั่น
+const normalizeForPiiScan = (s: string) => s.replace(/[\s\-–—_.]/g, "");
+
+const PII_RULES: Array<[RegExp, string]> = [
+  [/\d{13}/, "thai_national_id"],            // ตรวจก่อนเสมอ (สตริง 13 หลักจะกลืน license 6–9 หลัก)
+  [/(?:\+66|66|0)\d{8,9}/, "phone"],         // 0XXXXXXXXX / +66XXXXXXXXX
+  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/, "email"],
+  [/\d{6,9}/, "license_no"],                 // หลังตัดขีด/ช่องว่าง — เลข 6–9 หลักตามรูปแบบใบอนุญาต
+];
 
 const FreeText = z.string()
-  .transform((s) => s.trim().replace(/\s+/g, " "))   // sanitize: trim + ยุบช่องว่าง
-  .pipe(z.string().max(500))                          // จำกัดความยาว
-  .refine((v) => !(EMAIL_RE.test(v) || PHONE_RE.test(v) || THAI_ID_RE.test(v)),
-          { message: "ฟรีเท็กซ์ห้ามมีรูปแบบ email / เบอร์โทร / เลขบัตรประชาชน" });
+  .transform((s) => s.trim().replace(/\s+/g, " "))      // sanitize ผิว: trim + ยุบช่องว่าง
+  .pipe(z.string().max(500))                            // จำกัดความยาว
+  .refine((v) => {
+    const n = normalizeForPiiScan(v);
+    return !PII_RULES.some(([re]) => re.test(n));
+  }, { message: "ฟรีเท็กซ์ห้ามมีรูปแบบ email / เบอร์โทร / เลขบัตร 13 หลัก / เลขใบอนุญาต 6–9 หลัก" });
+// นโยบายเมื่อตรวจพบ (D12-3): BFF **ปฏิเสธ** (400 ERR-VAL-001 — ไม่เขียน raw ลง audit เด็ดขาด);
+// กรณี event async ที่ต้องเขียนได้ต่อ (ไม่คู่ mutation, §1.5) → แทนที่ส่วนที่ตรวจพบด้วย `[redacted:<kind>]`
+// และ mark `sanitized=true` ใน context — ห้ามเก็บค่าดิบทั้งสองกรณี
 
 // ตัวอย่าง schema ราย event (strict) — ประกาศให้ครบทุก event ก่อน migration (Wave B)
 const AUTH_LOGIN_OK = z.object({
@@ -162,8 +174,16 @@ const CERT_REVOKE = z.object({
   reason: FreeText,                    // บังคับ — เหตุผลการเพิกถอน
 }).strict();
 
+// D12-3 (BLOCKER F9): filters = **typed allowlist .strict()** — ห้าม field อื่นนอกชุดนี้
 const AUDIT_READ = z.object({
-  filters: z.record(z.string(), z.unknown()).optional(),  // ตัวกรองที่ไม่มี PII
+  filters: z.object({
+    actor_id: z.string().uuid().optional(),        // = คอลัมน์ actor_user_id (DD §3.8)
+    action: z.enum([...]).optional(),              // enum รายการ action ที่มีจริงใน catalog §2 (เช่น AUTH_LOGIN_OK, ROLE_GRANT, CERT_ISSUE, CREDIT_ACCRUAL, EXAM_SESSION_TAKEOVER ฯลฯ)
+    entity_type: z.enum([...]).optional(),         // ชื่อ entity ที่ใช้จริง (course, lesson, question_bank, question, assessment, attempt, certificate, credit_rule, credit_ledger, user, role, audit_log)
+    entity_id: z.string().uuid().optional(),
+    occurred_from: z.string().datetime().optional(),
+    occurred_to: z.string().datetime().optional(),
+  }).strict(),                                     // .strict() = ห้าม field อื่น (ปิดช่อง exfil ผ่าน filters)
   row_count: z.number().int().min(0),
 }).strict();
 ```
@@ -177,9 +197,16 @@ const AUDIT_READ = z.object({
 ### 3.3 Hash-chain (tamper-evidence แบบ lightweight)
 
 ```
-row_hash = sha256( prev_hash || id || occurred_at || action
-                 || actor_user_id || entity_type || entity_id || canonical_json(context) )
+row_hash = sha256( prev_hash
+                 || id || occurred_at
+                 || action || actor_user_id || canonical_json(actor_roles)
+                 || entity_type || entity_id
+                 || canonical_json(before) || canonical_json(after)   -- D12-7: hash ครบทุก evidentiary field
+                 || canonical_json(context)
+                 || ip_hash || user_agent || request_id )
 ```
+
+- **ลำดับการไล่สาย (traversal): `(occurred_at, id)`** (D12-7) — prev_hash ของแถวแรกของสาย = anchor วันก่อนหน้า (`audit_chain_anchors.last_row_hash`); สายแรกของระบบ (genesis) ใช้ prev_hash = 40 ค่า 0; การไล่ตรวจเรียงตาม (occurred_at, id) เสมอ ไม่ใช้แค่ id (กันเวลา clock skew ข้าม node)
 
 - การแทรก **serialize ด้วย `pg_advisory_xact_lock(hashtag)` ในฟังก์ชัน `append_audit_event()`** (SECURITY DEFINER — เขียนในนามเจ้าของ function จึงไม่ต้องมีสิทธิ์ direct INSERT สำหรับ service_role, D11-8) — กัน chain แตกจาก concurrent write
 - **Anchor รายวัน**: cron job เก็บ `(day, last_id, last_row_hash)` ลงตาราง **`audit_chain_anchors`** (ตารางใหม่ที่ DATA-DICTIONARY.md เพิ่มให้ตาม D11-6 — append-only เช่นกัน) — anchor ใช้เทียบ/สืบสายต่อ
@@ -191,11 +218,15 @@ row_hash = sha256( prev_hash || id || occurred_at || action
 ## 4. การบังคับ append-only (3 ชั้น)
 
 ```sql
--- ชั้น 1: DB privileges (D11-7) — ครบทั้ง UPDATE/DELETE/TRUNCATE ตรง DD §4.4
+-- ชั้น 1: DB privileges (D11-7 + D12-8) — ครบทั้ง UPDATE/DELETE/TRUNCATE + INSERT ตรง DD §4.4
 revoke update, delete, truncate on public.audit_logs
   from anon, authenticated, service_role;
-revoke insert on public.audit_logs from anon, authenticated, service_role; -- เขียนเฉพาะใน append_audit_event() (SECURITY DEFINER, D11-8)
+revoke insert on public.audit_logs from anon, authenticated, service_role; -- D12-8: เขียนผ่าน append_audit_event() เป็น path เดียว
 grant select on public.audit_logs to authenticated; -- อ่านผ่าน RLS
+
+-- D12-8: function เขียน audit มี path เดียว — EXECUTE ระบุเฉพาะ role `app_owner` (ไม่ใช่ service_role)
+revoke all on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text) from public, service_role;
+grant execute on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text) to app_owner;
 
 -- ชั้น 2: trigger บล็อกแม้ superuser/owner (ยกเว้น migration ที่ drop trigger อย่างชัดเจน)
 create or replace function public.prevent_audit_mutation()
@@ -224,15 +255,15 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 
 ---
 
-## 5. Retention & Export
+## 5. Retention & Export — canonical อยู่ที่ DATA-DICTIONARY.md §4.6 (D12-18)
 
-| หัวข้อ | นโยบาย default (config) |
-| --- | --- |
-| Retention | เก็บ 5 ปี (config `AUDIT_RETENTION_YEARS`, รอยืนยันกับนโยบายสภาฯ + PDPA data retention) — **v1 ไม่มีการลบอัตโนมัติ** จนกว่าจะมีมติเป็นลายลักษณ์อักษร |
-| การลบเมื่อครบกำหนด | ทำเป็น batch รายปี โดย super_admin ร้องขอ + CRITICAL event + export สำเนาก่อนลบ (export-then-purge) |
-| พื้นที่จัดเก็บ | ตารางหลัก + ย้ายแถวเก่ากว่า 1 ปี ไป partition เย็น/ตารางเก็บถาวร (ทำเมื่อปริมาณมากพอ — วางแผนไว้ก่อน) |
-| Export | `super_admin` ผ่านเส้นทางที่ CTO อนุมัติแยกต่างหาก (เช่น คำขอเป็นลายลักษณ์อักษร) → CSV/JSON, บันทึก `AUDIT_EXPORT` (CRITICAL), rate limit กลุ่ม EXPORT |
-| การเข้าถึงของเจ้าของข้อมูล | ผู้ใช้ทั่วไปขอดู activity ตัวเองผ่าน `audit_read_self` (ไม่ต้องรอเจ้าหน้าที่) |
+นโยบาย retention ประกาศที่เดียว (DD §4.6) — เอกสารนี้**ไม่ประกาศค่าซ้ำ**; สาระสำคัญที่ผูกกับกลไกของเอกสารนี้:
+
+- audit_logs = 5 ปี · security_events = 1 ปี · audit_chain_anchors = ถาวร (ค่าตาม DD §4.6 — config `audit_retention_years=5`)
+- **purge ใช้ `purge_role`** (บทบาทเฉพาะ — ไม่ใช่ service_role ของแอป, D12-18) ทำงาน**หลัง export สำเร็จ** (export-then-purge) + audit ทุกครั้ง (CRITICAL)
+- learning records ที่ถูก certificate อ้างอิง = **anonymize ไม่ลบ** (ตาม DD §4.6 — D12-18)
+- Export: `super_admin` ผ่านเส้นทางที่ CTO อนุมัติแยกต่างหาก (เช่น คำขอเป็นลายลักษณ์อักษร) → CSV/JSON, บันทึก `AUDIT_EXPORT` (CRITICAL), rate limit กลุ่ม EXPORT (API-SPECIFICATION.md §5)
+- การเข้าถึงของเจ้าของข้อมูล: ผู้ใช้ดู activity ตัวเองผ่าน `audit_read_self` (§4 — ไม่ต้องรอเจ้าหน้าที่)
 
 ---
 
@@ -261,7 +292,7 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 
 ความต้องการ audit ของ SRS ไม่ได้แบ่งตามหมวด event แต่เป็น **คุณสมบัติ 5 ข้อของระบบ audit โดยรวม** — การ map จึงเป็นแบบ property-based ไม่ใช่การจัดกลุ่ม event เข้าหมวด
 
-**AUD-001 — บันทึก audit ทุก action สำคัญ (coverage mandate):** event ทั้ง **50 ชนิดใน catalog §2 (§2.1–§2.6)** ตอบโจทย์นี้ร่วมกันทั้งหมด — ไม่มี event ใดอยู่นอก mandate และไม่มี action สำคัญใด (ตามนิยาม §2) ที่ไร้ event รองรับ; การเพิ่ม action สำคัญใหม่ = เพิ่ม event type ใน catalog โดยอ้าง AUD-001 ผ่าน DCR
+**AUD-001 — บันทึก audit ทุก action สำคัญ (coverage mandate):** event ทั้ง **51 ชนิดใน catalog §2 (§2.1–§2.6)** ตอบโจทย์นี้ร่วมกันทั้งหมด — ไม่มี event ใดออกนอก mandate และไม่มี action สำคัญใด (ตามนิยาม §2) ที่ไร้ event รองรับ; การเพิ่ม action สำคัญใหม่ = เพิ่ม event type ใน catalog โดยอ้าง AUD-001 ผ่าน DCR
 
 **AUD-002…AUD-005 — คุณสมบัติระดับระบบ พิสูจน์ที่กลไก (ไม่ใช่ที่ตัว event):**
 

@@ -2,7 +2,7 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 0.3.0 — แก้ตามคำตัดสิน CTO D11 (codex security gate รอบ 1 = FAIL): D11-3, D11-4, D11-5, D11-11, D11-14 |
+| เวอร์ชัน | 0.4.0 — แก้ตามคำตัดสิน CTO D12 (codex security gate รอบ 2 = FAIL — รอบสุดท้าย): D12-1, D12-5, D12-6, D12-10, D12-23 (เดิมแก้ D11 แล้วที่ 0.3.0) |
 | วันที่    | 2026-09-08                                      |
 | อ้างอิง  | PROJECT-BRIEF.md §4 (บทบาท seed), §5 (โดเมน), §8 (security) · API-SPECIFICATION.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md · SRS.md (Appendix A) |
 
@@ -151,10 +151,10 @@ $$;
 -- (1) profiles (D11-3/D11-4): แยก operation + column protection (owner แก้ได้เฉพาะคอลัมน์ที่กำหนด)
 alter table public.profiles enable row level security;
 create policy profiles_read on public.profiles for select to authenticated
-  using (id = auth.uid()
+  using (profiles.id = auth.uid()
          or public.has_any_role(array['staff:viewer','staff:registrar','super_admin'])); -- D11-4: เฉพาะ staff ที่งานเกี่ยวข้อง ไม่ใช่ทุก staff (ตรง §2.4 user:view ผู้อื่น — PII)
 create policy profiles_update_owner on public.profiles for update to authenticated
-  using (id = auth.uid()) with check (id = auth.uid());
+  using (profiles.id = auth.uid()) with check (profiles.id = auth.uid());
 revoke all on public.profiles from authenticated;
 grant select, update (display_name, phone, preferred_locale, pdpa_consented_at) on public.profiles to authenticated; -- column protection ตาม DD §3.1
 -- INSERT/DELETE ไม่มี policy (สร้างโดย trigger security definer; ไม่มี hard delete)
@@ -169,26 +169,43 @@ create policy courses_owner_read on public.courses for select to authenticated
 create policy courses_staff_read on public.courses for select to authenticated
   using (public.is_staff());
 create policy courses_owner_insert on public.courses for insert to authenticated
-  with check (created_by = auth.uid());
+  with check (courses.created_by = auth.uid()
+              and public.has_any_role(array['instructor'])
+              and courses.status in ('draft','pending_review')); -- D12-5: role gate + status gate (publish = staff:content เท่านั้น)
 create policy courses_staff_insert on public.courses for insert to authenticated
   with check (public.has_any_role(array['staff:content','super_admin']));
 create policy courses_owner_update on public.courses for update to authenticated
-  using (created_by = auth.uid()) with check (created_by = auth.uid());
+  using (courses.created_by = auth.uid()
+         and public.has_any_role(array['instructor'])
+         and courses.status in ('draft','pending_review'))
+  with check (courses.created_by = auth.uid()
+              and public.has_any_role(array['instructor'])
+              and courses.status in ('draft','pending_review')); -- D12-5; ใช้ค่า enum จริงของ DD course_status ('pending_review')
 create policy courses_staff_update on public.courses for update to authenticated
   using (public.has_any_role(array['staff:content','super_admin']))
   with check (public.has_any_role(array['staff:content','super_admin']));
 -- publish (status → 'published') = staff:content/super_admin เท่านั้น (§2.1 course:publish — SoD)
 --   RLS ไม่เห็น OLD/NEW พร้อมกัน จึงบังคับ transition ด้วย trigger guard (DD §4.2) + requirePermission("course:publish") ที่ BFF
 
--- (3) enrollments (D11-3): owner SELECT/INSERT-self เท่านั้น — status/completed_at เป็นของ server (UPDATE/DELETE ห้าม)
+-- (3) enrollments (D12-1): ผู้เรียนเหลือ SELECT เท่านั้น — INSERT/UPDATE ไม่มี policy ใด ๆ
+--     เขียนผ่าน SECURITY DEFINER functions (enroll — รายชื่อ canonical ที่ DD §3.2) เท่านั้น (D12-1 BLOCKER F2)
 create policy enrollments_owner_read on public.enrollments for select to authenticated
-  using (user_id = auth.uid()
-         or public.is_staff()
+  using (enrollments.user_id = auth.uid()
+         or public.has_any_role(array['staff:viewer','super_admin'])
          or exists (select 1 from public.courses c
-                    where c.id = course_id and c.created_by = auth.uid())); -- instructor เจ้าของหลักสูตร (ตาม DD §3.2)
-create policy enrollments_self_insert on public.enrollments for insert to authenticated
-  with check (user_id = auth.uid());
-revoke update, delete on public.enrollments from authenticated, anon; -- server-controlled (D11-1)
+                    where c.id = enrollments.course_id and c.created_by = auth.uid())); -- instructor เจ้าของหลักสูตร (ตาม DD §3.2)
+revoke update, delete, insert on public.enrollments from authenticated, anon; -- server-controlled (D12-1)
+
+-- (4) lesson_progress (D11-5 + D12-1): ตารางนี้ไม่มีคอลัมน์ user_id (ตาม DD §3.3) — เจ้าของอ้างผ่าน enrollment;
+--     ผู้เรียนเหลือ SELECT — เขียนผ่าน SECURITY DEFINER function `record_lesson_progress` เท่านั้น (D12-1)
+create policy lp_owner_read on public.lesson_progress for select to authenticated
+  using (exists (select 1 from public.enrollments e
+                 where e.id = lesson_progress.enrollment_id and e.user_id = auth.uid())
+         or public.has_any_role(array['staff:viewer','super_admin'])
+         or exists (select 1 from public.enrollments e
+                    join public.courses c on c.id = e.course_id
+                    where e.id = lesson_progress.enrollment_id and c.created_by = auth.uid()));
+revoke insert, update, delete on public.lesson_progress from authenticated, anon; -- เขียนผ่าน function เท่านั้น (D12-1)
 
 -- (4) lesson_progress (D11-5): ตารางนี้ไม่มีคอลัมน์ user_id (ตาม DD §3.3) — เจ้าของอ้างผ่าน enrollment
 create policy lp_owner_read on public.lesson_progress for select to authenticated
@@ -208,44 +225,55 @@ create policy lp_owner_update on public.lesson_progress for update to authentica
                  where e.id = enrollment_id and e.user_id = auth.uid()));
 revoke delete on public.lesson_progress from authenticated, anon; -- ไม่มี hard delete (D11-3)
 
--- (5) questions (D11-4/D11-5): ชื่อคอลัมน์ตาม DD — questions.bank_id (ไม่ใช่ question_bank_id)
+-- (5) questions (D11-4/D11-5 + D12-5): ชื่อคอลัมน์ตาม DD — questions.bank_id (ไม่ใช่ question_bank_id)
 --     instructor เห็นเฉพาะ bank ที่ตัวเองเป็นเจ้าของ (question_banks.created_by — DD §3.4, เพิ่มแล้วโดย DCR-3)
---     ผู้เรียนไม่มี policy ใด ๆ — ได้ข้อสอบผ่าน snapshot ที่ BFF สร้างตอน start attempt เท่านั้น
+--     ผู้เรียนไม่มี policy ใด ๆ (D12-2 BLOCKER F4: ห้าม SELECT raw — อ่านผ่าน projection view ที่ตัด is_correct/explanation
+--     จนครบเงื่อนไขเปิดเฉลย ตาม DD); q_read เพิ่ม staff:viewer ตาม DD §3.4 (D12-5)
 create policy q_read on public.questions for select to authenticated
-  using (public.has_any_role(array['staff:exam','super_admin'])
+  using (public.has_any_role(array['staff:viewer','staff:exam','super_admin'])
          or (public.has_any_role(array['instructor'])
              and exists (select 1 from public.question_banks qb
-                         where qb.id = bank_id and qb.created_by = auth.uid())));
+                         where qb.id = questions.bank_id and qb.created_by = auth.uid())));
 create policy q_insert on public.questions for insert to authenticated
   with check (public.has_any_role(array['staff:exam','super_admin'])
               or (public.has_any_role(array['instructor'])
-                  and created_by = auth.uid()
+                  and questions.created_by = auth.uid()
                   and exists (select 1 from public.question_banks qb
-                              where qb.id = bank_id and qb.created_by = auth.uid())));
+                              where qb.id = questions.bank_id and qb.created_by = auth.uid())));
 create policy q_update on public.questions for update to authenticated
   using (public.has_any_role(array['staff:exam','super_admin'])
          or (public.has_any_role(array['instructor'])
              and exists (select 1 from public.question_banks qb
-                         where qb.id = bank_id and qb.created_by = auth.uid())))
-  with check (created_by = auth.uid()
-              or public.has_any_role(array['staff:exam','super_admin']));
+                         where qb.id = questions.bank_id and qb.created_by = auth.uid())))
+  with check (public.has_any_role(array['staff:exam','super_admin'])
+              or (public.has_any_role(array['instructor'])
+                  and questions.created_by = auth.uid()
+                  and exists (select 1 from public.question_banks qb
+                              where qb.id = questions.bank_id and qb.created_by = auth.uid())));
+-- q_update with check ครอบ "destination bank" ด้วย (D12-5) — ย้ายข้อสอบไป bank ที่ตัวเองไม่เป็นเจ้าของไม่ได้
 -- เปลี่ยน status → 'active' = staff:exam/super_admin เท่านั้น (ตาม DD §3.4) — บังคับซ้ำด้วย trigger guard + BFF
 -- DELETE ไม่มี policy (ใช้ status='retired')
 
--- (6) assessment_attempts (D11-3): owner SELECT/INSERT-self; UPDATE/DELETE เป็นของ server (answer/submit/grade ฝั่ง server)
+-- (6) assessment_attempts (D12-1/D12-5): ผู้เรียนเหลือ SELECT (metadata) เท่านั้น — เริ่ม/บันทึก/ส่งข้อสอบ
+--     ผ่าน SECURITY DEFINER functions (start_attempt, save_answer, submit_attempt — DD) เท่านั้น (D12-1 BLOCKER F2);
+--     read เพิ่ม staff:viewer/super_admin ตาม DD (D12-5) + D12-21: session_id/lease_expires_at บนตารางนี้ (ASM-011)
 create policy attempts_owner_read on public.assessment_attempts for select to authenticated
-  using (user_id = auth.uid()
-         or public.has_any_role(array['staff:exam','staff:registrar'])
+  using (assessment_attempts.user_id = auth.uid()
+         or public.has_any_role(array['staff:viewer','staff:exam','staff:registrar','super_admin'])
          or exists (select 1 from public.enrollments e
                     join public.courses c on c.id = e.course_id
-                    where e.id = enrollment_id and c.created_by = auth.uid()));
-create policy attempts_owner_insert on public.assessment_attempts for insert to authenticated
-  with check (user_id = auth.uid());
-revoke update, delete on public.assessment_attempts from authenticated, anon; -- server-controlled (D11-1)
+                    where e.id = assessment_attempts.enrollment_id and c.created_by = auth.uid()));
+revoke insert, update, delete on public.assessment_attempts from authenticated, anon; -- server-controlled (D12-1)
+
+-- (6b) quiz_attempts / attempt_answers (D12-1/D12-2 BLOCKER F2+F4) — หมายเหตุแทน policy:
+--   • ผู้เรียน **ไม่มี INSERT/UPDATE policy** บน quiz_attempts — บันทึกผลผ่าน `record_quiz_attempt` เท่านั้น
+--   • ผู้เรียน **ไม่มี SELECT ตรง** บน attempt_answers (มี answer key ใน question_snapshot/is_correct) —
+--     อ่านผ่าน projection view ของ DD (ตัด is_correct/explanation/snapshot จนครบเงื่อนไขเปิดเฉลย)
+--   • การเขียนทั้งหมดเป็นของ server functions ที่ DD ระบุ (save_answer ฯลฯ) — owner เฉพาะ + audit ภายใน function
 
 -- (7) certificates (D11-14): SELECT เจ้าของ/registrar; INSERT/UPDATE เป็นของ server (D11-1)
 create policy certs_owner_read on public.certificates for select to authenticated
-  using (user_id = auth.uid()
+  using (certificates.user_id = auth.uid()
          or public.has_any_role(array['staff:registrar','super_admin']));
 revoke insert, update, delete, truncate on public.certificates from authenticated, anon;
 -- public verify ผ่าน view เท่านั้น — 4 คอลัมน์เท่านั้น (D11-14) แมพจากคอลัมน์จริงของ DD §3.4:
@@ -263,7 +291,7 @@ create view public.certificate_public_view
 -- (8) credit_ledger_entries (ชื่อตาม DATA-DICTIONARY.md — B-03): append-only สำหรับระบบ;
 --     เจ้าของ/registrar/staff:viewer/super_admin อ่านได้; ไม่มีใคร update/delete/truncate
 create policy credits_self_read on public.credit_ledger_entries for select to authenticated
-  using (user_id = auth.uid()
+  using (credit_ledger_entries.user_id = auth.uid()
          or public.has_any_role(array['staff:registrar','staff:viewer','super_admin']));
 revoke update, delete, truncate on public.credit_ledger_entries from authenticated, anon, service_role; -- ตรง DD §4.4 (D11-7)
 
@@ -272,18 +300,19 @@ revoke update, delete, truncate on public.credit_ledger_entries from authenticat
 create policy audit_read_admin on public.audit_logs for select to authenticated
   using (public.has_any_role(array['staff:viewer','super_admin']));
 create policy audit_read_self on public.audit_logs for select to authenticated
-  using (actor_user_id = auth.uid()); -- ชื่อคอลัมน์ตาม DD §3.8 (D11-6)
+  using (audit_logs.actor_user_id = auth.uid()); -- ชื่อคอลัมน์ตาม DD §3.8 (D11-6) + qualify (D12-6)
 revoke update, delete, truncate on public.audit_logs from anon, authenticated, service_role; -- D11-7
 -- INSERT ไม่มี policy/grant ให้ client role ใด (เขียนเฉพาะใน security definer function)
 
 -- (10) notifications (D11-5): ผู้รับอยู่ที่ notification_recipients.user_id (ตาม DD §3.6)
 create policy notif_read on public.notifications for select to authenticated
   using (exists (select 1 from public.notification_recipients nr
-                 where nr.notification_id = id and nr.user_id = auth.uid()));
+                 where nr.notification_id = notifications.id and nr.user_id = auth.uid())); -- qualify ครบ (D12-6)
 create policy nr_owner_read on public.notification_recipients for select to authenticated
-  using (user_id = auth.uid());
+  using (notification_recipients.user_id = auth.uid());
 create policy nr_owner_update on public.notification_recipients for update to authenticated
-  using (user_id = auth.uid()) with check (user_id = auth.uid());
+  using (notification_recipients.user_id = auth.uid())
+  with check (notification_recipients.user_id = auth.uid());
 revoke all on public.notification_recipients from authenticated;
 grant select, update (read_at, deleted_at) on public.notification_recipients to authenticated; -- column protection
 -- INSERT ทั้งสองตาราง = service_role ผ่าน BFF (ไม่มี policy ให้ authenticated)
@@ -299,7 +328,7 @@ grant select, update (read_at, deleted_at) on public.notification_recipients to 
 | --- | --- | --- |
 | มอบ `lawyer` | `staff:registrar`, `super_admin` | หลังตรวจเลขที่ใบอนุญาตผ่าน (license:verify) |
 | มอบ/ถอน `instructor` | `super_admin` เท่านั้น | มีเอกสารมอบหมายจากสภาฯ (เก็บ reason) |
-| มอบ/ถอน `staff:viewer|content|exam|registrar` | `super_admin` เท่านั้น | บังคับ MFA ก่อนใช้งานบทบาทนั้น — login สำเร็จแต่ session เป็น "enrollment-only" (ทำได้เฉพาะลงทะเบียน/ยืนยัน MFA); protected request ใด ๆ ถูกตอบ ERR-AUTH-004 จนกว่าจะ enrolled (D11-11) |
+| มอบ/ถอน `staff:viewer|content|exam|registrar` | `super_admin` เท่านั้น | MFA state machine เดียวกับ §4.2 (D12-10) — **grant ได้แม้ยังไม่มี MFA (IDENT-006)** แต่บัญชีเข้า state **enrollment-only** ทันทีเมื่อ login ถัดไป; protected request ใด ๆ ตอบ ERR-AUTH-004 จนกว่า state = verified |
 | มอบ/ถอน `super_admin` | `super_admin` อีกบัญชี (ต้อง ≥ 2 คนเห็นชอบนอกระบบ — บันทึกอ้างอิงใน reason) | จำนวน super_admin พร้อมกัน ≥ 2 เสมอ |
 | ถอนบทบาทตัวเอง | ห้าม | กัน lockout ตัวเอง |
 
@@ -311,9 +340,9 @@ grant select, update (read_at, deleted_at) on public.notification_recipients to 
 | --- | --- | --- |
 | Session idle timeout — ผู้เรียน | **60 นาที** | config `SESSION_IDLE_MINUTES_LEARNER` |
 | Session idle timeout — staff (ทุก sub-role) | **15 นาที** | config `SESSION_IDLE_MINUTES_STAFF` |
-| MFA สำหรับ instructor / staff ทุกระดับ / super_admin | **บังคับ (TOTP)** | ไม่ผ่าน MFA → session "enrollment-only" (D11-11) — protected request ใด ๆ ตอบ ERR-AUTH-004 |
-| MFA — session ก่อนจบ MFA (บัญชีที่บังคับ) | **enrollment-only** — ทำได้เฉพาะ `/auth/mfa/enroll` + `/auth/mfa/verify` | D11-11; ทุก protected request เช็ค MFA claim (`mfa_verified`) ทุกครั้ง ไม่ใช่เช็คครั้งเดียวตอน login |
-| ปิด MFA (`/auth/mfa/disable`) | ต้อง **recent-MFA (≤ 15 นาที)** + **ห้ามเหลือ 0 factor** | D11-11 — ต้องมี factor อื่นคงเหลือ (หรือเป็นบัญชีที่ไม่บังคับ); audit `AUTH_MFA_DISABLED` (WARN) |
+| **MFA state machine (เดียวทั้งระบบ — D12-10)** | states: `none` → `enrollment-only` → `verified` | transitions: login (password ผ่าน, ยังไม่มี MFA) → **enrollment-only** — allowlist = `/auth/mfa/enroll` + `/auth/mfa/verify` + **`/auth/logout` (ทุก state)**; enroll+verify สำเร็จ → **verified**; ทุก protected request เช็ค claim `mfa_verified` ทุกครั้ง (D11-11) |
+| MFA บังคับกับใคร | instructor / staff ทุกระดับ / super_admin (TOTP) | บัญชีบังคับ MFA ที่ยังไม่ verified = state enrollment-only ทุก login (ERR-AUTH-004) |
+| ปิด MFA (`/auth/mfa/disable`) | **v1: เฉพาะบัญชี citizen/lawyer (MFA optional)** | เงื่อนไข: recent-MFA (≤ 15 นาที) + ห้ามเหลือ 0 factor; **บัญชี staff/instructor/super_admin block ใน v1** ตาม API §3.1; audit `AUTH_MFA_DISABLED` (WARN) |
 | Absolute timeout | 12 ชม. (ผู้เรียน) / 8 ชม. (staff) | บังคับ login ใหม่ |
 | Lockout หลังพลาดรหัสผ่าน | 5 ครั้ง / ล็อก 15 นาที (ต่อบัญชี+IP) | ERR-AUTH-003; audit `AUTH_LOCKOUT` |
 | รหัสผ่าน | ≥ 12 ตัวอักษร + ตรวจ breached-password list | นโยบายอยู่ที่ Supabase Auth config |
@@ -352,7 +381,7 @@ grant select, update (read_at, deleted_at) on public.notification_recipients to 
 | T12 | staff:viewer | GET /api/v1/admin/users | 200 + audit PII_ACCESS เกิด 1 รายการ |
 | T13 | lawyer A | GET /api/v1/attempts/{ของ B}/result | 403/404 ERR-ASM-006 |
 | T14 | ทุกบทบาท | POST/PUT/PATCH/DELETE ใด ๆ บน /api/v1/admin/audit-logs | 404 — route ไม่มีอยู่ (ไม่มี write path เลย) |
-| T15 | staff:exam (ยังไม่ MFA) | POST /api/v1/auth/login | 200 — ได้ session **enrollment-only**; endpoint protected ใด ๆ (เช่น `GET /api/v1/me`) → ERR-AUTH-004 (เช็ค MFA claim ทุก request ไม่ใช่แค่ admin endpoint) จนกว่าจะ enrolled |
+| T15 | staff:exam (ยังไม่ MFA) | POST /api/v1/auth/login | 200 — state = **enrollment-only**; `GET /api/v1/me` → ERR-AUTH-004 (เช็ค claim ทุก request); `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/logout` ยังใช้ได้ (allowlist รวม logout ทุก state — D12-10) |
 | T16 | super_admin | DELETE /api/v1/admin/audit-logs/{id} | 404 — แม้ super_admin ก็ลบไม่ได้ |
 
 หมายเหตุ: T14/T16 ทดสอบว่า "write path ไม่มีในระบบ" ซึ่งแรงกว่าการทดสอบ 403 — audit เป็น append-only โดยการออกแบบ (AUDIT-LOG-DESIGN.md §4)
