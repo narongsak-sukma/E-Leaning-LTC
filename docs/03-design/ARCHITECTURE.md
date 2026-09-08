@@ -84,7 +84,7 @@ flowchart TB
         end
         subgraph SHARED["Shared Kernel"]
             GUARD["auth guard<br/>session httpOnly"]
-            RBAC["rbac<br/>has_any_role ฯลฯ"]
+            RBAC["rbac<br/>my_roles() / has_any_role() / is_staff()"]
             CFG["config<br/>env + DB-config + Q1-Q6"]
             STAB["storage abstraction"]
             AUD["audit service"]
@@ -171,6 +171,39 @@ flowchart TB
 
 prod วางเหมือน dev ทุกโครง ต่างเฉพาะปลายทาง: แอปบน Vercel, ข้อมูลบน Supabase Cloud, สื่อ/CDN/WAF บน Cloudflare — region ของ Vercel และ Supabase เลือกให้ใกล้กันและใกล้ไทย (Q5 PDPA cross-border, รอยืนยัน)
 
+### 5.5 Deployment — STAGING (cloud preview ก่อนขึ้น prod — brief §6, DCR-1)
+
+```mermaid
+flowchart TB
+    T["ทีม/ผู้ทดสอบ (browser)<br/>ทีม dev + UAT เจ้าหน้าที่สภาฯ"]
+    subgraph CFS["Cloudflare (โดเมน staging)"]
+        WAFS["WAF + Rate Limit"]
+    end
+    subgraph VCS["Vercel (staging/preview deployment)"]
+        NXS["Next.js 15 (โค้ดชุดเดียวกับ prod)"]
+        CRONS["Vercel Cron"]
+    end
+    subgraph SBS["Supabase Cloud (staging branch)"]
+        PGSI["PostgreSQL + pooler + RLS<br/>migrations เดียวกับ prod"]
+        STGS["Storage (bucket staging)"]
+    end
+    R2S["Cloudflare R2/Stream (bucket/โดเมน staging)"]
+    EMAILS["Resend/SMTP (ผู้รับจำกัด — อีเมลทดสอบ)"]
+    T --> WAFS --> NXS
+    NXS -->|"service_role (env vars ชุด staging)"| PGSI
+    NXS --> STGS
+    NXS -->|"signed URL อายุสั้น"| R2S
+    NXS --> EMAILS
+    CRONS --> NXS
+```
+
+- **วัตถุประสงค์ (brief §6 เพิ่มเมื่อ 0.2.0 ตาม DCR-1)**: environment ระดับกลางที่แยกจาก dev และ prod ไว้พิสูจน์ว่าระบบรับโหลดและปลอดภัยจริง **ก่อน promote ขึ้น prod**
+- **โครงเหมือน prod ทุกประการ โค้ดชุดเดียวกัน**: ใช้ config/โค้ดชุดเดียวกับ prod ต่างกันเฉพาะ **environment variables** (ปลายทาง Supabase staging branch, โดเมน/คีย์ staging ของ Cloudflare, คีย์อีเมล staging) — ห้าม branch โค้ดหรือ business logic ตาม environment ตามหลักการกลางด้านบน
+- **Gate ก่อน promote ขึ้น prod**: performance test ด้วย k6 (เป้าหมาย brief §7: **10,000 concurrent learners / 5,000 exam takers**) + security test (รวมการตรวจ RLS/rate limit ตาม brief §8) ผ่านครบก่อน แล้วจึง promote — เกณฑ์ละเอียดอยู่ที่ TEST-PLAN §4 (Wave D)
+- **ขอบเขตข้อมูล**: เฉพาะข้อมูลทดสอบ/ข้อมูลจำลอง — ห้ามใส่ PII จริง (PDPA, brief §8); งบ cloud tier ของ staging ผูกกับ Q7 (PROJECT-PLAN QP-5/Q7)
+
+หมายเหตุ: staging ไม่ใช่ environment ที่สามของ "โค้ดคนละชุด" — เป็น deployment ชุดเดียวกันกับ prod บนปลายทาง cloud อีกชุด เพื่อให้ผล k6/security test ที่พิสูจน์บน staging อ้างอิงไป prod ได้จริง
+
 ## 6. Data Flow — สื่อ และ ช่วงคาบสอบ
 
 ### 6.1 วิดีโอ streaming (dev ตรง vs prod ผ่าน CDN)
@@ -235,7 +268,7 @@ sequenceDiagram
 
 แม้ BFF ใช้ service_role (bypass RLS) แบบจำลองยังถือว่า RLS เป็นด่านที่สองเสมอ — ทุกตารางเปิด policy ครบทุก path ตาม DATA-DICTIONARY.md และ authorization ตัดสินที่ rbac service ก่อนแตะข้อมูล
 
-## 8. Migration Path dev → prod (อะไรเปลี่ยน / อะไรเหมือน)
+## 8. Migration Path dev → staging → prod (อะไรเปลี่ยน / อะไรเหมือน)
 
 ```mermaid
 flowchart LR
@@ -254,13 +287,14 @@ flowchart LR
     SAME --> SWAP
 ```
 
-| ด้าน | DEV (local Docker) | PROD (cloud) | สิ่งที่สลับ |
-| ---- | ------------------ | ------------ | ---------- |
-| แอป | next-app container :3000 | Vercel | `PUBLIC_BASE_URL`, คีย์ platform |
-| DB/Auth/Storage | Supabase local (Kong :8000, PG :5432) | Supabase Cloud (region SG/JP) | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_POOLER_URL` |
-| สื่อ | Supabase Storage (Docker volume) | Cloudflare R2/Stream + CDN | `MEDIA_PROVIDER=r2|stream` + คีย์ |
-| อีเมล | Mailpit (จับทดสอบ) | Resend/SMTP จริง | `EMAIL_PROVIDER` + คีย์ |
-| WAF/Rate limit | Next middleware (in-memory) | Cloudflare + middleware ชั้นใน | ค่า config ชุดเดียวกัน |
-| Cron | container scheduler | Vercel Cron | endpoint เดียวกันทั้งคู่ |
+| ด้าน | DEV (local Docker) | STAGING (cloud preview) | PROD (cloud) | สิ่งที่สลับด้วย env vars |
+| ---- | ------------------ | ---------------------- | ------------ | ---------------------- |
+| แอป | next-app container :3000 | Vercel staging/preview deployment | Vercel | `PUBLIC_BASE_URL`, คีย์ platform |
+| DB/Auth/Storage | Supabase local (Kong :8000, PG :5432) | Supabase Cloud **staging branch** | Supabase Cloud (region SG/JP) | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_POOLER_URL` — migrations เดียวกันทุก env |
+| สื่อ | Supabase Storage (Docker volume) | Cloudflare R2/Stream + CDN (bucket/โดเมน staging) | Cloudflare R2/Stream + CDN | `MEDIA_PROVIDER=r2\|stream` + คีย์ |
+| อีเมล | Mailpit (จับทดสอบ) | Resend/SMTP staging (ผู้รับจำกัด) | Resend/SMTP จริง | `EMAIL_PROVIDER` + คีย์ |
+| WAF/Rate limit | Next middleware (in-memory) | Cloudflare + middleware ชั้นใน | Cloudflare + middleware ชั้นใน | ค่า config ชุดเดียวกัน |
+| Cron | container scheduler | Vercel Cron | Vercel Cron | endpoint เดียวกันทุก env |
+| การใช้งาน | วนลูปพัฒนา | พิสูจน์ k6 10k/5k + security test + UAT ก่อน promote | ผู้ใช้จริง | โค้ด/migrations/config ชุดเดียวกัน |
 
-สรุป: การ "ขึ้น prod" = รัน migrations เดียวกัน + ตั้ง env vars ชุด prod — ไม่มีการแก้โค้ดหรือ branch ตาม environment (บังคับโดย review + lint)
+สรุป: การ "ขึ้น staging หรือ prod" = รัน migrations เดียวกัน + ตั้ง env vars ชุดของ environment นั้น — ไม่มีการแก้โค้ดหรือ branch ตาม environment (บังคับโดย review + lint) และ promote ขึ้น prod ต้องผ่าน gate บน staging ก่อน (k6 + security — §5.5)
