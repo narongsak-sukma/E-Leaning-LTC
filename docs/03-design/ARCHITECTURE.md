@@ -257,16 +257,17 @@ sequenceDiagram
     U->>E: GET /api/v1/courses (cookie session)
     MW->>MW: rate limit + ตรวจ Origin (mutation) + x-request-id
     MW->>RH: ส่งต่อพร้อม request context
-    RH->>GU: requireUser / requireRole
+    RH->>GU: requireUser / requirePermission
     GU->>GU: verify JWT จาก httpOnly cookie
-    GU-->>RH: user_id + roles
-    RH->>DB: SELECT ผ่าน service_role (หลังตรวจ rbac แล้ว)
-    DB->>DB: RLS policy ยังตรวจอีกชั้น (defense-in-depth)
+    GU-->>RH: user_id + roles + permissions
+    RH->>DB: SELECT ด้วย user JWT (role authenticated) — RLS บังคับจริงทุก query
+    DB->>DB: RLS policy กรองแถวตาม user_id/roles ของผู้ใช้
     DB-->>RH: เฉพาะแถวที่ policy อนุญาต
     RH-->>U: 200 + cache headers (CDN/ISR ตามชนิดหน้า)
+    Note over RH,DB: service_role (bypass RLS) ใช้เฉพาะกิจ — background job (retention purge / export / email / auto-submit) + server functions แคบขอบเขต (attempt snapshot, audit append) · ควบคุมด้วยการจำกัดจุดเรียกในโค้ด + review ไม่ใช่โดย RLS (D11-1)
 ```
 
-แม้ BFF ใช้ service_role (bypass RLS) แบบจำลองยังถือว่า RLS เป็นด่านที่สองเสมอ — ทุกตารางเปิด policy ครบทุก path ตาม DATA-DICTIONARY.md และ authorization ตัดสินที่ rbac service ก่อนแตะข้อมูล
+เส้นทางหลักของ request ธรรมดา = **user JWT (role `authenticated`)** — RLS policy บังคับจริงทุก query; `service_role` (bypass RLS) ใช้เฉพาะงานเบื้องหลังและ server functions ที่ขอบเขตแคบ เช่น attempt snapshot / audit append — ความปลอดภัยของเส้นทาง service_role พึ่งการจำกัดจุดเรียกในโค้ด + code review **ไม่ใช่ RLS** (RLS ไม่คุม service_role — D11-1) · ทุกตารางยังต้อง ENABLE RLS + policy ครบทุก path สำหรับ anon/authenticated ตาม DATA-DICTIONARY.md และ authorization ตัดสินที่ rbac service (`requirePermission()` — RBAC §1.2 ข้อ 4) ก่อน query เสมอ
 
 ## 8. Migration Path dev → staging → prod (อะไรเปลี่ยน / อะไรเหมือน)
 

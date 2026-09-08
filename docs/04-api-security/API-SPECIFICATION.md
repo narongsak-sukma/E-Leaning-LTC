@@ -2,9 +2,9 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 0.2.0 — Wave A (deliverable 8) แก้ตาม A6 review: B-10, B-11, B-12, B-13, M-03, M-04 |
+| เวอร์ชัน | 0.3.0 — แก้ตามคำตัดสิน CTO D11 (codex security gate รอบ 1 = FAIL): D11-1, D11-11, D11-12, D11-13, D11-14, D11-18 |
 | วันที่    | 2026-09-08                                         |
-| อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · SRS.md (Appendix A) |
+| อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md (canonical schema) · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
 
 ---
@@ -12,7 +12,8 @@
 ## 1. หลักการทั่วไป (binding)
 
 1. **JSON เท่านั้น** — request/response เป็น `application/json; charset=utf-8` (ยกเว้นไฟล์ media ที่เสิร์ฟผ่าน Storage/CDN โดยตรง ไม่ผ่าน `/api/v1`)
-2. **Authentication ผ่าน session (Supabase Auth)** — httpOnly cookie ที่ออกให้โดย BFF; frontend ไม่ถือ Supabase key ใด ๆ การเรียก Supabase ฝั่ง server ใช้ `service_role` เฉพาะใน BFF (บังคับตาม BRIEF §8)
+2. **Authentication ผ่าน session (Supabase Auth)** — httpOnly cookie ที่ออกให้โดย BFF; frontend ไม่ถือ Supabase key ใด ๆ (บังคับตาม BRIEF §8)
+   **Data access ของ BFF (D11-1)** — request ธรรมดาทุก endpoint: BFF เรียกฐานข้อมูลด้วย **user JWT (role `authenticated`)** เสมอ → **RLS บังคับจริงทุกแถว** (policies ที่ RBAC-DESIGN.md §3.1); `service_role` (bypass RLS) **ห้ามใช้เป็นเส้นทางหลัก** — ใช้เฉพาะ (a) background jobs เฉพาะกิจ (retention purge, export, email/queue worker) และ (b) server functions ขอบเขตแคบสำหรับ write ที่ server เป็นผู้ควบคุมค่า (เช่น ออก/เพิกถอนประกาศนียบัตร, บันทึกผลสอบ, ปรับ credit) — ทุกจุดที่ใช้ต้องระบุเหตุผล จำกัดคอลัมน์/เงื่อนไขให้แคบที่สุด และ audit ทุกครั้ง
 3. **Authorization ตรวจที่ BFF ทุก request** — middleware `requirePermission()` ตรวจ permission (ไม่ใช่ตรวจ "ชื่อบทบาท" ตรง ๆ) ก่อนเข้า handler — คู่ขนานกับ RLS ที่ DB (defense in depth)
 4. **zod validate ทุก input และ output** — query string, path params, body ผ่าน zod; response ขาออก validate ด้วย zod schema ก่อนส่ง (ป้องกัน PII/ฟิลด์รั่ว)
 5. **Error envelope มาตรฐาน** — ทุก error ใช้รูปแบบเดียว `{ "error": { "code", "message", "details?" } }` โดย `message` เป็นภาษาไทยเสมอ (i18n-ready ตาม BRIEF §9.3)
@@ -65,7 +66,7 @@ Response wrapper ทุก list endpoint:
 | ERR-AUTH-001 | 401 | ต้องเข้าสู่ระบบก่อนใช้บริการนี้ | ไม่มี session / session หมดอายุ |
 | ERR-AUTH-002 | 401 | อีเมลหรือรหัสผ่านไม่ถูกต้อง | login พลาด (ไม่บอกว่าฟิลด์ไหนผิด) |
 | ERR-AUTH-003 | 423 | บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง | lockout หลังพลาด N ครั้ง (§5) |
-| ERR-AUTH-004 | 403 | กรุณายืนยันตัวตนสองชั้น (MFA) ก่อนดำเนินการต่อ | staff/super_admin ยังไม่ผ่าน MFA |
+| ERR-AUTH-004 | 403 | กรุณายืนยันตัวตนสองชั้น (MFA) ก่อนดำเนินการต่อ | บัญชีที่บังคับ MFA (instructor/staff:*/super_admin) ยังไม่ผ่าน MFA — session ที่ login ได้เป็น "enrollment-only" และถูกปฏิเสธทุก protected request (เช็ค MFA claim ทุก request ตาม D11-11) |
 | ERR-AUTH-005 | 400 | ลิงก์รีเซ็ตรหัสผ่านไม่ถูกต้องหรือหมดอายุ | reset token invalid/expired |
 | ERR-RBAC-001 | 403 | คุณไม่มีสิทธิ์ดำเนินการนี้ | ผ่าน auth แต่ไม่มี permission |
 | ERR-VAL-001 | 400 | ข้อมูลที่ส่งมาไม่ถูกต้อง | zod ไม่ผ่าน, `details` มี field/path |
@@ -88,8 +89,8 @@ Response wrapper ทุก list endpoint:
 | ERR-ASM-004 | 422 | หมดเวลาสอบแล้ว ระบบไม่รับคำตอบเพิ่ม | timeout |
 | ERR-ASM-005 | 422 | บันทึกคำตอบไม่ได้เพราะส่งข้อสอบแล้ว | attempt submitted |
 | ERR-ASM-006 | 403 | คุณไม่ใช่เจ้าของรอบการสอบนี้ | attempt ของคนอื่น |
-| ERR-CERT-001 | 404 | ไม่พบประกาศนียบัตรจากรหัสอ้างอิงนี้ | public verify (เฉพาะรหัสไม่มีจริง) |
-| ERR-CERT-002 | 410 | ประกาศนียบัตรนี้ถูกลบออกจากระบบตามนโยบายการเก็บรักษาข้อมูล | retention purge — ใบที่ถูกเพิกถอน/แทนที่ **ไม่ใช่ 410** แต่ตอบ 200 + `status=revoked/superseded` (CRT-004) |
+| ERR-CERT-001 | — | (ยกเลิกการใช้ — คงรหัสไว้ในทะเบียน) เดิม 404 "ไม่พบประกาศนียบัตรจากรหัสอ้างอิงนี้" สำหรับ public verify — **ถอนตาม D8/D11-14**: `GET /certificates/{code}` ตอบ **200 เสมอ** และกรณีไม่พบใช้ 200 + `status="not_found"` | ห้ามใช้รหัสนี้กับ public verify อีก — จะเปิดใช้ใหม่ต้องผ่าน DCR |
+| ERR-CERT-002 | — | (ยกเลิกการใช้ — คงรหัสไว้ในทะเบียน) เดิม 410 "ถูกลบตาม retention" สำหรับ public verify — **ถอนตาม D8: ตอบ 200 เสมอ**; ใบที่ถูกเพิกถอน/แทนที่ = 200 + `status=revoked/superseded`, ไม่พบ = 200 + `status="not_found"` | ห้ามใช้รหัสนี้กับ public verify อีก — จะเปิดใช้ใหม่ต้องผ่าน DCR |
 | ERR-CRD-001 | 422 | กฎเครดิตนี้มีผลใช้งานแล้ว แก้ไขต้องสร้างฉบับใหม่ | immutable active rule |
 | ERR-CRD-002 | 422 | การปรับ credit ต้องระบุเหตุผล | reason required |
 | ERR-ADM-001 | 403 | การกระทำนี้ต้องใช้สิทธิ์เจ้าหน้าที่ระดับสูงขึ้น | staff sub-role ไม่พอ |
@@ -104,7 +105,7 @@ Response wrapper ทุก list endpoint:
 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
-| POST | /auth/register | สมัครสมาชิก (email+รหัสผ่าน หรือ เบอร์มือถือ) | guest | 201 + ส่งอีเมลยืนยัน | VAL-001, RATE-001 |
+| POST | /auth/register | สมัครสมาชิก — body ต้องมี `acknowledgeNotice` (รับทราบประกาศความเป็นส่วนตัว — บังคับ) แยกจาก `consents` เสริมแบบ optional/versioned (D11-18 — zod schema §4) | guest | 201 + ส่งอีเมลยืนยัน | VAL-001, RATE-001 |
 | POST | /auth/login | เข้าสู่ระบบ (สร้าง session) | guest | 200 + `Set-Cookie` httpOnly | AUTH-002/003/004, RATE-001 |
 | POST | /auth/logout | ออกจากระบบ (ทำลาย session) | ทุกบทบาทที่ login แล้ว | 204 | AUTH-001 |
 | POST | /auth/mfa/enroll | เริ่มผูก MFA (สร้าง secret/QR) | ทุกบทบาท | 200 | AUTH-001 |
@@ -117,7 +118,8 @@ Response wrapper ทุก list endpoint:
 | POST | /auth/otp/request | ขอ OTP ไปอีเมล/เบอร์มือถือ | guest | 202 (ไม่เปิดเผยว่ามีบัญชี) | RATE-001 |
 | POST | /auth/otp/verify | ยืนยัน OTP (ช่วย login หรือผูกเบอร์) | guest | 200 | AUTH-002, RATE-001 |
 | POST | /auth/logout-all | ออกจากระบบทุกอุปกรณ์ (revoke ทุก session) | ทุกบทบาทที่ login แล้ว | 204 | AUTH-001 |
-| GET | /auth/mfa/backups | ขอ backup codes ชุดใหม่ (ชุดเก่าใช้ไม่ได้ทันที — ครั้งเดียวต่อการ enrolled) | ทุกบทบาทที่ login + MFA แล้ว | 200 | RBAC-001 |
+| GET | /auth/mfa/backups | ดูสถานะ backup codes — **คืนเฉพาะ metadata (`count`, `created_at`) ไม่คืนโค้ดเด็ดขาด** (D11-12) | ทุกบทบาทที่ login + MFA แล้ว | 200 | AUTH-001 |
+| POST | /auth/mfa/backups/regenerate | สร้าง backup codes ชุดใหม่ — **CSRF-protected** (double-submit token ผูกกับ session), **ต้อง recent-MFA (ยืนยัน TOTP ภายใน ≤ 15 นาที)**, response `Cache-Control: no-store`, **โค้ดแสดงครั้งเดียว**จาก response นี้เท่านั้น และ**ชุดเก่า invalid ทันที** — audit `AUTH_MFA_BACKUPS_REGENERATED` (D11-12) | ทุกบทบาทที่ login + MFA แล้ว | 200 | AUTH-001, RBAC-001, RATE-001 |
 
 หมายเหตุ: login สำเร็จ/ล้มเหลว → audit `AUTH_LOGIN_OK/FAIL` เสมอ (AUDIT-LOG-DESIGN.md)
 
@@ -175,7 +177,7 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
-| GET | /certificates/{code} | **ตรวจสอบสาธารณะ** ไม่ต้อง auth — `{code}` ยอมรับทั้ง `cert_no` (พิมพ์มือ, D10) และ `verify_code` (จาก QR, nanoid — D10) — ตอบ **200 เสมอ** (CRT-004) ด้วย 4 ฟิลด์เท่านั้น: `{code, course_title, issued_at, status}` โดย `status ∈ valid \| revoked \| superseded` — **ไม่มีชื่อเจ้าของ** (ชื่อ-นามสกุลอยู่บน PDF ที่เจ้าของ/registrar ดาวน์โหลดเท่านั้น) | guest | 200 เสมอ | RATE-001 (410 ERR-CERT-002 เฉพาะใบที่ถูกลบตาม retention) |
+| GET | /certificates/{code} | **ตรวจสอบสาธารณะ** ไม่ต้อง auth — `{code}` ยอมรับทั้ง `cert_no` (พิมพ์มือ, D10) และ `verify_code` (จาก QR, nanoid — D10) — **ตอบ 200 เสมอ (D8/D11-14)** ด้วย 4 ฟิลด์ snake_case เท่านั้น: `{code, course_title, issued_at, status}` โดย `status ∈ valid \| revoked \| superseded` และ **เมื่อไม่พบ = 200 + `status="not_found"`** (โครง 4 ฟิลด์เท่าเดิม — `course_title`/`issued_at` เป็น null **เฉพาะกรณี not_found**; ไม่มีฟิลด์ `revoked_at` ใน response) — **กติกา not_found: ตอบเหมือนกันทุกกรณี ไม่เปิดเผยว่ารหัสนั้นมีจริงหรือไม่** (กัน enumeration) และ**ไม่มีชื่อเจ้าของ** (ชื่อ-นามสกุลอยู่บน PDF ที่เจ้าของ/registrar ดาวน์โหลดเท่านั้น) | guest | 200 เสมอ | RATE-001 |
 | GET | /me/certificates | ประกาศนียบัตรของตัวเอง (พร้อมลิงก์ PDF) | citizen, lawyer | 200 + pagination | AUTH-001 |
 | GET | /certificates/{id}/pdf | ดาวน์โหลด PDF ตัวจริง (id = uuid ต้อง auth — ต่างจาก public verify ที่ใช้ code) | เจ้าของใบรับรอง, staff:registrar, super_admin | 200 `application/pdf` | NF-001, RBAC-001 |
 | POST | /admin/certificates | ออกประกาศนียบัติรายใบ (จาก attempt ที่ผ่านเกณฑ์) — audit `CERT_ISSUE` | staff:registrar, super_admin | 201 | RBAC-001, VAL-001 |
@@ -246,13 +248,18 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 ```typescript
 import { z } from "zod";
 
-// 1) สมัครสมาชิก
+// 1) สมัครสมาชิก (D11-18) — แยก "รับทราบประกาศความเป็นส่วนตัว" (การประมวลผลจำเป็น) ออกจาก consent เสริม
 export const RegisterRequest = z.object({
   email: z.string().email().max(254),
   password: z.string().min(12).max(128),           // นโยบายรหัสผ่านเป็น config
   displayName: z.string().min(2).max(100),
   phone: z.string().regex(/^0\d{8,9}$/).optional(), // ไทย
-  acceptConsent: z.literal(true),                    // PDPA consent บังคับ
+  acknowledgeNotice: z.literal(true),               // บังคับ — รับทราบการประมวลผลที่จำเป็นตามสัญญา (ไม่ใช่ consent แบบเลือกได้)
+  consents: z.array(z.object({                      // ความยินยอมเสริม — ไม่ให้ก็สมัครได้; versioned
+    key: z.enum(["marketing", "email_notify"]),     // ค่าตาม DD `consents.consent_type` (pdpa_essential ไม่ใช่ optional consent)
+    version: z.string().min(1).max(20),
+    accepted: z.boolean(),
+  })).max(10).default([]),
 });
 
 // 2) เข้าสู่ระบบ
@@ -332,13 +339,17 @@ export const PageQuery = z.object({
   cursor: z.string().max(512).optional(),
 }).strict();
 
-// 13) Response: ผลตรวจสาธารณะของประกาศนียบัตร (CRT-004) — 4 ฟิลด์เท่านั้น ไม่มีชื่อเจ้าของ
+// 13) Response: ผลตรวจสาธารณะของประกาศนียบัตร (D11-14) — 4 ฟิลด์ snake_case เท่านั้น ไม่มีชื่อเจ้าของ
+//     ตอบ 200 เสมอ (D8): ไม่พบ = 200 + status="not_found" — ไม่เปิดเผยว่ารหัสมีจริงหรือไม่
 export const CertificatePublicView = z.object({
   code: z.string(),
-  courseTitle: z.string(),
-  issuedAt: z.string().datetime(),
-  status: z.enum(["valid", "revoked", "superseded"]),
-});
+  course_title: z.string().nullable(),
+  issued_at: z.string().datetime().nullable(),
+  status: z.enum(["valid", "revoked", "superseded", "not_found"]),
+}).refine(
+  (v) => v.status === "not_found" || (v.course_title !== null && v.issued_at !== null),
+  { message: "course_title/issued_at เป็น null ได้เฉพาะ status=\"not_found\"" }
+);
 
 // 14) Error envelope ขาออก (validate ทุก error response)
 export const ErrorEnvelope = z.object({
@@ -352,24 +363,30 @@ export const ErrorEnvelope = z.object({
 
 ---
 
-## 5. Rate limit matrix
+## 5. Rate limit matrix (canonical เดียว — D11-13)
 
-Key การนับ: guest = `ip + route-group`; login แล้ว = `user_id + route-group`. บังคับ 2 ชั้น: **Cloudflare WAF/rate rule (prod) + Next.js middleware (dev/สำรอง prod)** — **ค่าเดียวต่อ endpoint ใช้ทุก environment** (B-13) ปรับได้ที่ config key ใน `config/rate-limit.ts` (อ่านจาก env) ห้าม hardcode (BRIEF §6)
+**ค่าเดียว canonical ต่อ endpoint ใช้ทุก environment** — ทุกแถวมี config key ใน `config/rate-limit.ts` (อ่านจาก env) ห้าม hardcode (BRIEF §6, B-13); บังคับ 2 ชั้น: Cloudflare WAF/rate rule (prod) + Next.js middleware (dev/สำรอง prod)
+**คีย์การนับ:** guest = `ip`; login แล้ว = `user_id` **และ** `ip` (ดูกติกา cumulative ท้ายตาราง)
 
-| Group | ใช้กับ (ตัวอย่าง) | หน้าต่าง | Default | Config key | เกิน → |
-| --- | --- | --- | --- | --- | --- |
-| AUTH | /auth/login, /auth/register, /auth/otp/* | 1 นาที | **10/min** (SRS Appendix A) | `RATE_LIMIT_AUTH_PER_MIN` | 429 + Retry-After |
-| PWD_RESET | /auth/password-reset/* | 1 ชั่วโมง | 5/h | `RATE_LIMIT_PWD_RESET_PER_HOUR` | 429 |
-| MFA | /auth/mfa/* | 1 นาที | 10/min | `RATE_LIMIT_MFA_PER_MIN` | 429 |
-| PUBLIC_READ | /categories, /courses, /certificates/{code} | 1 นาที | 120/min | `RATE_LIMIT_PUBLIC_READ_PER_MIN` | 429 |
-| READ | /me*, /profile/* | 1 นาที | 120/min | `RATE_LIMIT_READ_PER_MIN` | 429 |
-| LEARN_WRITE | /lessons/*/progress, /lessons/*/quiz/submit | 1 นาที | 120/min | `RATE_LIMIT_LEARN_WRITE_PER_MIN` | 429 |
-| EXAM | /assessments/*/attempts, /attempts/* | 1 นาที | 60/min | `RATE_LIMIT_EXAM_PER_MIN` | 429 (log WARN) |
-| STAFF_WRITE | /admin/*, /credit-* | 1 นาที | 60/min | `RATE_LIMIT_STAFF_WRITE_PER_MIN` | 429 (audit) |
-| EXPORT | /admin/reports/*/export, /profile/export | 1 ชั่วโมง | 10/h | `RATE_LIMIT_EXPORT_PER_HOUR` | 429 |
+| Group | ใช้กับ (ตัวอย่าง) | หน้าต่าง | ขีดจำกัด (canonical) | Config key | คีย์การนับ | เกิน → |
+| --- | --- | --- | --- | --- | --- | --- |
+| AUTH | /auth/login, /auth/register, /auth/otp/* | 1 นาที | 10/min ต่อ IP + ต่อบัญชี (cumulative) | `RATE_LIMIT_AUTH_PER_MIN` | ip + user_id | 429 + Retry-After |
+| OTP_REQUEST (specific) | /auth/otp/request | 1 ชั่วโมง | **3/ชม. ต่อเบอร์/อีเมลปลายทาง** | `RATE_LIMIT_OTP_PER_TARGET_PER_HOUR` | เบอร์/อีเมลปลายทาง | 429 |
+| PWD_RESET | /auth/password-reset/* | 1 ชั่วโมง | **5/ชม. ต่อบัญชี** | `RATE_LIMIT_PWD_RESET_PER_HOUR` | บัญชีปลายทาง + IP (cumulative) | 429 |
+| MFA | /auth/mfa/* | 1 นาที | 10/min ต่อบัญชี | `RATE_LIMIT_MFA_PER_MIN` | user_id + ip | 429 |
+| PUBLIC_READ | /categories, /courses, /certificates/{code} | 1 นาที | 120/min ต่อ IP | `RATE_LIMIT_PUBLIC_READ_PER_MIN` | ip | 429 |
+| READ | /me*, /profile/* | 1 นาที | 120/min | `RATE_LIMIT_READ_PER_MIN` | user_id + ip | 429 |
+| LEARN_WRITE | /lessons/*/progress, /lessons/*/quiz/submit | 1 นาที | 120/min | `RATE_LIMIT_LEARN_WRITE_PER_MIN` | user_id + ip | 429 |
+| EXAM | /assessments/*/attempts, /attempts/* | 1 นาที | 60/min | `RATE_LIMIT_EXAM_PER_MIN` | user_id + ip | 429 (log WARN) |
+| STAFF_WRITE | /admin/*, /credit-* | 1 นาที | 60/min ต่อบัญชี | `RATE_LIMIT_STAFF_WRITE_PER_MIN` | user_id + ip | 429 (audit) |
+| EXPORT | /admin/reports/*/export, /profile/export | 1 ชั่วโมง | 10/h ต่อบัญชี | `RATE_LIMIT_EXPORT_PER_HOUR` | user_id | 429 |
 
-- ค่า EXAM 60/min ต่อคน รองรับเป้า 5,000 คนสอบพร้อมกัน (BRIEF §7) — สูงกว่าอัตรา autosave ที่ client ส่ง (throttle ที่ client 10 วินาที/ข้อ)
-- 429 ทุกครั้ง → audit `RATE_LIMIT_HIT` (ระดับ WARN) เมื่อเป็นกลุ่ม STAFF_WRITE/EXAM
+**กติกาการนับ (D11-13):**
+
+1. **กลุ่มเฉพาะ (specific) ชนะกลุ่มทั่วไป** — คำขอเดียวที่ตรงหลายกลุ่มใช้ขีดจำกัดของกลุ่มที่เจาะจงที่สุด (เช่น `/auth/otp/request` อยู่ทั้ง AUTH และ OTP_REQUEST → ใช้ OTP_REQUEST 3/ชม./เบอร์; `/auth/password-reset/*` → ใช้ PWD_RESET ไม่ใช่ AUTH)
+2. **ขีดจำกัด IP กับ user ใช้แบบ cumulative** — บังคับทั้งสองค่าพร้อมกัน นับแยกทั้งคู่ ใครถึงขีดก่อนถูกจำกัดก่อน (guest นับเฉพาะ IP; ผู้ใช้ที่ login แล้วนับทั้ง `user_id` และ `ip`)
+3. ค่า EXAM 60/min รองรับเป้า 5,000 คนสอบพร้อมกัน (BRIEF §7) — สูงกว่าอัตรา autosave ที่ client ส่ง (throttle ที่ client 10 วินาที/ข้อ)
+4. 429 ทุกครั้ง → audit `RATE_LIMIT_HIT` (ระดับ WARN) เมื่อเป็นกลุ่ม STAFF_WRITE/EXAM
 
 ---
 
