@@ -2,8 +2,8 @@
 
 |          |                                                   |
 | ------- | ------------------------------------------------- |
-| เวอร์ชัน | 0.2.0 — CTO Baseline (ตัดสินแล้ว แก้ไขต้องผ่าน DCR) |
-| วันที่    | 2026-09-08 (0.2.0: +staging env ตาม DCR-1)        |
+| เวอร์ชัน | 0.2.1 — CTO Baseline (ตัดสินแล้ว แก้ไขต้องผ่าน DCR) |
+| วันที่    | 2026-09-08 (0.2.1: +นอกขอบเขต manual grading ตาม DCR/M-05) |
 | สถานะ    | **SOURCE OF TRUTH** — เอกสารทุกฉบับต้องสอดคล้องกับเอกสารนี้ |
 
 ## 1. ภารกิจ (Mission)
@@ -21,7 +21,7 @@
 
 **อยู่ในขอบเขต:** หลักสูตร self-paced (วิดีโอ + เอกสาร + แบบทดสอบย่อย), การสอบปลายหลักสูตรออนไลน์, ออกประกาศนียบัตร + ยืนยันความถูกต้อง (verify), credit bank, ระบบสมาชิก/บัญชี, admin back-office, รายงาน/สถิติ, audit log, การแจ้งเตือนพื้นฐาน
 
-**นอกขอบเขต v1 (จดใน Risk/Open Questions):** ชำระเงินออนไลน์, คลาสสด (live), นำเข้า SCORM เต็มรูปแบบ, mobile native app (ทำ responsive web ก่อน), AI assistant
+**นอกขอบเขต v1 (จดใน Risk/Open Questions):** ชำระเงินออนไลน์, คลาสสด (live), นำเข้า SCORM เต็มรูปแบบ, mobile native app (ทำ responsive web ก่อน), AI assistant, การตรวจข้อสอบอัตนัยด้วยมือ (manual essay grading — รับ DCR จากการ review A6/M-05)
 
 ## 3. Personas
 
