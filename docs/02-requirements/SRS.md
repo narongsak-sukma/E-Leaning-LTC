@@ -3,12 +3,12 @@
 |          |                                                                 |
 | -------- | --------------------------------------------------------------- |
 | เอกสาร   | SRS (Software Requirements Specification)                       |
-| เวอร์ชัน | 0.1.0                                                            |
+| เวอร์ชัน | 0.2.0 (แก้ตาม review A6)                                         |
 | วันที่    | 2026-09-08                                                       |
 | สถานะ    | Draft — รอ lead review + cross-doc consistency + CTO gate (Wave A) |
 | เจ้าของ   | worker-2 (Task A2)                                               |
 | มาตรฐาน  | ISO/IEC/IEEE 29148:2018                                          |
-| Baseline | PROJECT-BRIEF v0.1.0 (source of truth) — ขัดแย้งฉบับใด ยึด Brief แล้ยยื่น DCR |
+| Baseline | PROJECT-BRIEF v0.2.1 (source of truth) — ขัดแย้งฉบับใด ยึด Brief แล้วยื่น DCR |
 
 > ข้อตกลงของเอกสารนี้ (binding): ทุก requirement เขียนในรูป "ระบบต้อง..." พร้อม AC ที่วัด/ทดสอบได้ · ค่าธุรกิจที่ยังไม่ยืนยัน = config + default + "รอยืนยัน Q#" (Appendix A) · ความสำคัญใช้ MoSCoW (**M**ust/**S**hould/**C**ould) · ศัพท์ตาม `GLOSSARY.md` · Requirement ID ใช้ trace ไปยัง `RTM.md`
 
@@ -24,13 +24,13 @@
 
 **อยู่ในขอบเขต v1:** หลักสูตร self-paced (วิดีโอ + เอกสาร + quiz), การสอบปลายหลักสูตรออนไลน์, ประกาศนียบัตร + verify สาธารณะ, credit bank, ระบบสมาชิก/บัญชี, admin back-office, รายงาน/สถิติ, audit log, การแจ้งเตือนพื้นฐาน (ในระบบ + อีเมล)
 
-**นอกขอบเขต v1:** ชำระเงินออนไลน์, คลาสสด (live), นำเข้า SCORM เต็มรูปแบบ, mobile native app (ทำ responsive web), AI assistant, การตรวจข้อสอบอัตนัยด้วยมือ
+**นอกขอบเขต v1:** ชำระเงินออนไลน์, คลาสสด (live), นำเข้า SCORM เต็มรูปแบบ, mobile native app (ทำ responsive web), AI assistant, การตรวจข้อสอบอัตนัยด้วยมือ (Brief v0.2.1 — รับ DCR แล้ว)
 
 ### 1.3 นิยามศัพท์
 ใช้ศัพท์ตาม `docs/00-baseline/GLOSSARY.md ทั้งฉบับ (เช่น Course, Module, Lesson, Quiz, Final Assessment, Question Bank, Certificate, Credit, Credit Bank, Renewal Cycle, Credit Rule, License Number, Registrar, Audit Log, RLS, DCR) — ไม่นิยามซ้ำในเอกสารนี้
 
 ### 1.4 เอกสารอ้างอิง (References)
-- R1: `PROJECT-BRIEF.md` v0.1.0 (source of truth) · R2: `GLOSSARY.md` v0.1.0 · R3: `PROJECT-STATE.md` (อ่านอย่างเดียว)
+- R1: `PROJECT-BRIEF.md` v0.2.1 (source of truth) · R2: `GLOSSARY.md` · R3: `PROJECT-STATE.md` (อ่านอย่างเดียว)
 - R4: ISO/IEC/IEEE 29148:2018 · R5: OWASP ASVS L2 + Top 10 (2021) · R6: WCAG 2.1 AA · R7: PDPA (พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล)
 - เอกสารลูกที่ต้องสอดคล้อง: SDS + Data Dictionary (worker-3) · API Spec + RBAC + Audit Design (worker-4) · Test Plan (worker-1)
 
@@ -66,23 +66,23 @@
 
 ### 2.4 ข้อจำกัด (Constraints — binding)
 - **C1 Stack (Brief §6):** Next.js 15 (App Router, RSC) + TypeScript strict + Tailwind; API = Route Handlers `/api/v1/*` + Server Actions; ตรวจ input ด้วย zod ทุกจุด; Supabase (PostgreSQL 15 + Auth + Storage) โดย RLS เปิดทุกตารางร่วมกับ RBAC; SQL migrations เป็นหลัก
-- **C2 ห้าม hardcode ค่า environment-specific:** โค้ดชุดเดียวรันได้ทั้ง local Docker (dev) และ cloud (prod) ต่างกันแค่ config/environment variables; สื่อ/อีเมลเข้าถึงผ่าน abstraction เท่านั้น
+- **C2 ห้าม hardcode ค่า environment-specific:** โค้ดชุดเดียวรันได้ทั้งสาม environment ต่างกันแค่ config/environment variables; สื่อ/อีเมลเข้าถึงผ่าน abstraction เท่านั้น
 - **C3 การตรวจสอบย้อนกลับ:** audit log append-only บังคับด้วย DB privileges + RLS ห้ามมี API แก้/ลบ (D6)
 - **C4 ภาษา:** Thai-first ทุก UI string (i18n-ready) error message เป็นภาษาที่ผู้ใช้เข้าใจ
 - **C5 ความปลอดภัย/ความถูกต้องตามกฎหมาย:** OWASP ASVS L2 + PDPA (Brief §8 ทุกข้อ — ขยายใน SEC-001..016)
-- **C6 Deployment:** dev = 100% local Docker (Supabase local stack); prod = 100% cloud services (Vercel + Supabase Cloud + Cloudflare) — ไม่มี hybrid ต่อ environment เดียว
+- **C6 Deployment (สาม environment):** dev = 100% local Docker (Supabase local stack) · staging = cloud preview (Vercel preview + Supabase staging + Cloudflare โดเมน staging, config ชุดเดียวกับ prod แยกด้วย env vars — ใช้พิสูจน์ PERF/SEC ตาม TEST-PLAN ก่อน promote) · prod = 100% cloud services (Vercel + Supabase Cloud + Cloudflare)
 - **C7 ค่าทางธุรกิจที่ยังไม่ยืนยัน:** ต้องเป็น config พร้อม default + "รอยืนยัน Q#" ห้าม hardcode (D3)
 
 ### 2.5 สมมติฐานและ Dependency (Assumptions + Dependencies)
 - **A1:** ผู้เรียนใช้เบราว์เซอร์สมัยใหม่ อินเทอร์เน็ตอย่างน้อย 4G · **A2:** บริการอีเมลขาออกมี SLA ตามผู้ให้บริการ — ระบบต้องมีคิว+retry (NTF-006) ไม่ assume ส่งสำเร็จทันที · **A3:** ยังไม่มี API ทางการของข้อมูลทนายความจากสภาฯ ใน v1 — ตรวจสอบแบบ manual (รอ Q3)
-- **A4:** Cloudflare R2/Stream ใช้ได้ใน prod และ quota เพียงพอต่อวิดีโอตาม Q6 · **A5:** เจ้าหน้าที่สภาฯ มีกระบวนการภายนอกระบบรองรับการอนุมัติ/เพิกถอนที่ระบบเสนอ · **A6:** คำตอบ Q1–Q6 จะมาถึงระหว่าง Wave C–E — ระบบจึงต้อง config-driven ตั้งแต่ต้น
+- **A4:** Cloudflare R2/Stream ใช้ได้ใน staging/prod และ quota เพียงพอต่อวิดีโอตาม Q6 · **A5:** เจ้าหน้าที่สภาฯ มีกระบวนการภายนอกระบบรองรับการอนุมัติ/เพิกถอนที่ระบบเสนอ · **A6:** คำตอบ Q1–Q6 จะมาถึงระหว่าง Wave C–E — ระบบจึงต้อง config-driven ตั้งแต่ต้น
 
 **Dependency ต่อคำถามค้าง (Q1–Q6 ตาม Brief §10):**
 
 | # | คำถาม | กระทบ requirement | Default ชั่วคราว (Appendix A) |
 | - | ----- | ------------------ | ----------------------------- |
 | Q1 | รอบต่ออายุกี่ปี + ต้องมี credit กี่หน่วยต่อรอบ | CRB-004/005/008, NTF-004 | 1 ปี / 12 หน่วย / ไม่สะสมข้ามรอบ |
-| Q2 | เกณฑ์ผ่าน / จำนวนครั้งสอบ | ASM-005..007, CRT-001 | 80% / 3 ครั้ง / cooldown 24 ชม. |
+| Q2 | เกณฑ์ผ่าน / จำนวนครั้งสอบ | ASM-005..007, CRT-001 | 70% / 3 ครั้ง / cooldown 24 ชม. |
 | Q3 | วิธียืนยันตัวตนทนายความ | IDENT-002/003 | เจ้าหน้าที่ตรวจเลข + เอกสารแนบ |
 | Q4 | ระดับ proctoring ที่ยอมรับได้ | ASM-011 | basic: สุ่มข้อ+จับเวลา+block session ซ้ำ ไม่บันทึกหน้าจอ/กล้อง |
 | Q5 | Data residency (Supabase region) | SEC-016, OPE, deployment | ap-southeast-1 (Singapore) |
@@ -103,7 +103,7 @@
 
 **AUTH-002 · M** — ระบบต้องรองรับการเข้าสู่ระบบด้วยอีเมล + รหัสผ่าน และการออกจากระบบ
 - AC: เข้าสู่ระบบสำเร็จเมื่อข้อมูลถูกต้องและบัญชีไม่ถูกล็อก/ปิดใช้งาน ภายใน p95 ≤ 1 วินาที
-- AC: การเข้าสู่ระบบผิดพลาดนับเข้า lockout (AUTH-009) และถูกบันทึกใน security event + audit · บัญชี staff*/super_admin ต้องผ่าน MFA (AUTH-007)
+- AC: การเข้าสู่ระบบผิดพลาดนับเข้า lockout (AUTH-009) และถูกบันทึกใน security event + audit · บัญชี staff*/super_admin/instructor ต้องผ่าน MFA (AUTH-007)
 
 **AUTH-003 · S** — ระบบต้องรองรับการสมัคร/เข้าสู่ระบบด้วยเบอร์มือถือและรหัส OTP (default: เปิดเมื่อมี SMS provider — ระบุใน Appendix A)
 - AC: OTP 6 หลัก หมดอายุ 5 นาที ตรวจความถูกต้องได้ครั้งละ 1 บัญชี และจำกัด 3 OTP/เบอร์/ชั่วโมง
@@ -119,12 +119,12 @@
 - AC: ความยาว ≥ 12 ตัวอักษร (default) ผสมตัวอักษรพิมพ์ใหญ่/เล็ก/ตัวเลข/สัญลักษณ์อย่างน้อย 3 หมวด
 - AC: ปฏิเสธรหัสผ่านที่อยู่ในรายการรหัสผ่านที่ถูกบุกรุกบ่อย (top common/leaked list) พร้อม error ภาษาไทยชี้เหตุผล
 
-**AUTH-007 · M** — ระบบต้องบังคับ MFA (TOTP) สำหรับ `super_admin` และ `staff` ทุกระดับ
+**AUTH-007 · M** — ระบบต้องบังคับ MFA (TOTP) สำหรับ `super_admin`, `staff` ทุกระดับ และ `instructor`
 - AC: บัญชีบทบาทดังกล่าวต้องลงทะเบียน TOTP จนสำเร็จก่อนใช้งานฟังก์ชันอื่นของระบบ
-- AC: มี backup code 8 รหัส ใช้ได้รหัสละครั้ง; ผู้ใช้ทั่วไป (citizen/lawyer/instructor) เปิด MFA ได้เองแบบ optional
+- AC: มี backup code 8 รหัส ใช้ได้รหัสละครั้ง; ผู้ใช้ทั่วไป (citizen/lawyer) เปิด MFA ได้เองแบบ optional (instructor บังคับ)
 
 **AUTH-008 · M** — ระบบต้องบริหาร session ตามนโยบาย (ค่าเป็น config)
-- AC: staff*/super_admin idle timeout 30 นาที (default) ผู้ใช้ทั่วไป 12 ชั่วโมง หมดอายุแล้วต้องพิสูจน์ตัวใหม่
+- AC: idle timeout: เจ้าหน้าที่ (staff*/super_admin/instructor) 15 นาที · ผู้เรียน (citizen/lawyer) 60 นาที (default) หมดอายุแล้วต้องพิสูจน์ตัวใหม่ — idle timeout ไม่ใช่ absolute session lifetime (อายุสูงสุดของ session กำหนดแยกเป็น config)
 - AC: refresh token rotation พร้อม reuse detection (ใช้ซ้ำ → เพิกถอนทั้งลำดับ) · ผู้ใช้มองเห็นรายการ session/อุปกรณ์ active ของตนเองได้
 
 **AUTH-009 · M** — ระบบต้องล็อกบัญชีชั่วคราวเมื่อพยายามเข้าสู่ระบบผิดติดต่อกัน
@@ -136,7 +136,7 @@
 
 **AUTH-011 · M** — ระบบต้องจำกัดอัตราการเรียก (rate limit) ปลายทางยืนยันตัวตนทั้งหมด
 - AC: login / ลืมรหัสผ่าน / OTP / ขอส่งอีเมลซ้ำ จำกัด 10 request/นาที/IP (default) เกินคือ HTTP 429 + ข้อความไทย
-- AC: ใช้กลไกเดียวกันทั้ง dev (middleware) และ prod (Cloudflare rate rule) — พฤติกรรมตรงกัน
+- AC: ใช้กลไกเดียวกันทั้ง dev (middleware) และ staging/prod (Cloudflare rate rule) — พฤติกรรมตรงกัน
 
 ### 3.2 IDENT — ตัวตน เนื้อหาประชาชน และการผูกใบอนุญาต
 
@@ -145,7 +145,7 @@
 
 **IDENT-002 · M** — ระบบต้องรองรับการยื่นคำขอผูกเลขที่ใบอนุญาตว่าความพร้อมเอกสารประกอบ
 - AC: รับไฟล์แนบ jpg/png/pdf ≤ 10 MB/ไฟล์ เก็บผ่าน storage abstraction (signed URL ไม่ public)
-- AC: เลขที่ใบอนุญาตผ่านการตรวจรูปแบบ; คำขุสถานะ `pending`; วิธียืนยันตาม config Q3 (default: เจ้าหน้าที่ตรวจ)
+- AC: เลขที่ใบอนุญาตผ่านการตรวจรูปแบบ; คำขอสถานะ `pending`; วิธียืนยันตาม config Q3 (default: เจ้าหน้าที่ตรวจ)
 
 **IDENT-003 · M** — ระบบต้องให้เจ้าหน้าที่ที่ได้รับมอบหมายพิจารณาคำขอผูกใบอนุญาต (อนุมัติ/ปฏิเสธพร้อมเหตุผล)
 - AC: การปฏิเสธต้องระบุเหตุผล (บังคับ) และทุกคำตัดสินบันทึก ผู้ตัดสิน/เวลา/เหตุผล ลง audit
@@ -219,7 +219,7 @@
 - AC: สูตร = จำนวนบทเรียนที่ผ่านเงื่อนไข / จำนวนบทเรียนทั้งหมดที่บังคับ (นิยามรายละเอียดและตารางที่ SDS/Data Dictionary)
 
 **LRN-008 · M** — ระบบต้องตัดสินเงื่อนไขผ่านบทเรียนตาม config ต่อหลักสูตร
-- AC: วิดีโอ: เวลาเล่นจริง ≥ 80% ของความยาว (default); เอกสาร: เปิดชมจนครบเงื่อนไขการเข้าถึงที่ระบบกำหนด; quiz: คะแนน ≥ 60% (default)
+- AC: วิดีโอ: เวลาเล่นจริง ≥ 80% ของความยาว (`video_complete_pct` default); เอกสาร: เปิดชมจนครบเงื่อนไขการเข้าถึงที่ระบบกำหนด; quiz: คะแนน ≥ 60% (default)
 - AC: เปลี่ยนค่าเกณฑ์ได้โดยไม่กระทบผลการตัดสินที่เกิดขึ้นแล้ว
 
 **LRN-009 · M** — ระบบต้องรองรับการกลับมาเรียนต่อ (resume) จากจุดที่ค้างไว้
@@ -252,7 +252,7 @@
 **ASM-006 · M** — ระบบต้องจำกัดจำนวนครั้งการสอบต่อหลักสูตร (default 3 ครั้ง — รอยืนยัน Q2)
 - AC: ระหว่างครั้งมี cooldown default 24 ชม.; แสดงจำนวนครั้งที่เหลือก่อนเริ่มสอบ · ครบจำนวนแล้วเริ่มสอบใหม่ไม่ได้ พร้อมช่องทางติดต่อเจ้าหน้าที่
 
-**ASM-007 · M** — ระบบต้องตัดสินผลผ่าน/ไม่ผ่านตามเกณฑ์ (default ≥ 80% — รอยืนยัน Q2)
+**ASM-007 · M** — ระบบต้องตัดสินผลผ่าน/ไม่ผ่านตามเกณฑ์ (default ≥ 70% — รอยืนยัน Q2)
 - AC: แสดงผล ผ่าน/ไม่ผ่าน พร้อมคะแนนทันทีหลัง submit
 
 **ASM-008 · M** — ระบบต้องบันทึกคำตอบระหว่างสอบอัตโนมัติ
@@ -288,7 +288,7 @@
 - AC: แสดงรายชื่อผู้มีสิทธิ์รอออก; ออกได้ทีละรายหรือเป็นชุด (bulk); ทุกการออกถูก audit พร้อมผู้ออก
 
 **CRT-003 · M** — ระบบต้องออกประกาศนียบัตรที่มีรหัสอ้างอิง unique และ QR code
-- AC: รหัสตามรูปแบบ config (default `LTC-<ปี ค.ศ.>-<สุ่ม 6 ตัว>` ไม่ซ้ำ เดายาก) · ข้อมูลบนใบ: ชื่อผู้รับ หลักสูตร วันที่ออก จำนวน credit; QR ชี้หน้า verify (CRT-004)
+- AC: รหัสตามรูปแบบ config: `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` ไม่ซ้ำ เดายาก (ยืนยันรูปแบบแล้ว; แสดงผลปี พ.ศ. ได้ตาม I18N-003 — รอยืนยันการใช้งานกับสภาฯ) · ข้อมูลบนใบ: ชื่อผู้รับ หลักสูตร วันที่ออก จำนวน credit; QR ชี้หน้า verify (CRT-004)
 
 **CRT-004 · M** — ระบบต้องมีหน้ายืนยันความถูกต้องประกาศนียบัตร (verify) สาธารณะ
 - AC: เข้าถึงได้โดยไม่ต้องเข้าสู่ระบบ; แสดง รหัส หลักสูตร วันที่ออก สถานะ (valid/revoked/superseded) · ไม่แสดงอีเมล เลขที่ใบอนุญาต หรือ PII อื่น; จำกัดอัตราการค้น; รหัสไม่ถูกต้องตอบข้อความเดียวกันทุกกรณี
@@ -410,13 +410,13 @@
 - AC: 5,000 simultaneous exam sessions: auto-save ไม่สูญหาย, submit สำเร็จ, ผลออกภายใน 60 วินาทีหลัง submit
 
 **PERF-004 · M** — ระบบต้องมีเวลาตอบสนอง API: p95 ≤ 500 ms (read) และ p95 ≤ 1,000 ms (write) ที่โหลด 500 req/s
-- AC: วัดจาก load test + monitoring จริงใน prod (OPE-001); ค่าเป้าเป็น config ของ monitoring alert
+- AC: วัดจาก load test บน staging (ที่พิสูจน์ตาม TEST-PLAN) + monitoring จริงใน prod (OPE-001); ค่าเป้าเป็น config ของ monitoring alert
 
 **PERF-005 · M** — ระบบต้องมี Core Web Vitals ของหน้าหลัก: LCP ≤ 2.5 วินาที และ INP ≤ 200 ms บนเครือข่าย 4G
 - AC: วัดด้วยเครื่องมือ RUM/lighthouse ใน CI ต่อหน้าหลัก 5 หน้า (หน้าแรก รายการหลักสูตร รายละเอียด เรียน สอบ)
 
 **PERF-006 · S** — ระบบต้องเริ่มเล่นวิดีโอภายใน 3 วินาที (p75) บน 4G
-- AC: วัดผ่าน CDN/streaming ของ prod; วิดีโอให้บริการผ่าน CDN ไม่ผ่าน origin โดยตรง
+- AC: วัดบน staging ผ่าน CDN/streaming ตาม TEST-PLAN; วิดีโอให้บริการผ่าน CDN ไม่ผ่าน origin โดยตรง
 
 **PERF-007 · M** — ระบบต้องคืนผลค้นหาหลักสูตรภายใน p95 ≤ 2 วินาที ที่ 5,000 หลักสูตร
 - AC: ทดสอบพร้อมคีย์เวิร์ดไทย+อังกฤษและตัวกรองรวมกัน
@@ -427,7 +427,7 @@
 ### 4.2 SEC — ความมั่นคงปลอดภัยและความเป็นส่วนตัว (ขยาย Brief §8 ทุกข้อ)
 
 **SEC-001 · M** — ระบบต้องเป็นไปตาม OWASP ASVS Level 2 และ OWASP Top 10
-- AC: ทบทวน design ตาม checklist ASVS V1–V14; ผลการทดสอบ (ZAP + manual pass) ต้องไม่มีช่องโหว่ระดับ high/critical ค้างอยู่ก่อน release
+- AC: ทบทวน design ตาม checklist ASVS V1–V14; ผลการทดสอบ (ZAP + manual pass บน staging ตาม TEST-PLAN) ต้องไม่มีช่องโหว่ระดับ high/critical ค้างอยู่ก่อน release
 
 **SEC-002 · M** — ระบบต้องเปิด RLS ทุกตารางใน PostgreSQL ร่วมกับ RBAC
 - AC: ทุกตารางมี policy; integration test ยืนยันว่า anon/authenticated อ่านข้อมูลข้างผู้ใช้/ข้ามสิทธิ์ไม่ได้
@@ -439,7 +439,7 @@
 - AC: บทบาทใด ๆ ในระบบ (รวม service_role ของแอป) ต้องไม่มีสิทธิ์ UPDATE/DELETE audit log
 
 **SEC-005 · M** — ระบบต้องมี rate limiting และ WAF ทุกสภาพแวดล้อม
-- AC: prod = Cloudflare WAF + rate rules; dev = middleware เทียบเคียงได้; ปลายทางบังคับ: auth, verify สาธารณะ, export, API ทั่วไป; เกินเกณฑ์ตอบ 429
+- AC: staging/prod = Cloudflare WAF + rate rules; dev = middleware เทียบเคียงได้; ปลายทางบังคับ: auth, verify สาธารณะ, export, API ทั่วไป; เกินเกณฑ์ตอบ 429
 
 **SEC-006 · M** — ระบบต้องเก็บ secrets เฉพาะ environment variables เท่านั้น
 - AC: ห้าม commit ห้าม log ทุก environment; CI มี secrets scan เป็น merge gate; ไม่มีค่า default credential ในโค้ด
@@ -447,8 +447,8 @@
 **SEC-007 · M** — ระบบต้องไม่ log ข้อมูล PII (เลขบัตรประชาชน เลขที่ใบอนุญาต อีเมล)
 - AC: log ผ่าน serializer ที่ตัด PII; อ้างอิงบุคคลด้วย user_id; CI มี automated scan หา PII pattern ใน log statement
 
-**SEC-008 · M** — ระบบต้องบังคับ MFA + session timeout + lockout แก่ผู้ดูแลทุกระดับ
-- AC: ยึด AUTH-007/008/009; ทดสอบว่าบัญชี staff* ที่ไม่มี MFA ใช้งานฟังก์ชันอื่นไม่ได้
+**SEC-008 · M** — ระบบต้องบังคับ MFA + session timeout + lockout แก่บัญชีบริหารและวิทยากร
+- AC: ยึด AUTH-007/008/009; ทดสอบว่าบัญชี staff*/super_admin/instructor ที่ไม่มี MFA ใช้งานฟังก์ชันอื่นไม่ได้
 
 **SEC-009 · M** — ระบบต้องยืนยันประกาศนียบัตรต่อสาธารณะได้โดยไม่เปิดเผย PII เกินจำเป็น
 - AC: ยึด CRT-004; ตรวจสอบ response ของหน้า verify/API ว่าไม่มีฟิลด์นอกเหนือที่ระบุ
@@ -483,7 +483,7 @@
 - AC: backup รายวันอัตโนมัติ + บันทึกผล; ซ้อม restore ทุกไตรมาสและเก็บหลักฐาน
 
 **REL-003 · S** — ระบบต้องแยกความล้มเหลวของบริการเสริมไม่ให้กระทบธุรกรรมหลัก
-- AC: อีเมลล่ม → การเรียน/สอบ/ออกใบรับรองยังทำงานได้ (แจ้งเตือนค้างในคิว); CDN/streaming มี fallback ตามผู้ให้บริการ
+- AC: อีเมลล่ม → การเรียน/สอบ/ออกประกาศนียบัตรยังทำงานได้ (แจ้งเตือนค้างในคิว); CDN/streaming มี fallback ตามผู้ให้บริการ
 
 **REL-004 · M** — ระบบต้องรักษาความต่อเนื่องของการสอบเมื่อผู้เรียนขาดการเชื่อมต่อชั่วคราว
 - AC: ยึด ASM-008; นาฬิกาสอบเดินตาม server ต่อเนื่องไม่หยุดระหว่าง disconnect
@@ -538,8 +538,8 @@
 **MAINT-001 · M** — ระบบต้องพัฒนาด้วย TypeScript strict โดยไม่ใช้ `any` โดยไม่จำเป็น
 - AC: `tsc --strict` ผ่านเป็น merge gate; lint บังคับ/เตือน `any`
 
-**MAINT-002 · M** — ระบบต้องใช้โค้ดชุดเดียวทั้ง dev (Docker) และ prod (cloud) ต่างกันเฉพาะ config
-- AC: ไม่มีเงื่อนไข environment กระจายใน business logic; สื่อ/อีเมล/คิวเข้าถึงผ่าน abstraction; smoke test parity ระหว่างสองสภาพแวดล้อม
+**MAINT-002 · M** — ระบบต้องใช้โค้ดชุดเดียวทั้งสาม environment (dev Docker / staging cloud / prod cloud) ต่างกันเฉพาะ config
+- AC: ไม่มีเงื่อนไข environment กระจายใน business logic; สื่อ/อีเมล/คิวเข้าถึงผ่าน abstraction; smoke test parity ครบทั้งสาม environment
 
 **MAINT-003 · M** — ระบบต้องเปลี่ยนแปลง schema ผ่าน SQL migration เท่านั้น
 - AC: ทุกการเปลี่ยน schema อยู่ใน `supabase/migrations`; รันซ้ำได้บน local Docker จนสำเร็จ
@@ -583,11 +583,11 @@
 - กลุ่มปลายทางตามโดเมน (รายละเอียดเต็มอยู่ที่ API Spec ของ worker-4): `/api/v1/auth/*`, `/api/v1/profile*`, `/api/v1/license*`, `/api/v1/categories*`, `/api/v1/courses*`, `/api/v1/enrollments*`, `/api/v1/lessons*`+progress, `/api/v1/question-banks*`, `/api/v1/exams*`+attempts, `/api/v1/certificates*`, `/api/v1/verify/*` (สาธารณะ), `/api/v1/credits*`+transcripts, `/api/v1/notifications*`, `/api/v1/admin/*`, `/api/v1/audit*`, `/api/health`
 
 ### 5.3 อีเมล (ขาออก)
-- เข้าถึงผ่าน email abstraction เท่านั้น (C2): dev = SMTP/กล่องจดหมายจำลองใน Docker; prod = ผู้ให้บริการที่เลือกตาม config
+- เข้าถึงผ่าน email abstraction เท่านั้น (C2): dev = SMTP/กล่องจดหมายจำลองใน Docker; staging/prod = ผู้ให้บริการ cloud ที่เลือกตาม config
 - เทมเพลตภาษาไทยจากระบบเทมเพลตกลาง (NTF-002/003/004); ส่งผ่านคิว + retry (NTF-006); ห้าม PII เกินจำเป็นในเนื้อหา
 
 ### 5.4 การเก็บสื่อ (Storage abstraction)
-- dev = Supabase local storage (Docker); prod = Cloudflare R2 (ไฟล์/เอกสาร) + Cloudflare Stream (วิดีโอ) — โค้ดเรียกผ่าน interface เดียว ห้ามอ้าง provider ตรงใน business logic (C2)
+- dev = Supabase local storage (Docker); staging/prod = Cloudflare R2 (ไฟล์/เอกสาร) + Cloudflare Stream (วิดีโอ) — โค้ดเรียกผ่าน interface เดียว ห้ามอ้าง provider ตรงใน business logic (C2)
 - ไฟล์เอกสารยืนยัน: private + signed URL อายุสั้น (SEC-016); วิดีโอ: signed URL + ไม่เปิด direct download (default ตาม Q6); ข้อจำกัดความยาว/ความละเอียด/ขนาดไฟล์เป็น config (Appendix A)
 
 ### 5.5 หน้า verify สาธารณะ (รับผู้ใช้ภายนอก)
@@ -597,26 +597,28 @@
 
 ## 6. Appendices
 
-### Appendix A — พารามิเตอร์ config ทั้งหมดที่ "รอยืนยัน" (ห้าม hardcode — D3)
+### Appendix A — defaults master ของโปรเจกต์: พารามิเตอร์ config + default (ห้าม hardcode — D3)
+
+> **D8:** Appendix A นี้คือ **defaults master เดียวของโปรเจกต์** — เอกสารอื่น (SDS/API/RBAC/TEST-PLAN ฯลฯ) ห้ามประกาศค่า default ซ้ำ ให้อ้างอิงที่นี่เสมอ
 
 | พารามิเตอร์ | Default | เหตุผลของ default | สถานะ |
 | --- | --- | --- | --- |
-| `renewal_cycle_years` (ความยาวรอบต่ออายุ) | 1 | ต่ออายุใบอนุญาตเป็นรายปีตามปฏิบัติทั่วไป — สมมติฐาน | รอยืนยัน Q1 |
-| `credits_required_per_cycle` | 12 | ค่ากลางของระบบ CLE ทั่วไป — สมมติฐาน | รอยืนยัน Q1 |
+| `renewal_cycle_years` (ความยาวรอบต่ออายุ) | 1 | ยืนยันเป็นค่า canonical ของโปรเจกต์ (D8) — ต่ออายุรายปี | canonical (D8) · รอยืนยัน Q1 |
+| `credits_required_per_cycle` | 12 | ยืนยันเป็นค่า canonical ของโปรเจกต์ (D8) | canonical (D8) · รอยืนยัน Q1 |
 | `credit_carryover_across_cycles` | false | อนุรักษ์นิยม ไม่สะสมข้ามรอบจนกว่าจะมีมติ | รอยืนยัน Q1 |
-| `exam_pass_threshold_percent` | 80 | มาตรฐานทั่วไปของการสอบรับประกาศนียบัตร | รอยืนยัน Q2 |
+| `exam_pass_threshold_percent` | 70 | มาตรฐานทั่วไปของการสอบรับประกาศนียบัตร | รอยืนยัน Q2 |
 | `exam_max_attempts` | 3 | สมดุลโอกาสกับความน่าเชื่อถือของผล | รอยืนยัน Q2 |
 | `exam_attempt_cooldown_hours` | 24 | กันการลองซ้ำติดต่อกันเพื่อเจาะข้อสอบ | รอยืนยัน Q2 |
 | `exam_time_limit_minutes` | 60 | พอดีต่อชุดข้อสอบขนาดกลาง | รอยืนยัน Q2 |
 | `exam_review_mode` | after_final_attempt | กันรั่วไหลของข้อสอบระหว่างยังมีครั้งเหลือ | รอยืนยัน Q2 |
 | `lawyer_verification_method` | staff_manual_document | ไม่มี API ทางการใน v1 (A3) | รอยืนยัน Q3 |
-| `proctoring_level` | basic | สุ่มข้อ+จับเวลา+block session ซ้ำ; ไม่บันทึนหน้าจอ/กล้อง (ความเป็นส่วนตัว) | รอยืนยัน Q4 |
+| `proctoring_mode` | basic | สุ่มข้อ+จับเวลา+block session ซ้ำ; ไม่บันทึนหน้าจอ/กล้อง (ความเป็นส่วนตัว) | รอยืนยัน Q4 |
 | `supabase_region` | ap-southeast-1 (SG) | ใกล้ไทยที่สุดที่ Supabase รองรับ | รอยืนยัน Q5 |
-| `video_max_minutes` | 60 | คุมขนาดไฟล์+ต้นทุน CDN ต่อบทเรียน | รอยืนยัน Q6 |
-| `video_max_resolution` | 1080p | ชัดพอต่อสไลด์/เนื้อหากฎหมาย บนทุกอุปกรณ์ | รอยืนยัน Q6 |
+| `max_video_minutes` | 60 | คุมขนาดไฟล์+ต้นทุน CDN ต่อบทเรียน | รอยืนยัน Q6 |
+| `max_video_resolution` | 1080p | ชัดพอต่อสไลด์/เนื้อหากฎหมาย บนทุกอุปกรณ์ | รอยืนยัน Q6 |
 | `video_prevent_download` | true | ปกป้องเนื้อหาตามเจตนารมณ์เจ้าของหลักสูตร | รอยืนยัน Q6 |
 
-**พารามิเตอร์ระบบทั่วไป (default กำหนดแล้ว เปลี่ยนได้โดยไม่ต้องรอคำตอบ Q):** `password_min_length=12`, `admin_idle_timeout_minutes=30`, `user_session_idle_hours=12`, `login_lockout_threshold=5`, `login_lockout_window_minutes=15`, `login_lockout_duration_minutes=15`, `auth_rate_limit_per_min=10`, `otp_expiry_minutes=5`, `email_verification_expiry_hours=24`, `reset_token_expiry_minutes=30`, `exam_autosave_seconds=15`, `exam_disconnect_grace_minutes=5`, `lesson_video_watch_percent=80`, `quiz_pass_percent=60`, `progress_pass_score_policy=highest`, `certificate_code_format=LTC-{YYYY}-{6}`, `certificate_auto_issue=false`, `renewal_notify_days_before=60,30,7`, `email_retry_max=3`, `page_size_default=20`, `media_signed_url_ttl_minutes=15`, `max_upload_mb=10` (เอกสาร) / `2000` (วิดีโอ), `audit_retention_years=5`, `backup_daily_rpo_hours=24`, `rto_hours=4`
+**พารามิเตอร์ระบบทั่วไป (default กำหนดแล้ว เปลี่ยนได้โดยไม่ต้องรอคำตอบ Q):** `password_min_length=12`, `admin_idle_timeout_minutes=15`, `learner_idle_timeout_minutes=60`, `login_lockout_threshold=5`, `login_lockout_window_minutes=15`, `login_lockout_duration_minutes=15`, `auth_rate_limit_per_min=10`, `otp_per_phone_per_hour=3`, `otp_expiry_minutes=5`, `email_verification_expiry_hours=24`, `reset_token_expiry_minutes=30`, `exam_autosave_seconds=15`, `exam_disconnect_grace_minutes=5`, `video_complete_pct=80`, `quiz_pass_percent=60`, `progress_pass_score_policy=highest`, `certificate_code_format=LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` (ยืนยันรูปแบบแล้ว — พ.ศ. เฉพาะการแสดงผลตาม I18N-003; รอยืนยันการใช้งานกับสภาฯ), `certificate_auto_issue=false`, `renewal_notify_days_before=60,30,7`, `email_retry_max=3`, `page_size_default=20`, `media_signed_url_ttl_minutes=15`, `max_upload_mb=10` (เอกสาร) / `2000` (วิดีโอ), `audit_retention_years=5`, `backup_daily_rpo_hours=24`, `rto_hours=4`
 
 ### Appendix B — สถิติ requirement
 
