@@ -17,7 +17,7 @@
 | Task | งาน                                    | Owner    | Status        |
 | ---- | -------------------------------------- | -------- | ------------- |
 | A0   | Repo init + baseline docs + brief      | lead     | ✅ done       |
-| A1   | Project Plan + Risk Register + Test Plan | worker-1 | 🔄 in_progress |
+| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ ส่งงาน+commit แล้ว (TEST-PLAN กำลัง align brief 0.2.0) |
 | A2   | SRS + RTM                              | worker-2 | 🔄 in_progress |
 | A3   | SDS + Architecture + Data Dictionary   | worker-3 | 🔄 in_progress |
 | A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
@@ -42,6 +42,7 @@
 | D4 | 2026-09-08 | Wave A ใช้ shared checkout + กรรมสิทธิ์ไฟล์แยกกัน (docs ไม่ทับกัน) — workers ห้ามใช้ git, lead เป็นคนเดียวที่ branch/commit/merge; per-worker worktrees เริ่มใช้ Wave B (โค้ด) | ไฟล์เอกสาร disjoint ไม่มี conflict; ลด overhead การ merge ใน phase เอกสาร |
 | D5 | 2026-09-08 | Model routing จริงของ environment นี้: workers = tier ราคาถูกสุดที่รับผิดชอบงานได้ (sonnet สำหรับงานเอกสาร/โค้ดหลัก, haiku สำหรับงานเล็ก), lead/CTO = session model (GLM 5.3) + codex gate สำหรับ milestone | environment นี้ spawn glm-5.3-flash โดยตรงไม่ได้ (ไม่มีใน model list ของ Agent tool) — ใช้ tier ถูกที่สุดที่คุณภาพรับได้แทน ตามเจตนาประหยัด token |
 | D6 | 2026-09-08 | Audit log ออกแบบเป็น append-only + บังคับด้วย DB privilege + RLS; ห้ามมี API แก้/ลบ audit | ข้อกำหนดความมั่นคงปลอดภัย/ตรวจสอบได้ |
+| D7 | 2026-09-08 | **DCR-1 APPROVE** (จาก worker-1): เพิ่ม Staging environment ใน brief §6 (cloud preview: Vercel staging + Supabase staging branch + Cloudflare staging domain, แยกด้วย env vars เท่านั้น ใช้พิสูจน์ perf 10k/5k + security test) → brief เป็น 0.2.0 + เพิ่ม Q7 (ความยินยอมค่า cloud tier) | เป้า performance พิสูจน์ไม่ได้บน local docker; DCR-2 (reconcile FR ID กับ SRS) กำหนดเป็นรายการ A6 ไม่กระทบ brief |
 
 ## Git Protocol
 
@@ -64,3 +65,4 @@
 
 - 2026-09-08 · เริ่มโครงการ · Wave A spawn workers 1–5 (docs) · lead = session นี้
 - 2026-09-08 · **A4 เสร็จ** — API-SPEC 350 บรรทัด (52 endpoints), RBAC 279 บรรทัด (47 permissions), AUDIT 257 บรรทัด (46 event types) · ตรวจรับ: wc -l ตรงรายงาน, ไม่แตะไฟล์อื่น · commit d02c574 + merge a031172 · ไม่มี DCR · **โจทย์ A6:** (1) ประสานชื่อตาราง/คอลัมน์/UUID กับ DATA-DICTIONARY ของ worker-3 (2) re-map AUD-01…12 ของ audit doc ให้ตรง SRS ของ worker-2 (3) ค่า default ทั้งหมด flag รอยืนยัน Q1–Q4 แล้ว
+- 2026-09-08 · **A1 เสร็จ** — PROJECT-PLAN 242 บรรทัด (11 sections), RISK-REGISTER 161 บรรทัด (26 risks), TEST-PLAN 334 บรรทัด (18 TC + 16 E2E) · ตรวจรับ: wc -l ตรงรายงาน · commit 7a88da6 + merge e9fd2b3 · **DCR-1 APPROVE → brief 0.2.0 (+staging env, +Q7)** · DCR-2 เป็นรายการ A6 · คำถามค้าง QP-1/QP-2/QP-3/QP-5 รอ user/หน่วยงาน (ดู §คำถามค้างใน PROJECT-PLAN) · สั่ง worker-1 align TEST-PLAN กับ brief 0.2.0

@@ -2,8 +2,8 @@
 
 |          |                                                   |
 | ------- | ------------------------------------------------- |
-| เวอร์ชัน | 0.1.0 — CTO Baseline (ตัดสินแล้ว แก้ไขต้องผ่าน DCR) |
-| วันที่    | 2026-09-08                                        |
+| เวอร์ชัน | 0.2.0 — CTO Baseline (ตัดสินแล้ว แก้ไขต้องผ่าน DCR) |
+| วันที่    | 2026-09-08 (0.2.0: +staging env ตาม DCR-1)        |
 | สถานะ    | **SOURCE OF TRUTH** — เอกสารทุกฉบับต้องสอดคล้องกับเอกสารนี้ |
 
 ## 1. ภารกิจ (Mission)
@@ -61,6 +61,7 @@
 | Migration      | SQL migrations (supabase/migrations) — ใช้ SQL เป็นหลัก เพื่อ parity กับ prod       |
 | Media/วิดีโอ    | ผ่าน storage abstraction: dev = Supabase local storage (Docker) → prod = **Cloudflare R2/Stream** |
 | Dev environment| **100% local Docker** (Supabase local stack + บริการเสริมใน docker-compose ถ้าจำเป็น) |
+| Staging        | **Cloud preview ก่อนขึ้น prod** — Vercel preview/staging deployment + Supabase staging branch + Cloudflare (โดเมน staging) ใช้ config ชุดเดียวกับ prod แยกด้วย env vars เท่านั้น — ใช้พิสูจน์ performance (k6 10k/5k) + security test ก่อน promote (เพิ่มเมื่อ 0.2.0 ตาม DCR-1) |
 | Production     | **100% cloud services** — Vercel (app) + Supabase Cloud (data/auth/storage) + Cloudflare (DNS, WAF, CDN, rate limit, R2/Stream) |
 | i18n           | **Thai-first**, รองรับอังกฤษ (โครงสร้างพร้อม next-intl-style)                        |
 | Testing        | Vitest (unit) + Playwright (E2E) + OWASP ZAP/manual security pass                   |
@@ -110,5 +111,6 @@
 | Q4 | proctoring ระดับที่ยอมรับได้ (บันทึกหน้าจอ? lock browser?)        | exam engine design           |
 | Q5 | Data residency — PDPA cross-border (Supabase region ใกล้ไทยคือ SG/JP) | deployment arch            |
 | Q6 | วิดีโอ: จำกัดความยาว/ความละเอียด? ป้องกันดาวน์โหลด?              | media pipeline               |
+| Q7 | Staging: ยอมรับค่าใช้จ่าย cloud tier สำหรับ load test 10k/5k หรือไม่ (Vercel/Supabase/Cloudflare plan) | staging env + performance gate |
 
 > ค่าเริ่มต้น (default) ต้องกำหนดทุก config พร้อมเหตุผล และระบุ "รอยืนยัน Q#"
