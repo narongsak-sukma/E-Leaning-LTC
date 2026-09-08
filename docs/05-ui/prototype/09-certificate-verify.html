@@ -74,14 +74,14 @@ h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-
   <form id="verifyForm" novalidate class="mt-8 rounded-[14px] bg-white p-5 shadow-card sm:p-6">
     <label for="cert-code" class="block font-heading text-sm font-semibold text-ink-900">รหัสอ้างอิงประกาศนียบัตร <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
     <div class="mt-2 flex flex-col gap-3 sm:flex-row">
-      <input id="cert-code" name="cert-code" type="text" required placeholder="เช่น LTC-2569-0012345" value="LTC-2569-0012345" aria-describedby="code-help"
+      <input id="cert-code" name="cert-code" type="text" required placeholder="เช่น LTC-2026-483920" value="LTC-2026-483920" aria-describedby="code-help"
         class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-4 py-3 font-heading text-lg tracking-wide text-ink-900 placeholder:text-ink-400 focus:border-brand-500 tnum">
       <button type="submit" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-[10px] bg-brand-600 px-6 py-3 font-heading font-semibold text-white shadow-card hover:bg-brand-700 active:translate-y-px">
         <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
         ตรวจสอบ
       </button>
     </div>
-    <p id="code-help" class="mt-2 text-sm text-ink-500">รหัสขึ้นต้นด้วย LTC- ตามด้วยปีที่ออกและหมายเลขลำดับ พิมพ์ให้ครบทุกตัว</p>
+    <p id="code-help" class="mt-2 text-sm text-ink-500">รหัสขึ้นต้นด้วย LTC- ตามด้วยปีที่ออก (ค.ศ.) และเลขสุ่ม 6 หลัก พิมพ์ให้ครบทุกตัว — ปี พ.ศ. แสดงเฉพาะในหน้าจอ UI ตาม I18N-003</p>
     <p class="mt-3 flex items-start gap-2 rounded-[10px] bg-mist-50 p-3 text-sm text-ink-700">
       <svg viewBox="0 0 24 24" class="mt-0.5 h-4.5 w-4.5 shrink-0 text-brand-600" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14h1M14 20h1M18 18h3v3h-3z"/></svg>
       สแกน QR Code บนประกาศนียบัตรจะเปิดหน้านี้พร้อมผลการตรวจสอบทันที โดยไม่ต้องพิมพ์รหัส
@@ -112,7 +112,7 @@ h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-
         <dl class="w-full divide-y divide-mist-100 text-sm">
           <div class="flex flex-wrap justify-between gap-2 py-2.5">
             <dt class="text-ink-500">รหัสอ้างอิง</dt>
-            <dd class="font-heading font-bold text-ink-900 tnum">LTC-2569-0012345</dd>
+            <dd class="font-heading font-bold text-ink-900 tnum">LTC-2026-483920</dd>
           </div>
           <div class="flex flex-wrap justify-between gap-2 py-2.5">
             <dt class="text-ink-500">ชื่อผู้รับประกาศนียบัตร</dt>
@@ -166,7 +166,7 @@ h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-
   </aside>
 
   <p class="mt-8 text-center text-xs text-ink-500">
-    ทดลอง: กรอก <button type="button" id="demoFound" class="font-semibold text-brand-600 hover:underline">LTC-2569-0012345</button> เพื่อดูผล "ถูกต้อง" หรือ <button type="button" id="demoNotFound" class="font-semibold text-brand-600 hover:underline">LTC-0000-0000000</button> เพื่อดูผล "ไม่พบข้อมูล"
+    ทดลอง: กรอก <button type="button" id="demoFound" class="font-semibold text-brand-600 hover:underline">LTC-2026-483920</button> เพื่อดูผล "ถูกต้อง" หรือ <button type="button" id="demoNotFound" class="font-semibold text-brand-600 hover:underline">LTC-2026-000000</button> เพื่อดูผล "ไม่พบข้อมูล"
   </p>
 </main>
 
@@ -190,13 +190,13 @@ h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     if (!input.value.trim()) { input.focus(); return; }
-    show(input.value.trim().toUpperCase() === 'LTC-2569-0012345' ? 'found' : 'notfound');
+    show(input.value.trim().toUpperCase() === 'LTC-2026-483920' ? 'found' : 'notfound');
   });
   document.getElementById('tryAgain').addEventListener('click', () => {
     input.value = ''; input.focus();
   });
-  document.getElementById('demoFound').addEventListener('click', () => { input.value = 'LTC-2569-0012345'; show('found'); });
-  document.getElementById('demoNotFound').addEventListener('click', () => { input.value = 'LTC-0000-0000000'; show('notfound'); });
+  document.getElementById('demoFound').addEventListener('click', () => { input.value = 'LTC-2026-483920'; show('found'); });
+  document.getElementById('demoNotFound').addEventListener('click', () => { input.value = 'LTC-2026-000000'; show('notfound'); });
 </script>
 </body>
 </html>
