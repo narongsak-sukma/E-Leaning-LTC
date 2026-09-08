@@ -63,7 +63,7 @@
 | COURSE_PUBLISH | staff:content, super_admin | course_id, ผู้อนุมัติ ≠ ผู้สร้าง (SoD ผ่าน) | NOTICE | — |
 | COURSE_UNPUBLISH | staff:content | course_id, reason | NOTICE | — |
 | COURSE_ARCHIVE | staff:content | course_id, reason | NOTICE | — |
-| QB_QUESTION_CREATE | instructor, staff:exam | question_bank_id, จำนวนข้อ | INFO | — |
+| QB_QUESTION_CREATE | instructor, staff:exam | bank_id (FK question_banks.id — DD §3.4), จำนวนข้อ | INFO | — |
 | QB_QUESTION_UPDATE | instructor, staff:exam | question_id, version | INFO | — |
 | QB_QUESTION_DELETE | staff:exam, super_admin | question_id, เหตุผล, จำนวนชุดข้อสอบที่อ้างอยู่ (เติมตาม ASM-001) | NOTICE | — |
 | ENROLL_CREATE | citizen, lawyer | course_id, user_id | INFO | — |
@@ -268,7 +268,7 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 | REQ | ความต้องการ (SRS) | พิสูจน์/บังคับที่ไหน |
 | --- | --- | --- |
 | AUD-002 | บังคับ append-only (คุณสมบัติของ storage) | §4 สามชั้น: (1) `REVOKE UPDATE, DELETE, TRUNCATE` (D11-7) (2) trigger `prevent_audit_mutation()` บล็อกแม้ owner/superuser (row + statement TRUNCATE trigger) (3) RLS — เขียนผ่าน `append_audit_event()` SECURITY DEFINER เท่านั้น (D11-8) + ไม่มี write API เลย (RBAC-DESIGN.md §6 T14/T16) |
-| AUD-003 | ค้นหา/กรอง audit โดยเจ้าหน้าที่ | §3.1 ดัชนี `(event_type, occurred_at)` / `(actor_id, occurred_at)` / `(entity_type, entity_id)` + `GET /api/v1/admin/audit-logs` (API-SPECIFICATION.md §3.8 — pagination + filter) สิทธิ์ staff:viewer/super_admin ตาม RLS §4 — ทุกการอ่านของ staff เกิด event `AUDIT_READ` |
+| AUD-003 | ค้นหา/กรอง audit โดยเจ้าหน้าที่ | §3.1 ดัชนีตาม DD §3.8: `(action, occurred_at)` / `(actor_user_id, occurred_at)` / `(entity_type, entity_id, occurred_at)` + `GET /api/v1/admin/audit-logs` (API-SPECIFICATION.md §3.8 — pagination + filter) สิทธิ์ staff:viewer/super_admin ตาม RLS §4 — ทุกการอ่านของ staff เกิด event `AUDIT_READ` |
 | AUD-004 | ไม่บรรจุ PII ใน payload (กติกาต่อทุก event) | §3.2 กติกา payload: schema ราย event (strict) + `FreeText` sanitize (ความยาวจำกัด + ห้ามรูปแบบ email/เบอร์โทร/เลขบัตร, D11-9) + input ผิดเก็บเฉพาะ hash/ความยาว + เก็บเฉพาะ "ชื่อฟิลด์ที่เปลี่ยน" ไม่ใช่ค่าเดิม/ใหม่ + §3.1 อ้างคนด้วย `actor_user_id` (uuid, ตาม DD §3.8), `ip_hash` ไม่เก็บ IP ตรง + คอลัมน์ PDPA กำกับทุก event ใน §2 |
 | AUD-005 | retention ≥ 5 ปี | §5 นโยบาย retention: default 5 ปี (config `AUDIT_RETENTION_YEARS`, ตาม SRS Appendix A), v1 ไม่มีการลบอัตโนมัติจนกว่าจะมีมติ, ก่อนลบต้อง export สำเนา (export-then-purge + CRITICAL event) |
 

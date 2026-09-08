@@ -160,7 +160,7 @@ grant select, update (display_name, phone, preferred_locale, pdpa_consented_at) 
 -- INSERT/DELETE ไม่มี policy (สร้างโดย trigger security definer; ไม่มี hard delete)
 
 -- (2) courses (D11-3): แยก operation — instructor เจ้าของ INSERT/UPDATE ได้ แต่ publish = staff:content เท่านั้น
---     เจ้าของหลักสูตรอ้างคอลัมน์ courses.created_by (ยังไม่มีใน DD §3.2 — เพิ่มผ่าน DCR ก่อน migration, ดู §7)
+--     เจ้าของหลักสูตรอ้างคอลัมน์ courses.created_by (DD §3.2 — เพิ่มแล้วโดย DCR-3, 2026-09-08)
 create policy courses_public_read on public.courses for select to anon, authenticated
   using (status = 'published'
          and (is_public or public.has_any_role(array['lawyer'])));
@@ -209,7 +209,7 @@ create policy lp_owner_update on public.lesson_progress for update to authentica
 revoke delete on public.lesson_progress from authenticated, anon; -- ไม่มี hard delete (D11-3)
 
 -- (5) questions (D11-4/D11-5): ชื่อคอลัมน์ตาม DD — questions.bank_id (ไม่ใช่ question_bank_id)
---     instructor เห็นเฉพาะ bank ที่ตัวเองเป็นเจ้าของ (question_banks.created_by — ยังไม่มีใน DD §3.4, ดู §7)
+--     instructor เห็นเฉพาะ bank ที่ตัวเองเป็นเจ้าของ (question_banks.created_by — DD §3.4, เพิ่มแล้วโดย DCR-3)
 --     ผู้เรียนไม่มี policy ใด ๆ — ได้ข้อสอบผ่าน snapshot ที่ BFF สร้างตอน start attempt เท่านั้น
 create policy q_read on public.questions for select to authenticated
   using (public.has_any_role(array['staff:exam','super_admin'])
@@ -366,4 +366,4 @@ grant select, update (read_at, deleted_at) on public.notification_recipients to 
 | บัญชีเจ้าหน้าที่ 1 คนถือหลาย sub-role (เช่น content+exam) — ยอมรับได้แค่ไหนในทีมเล็ก | เสนอ default: อนุญัติพร้อม flag SoD; เข้มงวดขึ้นเมื่อทีมโต (DCR) |
 | การยืนยันตัวตนทนายผ่าน SSO ระบบสมาชิกสภาฯ (Q3) จะเพิ่มบทบาท/การ map แบบใหม่ | รอยืนยัน Q3 — โครง permission ไม่กระทบ (เพิ่มที่ชั้น identity) |
 | ชื่อตาราง/คอลัมน์ในตัวอย่าง SQL ยึด DATA-DICTIONARY.md แล้ว (B-03: role_assignments, assessment_attempts, credit_ledger_entries) — คงตรวจซ้ำอีกครั้งเมื่อ DATA-DICTIONARY เปลี่ยนเวอร์ชัน | ปิดจาก A6 review |
-| **คอลัมน์เจ้าของทรัพยากรยังไม่มีใน DD** — `courses.created_by` และ `question_banks.created_by` ที่ policy §3.1 ใช้อ้าง "instructor เจ้าของ" ต้องเพิ่มใน DATA-DICTIONARY.md §3.2/§3.4 ผ่าน DCR ก่อนเขียน migration จริง (D11-5: policy ห้ามอ้างคอลัมน์ที่ไม่มีจริง) | เปิด — ต้อง DCR กับ worker-3 ก่อน Wave B |
+| **คอลัมน์เจ้าของทรัพยากร** — `courses.created_by` และ `question_banks.created_by` ที่ policy §3.1 ใช้อ้าง "instructor เจ้าของ" (D11-5: policy ห้ามอ้างคอลัมน์ที่ไม่มีจริง) | **ปิดแล้ว — DCR-3 (2026-09-08):** DATA-DICTIONARY §3.2/§3.4 เพิ่มคอลัมน์ครบทั้งสองตาราง |
