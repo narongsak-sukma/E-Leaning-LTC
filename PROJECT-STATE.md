@@ -17,7 +17,7 @@
 | Task | งาน                                    | Owner    | Status        |
 | ---- | -------------------------------------- | -------- | ------------- |
 | A0   | Repo init + baseline docs + brief      | lead     | ✅ done       |
-| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ ส่งงาน+commit แล้ว (TEST-PLAN กำลัง align brief 0.2.0) |
+| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ เสร็จสมบูรณ์ + align brief 0.2.0 แล้ว (รอ A6 review) |
 | A2   | SRS + RTM                              | worker-2 | 🔄 in_progress |
 | A3   | SDS + Architecture + Data Dictionary   | worker-3 | 🔄 in_progress |
 | A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
@@ -65,4 +65,5 @@
 
 - 2026-09-08 · เริ่มโครงการ · Wave A spawn workers 1–5 (docs) · lead = session นี้
 - 2026-09-08 · **A4 เสร็จ** — API-SPEC 350 บรรทัด (52 endpoints), RBAC 279 บรรทัด (47 permissions), AUDIT 257 บรรทัด (46 event types) · ตรวจรับ: wc -l ตรงรายงาน, ไม่แตะไฟล์อื่น · commit d02c574 + merge a031172 · ไม่มี DCR · **โจทย์ A6:** (1) ประสานชื่อตาราง/คอลัมน์/UUID กับ DATA-DICTIONARY ของ worker-3 (2) re-map AUD-01…12 ของ audit doc ให้ตรง SRS ของ worker-2 (3) ค่า default ทั้งหมด flag รอยืนยัน Q1–Q4 แล้ว
-- 2026-09-08 · **A1 เสร็จ** — PROJECT-PLAN 242 บรรทัด (11 sections), RISK-REGISTER 161 บรรทัด (26 risks), TEST-PLAN 334 บรรทัด (18 TC + 16 E2E) · ตรวจรับ: wc -l ตรงรายงาน · commit 7a88da6 + merge e9fd2b3 · **DCR-1 APPROVE → brief 0.2.0 (+staging env, +Q7)** · DCR-2 เป็นรายการ A6 · คำถามค้าง QP-1/QP-2/QP-3/QP-5 รอ user/หน่วยงาน (ดู §คำถามค้างใน PROJECT-PLAN) · สั่ง worker-1 align TEST-PLAN กับ brief 0.2.0
+- 2026-09-08 · **A1 เสร็จ** — PROJECT-PLAN 242 บรรทัด (11 sections), RISK-REGISTER 161 บรรทัด (26 risks), TEST-PLAN 334 บรรทัด (18 TC + 16 E2E) · ตรวจรับ: wc -l ตรงรายงาน · commit 7a88da6 + merge e9fd2b3 · **DCR-1 APPROVE → brief 0.2.0 (+staging env, +Q7)** · DCR-2 เป็นรายการ A6 · คำถามค้าง QP-1/QP-2/QP-3/QP-5 รอ user/หน่ยงาน (ดู §คำถามค้างใน PROJECT-PLAN) · สั่ง worker-1 align TEST-PLAN กับ brief 0.2.0
+- 2026-09-08 · **A1 follow-up เสร็จ** — TEST-PLAN 0.2.0-draft (337 บรรทัด): staging เป็น env หลักของ security/perf test, entry criteria + T-1 อัปเดต, ลบ QP-5 ออก · lead แก้ QP-5 เดิมใน PROJECT-PLAN §11 ยุบรวม Q7 · commit 4840b93 + merge d64e378 · **A1 ปิดสมบูรณ์**
