@@ -52,7 +52,7 @@
 | `export_status` | queued, processing, completed, failed |
 | `security_event_type` | login_fail, mfa_fail, lockout, rate_limit_hit, session_revoke |
 
-## 3. ตารางตามโดเมน (39 ตาราง)
+## 3. ตารางตามโดเมน (40 ตาราง)
 
 ### 3.1 Identity & License
 
@@ -68,7 +68,7 @@
 | email | text | NOT NULL UNIQUE (มิเรอร์จาก auth เพื่อ query; ต้นทางคือ Supabase Auth) |
 | phone | text | NULL, format E.164 |
 | preferred_locale | text | NOT NULL DEFAULT 'th', CHECK IN ('th','en') |
-| pdpa_consented_at | timestamptz | NULL — จะ NOT NULL เมื่อ flow consent ใช้งาน (SRS) |
+| pdpa_consented_at | timestamptz | NULL — (หมายเหตุ D12/F18) หลักฐาน "รับทราบประกาศ" แยกไป `notice_acknowledgments` แล้ว — คอลัมน์นี้เหลือเฉพาะ consent PDPA จริง จะ NOT NULL เมื่อ flow consent ใช้งาน (SRS) |
 | is_active | boolean | NOT NULL DEFAULT true |
 | deleted_at | timestamptz | NULL (soft delete) |
 คีย์/Index: UNIQUE(email) WHERE deleted_at IS NULL; INDEX(deleted_at)
@@ -88,9 +88,10 @@ Retention: อายุบัญชี + 10 ปีหลังลบ — **anony
 | verified_by | uuid | NULL FK→profiles (เจ้าหน้าที่ผู้อนุมัติ) |
 | verified_at | timestamptz | NULL |
 | expires_on | date | NULL (วันหมดอายุใบอนุญาต — ใช้อ้างรอบต่ออายุ) |
+| revoked_at | timestamptz | NULL (เพิกถอนใบอนุญาต — NULL + status='verified' = ใบใช้งานอยู่ — F20/D12) |
 | rejected_reason | text | NULL (เมื่อ status='rejected' ต้อง NOT NULL — CHECK) |
 | deleted_at | timestamptz | NULL |
-คีย์/Index: UNIQUE(user_id, license_no) WHERE deleted_at IS NULL; INDEX(license_no) WHERE deleted_at IS NULL; CHECK (status='rejected' ↔ rejected_reason IS NOT NULL)
+คีย์/Index: UNIQUE(user_id, license_no) WHERE deleted_at IS NULL; **UNIQUE(license_no) WHERE revoked_at IS NULL** (เลขใบอนุญาตหนึ่งเลขผูกกับบัญชี active ได้เดียว — F20/D12); INDEX(license_no) WHERE deleted_at IS NULL; CHECK (status='rejected' ↔ rejected_reason IS NOT NULL) — หมายเหตุ: approval function ตรวจ conflict ของ license_no **แบบ atomic ใน TX เดียวกับการ grant** ก่อนอนุมัติ (ชน → ERR-PRF-001)
 RLS: **SELECT** เจ้าของแถว หรือ staff:exam/registrar + super_admin; **INSERT** service_role เท่านั้น (สร้างอัตโนมัติเมื่อ `license_applications` ได้รับอนุมัติ); **UPDATE** เจ้าหน้าที่ staff:registrar/super_admin เท่านั้น (เปลี่ยน status/verified_by/rejected_reason); **DELETE** ไม่อนุญาต
 Retention: ตลอดอายุบัญชี + 10 ปี (เกี่ยวเนื่องสิทธิต่อใบอนุญาต)
 
@@ -144,6 +145,20 @@ Retention: ถาวร (ประวัติการมอบ/เพิกถ
 คีย์/Index: INDEX(user_id, consent_type, created_at DESC)
 RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin; **INSERT** service_role ผ่าน BFF เท่านั้น; **UPDATE/DELETE** ไม่อนุญาต (หลักฐาน consent แก้ไม่ได้ — ถอน = เพิ่มแถว action='revoke')
 Retention: ตลอดอายุบัญชี + 10 ปี (PDPA)
+
+#### `notice_acknowledgments` — หลักฐานการรับทราบประกาศ **(append-only — แยกจาก consents — F18/D12)**
+
+วัตถุประสงค์ (ตารางเสริม D12): บันทึกว่าผู้ใช้กดรับทราบประกาศ/ข้อกำหนดของระบบ (notice_key + version) — **คนละความหมายกับ `consents`** (consent PDPA จริง — ให้/ถอนได้) ตารางนี้เป็น append-only เพื่อเป็นหลักฐานการรับทราบต่อเวอร์ชัน
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| user_id | uuid | NOT NULL FK→profiles |
+| notice_key | text | NOT NULL (คีย์ประกาศ เช่น 'regulation_update_2026') |
+| version | text | NOT NULL (เวอร์ชันของประกาศที่รับทราบ) |
+| acknowledged_at | timestamptz | NOT NULL DEFAULT now() |
+คีย์/Index: UNIQUE(user_id, notice_key, version); INDEX(notice_key, version)
+RLS: **SELECT** เจ้าของแถว; **INSERT** เจ้าของแถวผ่าน BFF (acknowledge ของตัวเอง); **UPDATE/DELETE ไม่มี path เด็ดขาด** (append-only — รวม REVOKE ใน §4.4); service_role อ่านเพื่อ gate ฟีเจอร์ที่ต้องรับทราบก่อน
+Retention: ตลอดอายุบัญชี (หลักฐานการรับทราบ — canonical ที่ §4.6)
 
 ### 3.2 Catalog & Enrollment
 
@@ -252,7 +267,7 @@ Retention: ตลอดอายุการใช้งาน + ตาม reten
 | completed_at | timestamptz | NULL (ตั้งโดย rollup — SDS §3.3) |
 | deleted_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(user_id, course_id) WHERE deleted_at IS NULL; INDEX(course_id, status); INDEX(user_id)
-RLS: **SELECT** เจ้าของแถว · `has_any_role('staff:viewer','super_admin')` · instructor เจ้าของหลักสูตร · staff:exam/staff:registrar เฉพาะขอบเขตรายงานของตน (ผลสอบ/credit — อ่านผ่าน view ตาม report:view RBAC §2) — ไม่เปิด SELECT ทั้งตารางให้ staff ทุกระดับ (D11-4); **INSERT** ผู้ใช้เป็นเจ้าของแถวเอง (self — ผ่าน BFF ที่ตรวจเงื่อนไขสิทธิ์ก่อน) หรือ service_role (staff ลงทะเบียนให้); **UPDATE** service_role เท่านั้น (status/completed_at คำนวณฝั่ง server); **DELETE** ไม่อนุญาต (ใช้ cancelled)
+RLS: **SELECT** เจ้าของแถว · `has_any_role('staff:viewer','super_admin')` · instructor เจ้าของหลักสูตร · staff:exam/staff:registrar เฉพาะขอบเขตรายงานของตน (ผลสอบ/credit — อ่านผ่าน view ตาม report:view RBAC §2) — ไม่เปิด SELECT ทั้งตารางให้ staff ทุกระดับ (D11-4); **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2/D12)** — INSERT ผ่าน `enroll()` SECURITY DEFINER (ตรวจสิทธิ์/หลักสูตร published/ห้ามซ้ำข้างใน), UPDATE เฉพาะ rollup/งานทะเบียน; **DELETE** ไม่อนุญาต (ใช้ cancelled)
 Retention: ตามอายุบัญชี (learning records — canonical ที่ §4.6; ฐานของประกาศนียบัตร/credit คงอยู่ผ่าน certificates/credit_ledger_entries ที่เป็นถาวร)
 
 ### 3.3 Learning & Progress
@@ -272,7 +287,7 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | completed_at | timestamptz | NULL (idempotent — ตั้งครั้งเดียว) |
 | updated_at | timestamptz | DEFAULT now() |
 คีย์/Index: UNIQUE(enrollment_id, lesson_id); INDEX(lesson_id)
-RLS: **SELECT** เจ้าของผ่าน enrollment · `has_any_role('staff:viewer','super_admin')` · instructor เจ้าของหลักสูตร (ความคืบหน้าเป็นข้อมูลผู้อื่น — RBAC §2); **INSERT/UPDATE** เจ้าของ enrollment ผ่าน BFF เท่านั้น (BFF clamp ค่า + เป็นผู้ตัดสิน completed_at); **DELETE** ไม่อนุญาต
+RLS: **SELECT** เจ้าของผ่าน enrollment · `has_any_role('staff:viewer','super_admin')` · instructor เจ้าของหลักสูตร (ความคืบหน้าเป็นข้อมูลผู้อื่น — RBAC §2); **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2/D12)** — เขียนผ่าน `record_lesson_progress()` SECURITY DEFINER (server ตัดสิน bounded intervals/completed_at ข้างใน — SDS §3.3); **DELETE** ไม่อนุญาต
 Retention: ตามอายุบัญชี (learning records — canonical ที่ §4.6)
 
 #### `lesson_quizzes` — แบบทดสอบย่อย (quiz)
@@ -302,7 +317,7 @@ Retention: ถาวร
 | sort_order | int | NOT NULL |
 | is_active | boolean | NOT NULL DEFAULT true |
 คีย์/Index: INDEX(quiz_id, sort_order)
-RLS: **SELECT** ผู้ลงทะเบียน (BFF ตัด explanation ออกจนกว่าจะทำเสร็จ) + instructor/staff; **INSERT/UPDATE** instructor เจ้าของ/staff:content; **DELETE** ไม่อนุญาต (ใช้ is_active=false)
+RLS: **ไม่มี policy ให้ผู้เรียน (F4/D12 — ตารางฐานมี explanation/เฉลย)** — ผู้เรียนได้รับโจทย์ผ่าน BFF เท่านั้น; **SELECT** instructor เจ้าของ + `has_any_role('staff:viewer','staff:content','super_admin')`; **INSERT/UPDATE** instructor เจ้าของ/staff:content; **DELETE** ไม่อนุญาต (ใช้ is_active=false)
 Retention: ถาวร
 
 #### `quiz_options` — ตัวเลือกของคำถาม quiz
@@ -314,7 +329,7 @@ Retention: ถาวร
 | is_correct | boolean | NOT NULL |
 | sort_order | int | NOT NULL |
 คีย์/Index: UNIQUE(question_id, sort_order)
-RLS: **SELECT** ผู้ลงทะเบียน/instructor/staff แต่ **BFF ห้ามส่ง is_correct ออกไปตลอดการทำ quiz** (คะแนนตัดสินฝั่ง server); **INSERT/UPDATE** instructor เจ้าของ/staff:content; **DELETE** ไม่อนุญาต
+RLS: **ไม่มี policy ให้ผู้เรียน (F4/D12 — is_correct เป็นเฉลย)** — BFF อ่านผ่าน service path แล้วส่งเฉพาะ id/text/sort_order **ไม่มี is_correct ตลอดการทำ quiz** (คะแนนตัดสินฝั่ง server); **SELECT** instructor เจ้าของ + `has_any_role('staff:viewer','staff:content','super_admin')`; **INSERT/UPDATE** instructor เจ้าของ/staff:content; **DELETE** ไม่อนุญาต
 Retention: ถาวร
 
 #### `quiz_attempts` — ผลการทำ quiz รายครั้ง
@@ -330,7 +345,7 @@ Retention: ถาวร
 | passed | boolean | NULL |
 | answers_snapshot | jsonb | NULL (เก็บข้อ+ตัวเลือกที่เลือก ณ ตรวจ — ง่ายต่อเฉลย) |
 คีย์/Index: UNIQUE(quiz_id, user_id, attempt_no); INDEX(user_id)
-RLS: **SELECT** เจ้าของแถว/staff/instructor เจ้าของ; **INSERT** เจ้าของ (ผ่าน BFF ตรวจ max_attempts); **UPDATE** service_role เท่านั้น (บันทึกผลตอน submit); **DELETE** ไม่อนุญาต
+RLS: **SELECT** เจ้าของแถว + `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` + instructor เจ้าของหลักสูตร; **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2/D12)** — เขียนผ่าน `record_quiz_attempt()` SECURITY DEFINER (INSERT + ตรวจ max_attempts + ตรวจคะแนนจาก quiz_options ข้างใน function เดียว); **DELETE** ไม่อนุญาต
 Retention: ตามอายุบัญชี (learning records — canonical ที่ §4.6)
 
 ### 3.4 Assessment & Certification
@@ -363,8 +378,9 @@ Retention: ถาวร
 | status | question_status | NOT NULL DEFAULT 'draft' |
 | tags | text[] | NOT NULL DEFAULT '{}' |
 | created_by | uuid | NOT NULL FK→profiles |
+| version | int | NOT NULL DEFAULT 1 (bump เมื่อแก้โจทย์/ตัวเลือก — `attempt_answers.question_snapshot` อ้างเวอร์ชันนี้ — F13/D12) |
 คีย์/Index: INDEX(bank_id, status, difficulty); GIN(tags)
-RLS: **SELECT** instructor เจ้าของ bank + `has_any_role('staff:viewer','staff:exam','super_admin')` เท่านั้น (question_bank:view — RBAC §2) — **ผู้เรียนห้าม query โดยตรง** (ได้รับเฉพาะ snapshot ผ่าน BFF ตอนสอบ); **INSERT/UPDATE** instructor/staff:exam/super_admin (เปลี่ยน status='active' ต้อง staff:exam); **DELETE** ไม่อนุญาต (ใช้ retired)
+RLS: **SELECT** instructor เจ้าของ bank + `has_any_role('staff:viewer','staff:exam','super_admin')` เท่านั้น (question_bank:view — RBAC §2) — **ผู้เรียนห้าม query โดยตรง — ไม่มี learner policy (F4/D12)** (ได้รับเฉพาะ snapshot ผ่าน BFF ตอนสอบ); **INSERT/UPDATE** instructor/staff:exam/super_admin (เปลี่ยน status='active' ต้อง staff:exam); **DELETE** ไม่อนุญาต (ใช้ retired)
 Retention: ถาวร (อ้างอิงโดย attempt_answers)
 
 #### `question_options` — ตัวเลือกของข้อสอบ
@@ -412,7 +428,7 @@ Retention: ถาวร
 | require_course_complete | boolean | NOT NULL DEFAULT true |
 | proctoring_mode | proctoring_mode | NOT NULL DEFAULT 'basic' (ตาม SRS Appendix A `proctoring_mode` — ธง Q4) |
 | effective_from | timestamptz | NOT NULL DEFAULT now() |
-คีย์/Index: UNIQUE(assessment_id, version); INDEX(assessment_id) WHERE effective_from <= now() — attempt ใช้ rules เวอร์ชันที่มีผล ณ วันสอบ (การแก้กฎไม่ย้อนหลัง)
+คีย์/Index: UNIQUE(assessment_id, version); INDEX(assessment_id, effective_from) — attempt ใช้ rules เวอร์ชันที่มีผล ณ วันสอบ โดยใส่เงื่อนไข `effective_from <= now()` **ตอน query** (ห้ามเป็น index predicate — now() ไม่ immutable ใช้ใน index predicate ไม่ได้ — F21/D12); การแก้กฎไม่ย้อนหลัง
 RLS: **SELECT** ผู้ลงทะเบียน (เห็นเฉพาะฟิลด์ที่เกี่ยวกับผู้สอบ เช่น เวลา/จำนวนครั้ง) + instructor เจ้าของหลักสูตร + `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` เห็นเต็ม (assessment:view กติกา — RBAC §2); **INSERT/UPDATE** staff:exam/super_admin ผ่าน BFF + audit (แก้ = สร้าง version ใหม่); **DELETE** ไม่อนุญาต
 Retention: ถาวร (versioned)
 
@@ -426,6 +442,8 @@ Retention: ถาวร (versioned)
 | rules_id | uuid | NOT NULL FK→assessment_rules (snapshot กติกาที่ใช้) |
 | attempt_no | int | NOT NULL CHECK > 0 |
 | status | attempt_status | NOT NULL DEFAULT 'in_progress' |
+| session_id | text | NOT NULL (session เจ้าของ attempt — lease จาก JWT claim `session_id` — F22/D12) |
+| lease_expires_at | timestamptz | NULL (อายุ lease ต่อ request — session/อุปกรณ์อื่น takeover ได้หลังหมด `exam_disconnect_grace_minutes` (default 5 นาที) + audit `EXAM_SESSION_TAKEOVER` — SDS §3.1f) |
 | started_at | timestamptz | NOT NULL DEFAULT now() (DB clock — จับเวลา server-side) |
 | expires_at | timestamptz | NOT NULL (= started_at + rules.time_limit_minutes ตอนสร้าง) |
 | submitted_at | timestamptz | NULL (idempotent key ของ submit) |
@@ -435,7 +453,7 @@ Retention: ถาวร (versioned)
 | correct_count | int | NULL |
 | client_events | jsonb | NULL (proctoring ระดับ basic — บันทึก client events เช่น tab blur; จำกัดขนาด, ไม่มี PII) |
 คีย์/Index: UNIQUE(assessment_id, user_id, attempt_no); **UNIQUE(assessment_id, user_id) WHERE status='in_progress'** (ป้องกันสอบซ้อน — SDS §3.1f); INDEX(status) WHERE status='in_progress' (auto-submit job); INDEX(user_id)
-RLS: **SELECT** เจ้าของแถว + `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` + instructor เจ้าของหลักสูตร (attempt:view ทุกคน — RBAC §2); **INSERT** เจ้าของผ่าน BFF (หลังตรวจเงื่อนไขครบ); **UPDATE** service_role เท่านั้น (answer/submit/grade ทั้งหมดฝั่ง server); **DELETE** ไม่อนุญาต (ยกเลิกด้วย status='voided' โดย staff:exam + audit)
+RLS: **SELECT** เจ้าของแถว + `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` + instructor เจ้าของหลักสูตร (attempt:view ทุกคน — RBAC §2); **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2/D12)** — INSERT ผ่าน `start_attempt()` (ตรวจ enrollment/max_attempts/attempt ค้าง + ผูก session_id/lease ข้างใน), UPDATE ผ่าน `save_answer()`/`submit_attempt()`/auto-submit job เท่านั้น; **DELETE** ไม่อนุญาต (ยกเลิกด้วย status='voided' โดย staff:exam + audit)
 Retention: ตามอายุบัญชี (learning records — canonical ที่ §4.6)
 
 #### `attempt_answers` — คำตอบรายข้อ (snapshot ของการสุ่ม)
@@ -447,13 +465,15 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | seq | int | NOT NULL (ลำดับที่สุ่มได้) |
 | option_order | int[] | NULL (ลำดับตัวเลือกที่สุ่ม ณ ตอน start) |
 | selected_option_ids | uuid[] | NULL (บันทึกทีละข้อ — UPSERT) |
-| question_snapshot | jsonb | NOT NULL (โจทย์/ตัวเลือก/is_correct/points + เวอร์ชัน question ณ วินาที start — D11-16: Grader ตรวจจาก snapshot ล้วน การแก้ข้อสอบระหว่างสอบไม่กระทบ attempt ที่กำลังสอบ) |
+| question_snapshot | jsonb | NOT NULL — โครง `{question_id, version, text, options:[{id, text, is_correct, points}], points}` (snapshot ณ วินาที start — D11-16/F13/F14: Grader ตรวจจาก snapshot ล้วน การแก้ข้อสอบระหว่างสอบไม่กระทบ attempt ที่กำลังสอบ) |
 | is_correct | boolean | NULL (ตั้งตอนตรวจ) |
 | points_earned | smallint | NULL |
 | answered_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(attempt_id, question_id); INDEX(question_id)
-RLS: **SELECT** เจ้าของผ่าน attempt เฉพาะ status ไม่ใช่ in_progress หรือเป็นของตัวเองระหว่างสอบแบบไม่มี is_correct (BFF ควบคุม); **INSERT** service_role (สร้าง snapshot ตอน start); **UPDATE** service_role เท่านั้น (บันทึกคำตอบ/ผลตรวจ); **DELETE** ไม่อนุญาต
+RLS: **ผู้เรียนไม่มี SELECT policy บนตารางฐาน (F4/D12)** — แถวมี `question_snapshot` (is_correct = เฉลย) ผู้เรียนอ่านผ่าน view `learner_attempt_view` เท่านั้น; **SELECT** เฉพาะ `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` + instructor เจ้าของหลักสูตร; **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2)** — สร้าง snapshot โดย `start_attempt()`, บันทึกคำตอบ/ผลตรวจโดย `save_answer()`/`submit_attempt()`; **DELETE** ไม่อนุญาต
 Retention: ตามอายุบัญชี (learning records — canonical ที่ §4.6)
+
+**View สำหรับผู้เรียน (F4/D12)**: `learner_attempt_view` — SELECT เฉพาะแถวของตัวเอง (join ผ่าน `assessment_attempts.user_id = auth.uid()`) และ **ตัดคอลัมน์เฉลยออก** (`is_correct`, `points_earned`, `question_snapshot` และ explanation) — เปิดเฉลยเมื่อครบเงื่อนไขตาม `exam_review_mode` (SRS Appendix A; เงื่อนไขอยู่ในนิยาม view เช่น `submitted_at IS NOT NULL` + grace) ; grant SELECT ให้ authenticated — ผู้เรียนไม่ SELECT ตารางฐานโดยตรง
 
 #### `certificates` — ประกาศนียบัตร **(PII — PDPA: holder_name_snapshot)**
 
@@ -461,7 +481,7 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | ------- | ---- | --------------------- |
 | cert_no | text | NOT NULL UNIQUE — รูปแบบ `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` ตาม SRS Appendix A `certificate_code_format` (สุ่มด้วย CSPRNG + ตรวจ UNIQUE ซ้ำใน transaction; **ไม่ใช้ sequence** เพราะลำดับถูกเดาเลขถัดไปได้ — รอยืนยันรูปแบบกับสภาฯ) |
 | verify_code | text | NOT NULL UNIQUE (nanoid 43 อักขระ, CSPRNG — คีย์สาธารณะ ไม่มี PII) |
-| enrollment_id | uuid | NOT NULL UNIQUE FK→enrollments (idempotent ของการออก) |
+| enrollment_id | uuid | NOT NULL FK→enrollments (partial UNIQUE WHERE status='valid' — 1 หลักสูตรต่อบัญชีมีใบ valid ได้ 1 ใบ แต่มีประวัติ reissue ได้ — F16/D12) |
 | user_id | uuid | NOT NULL FK→profiles |
 | course_id | uuid | NOT NULL FK→courses |
 | holder_name_snapshot | text | NOT NULL (ชื่อตามที่พิมพ์บนใบประกาศ) |
@@ -474,7 +494,8 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | revoked_reason | text | NULL |
 | pdf_media_id | uuid | NULL FK→media_assets |
 | superseded_by | uuid | NULL FK→certificates (reissue → ใบเดิมเปลี่ยน status='superseded' และชี้ใบใหม่) |
-คีย์/Index: UNIQUE(cert_no); UNIQUE(verify_code); UNIQUE(enrollment_id); INDEX(user_id); CHECK (status='revoked' ↔ revoked_at IS NOT NULL)
+| supersedes_cert_id | uuid | NULL FK→certificates (lineage — ใบใหม่ชี้กลับใบเก่าที่ตนแทนที่ — F16/D12) |
+คีย์/Index: UNIQUE(cert_no); UNIQUE(verify_code); **UNIQUE(enrollment_id) WHERE status='valid'** (partial — F16/D12); INDEX(user_id); INDEX(supersedes_cert_id); CHECK (status='revoked' ↔ revoked_at IS NOT NULL)
 RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin — path สาธารณะเป็น BFF อย่างเดียว: `GET /certificates/{code}` ตอบ **200 เสมอ** ด้วย 4 ฟิลด์ `{code, course_title, issued_at, status ∈ valid|revoked|superseded}` — **ห้ามแสดงชื่อเจ้าของ** (ชื่ออยู่บน PDF เท่านั้น — D8); **INSERT** service_role ผ่าน BFF โดย staff:registrar/super_admin เท่านั้น + audit; **UPDATE** service_role (เปลี่ยน status พร้อมเหตุผล — registrar); **DELETE** ไม่อนุญาตเด็ดขาด
 Retention: ถาวร (เอกสารสิทธิ)
 
@@ -508,9 +529,10 @@ Retention: **90 วัน** (ตัดด้วย job — เก็บสถิ
 | required_credits_per_cycle | numeric(6,2) | NULL (เกณฑ์ต่อรอบ — default 12, **รอยืนยัน Q1**) |
 | priority | int | NOT NULL DEFAULT 100 (ตัวเลขน้อย = จับคู่ก่อน) |
 | effective_from / effective_to | timestamptz | NOT NULL DEFAULT now() / NULL |
-| is_active | boolean | NOT NULL DEFAULT true |
+| status | text | NOT NULL DEFAULT 'draft', CHECK IN ('draft','active','retired') (lifecycle versioned — คู่กับ effective window; จับคู่ได้เฉพาะ status='active' + window ครอบวันเกิดเหตุ — F17/D12) |
+| renewal_cycle | text | NULL (ประเภทรอบที่กฎผูก เช่น 'annual' — NULL = ตามรอบ default ของ config — รอยืนยัน Q1 — F17/D12) |
 คีย์/Index: UNIQUE(code); INDEX(course_id, priority)
-RLS: **SELECT** ผู้ใช้ role lawyer (ดูกฎของตัวเองแบบสรุป) + `has_any_role('staff:viewer','staff:registrar','super_admin')` (credit_rule:view — RBAC §2); **INSERT/UPDATE** super_admin/staff:registrar ผ่าน BFF + audit; **DELETE** ไม่อนุญาต (ปิดด้วย is_active/effective_to)
+RLS: **SELECT** ผู้ใช้ role lawyer (ดูกฎของตัวเองแบบสรุป) + `has_any_role('staff:viewer','staff:registrar','super_admin')` (credit_rule:view — RBAC §2); **INSERT/UPDATE** super_admin/staff:registrar ผ่าน BFF + audit (แก้ = สร้างเวอร์ชันใหม่ไม่แก้ย้อนหลัง); **DELETE** ไม่อนุญาต (retire ด้วย status='retired' / effective_to — F17/D12)
 Retention: ถาวร (versioned ด้วย effective window)
 
 #### `renewal_cycles` — รอบต่ออายุใบอนุญาตรายบุคคล
@@ -536,9 +558,9 @@ Retention: ถาวร (ประวัติการต่ออายุ)
 | entry_type | ledger_entry_type | NOT NULL |
 | credit_type | text | NOT NULL DEFAULT 'general' |
 | amount | numeric(6,2) | NOT NULL (signed — reversal ติดลบ) |
-| certificate_id | uuid | NULL FK→certificates (accrual — = source_id เมื่อ source_type='certificate'; คงไว้เพื่อ reporting) |
-| source_type | text | NOT NULL DEFAULT 'certificate' (ประเภทเหตุการณ์ต้นทาง เช่น 'certificate' — ใช้กันซ้ำกับ UNIQUE ด้านล่าง — D11-17) |
-| source_id | uuid | NULL (id ของเหตุการณ์ต้นทาง เช่น certificates.id) |
+| certificate_id | uuid | NULL FK→certificates (ลิงก์ไปใบประกาศที่เกี่ยวข้อง — ตั้งภายหลังเมื่อออกใบ เพื่อ reporting เท่านั้น **ไม่ใช่ต้นทางของ accrual** — F15/D12) |
+| source_type | text | NOT NULL DEFAULT 'assessment_attempt' (ต้นทางของ accrual = attempt ที่ผ่าน — **การออกประกาศนียบัตรไม่ใช่ต้นทาง credit** — F15/D12) |
+| source_id | uuid | NULL (= assessment_attempts.id เมื่อ source_type='assessment_attempt') |
 | original_entry_id | uuid | NULL FK→credit_ledger_entries (ต้นทางของ reversal) |
 | rule_id | uuid | NULL FK→credit_rules (กฎที่ใช้ตอน accrual) |
 | reason | text | NULL (บังคับเมื่อ type IN ('adjustment','reversal') — CHECK) |
@@ -563,7 +585,7 @@ Retention: ถาวร (transcript ของทนายความ)
 | created_by | uuid | NULL FK→profiles (NULL = ระบบ) |
 | expires_at | timestamptz | NULL |
 คีย์/Index: INDEX(created_at DESC); INDEX(topic)
-RLS: **SELECT** ผู้รับเท่านั้น (JOIN ผ่าน notification_recipients — policy ใช้ EXISTS); **INSERT** service_role ผ่าน BFF (notification service); **UPDATE** service_role (แก้ไขก่อนส่งได้); **DELETE** ไม่อนุญาต (ล้างตาม expires_at ด้วย job)
+RLS: **SELECT** ผู้รับเท่านั้น (JOIN ผ่าน notification_recipients — policy ใช้ EXISTS); **INSERT** service_role ผ่าน BFF (notification service — **เช็ค consent active ของผู้รับก่อนสร้าง** — F18/D12); **UPDATE** service_role (แก้ไขก่อนส่งได้); **DELETE** ไม่อนุญาต (ล้างตาม expires_at ด้วย job)
 Retention: 12 เดือน หรือตาม expires_at
 
 #### `notification_recipients` — ผู้รับแจ้งเตือนรายคน/รายช่องทาง
@@ -613,7 +635,7 @@ Retention: ถาวร (versioned)
 
 #### `email_outbox` — คิวอีเมลขาออก **(PII — PDPA: to_email)**
 
-วัตถุประสงค์ (ตารางเสริมที่เพิ่มนอกรายการขั้นต่ำ): แยกการส่งอีเมลออกจาก request path + retry ได้ (SDS §8) — dev ใช้ Mailpit จับ, prod ใช้ Resend/SMTP
+วัตถุประสงค์ (ตารางเสริมที่เพิ่มนอกรายการขั้นต่ำ): แยกการส่งอีเมลออกจาก request path + retry ได้ (SDS §8) — dev ใช้ Mailpit จับ, prod ใช้ Resend/SMTP; **worker เช็ค consent ที่ยัง active ของผู้รับ ณ ตอน dispatch** (ถอน consent = งดส่ง — F18/D12)
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
@@ -690,8 +712,10 @@ Reporting ทั้งหมดอ่านผ่าน view + สิทธิ�
 | user_agent | text | NULL (ตัดทอน) |
 | request_id | text | NULL (เชื่อมกับ app log) |
 | context | jsonb | NULL |
-คีย์/Index: INDEX(entity_type, entity_id, occurred_at DESC); INDEX(actor_user_id, occurred_at DESC); INDEX(action, occurred_at DESC); ไม่มี FK แบบ enforce ต่อ actor เพื่อกันการ rewrite ประวัติ (ใช้ lookup ที่แอป)
-RLS: **SELECT** `has_any_role('staff:viewer','super_admin')` (audit_log:view ทั้งหมด — sv อ่านอย่างเดียว ตาม RBAC §2) + แถว activity ของตัวเอง (ทุกบทบาท — audit_log:view activity ตัวเอง); **INSERT** service_role ผ่าน audit service เท่านั้น; **UPDATE/DELETE ไม่มี path เด็ดขาด** — `REVOKE UPDATE, DELETE ON audit_logs FROM anon, authenticated, service_role` + ไม่มี policy ใดอนุญาต (D6); ไม่มี API แก้/ลบ audit
+| prev_hash | text | NOT NULL (hash ของแถวก่อนหน้าในสาย — แถวแรกของวันใช้ค่า seed ตาม AUDIT-LOG-DESIGN §3.3 — F7/D12) |
+| row_hash | text | NOT NULL UNIQUE — **sha256 บน canonical serialization ครบทุก evidentiary field** (prev_hash, id, actor_user_id, actor_roles, action, entity_type, entity_id, before, after, context, occurred_at — ลำดับฟิลด์ตามนิยาม AUDIT-LOG-DESIGN §3.3) · การไล่ตรวจสายใช้ traversal order `(occurred_at, id)` · anchor รายวันที่ `audit_chain_anchors` (F7/D12) |
+คีย์/Index: INDEX(entity_type, entity_id, occurred_at DESC); INDEX(actor_user_id, occurred_at DESC); INDEX(action, occurred_at DESC); INDEX(occurred_at, id) (traversal order ของ hash-chain — F7); ไม่มี FK แบบ enforce ต่อ actor เพื่อกันการ rewrite ประวัติ (ใช้ lookup ที่แอป)
+RLS: **SELECT** `has_any_role('staff:viewer','super_admin')` (audit_log:view ทั้งหมด — sv อ่านอย่างเดียว ตาม RBAC §2) + แถว activity ของตัวเอง (ทุกบทบาท — audit_log:view activity ตัวเอง); **INSERT ไม่มี policy/grant ใด** — เขียนผ่าน `append_audit_event()` SECURITY DEFINER (owner `app_owner`) เท่านั้น (F8/D12); **UPDATE/DELETE ไม่มี path เด็ดขาด** — `REVOKE UPDATE, DELETE, INSERT ON audit_logs FROM anon, authenticated, service_role` + ไม่มี policy ใดอนุญาต (D6); ไม่มี API แก้/ลบ audit
 Retention: 5 ปี (นโยบายสภาฯ + PDPA — canonical ที่ §4.6) — purge job หลัง export เป็นงาน v1.1; partition รายเดือนเมื่อโต (SDS §8)
 
 #### `audit_chain_anchors` — anchor รายวันของ hash-chain audit_logs **(append-only — D11-6)**
@@ -728,11 +752,11 @@ Retention: 1 ปี (canonical ที่ §4.6)
 
 #### `admin_sessions` — ติดตาม session ของ staff/admin
 
-วัตถุประสงค์ (ตารางเสริมที่เพิ่มนอกรายการขั้นต่ำ): บังคับ idle timeout/absolute timeout/lockout/revoke ทันที ของบัญชี staff (SDS §5.5) — JWT ของ Supabase เพียงอย่างเดียวทำ policy แบบนี้ไม่สะดวก
+วัตถุประสงค์ (ตารางเสริมที่เพิ่มนอกรายการขั้นต่ำ): บังคับ idle timeout/absolute timeout/lockout/revoke ทันที ของบัญชี **staff/instructor/super_admin** (SDS §5.5) — JWT ของ Supabase เพียงอย่างเดียวทำ policy แบบนี้ไม่สะดวก (F10/D12)
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
-| user_id | uuid | NOT NULL FK→profiles (ต้องเป็นบทบาท staff*/super_admin — ตรวจที่ BFF) |
+| user_id | uuid | NOT NULL FK→profiles (ต้องเป็นบทบาท staff*/instructor/super_admin — ตรวจที่ BFF — F10/D12) |
 | session_id | text | NOT NULL UNIQUE (ค่าจาก Supabase session) |
 | mfa_satisfied | boolean | NOT NULL DEFAULT false (บังคับ true — brief §8) |
 | started_at | timestamptz | NOT NULL DEFAULT now() |
@@ -762,11 +786,11 @@ Retention: 24 เดือน
 ### 4.3 Soft-delete policy
 
 - แอปไม่มีสิทธิ์ hard delete เลย (RLS ไม่มี policy DELETE ยกเว้นระบุ) — ลบ = ตั้ง deleted_at
-- การ purge ตาม retention เป็น job แยกที่ใช้ role เฉพาะ (ไม่ใช่ service_role ของแอป) + บันทึก audit ทุกครั้ง
+- การ purge ตาม retention เป็น job แยกที่ใช้บทบาทเฉพาะ **`purge_role`** (ชื่อเดียวกับที่ API/AUDIT อ้าง — ไม่ใช่ service_role ของแอป — F19/D12) + บันทึก audit ทุกครั้ง
 
 ### 4.4 Append-only enforcement (audit_logs + credit_ledger_entries + security_events)
 
-1. `REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_logs, credit_ledger_entries, security_events, audit_chain_anchors FROM anon, authenticated, service_role` — เหลือ path เขียน INSERT อย่างเดียว (D11-7)
+1. `REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_logs, credit_ledger_entries, security_events, audit_chain_anchors FROM anon, authenticated, service_role` (D11-7) + **`REVOKE INSERT ON audit_logs FROM anon, authenticated, service_role` (F8/D12)** — เขียน audit ได้เฉพาะผ่าน `append_audit_event()` SECURITY DEFINER (owner เฉพาะ `app_owner` — grant EXECUTE ให้ service_role/authenticated ตามจำเป็น); ตารางอื่นในกลุ่มนี้ยังเหลือ path INSERT อย่างเดียว
 2. RLS ไม่มี policy สำหรับ UPDATE/DELETE เลย
 3. trigger guard สุดท้าย: ถ้ามีการ UPDATE/DELETE (โดน role ที่ยังมีสิทธิ์ เช่น ตอน migration) ให้ RAISE EXCEPTION
 4. ไม่มี API/Server Action ใดเปิด path แก้/ลบ (ตรวจด้วย codex gate ตอน review โค้ด auth/security/data)
@@ -788,13 +812,28 @@ Retention: 24 เดือน
 | กลุ่มตาราง | Retention | หมายเหตุ |
 | ---------- | --------- | -------- |
 | credit_ledger_entries, renewal_cycles, certificates, notification_templates | ถาวร | หลักฐานธุรกิจ/transcript — ไม่มี purge |
-| audit_logs | 5 ปี | partition รายเดือนเมื่อโต · **purge job (role เฉพาะ) หลัง export สำเร็จ — เป็นงาน v1.1** (v1 = export อย่างเดียว ยังไม่ purge — แก้ข้อความ "v1 ไม่มีการลบ" เดิมให้ชัดเจน) |
+| audit_logs | 5 ปี | partition รายเดือนเมื่อโต · **purge job โดยบทบาทเฉพาะ `purge_role` หลัง export สำเร็จ — เป็นงาน v1.1** (v1 = export อย่างเดียว ยังไม่ purge) |
 | audit_chain_anchors | ถาวร | ต้องครบทุกวันเพื่อตรวจสาย hash-chain ย้อนหลัง |
-| security_events | 1 ปี | purge ด้วย job เฉพาะ + audit ทุกครั้ง |
+| security_events | 1 ปี | purge ด้วย `purge_role` + audit ทุกครั้ง |
 | certificate_verifications, email_outbox | 90 วัน | |
 | notifications, notification_recipients, report_exports | 12 เดือน (ไฟล์ export 7 วัน) | |
 | event_outbox | purge 30 วันหลัง processed | |
 | admin_sessions | 24 เดือน | |
 | profiles, lawyer_licenses, license_applications, consents | อายุบัญชี + 10 ปี | **anonymize เมื่อเจ้าของข้อมูลใช้สิทธิ์ลบ** (ระบบเก็บ audit/หลักฐานธุรกิจไว้ตาม §4.5) |
-| enrollments, lesson_progress, quiz_attempts, assessment_attempts, attempt_answers (learning records) | ตามอายุบัญชี | purge ด้วย job เฉพาะ + audit |
+| enrollments, lesson_progress, quiz_attempts, assessment_attempts, attempt_answers (learning records) | ตามอายุบัญชี | purge ด้วย `purge_role` + audit · **แถวที่ยังถูก certificates/credit_ledger_entries อ้าง FK อยู่ = anonymize ไม่ลบแถว** (FK RESTRICT บังคับ — ตัดค่าระบุตัวตนในคอลัมน์/snapshot คงโครง ledger/certificate ไว้ — F19/D12) |
 | notification_settings | ตามอายุบัญชี | |
+
+### 4.7 Server-controlled write functions (การเขียนของผู้เรียน — F2/D12)
+
+ตารางที่ผู้เรียนต้องเขียนได้ทั้งหมด **ไม่มี INSERT/UPDATE policy ให้บทบาทผู้เรียน** (`anon`/`citizen`/`lawyer`) — เขียนผ่าน **SECURITY DEFINER functions** เท่านั้น (owner เฉพาะ เช่น `app_owner`; ตรวจ `auth.uid()` + เงื่อนไขธุรกิจข้างใน + เขียน audit ใน TX เดียวกัน; grant EXECUTE ให้ `authenticated`):
+
+| Function | ตารางที่เขียน | เงื่อนไขที่ตรวจข้างใน |
+| -------- | ------------- | --------------------- |
+| `enroll()` | enrollments (INSERT) | หลักสูตร published, สิทธิ์ตาม role/is_public, ไม่ซ้ำ (UNIQUE), prerequisite |
+| `record_lesson_progress()` | lesson_progress (INSERT/UPDATE) | เป็นเจ้าของ enrollment, clamp ค่า, bounded playback intervals (SDS §3.3 — D11-15), ตัดสิน completed_at |
+| `record_quiz_attempt()` | quiz_attempts (INSERT/UPDATE) | ลงทะเบียน, ตรวจ max_attempts, ตรวจคะแนนจาก quiz_options ฝั่ง server ล้วน |
+| `start_attempt()` | assessment_attempts + attempt_answers (INSERT) | enrollment active, require_course_complete, max_attempts, ไม่มี attempt in_progress, ผูก session_id + lease, สุ่มข้อ + เขียน `question_snapshot` |
+| `save_answer()` | attempt_answers (UPDATE), assessment_attempts (UPDATE lease) | attempt in_progress, ยังไม่ `expires_at`, lease/session ตรง, `selected_option_ids` เป็น subset ของ options ใน snapshot |
+| `submit_attempt()` | assessment_attempts + attempt_answers (UPDATE), event_outbox (INSERT เมื่อผ่าน) | idempotent (`submitted_at IS NULL`), ตรวจ lease, Grader ตรวจจาก `question_snapshot` ล้วน (F14), TX เดียวกับ outbox event (F15) |
+
+หลักการ: RLS ยังเป็นชั้นกันการอ่านตาม permission matrix (RBAC §2) แต่ **การเขียนควบคุมศูนย์กลางที่ functions** — BFF เรียก function ด้วย user JWT และ function ตรวจ `auth.uid()` เอง ทำให้เงื่อนไขธุรกิจ (max_attempts / lease / grading / accrual) ไม่สามารถถูกเขียนตรงจาก client ได้ทุกกรณี (เสริม D11-1)

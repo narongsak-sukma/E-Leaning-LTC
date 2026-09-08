@@ -58,7 +58,8 @@ flowchart TB
     Browser --> CF
     CF --> NEXT
     Browser -->|"dev: เข้า Next.js ตรง"| NEXT
-    NEXT -->|"service_role เฉพาะ server"| PG
+    NEXT -->|"user JWT (authenticated / anon) — เส้นทางหลัก"| PG
+    NEXT -.->|"service_role: jobs เฉพาะกิจ + SECURITY DEFINER functions — เส้นรอง (ขอบเขตแคบ)"| PG
     NEXT --> AUTH
     NEXT -->|"ออก signed URL"| MEDIA
     NEXT --> MAIL
@@ -107,7 +108,7 @@ flowchart TB
     MODS --> CFG
 ```
 
-module ทั้ง 8 ไม่เรียกกันเองโดยตรง แต่แลกเปลี่ยนผ่าน event ภายใน (เช่น `certificate.issued` จาก M4 ไป M5) และใช้ shared kernel ร่วมกัน — รายละเอียดความรับผิดชอบ/interface/dependency ของแต่ละ module อยู่ใน SDS.md §2
+module ทั้ง 8 ไม่เรียกกันเองโดยตรง แต่แลกเปลี่ยนผ่าน event ภายใน (เช่น `assessment_attempt.passed` จาก M4 ไป M5 เพื่อ credit accrual — F15/D12; `certificate.issued` เป็นเหตุการณ์แจ้งเตือนเท่านั้น) และใช้ shared kernel ร่วมกัน — รายละเอียดความรับผิดชอบ/interface/dependency ของแต่ละ module อยู่ใน SDS.md §2
 
 ## 4. Deployment — DEV (100% local Docker)
 
@@ -163,7 +164,8 @@ flowchart TB
     DNS --> NX
     B -->|"สตรีมผ่าน signed URL"| CDN
     CDN --> R2
-    NX -->|"service_role"| PGC
+    NX -->|"user JWT (authenticated / anon) — เส้นทางหลัก"| PGC
+    NX -.->|"service_role: jobs เฉพาะกิจ + SECURITY DEFINER functions — เส้นรอง"| PGC
     NX --> AUTHC
     NX --> RESEND
     CRONP --> NX
@@ -190,7 +192,8 @@ flowchart TB
     R2S["Cloudflare R2/Stream (bucket/โดเมน staging)"]
     EMAILS["Resend/SMTP (ผู้รับจำกัด — อีเมลทดสอบ)"]
     T --> WAFS --> NXS
-    NXS -->|"service_role (env vars ชุด staging)"| PGSI
+    NXS -->|"user JWT (authenticated / anon) — เส้นทางหลัก (env vars ชุด staging)"| PGSI
+    NXS -.->|"service_role: jobs เฉพาะกิจ + SECURITY DEFINER functions — เส้นรอง"| PGSI
     NXS --> STGS
     NXS -->|"signed URL อายุสั้น"| R2S
     NXS --> EMAILS

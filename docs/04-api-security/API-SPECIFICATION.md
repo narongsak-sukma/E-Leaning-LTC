@@ -2,7 +2,7 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 0.3.0 — แก้ตามคำตัดสิน CTO D11 (codex security gate รอบ 1 = FAIL): D11-1, D11-11, D11-12, D11-13, D11-14, D11-18 |
+| เวอร์ชัน | 0.4.0 — แก้ตามคำตัดสิน CTO D12 (codex security gate รอบ 2 = FAIL — รอบสุดท้าย): D12-6, D12-8, D12-10, D12-12, D12-15, D12-16, D12-17, D12-23 (เดิมแก้ D11 แล้วที่ 0.3.0) |
 | วันที่    | 2026-09-08                                         |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md (canonical schema) · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
@@ -13,7 +13,7 @@
 
 1. **JSON เท่านั้น** — request/response เป็น `application/json; charset=utf-8` (ยกเว้นไฟล์ media ที่เสิร์ฟผ่าน Storage/CDN โดยตรง ไม่ผ่าน `/api/v1`)
 2. **Authentication ผ่าน session (Supabase Auth)** — httpOnly cookie ที่ออกให้โดย BFF; frontend ไม่ถือ Supabase key ใด ๆ (บังคับตาม BRIEF §8)
-   **Data access ของ BFF (D11-1)** — request ธรรมดาทุก endpoint: BFF เรียกฐานข้อมูลด้วย **user JWT (role `authenticated`)** เสมอ → **RLS บังคับจริงทุกแถว** (policies ที่ RBAC-DESIGN.md §3.1); `service_role` (bypass RLS) **ห้ามใช้เป็นเส้นทางหลัก** — ใช้เฉพาะ (a) background jobs เฉพาะกิจ (retention purge, export, email/queue worker) และ (b) server functions ขอบเขตแคบสำหรับ write ที่ server เป็นผู้ควบคุมค่า (เช่น ออก/เพิกถอนประกาศนียบัตร, บันทึกผลสอบ, ปรับ credit) — ทุกจุดที่ใช้ต้องระบุเหตุผล จำกัดคอลัมน์/เงื่อนไขให้แคบที่สุด และ audit ทุกครั้ง
+   **Data access ของ BFF (D11-1 + D12-18)** — request ธรรมดาทุก endpoint: BFF เรียกฐานข้อมูลด้วย **user JWT (role `authenticated`)** เสมอ → **RLS บังคับจริงทุกแถว** (policies ที่ RBAC-DESIGN.md §3.1); `service_role` (bypass RLS) **ห้ามใช้เป็นเส้นทางหลัก** — ใช้เฉพาะ (a) background jobs เฉพาะกิจ (export, email/queue worker) และ (b) server functions ขอบเขตแคบสำหรับ write ที่ server เป็นผู้ควบคุมค่า (enroll, record_lesson_progress, record_quiz_attempt, start_attempt, save_answer, submit_attempt, ออก/เพิกถอนประกาศนียบัตร, ปรับ credit — รายชื่อ canonical ที่ DATA-DICTIONARY.md); งาน **purge retention ใช้ `purge_role` บทบาทเฉพาะ ไม่ใช่ service_role** (ตาม DD §4.6) — ทุกจุดที่ใช้สิทธิ์พิเศษต้องระบุเหตุผล จำกัดคอลัมน์/เงื่อนไขให้แคบที่สุด และ audit ทุกครั้ง
 3. **Authorization ตรวจที่ BFF ทุก request** — middleware `requirePermission()` ตรวจ permission (ไม่ใช่ตรวจ "ชื่อบทบาท" ตรง ๆ) ก่อนเข้า handler — คู่ขนานกับ RLS ที่ DB (defense in depth)
 4. **zod validate ทุก input และ output** — query string, path params, body ผ่าน zod; response ขาออก validate ด้วย zod schema ก่อนส่ง (ป้องกัน PII/ฟิลด์รั่ว)
 5. **Error envelope มาตรฐาน** — ทุก error ใช้รูปแบบเดียว `{ "error": { "code", "message", "details?" } }` โดย `message` เป็นภาษาไทยเสมอ (i18n-ready ตาม BRIEF §9.3)
@@ -110,7 +110,7 @@ Response wrapper ทุก list endpoint:
 | POST | /auth/logout | ออกจากระบบ (ทำลาย session) | ทุกบทบาทที่ login แล้ว | 204 | AUTH-001 |
 | POST | /auth/mfa/enroll | เริ่มผูก MFA (สร้าง secret/QR) | ทุกบทบาท | 200 | AUTH-001 |
 | POST | /auth/mfa/verify | ยืนยันรหัส TOTP เพื่อเปิดใช้ MFA | ทุกบทบาท | 200 | VAL-001 |
-| POST | /auth/mfa/disable | ปิด MFA (staff ต้องมี super_admin อนุมัติ — นอก v1 ให้ block) | ทุกบทบาท | 200 | RBAC-001 |
+| POST | /auth/mfa/disable | ปิด MFA — **v1: เฉพาะ citizen/lawyer (optional-MFA)**; staff/instructor/super_admin **block ใน v1**; ต้อง recent-MFA ≤15 นาที + ห้ามเหลือ 0 factor (D12-10) | citizen, lawyer | 200 | RBAC-001 |
 | POST | /auth/password-reset/request | ขอลิงก์รีเซ็ตรหัสผ่าน (ตอบเหมือนกันทุกกรณี) | guest | 202 เสมอ | RATE-001 |
 | POST | /auth/password-reset/confirm | ตั้งรหัสผ่านใหม่จาก token | guest | 200 | AUTH-005 |
 | POST | /auth/verify | ยืนยันอีเมลจาก token (เปิดใช้บัญชี) | guest | 200 | AUTH-005 |
@@ -139,8 +139,8 @@ PDPA endpoints (สิทธิของเจ้าของข้อมูล 
 | --- | --- | --- | --- | --- | --- |
 | GET | /profile/export | ขอส่งออกข้อมูลของตัวเอง (data portability — สร้าง job ส่งไฟล์ให้ตัวเอง) | ทุกบทบาทที่ login แล้ว | 202 (job) | RATE-001 |
 | POST | /profile/delete | ขอลบบัญชี/ข้อมูลส่วนบุคคล (ตาม retention ที่กฎบังคับ — ผลสอบ/audit เก็บต่อ) | ทุกบทบาทที่ login แล้ว | 202 (รอยืนยันซ้ำทางอีเมล) | RATE-001 |
-| GET | /profile/consents | ดูประวัติ consent ที่ให้ไว้ | ทุกบทบาทที่ login แล้ว | 200 | AUTH-001 |
-| PATCH | /profile/consents | ให้/ถอน consent (เช่น รับข่าวสาร) | ทุกบทบาทที่ login แล้ว | 200 | VAL-001 |
+| GET | /profile/consents | ดู consent แบ่ง **2 sections** (D12-17): (1) `notice_acknowledgments` — การรับทราบประกาศความเป็นส่วนตัว **อ่านอย่างเดียว** (เกิดอัตโนมัติตอน register, ตาราง append-only ตาม DD); (2) `consents` — ความยินยอมเสริม (marketing/email_notify) พร้อมเวอร์ชัน/สถานะ active | ทุกบทบาทที่ login แล้ว | 200 | AUTH-001 |
+| PATCH | /profile/consents | ให้/ถอน consent **เฉพาะ optional เท่านั้น** (section `consents` — ห้ามแตะ notice_acknowledgments ซึ่ง append-only) | ทุกบทบาทที่ login แล้ว | 200 | VAL-001 |
 
 ### 3.3 Catalog & Enrollment (โดเมน 2)
 
@@ -182,8 +182,9 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 | GET | /certificates/{id}/pdf | ดาวน์โหลด PDF ตัวจริง (id = uuid ต้อง auth — ต่างจาก public verify ที่ใช้ code) | เจ้าของใบรับรอง, staff:registrar, super_admin | 200 `application/pdf` | NF-001, RBAC-001 |
 | POST | /admin/certificates | ออกประกาศนียบัติรายใบ (จาก attempt ที่ผ่านเกณฑ์) — audit `CERT_ISSUE` | staff:registrar, super_admin | 201 | RBAC-001, VAL-001 |
 | POST | /admin/certificates/bulk | ออกเป็นชุด (รอบเดียวกัน) — 202 job + สรุปผลทาง notification | staff:registrar, super_admin | 202 (job) | RBAC-001 |
+| GET | /admin/certificates/eligible | รายการ attempt ที่ผ่านเกณฑ์แล้ว**ที่ยังไม่มี certificate สถานะ `valid`** — คิวงานออกประกาศนียบัตร (pagination + filter ตามหลักสูตร/ช่วงเวลา) — audit `PII_ACCESS` (D12-23) | staff:registrar, super_admin | 200 + pagination | RBAC-001 |
 | POST | /admin/certificates/{id}/revoke | เพิกถอน (บังคับ reason) — audit `CERT_REVOKE` | staff:registrar, super_admin | 200 | RBAC-001, VAL-001 |
-| POST | /admin/certificates/{id}/reissue | ออกใหม่แทนใบเดิม (ใบเดิมเปลี่ยน status=superseded) — CRT-007, audit `CERT_REISSUE` | staff:registrar, super_admin | 201 (ใบใหม่) | RBAC-001 |
+| POST | /admin/certificates/{id}/reissue | ออกใหม่แทนใบเดิม (ใบเดิมเปลี่ยน status=superseded + ชี้ `supersedes_cert_id` lineage — DD; **idempotent ต่อ enrollment เพราะ UNIQUE(enrollment_id) เป็น partial `WHERE status='valid'` จึงมี valid ได้ 1 ใบ/คน/หลักสูตร แต่เก็บ superseded ได้หลายใบ**; reissue ไม่กระทบ credit ที่ accrual ไปแล้ว — D12-14/15) — CRT-007, audit `CERT_REISSUE` | staff:registrar, super_admin | 201 (ใบใหม่) | RBAC-001 |
 
 ### 3.7 Credit Bank — เจ้าหน้าที่ (โดเมน 5)
 
@@ -211,11 +212,11 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 | POST | /admin/question-banks | สร้างคลัง/นำเข้าข้อสอบ | instructor, staff:exam | 201 | RBAC-001, VAL-001 |
 | PATCH | /admin/question-banks/{id}/questions/{qid} | แก้ข้อสอบ (version ใหม่ — ข้อที่ใช้แล้วอ่านอย่างเดียว) | instructor (เจ้าของ), staff:exam | 200 | RBAC-001 |
 | GET | /admin/assessments | ชุดข้อสอบ/กติกาทุกชุด | staff:exam, staff:viewer, super_admin | 200 | RBAC-001 |
-| POST | /admin/assessments | สร้างชุดข้อสอบ (กติกา: เวลา สุ่ม จำนวนครั้ง เกณฑ์ผ่าน — Q2) | staff:exam, super_admin | 201 | RBAC-001, VAL-001 |
+| POST | /admin/assessments | สร้างชุดข้อสอบ (กติกา: เวลา สุ่ม จำนวนครั้ง เกณฑ์ผ่าน — Q2) — **instructor ได้เฉพาะ `draft` ของหลักสูตรตัวเอง** (ตรง matrix RBAC §2.2, D12-23) | instructor (draft เจ้าของหลักสูตร), staff:exam, super_admin | 201 | RBAC-001, VAL-001 |
 | GET | /admin/reports/enrollments | รายงานการลงทะเบียน/การเรียน | staff:viewer, super_admin | 200 | RBAC-001 |
 | GET | /admin/reports/assessments | รายงานผลสอบ | staff:exam, staff:viewer, super_admin | 200 | RBAC-001 |
 | GET | /admin/reports/credits | รายงาน credit ตามรอบ | staff:registrar, staff:viewer, super_admin | 200 | RBAC-001 |
-| GET | /admin/reports/{type}/export | ส่งออก CSV/JSON (audit `ADMIN_EXPORT`) — สูงสุดตาม §5 | staff:viewer, staff:registrar, super_admin (ตาม report) | 200 `text/csv` หรือ JSON | RBAC-001, RATE-001 |
+| GET | /admin/reports/{type}/export | ส่งออก CSV/JSON (audit `ADMIN_EXPORT`) — สูงสุดตาม §5 — **staff:exam ได้เฉพาะ report ผลสอบ** (ตรง matrix §2.4 report:export, D12-23) | staff:viewer, staff:registrar (credit), staff:exam (ผลสอบ), super_admin | 200 `text/csv` หรือ JSON | RBAC-001, RATE-001 |
 | GET | /admin/audit-logs | อ่าน audit log (pagination + filter) — **อ่านอย่างเดียว ไม่มี endpoint แก้/ลบ** (BRIEF §8, D6) | staff:viewer, super_admin | 200 + pagination | RBAC-001 |
 | GET | /admin/license-applications | รายการคำขอผูกเลขที่ใบอนุญาต (รอตรวจ/ตัดสินแล้ว) | staff:registrar, super_admin | 200 + pagination | RBAC-001 |
 | PATCH | /admin/license-applications/{id} | ตัดสินคำขอ (อนุมัติ/ปฏิเสธ) — audit `LICENSE_VERIFY` + อนุมัติแล้วมอบบทบาท `lawyer` อัตโนมัติ (audit `ROLE_GRANT`) | staff:registrar, super_admin | 200 | RBAC-001, VAL-001 |
@@ -278,13 +279,15 @@ export const LicenseBindRequest = z.object({
 // 4) ลงทะเบียนหลักสูตร (path param)
 export const EnrollParams = z.object({ courseId: z.string().uuid() });
 
-// 5) บันทึกความคืบหน้าบทเรียน
+// 5) บันทึกความคืบหน้าบทเรียน (D12-12) — **ตัด `completed` ออก**: สถานะ "จบบท" ตัดสินฝั่ง server
+//    (record_lesson_progress คำนวณจาก watch_sec_accum + completion_rule; บท quiz จบด้วยคะแนนสูงสุดตาม `progress_pass_score_policy=highest`)
 export const LessonProgressRequest = z.object({
   positionSeconds: z.number().int().min(0).optional(), // วิดีโอ
-  completed: z.boolean().optional(),
-  documentRead: z.boolean().optional(),
-}).refine((v) => v.positionSeconds !== undefined || v.completed !== undefined
-             || v.documentRead !== undefined, { message: "ต้องส่งความคืบหน้าอย่างน้อยหนึ่งรายการ" });
+  documentRead: z.boolean().optional(),                // เอกสาร — client attestation เท่านั้น
+}).refine((v) => (v.positionSeconds !== undefined) !== (v.documentRead !== undefined),
+          { message: "ส่งอย่างใดอย่างหนึ่งเท่านั้น: positionSeconds (วิดีโอ) XOR documentRead (เอกสาร)" });
+// tradeoff ที่ยอมรับ (D12-12): documentRead เป็นคำยืนยันจาก client (เอกสาร static ไม่มี server-side elapsed time ให้วัด)
+// — ชดเชยด้วย: วิดีโอคุมด้วย bounded playback intervals + ข้อสอบ/quiz ตรวจฝั่ง server ล้วน
 
 // 6) ส่งแบบทดสอบย่อย
 export const QuizSubmitRequest = z.object({
@@ -306,16 +309,20 @@ export const AttemptSubmitRequest = z.object({
   unansweredQuestionIds: z.array(z.string().uuid()).max(500).default([]),
 }).strict();
 
-// 9) สร้างกฎเครดิต — mirror schema จริงของตาราง credit_rules ตาม DATA-DICTIONARY.md (M-03)
+// 9) สร้างกฎเครดิต — mirror credit_rules ตาม DATA-DICTIONARY.md (M-03 + D12-16: +name/credit_type/status lifecycle)
 export const CreditRuleCreateRequest = z.object({
   code: z.string().regex(/^[A-Z0-9_]{3,32}$/),
+  name: z.string().min(2).max(200),                     // บังคับ (D12-16)
   courseId: z.string().uuid().nullable(),          // FK courses.id (null = ใช้กับทุกหลักสูตรในหมวด)
+  creditType: z.string().min(1).max(50).default("general"),
+  renewalCycle: z.enum(["LAWYER_STANDARD"]).default("LAWYER_STANDARD"), // รอ Q1
   credits: z.string().regex(/^\d{1,4}(\.\d{1,2})?$/)
     .refine((v) => parseFloat(v) > 0),             // numeric(6,2) ค่าเป็นบวกเท่านั้น
-  validDays: z.number().int().min(1).max(3650),    // อายุ credit เป็น "วัน" (ไม่ใช่ปี)
-  renewalCycle: z.enum(["LAWYER_STANDARD"]).default("LAWYER_STANDARD"), // รอ Q1
+  validDays: z.number().int().min(1).max(3650).nullable().default(null), // null = อายุตามรอบต่ออายุ (ตาม DD)
   effectiveFrom: z.string().date(),
 });
+// lifecycle (D12-16): `status` draft → active → retired — ฉบับ active แก้ไม่ได้ (ERR-CRD-001; แก้ = สร้างฉบับใหม่
+// หรือปิดด้วย retired) — API ไม่รับ field `status` ใน request นี้ (สร้างได้เฉพาะ draft)
 
 // 10) ปรับ credit มือ
 export const CreditAdjustmentRequest = z.object({
@@ -363,28 +370,28 @@ export const ErrorEnvelope = z.object({
 
 ---
 
-## 5. Rate limit matrix (canonical เดียว — D11-13)
+## 5. Rate limit matrix (canonical เดียว — D11-13 + D12-11)
 
-**ค่าเดียว canonical ต่อ endpoint ใช้ทุก environment** — ทุกแถวมี config key ใน `config/rate-limit.ts` (อ่านจาก env) ห้าม hardcode (BRIEF §6, B-13); บังคับ 2 ชั้น: Cloudflare WAF/rate rule (prod) + Next.js middleware (dev/สำรอง prod)
-**คีย์การนับ:** guest = `ip`; login แล้ว = `user_id` **และ** `ip` (ดูกติกา cumulative ท้ายตาราง)
+**ค่าเดียว canonical ต่อ endpoint ใช้ทุก environment** — ทุกแถวชี้ config key ใน **SRS Appendix A** (ตรงชุด — D12-11; key ที่ยังไม่มีใน SRS เดิม worker-2 เพิ่มให้ครบทุกกลุ่ม: mfa 10 / read 120 / learn_write 120 / exam 60 / staff_write 60 / export 10); ห้าม hardcode (BRIEF §6, B-13); บังคับ 2 ชั้น: Cloudflare WAF/rate rule (prod) + Next.js middleware (dev/สำรอง prod)
+**คีย์การนับ (D12-11):** **IP counter cumulative ทุกกลุ่ม** (คู่กับคีย์อื่นเสมอ — นับแยกทั้งคู่ ใครถึงขีดก่อนถูกจำกัดก่อน); pre-auth ที่ยังไม่มี user_id (login/register/otp) ใช้ **อีเมล normalized (lowercase + trim)** เป็นคีย์บัญชี ไม่ใช่ user_id
 
-| Group | ใช้กับ (ตัวอย่าง) | หน้าต่าง | ขีดจำกัด (canonical) | Config key | คีย์การนับ | เกิน → |
+| Group | ใช้กับ (ตัวอย่าง) | หน้าต่าง | ขีดจำกัด (canonical) | Appendix A key | คีย์การนับ (IP cumulative ทุกกลุ่ม — D12-11) | เกิน → |
 | --- | --- | --- | --- | --- | --- | --- |
-| AUTH | /auth/login, /auth/register, /auth/otp/* | 1 นาที | 10/min ต่อ IP + ต่อบัญชี (cumulative) | `RATE_LIMIT_AUTH_PER_MIN` | ip + user_id | 429 + Retry-After |
-| OTP_REQUEST (specific) | /auth/otp/request | 1 ชั่วโมง | **3/ชม. ต่อเบอร์/อีเมลปลายทาง** | `RATE_LIMIT_OTP_PER_TARGET_PER_HOUR` | เบอร์/อีเมลปลายทาง | 429 |
-| PWD_RESET | /auth/password-reset/* | 1 ชั่วโมง | **5/ชม. ต่อบัญชี** | `RATE_LIMIT_PWD_RESET_PER_HOUR` | บัญชีปลายทาง + IP (cumulative) | 429 |
-| MFA | /auth/mfa/* | 1 นาที | 10/min ต่อบัญชี | `RATE_LIMIT_MFA_PER_MIN` | user_id + ip | 429 |
-| PUBLIC_READ | /categories, /courses, /certificates/{code} | 1 นาที | 120/min ต่อ IP | `RATE_LIMIT_PUBLIC_READ_PER_MIN` | ip | 429 |
-| READ | /me*, /profile/* | 1 นาที | 120/min | `RATE_LIMIT_READ_PER_MIN` | user_id + ip | 429 |
-| LEARN_WRITE | /lessons/*/progress, /lessons/*/quiz/submit | 1 นาที | 120/min | `RATE_LIMIT_LEARN_WRITE_PER_MIN` | user_id + ip | 429 |
-| EXAM | /assessments/*/attempts, /attempts/* | 1 นาที | 60/min | `RATE_LIMIT_EXAM_PER_MIN` | user_id + ip | 429 (log WARN) |
-| STAFF_WRITE | /admin/*, /credit-* | 1 นาที | 60/min ต่อบัญชี | `RATE_LIMIT_STAFF_WRITE_PER_MIN` | user_id + ip | 429 (audit) |
-| EXPORT | /admin/reports/*/export, /profile/export | 1 ชั่วโมง | 10/h ต่อบัญชี | `RATE_LIMIT_EXPORT_PER_HOUR` | user_id | 429 |
+| AUTH | /auth/login, /auth/register | 1 นาที | 10/min ต่อ IP + ต่อ **อีเมล normalized** (pre-auth ไม่มี user_id) | `auth_rate_limit_per_min` | ip + email(normalized) | 429 + Retry-After |
+| OTP_REQUEST (specific) | /auth/otp/request | 1 ชั่วโมง | **3/ชม. ต่อเบอร์/อีเมลปลายทาง** | `otp_per_phone_per_hour` | ปลายทาง + ip | 429 |
+| PWD_RESET | /auth/password-reset/* | 1 ชั่วโมง | **5/ชม. ต่อบัญชี** | `password_reset_per_hour_per_account` | อีเมลปลายทาง (normalized) + ip | 429 |
+| MFA | /auth/mfa/* | 1 นาที | 10/min ต่อบัญชี | `mfa_rate_limit_per_min` | user_id + ip | 429 |
+| PUBLIC_READ | /categories, /courses, /certificates/{code} | 1 นาที | 120/min ต่อ IP | `public_read_rate_limit_per_min` | ip | 429 |
+| READ | /me*, /profile/* | 1 นาที | 120/min | `read_rate_limit_per_min` | user_id + ip | 429 |
+| LEARN_WRITE | /lessons/*/progress, /lessons/*/quiz/submit | 1 นาที | 120/min | `learn_write_rate_limit_per_min` | user_id + ip | 429 |
+| EXAM | /assessments/*/attempts, /attempts/answers, /attempts/*/submit | 1 นาที | 60/min | `exam_rate_limit_per_min` | user_id + ip | 429 (log WARN) |
+| STAFF_WRITE | /admin/*, /credit-* | 1 นาที | 60/min ต่อบัญชี | `staff_write_rate_limit_per_min` | user_id + ip | 429 (audit) |
+| EXPORT | /admin/reports/*/export, /profile/export | 1 ชั่วโมง | 10/h ต่อบัญชี | `export_per_hour` | user_id + ip | 429 |
 
 **กติกาการนับ (D11-13):**
 
 1. **กลุ่มเฉพาะ (specific) ชนะกลุ่มทั่วไป** — คำขอเดียวที่ตรงหลายกลุ่มใช้ขีดจำกัดของกลุ่มที่เจาะจงที่สุด (เช่น `/auth/otp/request` อยู่ทั้ง AUTH และ OTP_REQUEST → ใช้ OTP_REQUEST 3/ชม./เบอร์; `/auth/password-reset/*` → ใช้ PWD_RESET ไม่ใช่ AUTH)
-2. **ขีดจำกัด IP กับ user ใช้แบบ cumulative** — บังคับทั้งสองค่าพร้อมกัน นับแยกทั้งคู่ ใครถึงขีดก่อนถูกจำกัดก่อน (guest นับเฉพาะ IP; ผู้ใช้ที่ login แล้วนับทั้ง `user_id` และ `ip`)
+2. **ขีดจำกัด IP กับ user ใช้แบบ cumulative ทุกกลุ่ม (D12-11)** — ทุกกลุ่มมี IP counter เสมอ คู่กับคีย์อื่น (user_id / อีเมล normalized / ปลายทาง OTP) — นับแยกทั้งคู่ ใครถึงขีดก่อนถูกจำกัดก่อน (pre-auth ไม่มี user_id → ใช้อีเมล normalized แทน)
 3. ค่า EXAM 60/min รองรับเป้า 5,000 คนสอบพร้อมกัน (BRIEF §7) — สูงกว่าอัตรา autosave ที่ client ส่ง (throttle ที่ client 10 วินาที/ข้อ)
 4. 429 ทุกครั้ง → audit `RATE_LIMIT_HIT` (ระดับ WARN) เมื่อเป็นกลุ่ม STAFF_WRITE/EXAM
 
