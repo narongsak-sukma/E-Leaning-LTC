@@ -18,7 +18,7 @@
 | ---- | -------------------------------------- | -------- | ------------- |
 | A0   | Repo init + baseline docs + brief      | lead     | ✅ done       |
 | A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ เสร็จสมบูรณ์ + align brief 0.2.0 แล้ว (รอ A6 review) |
-| A2   | SRS + RTM                              | worker-2 | 🔄 in_progress |
+| A2   | SRS + RTM                              | worker-2 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
 | A3   | SDS + Architecture + Data Dictionary   | worker-3 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
 | A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
 | A5   | Design System + UI Prototype           | worker-5 | 🔄 in_progress |
@@ -68,3 +68,4 @@
 - 2026-09-08 · **A1 เสร็จ** — PROJECT-PLAN 242 บรรทัด (11 sections), RISK-REGISTER 161 บรรทัด (26 risks), TEST-PLAN 334 บรรทัด (18 TC + 16 E2E) · ตรวจรับ: wc -l ตรงรายงาน · commit 7a88da6 + merge e9fd2b3 · **DCR-1 APPROVE → brief 0.2.0 (+staging env, +Q7)** · DCR-2 เป็นรายการ A6 · คำถามค้าง QP-1/QP-2/QP-3/QP-5 รอ user/หน่ยงาน (ดู §คำถามค้างใน PROJECT-PLAN) · สั่ง worker-1 align TEST-PLAN กับ brief 0.2.0
 - 2026-09-08 · **A1 follow-up เสร็จ** — TEST-PLAN 0.2.0-draft (337 บรรทัด): staging เป็น env หลักของ security/perf test, entry criteria + T-1 อัปเดต, ลบ QP-5 ออก · lead แก้ QP-5 เดิมใน PROJECT-PLAN §11 ยุบรวม Q7 · commit 4840b93 + merge d64e378 · **A1 ปิดสมบูรณ์**
 - 2026-09-08 · **A3 เสร็จ** — SDS 394 บรรทัด, ARCHITECTURE 266 บรรทัด (mermaid 15 block), DATA-DICTIONARY 646 บรรทัด (**31 ตาราง** ครบขั้นต่ำ 29 + course_categories + email_outbox พร้อมเหตุผล; RLS 31/31; REVOKE บังคับ append-only audit+ledger; PII registry 5 จุด) · ตรวจรับ: wc -l/grep ตรงรายงาน · commit 291952f + merge 73d0bc8 · ไม่มี DCR · **เพิ่มโจทย์ A6:** (4) role key `staff:viewer` (brief/RBAC) vs `staff_viewer` (DB enum) ต้องตกลงชื่อเดียว (5) นิยาม helper `has_any_role()`/`is_staff()` canonical ที่ RBAC doc (6) API paths ใน SDS ต้องตรง API-SPEC (7) รูปแบบ cert_no `LTC-<ปี>-<6หลัก>` รอยืนยันกับรูปแบบจริงของสภาฯ (ผูก Q1–Q6)
+- 2026-09-08 · **A2 เสร็จ** — SRS 647 บรรทัด (**134 requirements**: FR 83 + NFR 51, M114/S19/C1, ทุกตัวมี AC วัดได้) + RTM 252 บรรทัด (trace 5 มิติ coverage 100%) · ตรวจรับ: wc -l ตรง, unique Req ID = 134 พอดี · commit eb003e4 + merge c340531 · ไม่มี DCR · **เพิ่มโจทย์ A6:** (8) RTM อ้าง D13–D18 mapping เป็นสมมติฐาน — lead ยืนยัน (9) ชื่อตาราง/endpoint ใน RTM เป็นร่าง ต้องกระทบยอดกับ DATA-DICT + API-SPEC (10) SRS เขียนบน brief 0.1.0 — ต้องเช็คว่าขัดกับ staging (brief 0.2.0) ไหม (11) default `credits_required_per_cycle=12`, `renewal_cycle_years=1` เป็นสมมติฐานล้วน — **เร่งคำตอบ Q1–Q2 ก่อน Wave D–E**
