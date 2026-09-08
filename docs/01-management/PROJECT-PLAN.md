@@ -239,4 +239,4 @@
 | QP-2 | ใครเป็นผู้ sign-off UAT ฝั่งสภาฯ (กี่คน ต้องผ่านกี่ flow)                | เกณฑ์ M5                    |
 | QP-3 | มี SME กฎหมายตรวจความถูกต้องเนื้อหาหลักสูตรหรือไม่ (R-12)              | คุณภาพเนื้อหา Wave C–D     |
 | QP-4 | ต้องรายงานความคืบหน้าถึงผู้ว่าจ้างในรูปแบบ/ความถี่ใด                    | กระบวนการรายงาน             |
-| QP-5 | ใช้ staging/preview deployment (cloud) สำหรับ load test 10k/5k อย่างไร — brief กำหนดแค่ dev=local Docker กับ prod=cloud (TEST-PLAN §4, T-1) | เกณฑ์ performance ของ M3/M5 |
+| QP-5 | ~~ใช้ staging/preview deployment อย่างไร~~ **ยุบรวมเข้า Q7** — brief 0.2.0 §6 นิยาม staging environment แล้ว (DCR-1) เหลือเฉพาะคำถามงบ cloud tier ซึ่ง Q7 ครอบคลุม (TEST-PLAN §4, T-1) | เกณฑ์ performance ของ M3/M5 — **ต้องได้คำตอบ Q7 ก่อนสิ้น Wave C** |
