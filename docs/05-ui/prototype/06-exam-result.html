@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ผลการสอบ · กฎหมายที่ประชาชนควรรู้ · ระบบอีเลิร์นนิ่ง สภาทนายความ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  colors: {
+    brand:{50:'#F0F6FC',100:'#DCE9F6',200:'#B9D3EB',300:'#8AB4DC',400:'#5793CB',500:'#3375B5',600:'#245E9B',700:'#1B4B7E',800:'#133A61',900:'#0E2B4A',950:'#081B31'},
+    gold:{50:'#FBF7EC',100:'#F5ECD3',200:'#E9D8A4',300:'#DCC072',500:'#B8922E',700:'#7A5B1D'},
+    ink:{400:'#64788E',500:'#54687F',600:'#41556E',700:'#31445C',900:'#0E1B2C'},
+    mist:{50:'#F7F9FC',100:'#EEF3F9',200:'#E3EAF2',300:'#D3DDE9'},
+    success:{50:'#E4F4EA',100:'#CBE9D8',600:'#166B43'},
+    warning:{50:'#FCF3E1',100:'#F7E4BC',600:'#92610A'},
+    danger:{50:'#FBEDEB',100:'#F5D4D0',600:'#B3261E'}
+  },
+  fontFamily:{sans:['Sarabun','ui-sans-serif','system-ui','sans-serif'],heading:['"IBM Plex Sans Thai"','Sarabun','sans-serif']},
+  boxShadow:{card:'0 1px 2px rgba(14,43,74,.06), 0 6px 20px rgba(14,43,74,.08)',pop:'0 12px 40px rgba(14,43,74,.18)'}
+}}};
+</script>
+<style>
+body{font-family:'Sarabun',ui-sans-serif,system-ui,sans-serif;color:#31445C;background:#F7F9FC;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-serif}
+:focus-visible{outline:3px solid #3375B5;outline-offset:2px;border-radius:6px}
+.skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:#0E2B4A;color:#fff;padding:.75rem 1.25rem;border-radius:0 0 10px 0}
+.skip-link:focus{left:0}
+[hidden]{display:none!important}
+.tnum{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body class="min-h-screen">
+<a href="#main" class="skip-link">ข้ามไปยังเนื้อหาหลัก</a>
+
+<!-- ═══ topbar ผู้เรียน ═══ -->
+<header class="sticky top-0 z-40 border-b border-brand-950/40 bg-brand-900 text-white">
+  <div class="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
+    <a href="07-learner-dashboard.html" class="flex items-center gap-2.5">
+      <svg viewBox="0 0 48 48" class="h-8 w-8" role="img" aria-label="ตราสัญลักษณ์สภาทนายความ (จำลอง)">
+        <circle cx="24" cy="24" r="22.5" fill="#0E2B4A" stroke="#DCC072" stroke-width="1.5"/>
+        <g stroke="#DCC072" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M24 12v22"/><path d="M12 16h24"/><path d="M17 34h14"/>
+          <path d="M12 16 8 23"/><path d="M12 16l4 7"/><path d="M8 23a4.6 4.6 0 0 0 8 0"/>
+          <path d="M36 16l-4 7"/><path d="M36 16l4 7"/><path d="M32 23a4.6 4.6 0 0 0 8 0"/>
+        </g>
+      </svg>
+      <span class="font-heading font-bold">แดชบอร์ดผู้เรียน</span>
+    </a>
+    <a href="07-learner-dashboard.html" class="ml-auto flex items-center gap-2.5">
+      <span class="hidden text-right text-xs leading-tight text-brand-100 sm:block">
+        <span class="block font-semibold text-white">ธนกร วัฒนกุล</span>
+        <span>ทนายความ · ทล. 25891</span>
+      </span>
+      <span class="flex h-9 w-9 items-center justify-center rounded-full bg-gold-300 font-heading text-sm font-bold text-brand-950" aria-hidden="true">ธ</span>
+      <span class="sr-only">ไปที่แดชบอร์ดของฉัน</span>
+    </a>
+  </div>
+</header>
+
+<main id="main" class="mx-auto max-w-3xl px-4 py-8 sm:px-6">
+  <!-- breadcrumb -->
+  <nav aria-label="เส้นทาง" class="mb-5">
+    <ol class="flex flex-wrap items-center gap-2 text-sm text-ink-500">
+      <li><a href="07-learner-dashboard.html" class="hover:text-brand-700 hover:underline">แดชบอร์ดของฉัน</a></li>
+      <li aria-hidden="true" class="text-mist-300">/</li>
+      <li><a href="03-course-detail.html" class="hover:text-brand-700 hover:underline">กฎหมายที่ประชาชนควรรู้</a></li>
+      <li aria-hidden="true" class="text-mist-300">/</li>
+      <li aria-current="page" class="font-medium text-ink-700">ผลการสอบ</li>
+    </ol>
+  </nav>
+
+  <!-- ═══ สรุปผล ═══ -->
+  <section aria-labelledby="result-title" class="overflow-hidden rounded-[14px] bg-white shadow-card">
+    <div class="bg-gradient-to-br from-success-600 to-brand-700 px-6 py-8 text-center text-white sm:px-10">
+      <span class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-white/15 ring-4 ring-white/25">
+        <svg viewBox="0 0 24 24" class="h-10 w-10 text-white" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5L19.5 7"/></svg>
+      </span>
+      <p class="mt-4 inline-flex items-center gap-1.5 rounded-full bg-white/90 px-4 py-1 text-sm font-bold text-success-600">
+        <span class="h-2 w-2 rounded-full bg-success-600" aria-hidden="true"></span> ผ่าน
+      </p>
+      <h1 id="result-title" class="mt-3 font-heading text-2xl font-bold sm:text-3xl">ยินดีด้วย คุณสอบผ่านหลักสูตร</h1>
+      <p class="mt-2 text-brand-50">กฎหมายที่ประชาชนควรรู้ · การสอบปลายหลักสูตร</p>
+      <p class="mt-6">
+        <span class="font-heading text-6xl font-bold tnum" style="font-variant-numeric:tabular-nums">84</span>
+        <span class="text-xl text-brand-100"> / 100 คะแนน</span>
+      </p>
+      <p class="mt-1 text-sm text-brand-100">เกณฑ์ผ่าน 70 คะแนน (ตอบถูก 25 จาก 30 ข้อ)</p>
+    </div>
+
+    <dl class="grid grid-cols-2 divide-x divide-mist-200 border-b border-mist-200 sm:grid-cols-4">
+      <div class="p-4 text-center">
+        <dt class="text-xs text-ink-500">วันที่สอบ</dt>
+        <dd class="mt-1 font-heading text-sm font-semibold text-ink-900">8 ก.ย. 2569</dd>
+      </div>
+      <div class="p-4 text-center">
+        <dt class="text-xs text-ink-500">เวลาที่ใช้</dt>
+        <dd class="mt-1 font-heading text-sm font-semibold text-ink-900 tnum">38:12 / 60:00</dd>
+      </div>
+      <div class="p-4 text-center">
+        <dt class="text-xs text-ink-500">ครั้งที่สอบ</dt>
+        <dd class="mt-1 font-heading text-sm font-semibold text-ink-900 tnum">1 / 3</dd>
+      </div>
+      <div class="p-4 text-center">
+        <dt class="text-xs text-ink-500">รหัสการสอบ</dt>
+        <dd class="mt-1 font-heading text-sm font-semibold text-ink-900 tnum">ASM-2569-00841</dd>
+      </div>
+    </dl>
+
+    <!-- คะแนนตามหมวด -->
+    <div class="p-6 sm:p-8">
+      <h2 class="font-heading font-bold text-ink-900">คะแนนตามหมวดเนื้อหา</h2>
+      <ul class="mt-4 space-y-4">
+        <li>
+          <div class="flex items-baseline justify-between text-sm">
+            <span class="font-medium text-ink-700">โมดูล 1 · พื้นฐานกฎหมายไทย</span>
+            <span class="tnum text-ink-500">18 / 20</span>
+          </div>
+          <div class="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-mist-200" role="progressbar" aria-valuenow="90" aria-valuemin="0" aria-valuemax="100" aria-label="คะแนนหมวดพื้นฐานกฎหมายไทย 90 เปอร์เซ็นต์">
+            <div class="h-full rounded-full bg-success-600" style="width:90%"></div>
+          </div>
+        </li>
+        <li>
+          <div class="flex items-baseline justify-between text-sm">
+            <span class="font-medium text-ink-700">โมดูล 2 · สัญญาในชีวิตประจำวัน</span>
+            <span class="tnum text-ink-500">24 / 30</span>
+          </div>
+          <div class="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-mist-200" role="progressbar" aria-valuenow="80" aria-valuemin="0" aria-valuemax="100" aria-label="คะแนนหมวดสัญญาในชีวิตประจำวัน 80 เปอร์เซ็นต์">
+            <div class="h-full rounded-full bg-brand-600" style="width:80%"></div>
+          </div>
+        </li>
+        <li>
+          <div class="flex items-baseline justify-between text-sm">
+            <span class="font-medium text-ink-700">โมดูล 3 · กฎหมายเกี่ยวกับทรัพย์สิน</span>
+            <span class="tnum text-ink-500">20 / 25</span>
+          </div>
+          <div class="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-mist-200" role="progressbar" aria-valuenow="80" aria-valuemin="0" aria-valuemax="100" aria-label="คะแนนหมวดกฎหมายเกี่ยวกับทรัพย์สิน 80 เปอร์เซ็นต์">
+            <div class="h-full rounded-full bg-brand-600" style="width:80%"></div>
+          </div>
+        </li>
+        <li>
+          <div class="flex items-baseline justify-between text-sm">
+            <span class="font-medium text-ink-700">โมดูล 4 · ครอบครัวและมรดกเบื้องต้น</span>
+            <span class="tnum text-ink-500">22 / 25</span>
+          </div>
+          <div class="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-mist-200" role="progressbar" aria-valuenow="88" aria-valuemin="0" aria-valuemax="100" aria-label="คะแนนหมวดครอบครัวและมรดก 88 เปอร์เซ็นต์">
+            <div class="h-full rounded-full bg-success-600" style="width:88%"></div>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ═══ หน่วยกิตที่ได้รับ ═══ -->
+  <section aria-labelledby="credit-title" class="mt-6 flex flex-col gap-4 rounded-[14px] border border-gold-200 bg-gold-50 p-5 sm:flex-row sm:items-center sm:p-6">
+    <span class="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-gold-100 text-gold-700">
+      <svg viewBox="0 0 24 24" class="h-7 w-7" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="9" r="5.5"/><path d="m8.5 13.5-1.7 7 5.2-2.8 5.2 2.8-1.7-7"/></svg>
+    </span>
+    <div class="flex-1">
+      <h2 id="credit-title" class="font-heading font-bold text-ink-900">ได้รับ 3 หน่วยกิต บันทึกเข้า Credit Bank แล้ว</h2>
+      <p class="mt-1 text-sm leading-relaxed text-ink-700">รอบต่ออายุใบอนุญาต 2569–2571 · ยอดสะสมล่าสุด <span class="font-semibold tnum">22 / 36</span> หน่วย · บันทึกเมื่อ 8 ก.ย. 2569 14:41 น.</p>
+    </div>
+    <a href="07-learner-dashboard.html" class="shrink-0 rounded-[10px] border-[1.5px] border-gold-500 bg-white px-4 py-2.5 font-heading text-sm font-semibold text-gold-700 hover:bg-gold-100">ดู Credit Bank</a>
+  </section>
+
+  <!-- ═══ ปุ่ม action ═══ -->
+  <div class="mt-6 flex flex-col gap-3 sm:flex-row">
+    <a href="09-certificate-verify.html" class="inline-flex flex-1 items-center justify-center gap-2 rounded-[10px] bg-brand-600 px-5 py-3.5 font-heading font-semibold text-white shadow-card hover:bg-brand-700 active:translate-y-px">
+      <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+      ดาวน์โหลดประกาศนียบัตร (PDF 0.8 MB)
+    </a>
+    <button id="revealBtn" type="button" aria-expanded="false" aria-controls="review" class="inline-flex flex-1 items-center justify-center gap-2 rounded-[10px] border-[1.5px] border-brand-600 bg-white px-5 py-3.5 font-heading font-semibold text-brand-700 hover:bg-brand-50">
+      <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+      ดูเฉลยและข้อที่ตอบผิด
+    </button>
+  </div>
+  <p class="mt-3 text-center text-sm text-ink-500">ประกาศนียบัตรรหัส <span class="font-semibold tnum">LTC-2569-0012345</span> · ตรวจสอบความถูกต้องได้ที่หน้า Verify สาธารณะ</p>
+
+  <!-- ═══ เฉลย (ซ่อน/แสดง) ═══ -->
+  <section id="review" hidden aria-labelledby="review-title" class="mt-6">
+    <h2 id="review-title" class="font-heading text-xl font-bold text-ink-900">ข้อที่ตอบไม่ถูก (5 ข้อ)</h2>
+    <div class="mt-4 space-y-4">
+      <article class="rounded-[14px] border border-danger-100 bg-white p-5 shadow-card">
+        <p class="flex items-center gap-2 text-sm font-semibold text-ink-500">ข้อที่ <span class="tnum">12</span> · หมวดสัญญาในชีวิตประจำวัน</p>
+        <p class="mt-2 leading-relaxed text-ink-900">ตามประมวลกฎหมายแพ่งและพาณิชย์ การขายอสังหาริมทรัพย์เพื่อโอนกรรมสิทธิ์ ความถูกต้องของการทำนิติกรรมเป็นอย่างไร?</p>
+        <div class="mt-3 space-y-2 text-sm">
+          <p class="flex items-start gap-2 rounded-[10px] bg-danger-50 p-3 text-danger-600">
+            <svg viewBox="0 0 24 24" class="mt-0.5 h-4.5 w-4.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></svg>
+            <span><span class="font-semibold">คำตอบของคุณ (ข.):</span> ทำเป็นหนังสือสัญญาโดยมีพยานบุคคลอย่างน้อย 2 คนรับรองลายมือชื่อ</span>
+          </p>
+          <p class="flex items-start gap-2 rounded-[10px] bg-success-50 p-3 text-success-600">
+            <svg viewBox="0 0 24 24" class="mt-0.5 h-4.5 w-4.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 5-5.5"/></svg>
+            <span><span class="font-semibold">เฉลย (ค.):</span> การโอนกรรมสิทธิ์ต้องทำเป็นหนังสือและจดทะเบียนต่อพนักงานเจ้าหน้าที่ มิฉะนั้นไม่สมบูรณ์</span>
+          </p>
+        </div>
+      </article>
+      <p class="text-sm text-ink-500">ดูเฉลยครบทั้ง 30 ข้อได้ใน <button type="button" class="font-semibold text-brand-600 hover:underline">รายละเอียดฉบับเต็ม (PDF)</button></p>
+    </div>
+  </section>
+
+  <p class="mt-8 text-center">
+    <a href="07-learner-dashboard.html" class="font-semibold text-brand-600 hover:underline">← กลับไปที่แดชบอร์ดของฉัน</a>
+  </p>
+</main>
+
+<footer class="border-t border-mist-200 bg-white">
+  <div class="mx-auto max-w-7xl px-4 py-5 text-center text-xs text-ink-500 sm:px-6">
+    © 2569 สภาทนายความแห่งประเทศไทย — ต้นแบบเพื่อการออกแบบ ข้อมูลเป็นตัวอย่าง
+  </div>
+</footer>
+
+<script>
+  const btn = document.getElementById('revealBtn'), panel = document.getElementById('review');
+  btn.addEventListener('click', () => {
+    const open = panel.hasAttribute('hidden');
+    if (open) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+    btn.setAttribute('aria-expanded', String(open));
+  });
+</script>
+</body>
+</html>

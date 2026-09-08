@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>เข้าสู่ระบบ / สมัครสมาชิก · ระบบอีเลิร์นนิ่ง สภาทนายความแห่งประเทศไทย</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  colors: {
+    brand:{50:'#F0F6FC',100:'#DCE9F6',200:'#B9D3EB',300:'#8AB4DC',400:'#5793CB',500:'#3375B5',600:'#245E9B',700:'#1B4B7E',800:'#133A61',900:'#0E2B4A',950:'#081B31'},
+    gold:{50:'#FBF7EC',100:'#F5ECD3',200:'#E9D8A4',300:'#DCC072',500:'#B8922E',700:'#7A5B1D'},
+    ink:{400:'#64788E',500:'#54687F',600:'#41556E',700:'#31445C',900:'#0E1B2C'},
+    mist:{50:'#F7F9FC',100:'#EEF3F9',200:'#E3EAF2',300:'#D3DDE9'},
+    success:{50:'#E4F4EA',100:'#CBE9D8',600:'#166B43'},
+    warning:{50:'#FCF3E1',100:'#F7E4BC',600:'#92610A'},
+    danger:{50:'#FBEDEB',100:'#F5D4D0',600:'#B3261E'}
+  },
+  fontFamily:{sans:['Sarabun','ui-sans-serif','system-ui','sans-serif'],heading:['"IBM Plex Sans Thai"','Sarabun','sans-serif']},
+  boxShadow:{card:'0 1px 2px rgba(14,43,74,.06), 0 6px 20px rgba(14,43,74,.08)',pop:'0 12px 40px rgba(14,43,74,.18)'}
+}}};
+</script>
+<style>
+body{font-family:'Sarabun',ui-sans-serif,system-ui,sans-serif;color:#31445C;background:#F7F9FC;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-serif}
+:focus-visible{outline:3px solid #3375B5;outline-offset:2px;border-radius:6px}
+.skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:#0E2B4A;color:#fff;padding:.75rem 1.25rem;border-radius:0 0 10px 0}
+.skip-link:focus{left:0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body class="min-h-screen">
+<a href="#main" class="skip-link">ข้ามไปยังเนื้อหาหลัก</a>
+
+<div class="lg:grid lg:min-h-screen lg:grid-cols-[5fr_7fr]">
+
+  <!-- ═══ แผงซ้าย: แบรนด์ ═══ -->
+  <aside class="relative hidden overflow-hidden bg-gradient-to-br from-brand-950 via-brand-900 to-brand-800 p-10 text-white lg:flex lg:flex-col xl:p-14">
+    <svg class="pointer-events-none absolute inset-0 h-full w-full opacity-40" viewBox="0 0 600 800" fill="none" aria-hidden="true" preserveAspectRatio="xMidYMid slice">
+      <circle cx="500" cy="130" r="240" stroke="#DCC072" stroke-opacity=".3" stroke-width="1.5"/>
+      <circle cx="500" cy="130" r="160" stroke="#DCC072" stroke-opacity=".22" stroke-width="1"/>
+      <circle cx="500" cy="130" r="95" stroke="#B9D3EB" stroke-opacity=".18" stroke-width="1"/>
+      <path d="M-40 640 C 180 540, 360 700, 640 560" stroke="#B9D3EB" stroke-opacity=".2" stroke-width="1.5"/>
+      <path d="M-40 690 C 200 600, 400 750, 660 620" stroke="#DCC072" stroke-opacity=".15" stroke-width="1"/>
+    </svg>
+
+    <a href="01-home.html" class="relative flex items-center gap-3">
+      <svg viewBox="0 0 48 48" class="h-12 w-12" role="img" aria-label="ตราสัญลักษณ์สภาทนายความแห่งประเทศไทย (จำลอง)">
+        <circle cx="24" cy="24" r="22.5" fill="#0E2B4A" stroke="#DCC072" stroke-width="1.5"/>
+        <g stroke="#DCC072" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M24 12v22"/><path d="M12 16h24"/><path d="M17 34h14"/>
+          <path d="M12 16 8 23"/><path d="M12 16l4 7"/><path d="M8 23a4.6 4.6 0 0 0 8 0"/>
+          <path d="M36 16l-4 7"/><path d="M36 16l4 7"/><path d="M32 23a4.6 4.6 0 0 0 8 0"/>
+        </g>
+        <circle cx="24" cy="11" r="1.6" fill="#DCC072"/>
+      </svg>
+      <span class="leading-tight">
+        <span class="block font-heading font-bold">ระบบอีเลิร์นนิ่ง</span>
+        <span class="block text-sm text-brand-200">สภาทนายความแห่งประเทศไทย</span>
+      </span>
+    </a>
+
+    <div class="relative mt-auto max-w-md">
+      <h1 class="font-heading text-4xl font-bold leading-tight">ยกระดับความรู้<br>กฎหมายของคุณ<br>อย่างมั่นใจ</h1>
+      <p class="mt-4 leading-relaxed text-brand-100">บัญชีเดียว เรียนหลักสูตรกฎหมาย สอบรับประกาศนียบัตร และสะสมหน่วยกิตได้ตลอดรอบต่ออายุใบอนุญาต</p>
+      <ul class="mt-8 space-y-4 text-brand-100">
+        <li class="flex items-start gap-3">
+          <span class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gold-300/15 text-gold-300">
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+          </span>
+          เรียนได้ทุกที่ ทุกเวลา ตามจังหวะของคุณ (self-paced)
+        </li>
+        <li class="flex items-start gap-3">
+          <span class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gold-300/15 text-gold-300">
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+          </span>
+          สอบท้ายหลักสูตรออนไลน์ รับประกาศนียบัตรที่ตรวจสอบได้
+        </li>
+        <li class="flex items-start gap-3">
+          <span class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gold-300/15 text-gold-300">
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+          </span>
+          Credit Bank สะสมหน่วยกิตตามรอบต่ออายุใบอนุญาตว่าความ
+        </li>
+        <li class="flex items-start gap-3">
+          <span class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gold-300/15 text-gold-300">
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+          </span>
+          หลักสูตรโดยวิทยากรผู้ทรงคุณวุฒิจากสภาทนายความแห่งประเทศไทย
+        </li>
+      </ul>
+    </div>
+
+    <p class="relative mt-10 text-xs text-brand-300">ต้นแบบเพื่อการออกแบบ · ข้อมูลเป็นตัวอย่าง</p>
+  </aside>
+
+  <!-- ═══ แผงขวา: ฟอร์ม ═══ -->
+  <div class="flex flex-col">
+    <header class="flex items-center justify-between border-b border-mist-200 bg-white px-4 py-3 sm:px-8 lg:hidden">
+      <a href="01-home.html" class="flex items-center gap-2.5">
+        <svg viewBox="0 0 48 48" class="h-9 w-9" role="img" aria-label="ตราสัญลักษณ์สภาทนายความ (จำลอง)">
+          <circle cx="24" cy="24" r="22.5" fill="#0E2B4A" stroke="#DCC072" stroke-width="1.5"/>
+          <g stroke="#DCC072" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M24 12v22"/><path d="M12 16h24"/><path d="M17 34h14"/>
+            <path d="M12 16 8 23"/><path d="M12 16l4 7"/><path d="M8 23a4.6 4.6 0 0 0 8 0"/>
+            <path d="M36 16l-4 7"/><path d="M36 16l4 7"/><path d="M32 23a4.6 4.6 0 0 0 8 0"/>
+          </g>
+        </svg>
+        <span class="font-heading font-bold text-ink-900">ระบบอีเลิร์นนิ่ง สภาทนายความ</span>
+      </a>
+      <a href="01-home.html" class="text-sm font-semibold text-brand-600 hover:underline">← กลับหน้าแรก</a>
+    </header>
+
+    <main id="main" class="flex flex-1 items-start justify-center px-4 py-10 sm:px-8">
+      <div class="w-full max-w-xl">
+        <p class="mb-4 hidden lg:block"><a href="01-home.html" class="text-sm font-semibold text-brand-600 hover:underline">← กลับไปหน้าแรก</a></p>
+
+        <div class="rounded-[14px] bg-white p-6 shadow-card sm:p-8">
+          <h2 class="font-heading text-2xl font-bold text-ink-900">ยินดีต้อนรับสู่ระบบอีเลิร์นนิ่ง</h2>
+          <p class="mt-1.5 text-ink-500">เข้าสู่ระบบ หรือสมัครสมาชิกใหม่เพื่อเริ่มเรียนหลักสูตรกฎหมาย</p>
+
+          <!-- tabs -->
+          <div role="tablist" aria-label="เลือกโหมดการเข้าถึงบัญชี" class="mt-6 flex gap-1 border-b border-mist-200">
+            <button role="tab" id="tab-login" aria-selected="true" aria-controls="panel-login"
+              class="-mb-px rounded-t-[10px] border-b-2 border-brand-600 px-4 py-2.5 font-heading font-semibold text-brand-700">เข้าสู่ระบบ</button>
+            <button role="tab" id="tab-register" aria-selected="false" aria-controls="panel-register" tabindex="-1"
+              class="-mb-px rounded-t-[10px] border-b-2 border-transparent px-4 py-2.5 font-heading font-medium text-ink-500 hover:text-ink-700">สมัครสมาชิก</button>
+            <button role="tab" id="tab-forgot" aria-selected="false" aria-controls="panel-forgot" tabindex="-1"
+              class="-mb-px hidden rounded-t-[10px] border-b-2 border-transparent px-4 py-2.5 font-heading font-medium text-ink-500 hover:text-ink-700 sm:block">ลืมรหัสผ่าน</button>
+          </div>
+          <!-- ═══ panel: เข้าสู่ระบบ ═══ -->
+          <section role="tabpanel" id="panel-login" aria-labelledby="tab-login" class="mt-6">
+            <form novalidate>
+              <div class="space-y-5">
+                <div>
+                  <label for="login-id" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">
+                    อีเมล หรือ เบอร์โทรศัพท์มือถือ <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span>
+                  </label>
+                  <input id="login-id" name="login-id" type="text" autocomplete="username" required
+                    class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 placeholder:text-ink-400 focus:border-brand-500"
+                    placeholder="เช่น thanakorn@email.com หรือ 0812345678">
+                </div>
+                <div>
+                  <div class="mb-1.5 flex items-baseline justify-between">
+                    <label for="login-pw" class="block font-heading text-sm font-semibold text-ink-900">
+                      รหัสผ่าน <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span>
+                    </label>
+                    <button type="button" id="goForgot" class="text-sm font-semibold text-brand-600 hover:underline">ลืมรหัสผ่าน?</button>
+                  </div>
+                  <input id="login-pw" name="login-pw" type="password" autocomplete="current-password" required
+                    class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 focus:border-brand-500"
+                    placeholder="กรอกรหัสผ่าน">
+                </div>
+                <label class="flex items-center gap-2.5 text-sm text-ink-700">
+                  <input type="checkbox" class="h-4 w-4 rounded-[6px] border-mist-300 text-brand-600 focus:ring-brand-500" checked>
+                  จดจำการเข้าสู่ระบบบนอุปกรณ์นี้
+                </label>
+                <button type="submit" class="w-full rounded-[10px] bg-brand-600 px-5 py-3 font-heading font-semibold text-white shadow-card hover:bg-brand-700 active:translate-y-px">เข้าสู่ระบบ</button>
+              </div>
+            </form>
+
+            <div class="mt-6 rounded-[10px] bg-mist-50 p-4 text-sm leading-relaxed text-ink-700">
+              <p class="flex gap-2">
+                <svg viewBox="0 0 24 24" class="mt-0.5 h-4.5 w-4.5 shrink-0 text-brand-600" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>
+                <span><span class="font-semibold">เจ้าหน้าที่สภาทนายความ</span> เข้าสู่ระบบผ่านพอร์ทัลภายในของสภาฯ ซึ่งกำหนดการยืนยันตัวตนสองชั้น (MFA) ทุกครั้ง</span>
+              </p>
+            </div>
+
+            <p class="mt-6 text-center text-sm text-ink-500">
+              ยังไม่มีบัญชี?
+              <button type="button" id="goRegister" class="font-semibold text-brand-600 hover:underline">สมัครสมาชิกฟรี</button>
+            </p>
+          </section>
+
+          <!-- ═══ panel: สมัครสมาชิก ═══ -->
+          <section role="tabpanel" id="panel-register" aria-labelledby="tab-register" class="mt-6" hidden>
+            <form novalidate>
+              <!-- ประเภทสมาชิก -->
+              <fieldset>
+                <legend class="mb-2 font-heading text-sm font-semibold text-ink-900">ประเภทสมาชิก <span class="text-danger-600" aria-hidden="true">*</span></legend>
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label class="flex cursor-pointer items-start gap-3 rounded-[10px] border-[1.5px] border-mist-300 bg-white p-4 has-[:checked]:border-brand-600 has-[:checked]:bg-brand-50">
+                    <input type="radio" name="memberType" value="citizen" class="mt-1 h-4 w-4 text-brand-600" checked>
+                    <span>
+                      <span class="block font-heading font-semibold text-ink-900">ประชาชนทั่วไป</span>
+                      <span class="mt-0.5 block text-sm text-ink-500">เรียนหลักสูตรสำหรับสาธารณะ ไม่ต้องมีเลขที่ใบอนุญาต</span>
+                    </span>
+                  </label>
+                  <label class="flex cursor-pointer items-start gap-3 rounded-[10px] border-[1.5px] border-mist-300 bg-white p-4 has-[:checked]:border-brand-600 has-[:checked]:bg-brand-50">
+                    <input type="radio" name="memberType" value="lawyer" class="mt-1 h-4 w-4 text-brand-600">
+                    <span>
+                      <span class="block font-heading font-semibold text-ink-900">ทนายความ</span>
+                      <span class="mt-0.5 block text-sm text-ink-500">สอบรับประกาศนียบัตร และสะสมหน่วยกิตต่ออายุใบอนุญาต</span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <!-- เลขที่ใบอนุญาต (เฉพาะทนาย) -->
+              <div id="licenseField" class="mt-4 rounded-[10px] border border-dashed border-brand-300 bg-brand-50/60 p-4" hidden>
+                <label for="license-no" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">
+                  เลขที่ใบอนุญาตว่าความ <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็นสำหรับทนายความ)</span>
+                </label>
+                <input id="license-no" name="license-no" type="text" inputmode="numeric" placeholder="เช่น 25891"
+                  aria-describedby="license-help"
+                  class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 placeholder:text-ink-400 focus:border-brand-500" style="font-variant-numeric:tabular-nums">
+                <p id="license-help" class="mt-1.5 text-sm text-ink-500">ระบบจะตรวจสอบเลขที่ใบอนุญาตกับทะเบียนของสภาทนายความก่อนเปิดสิทธิ์สอบและสะสมหน่วยกิต</p>
+              </div>
+
+              <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label for="reg-firstname" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">ชื่อ <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
+                  <input id="reg-firstname" name="reg-firstname" type="text" autocomplete="given-name" required value="ธนกร"
+                    class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 focus:border-brand-500">
+                </div>
+                <div>
+                  <label for="reg-lastname" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">นามสกุล <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
+                  <input id="reg-lastname" name="reg-lastname" type="text" autocomplete="family-name" required value="วัฒนกุล"
+                    class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 focus:border-brand-500">
+                </div>
+              </div>
+
+              <div class="mt-4">
+                <label for="reg-email" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">อีเมล <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
+                <input id="reg-email" name="reg-email" type="email" autocomplete="email" required aria-invalid="true" aria-describedby="reg-email-err"
+                  value="ธนกร@อีเมล" class="w-full rounded-[10px] border-[1.5px] border-danger-600 bg-white px-3.5 py-2.5 text-ink-900">
+                <p id="reg-email-err" class="mt-1.5 flex items-center gap-1.5 text-sm text-danger-600">
+                  <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>
+                  รูปแบบอีเมลไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง
+                </p>
+              </div>
+
+              <div class="mt-4">
+                <label for="reg-phone" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">เบอร์โทรศัพท์มือถือ <span class="text-ink-500 font-normal">(ไม่บังคับ)</span></label>
+                <input id="reg-phone" name="reg-phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="08X-XXX-XXXX"
+                  class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 placeholder:text-ink-400 focus:border-brand-500" style="font-variant-numeric:tabular-nums">
+              </div>
+
+              <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label for="reg-pw" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">รหัสผ่าน <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
+                  <input id="reg-pw" name="reg-pw" type="password" autocomplete="new-password" required aria-invalid="true" aria-describedby="reg-pw-err reg-pw-help" value="1234"
+                    class="w-full rounded-[10px] border-[1.5px] border-danger-600 bg-white px-3.5 py-2.5 text-ink-900">
+                  <p id="reg-pw-help" class="mt-1.5 text-sm text-ink-500">อย่างน้อย 8 ตัวอักษร ผสมตัวพิมพ์ใหญ่-เล็ก และตัวเลข</p>
+                  <p id="reg-pw-err" class="mt-1 flex items-center gap-1.5 text-sm text-danger-600">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5h.01"/></svg>
+                    รหัสผ่านสั้นเกินไป (ต้องมีอย่างน้อย 8 ตัวอักษร)
+                  </p>
+                </div>
+                <div>
+                  <label for="reg-pw2" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">ยืนยันรหัสผ่าน <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
+                  <input id="reg-pw2" name="reg-pw2" type="password" autocomplete="new-password" required
+                    class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 focus:border-brand-500">
+                </div>
+              </div>
+
+              <div class="mt-5">
+                <label class="flex items-start gap-2.5 text-sm leading-relaxed text-ink-700">
+                  <input type="checkbox" required class="mt-1 h-4 w-4 rounded-[6px] border-mist-300 text-brand-600">
+                  <span>ข้าพเจ้าได้อ่านและยอมรับ<a href="#" class="font-semibold text-brand-600 hover:underline">ข้อกำหนดการใช้บริการ</a> และ<a href="#" class="font-semibold text-brand-600 hover:underline">นโยบายความเป็นส่วนตัว (PDPA)</a> รวมถึงการเก็บและประมวลผลข้อมูลตามที่ระบุ</span>
+                </label>
+              </div>
+
+              <button type="submit" class="mt-6 w-full rounded-[10px] bg-brand-600 px-5 py-3 font-heading font-semibold text-white shadow-card hover:bg-brand-700 active:translate-y-px">สมัครสมาชิก</button>
+              <p class="mt-4 text-center text-sm text-ink-500">มีบัญชีแล้ว? <button type="button" id="backLogin" class="font-semibold text-brand-600 hover:underline">เข้าสู่ระบบ</button></p>
+            </form>
+          </section>
+
+          <!-- ═══ panel: ลืมรหัสผ่าน ═══ -->
+          <section role="tabpanel" id="panel-forgot" aria-labelledby="tab-forgot" class="mt-6" hidden>
+            <form novalidate>
+              <div class="rounded-[10px] bg-mist-50 p-4 text-sm leading-relaxed text-ink-700">
+                <p>กรอกอีเมลที่ใช้สมัครบัญชี ระบบจะส่งลิงก์สำหรับตั้งรหัสผ่านใหม่ (ลิงก์มีอายุ 30 นาที)</p>
+              </div>
+              <div class="mt-4">
+                <label for="forgot-email" class="mb-1.5 block font-heading text-sm font-semibold text-ink-900">อีเมล <span class="text-danger-600" aria-hidden="true">*</span><span class="sr-only">(จำเป็น)</span></label>
+                <input id="forgot-email" name="forgot-email" type="email" required placeholder="name@example.com"
+                  class="w-full rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 placeholder:text-ink-400 focus:border-brand-500">
+              </div>
+              <button type="submit" class="mt-5 w-full rounded-[10px] bg-brand-600 px-5 py-3 font-heading font-semibold text-white shadow-card hover:bg-brand-700 active:translate-y-px">ส่งลิงก์ตั้งรหัสผ่านใหม่</button>
+              <p class="mt-4 text-center text-sm text-ink-500"><button type="button" id="forgotBack" class="font-semibold text-brand-600 hover:underline">← กลับไปหน้าเข้าสู่ระบบ</button></p>
+            </form>
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <footer class="border-t border-mist-200 bg-white px-4 py-4 text-center text-xs text-ink-500 sm:px-8">
+      © 2569 สภาทนายความแห่งประเทศไทย · <a href="#" class="text-brand-600 hover:underline">นโยบายความเป็นส่วนตัว (PDPA)</a> · <a href="#" class="text-brand-600 hover:underline">ข้อกำหนดการใช้บริการ</a>
+    </footer>
+  </div>
+</div>
+<script>
+  // ── สลับ tab (เข้าสู่ระบบ / สมัครสมาชิก / ลืมรหัสผ่าน) ──
+  const tabs = ['login', 'register', 'forgot'];
+
+  function selectTab(name, focus = true) {
+    tabs.forEach(t => {
+      const tab = document.getElementById('tab-' + t);
+      const panel = document.getElementById('panel-' + t);
+      const active = t === name;
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+      if (active) { panel.removeAttribute('hidden'); if (focus) tab.focus({ preventScroll: true }); }
+      else { panel.setAttribute('hidden', ''); }
+    });
+  }
+
+  tabs.forEach(t => {
+    document.getElementById('tab-' + t).addEventListener('click', () => selectTab(t));
+  });
+
+  // ลิงก์ข้าม tab
+  document.getElementById('goRegister').addEventListener('click', () => selectTab('register', false));
+  document.getElementById('backLogin').addEventListener('click', () => selectTab('login', false));
+  document.getElementById('goForgot').addEventListener('click', () => selectTab('forgot', false));
+  document.getElementById('forgotBack').addEventListener('click', () => selectTab('login', false));
+
+  // แป้นพิมพ์ลูกศรใน tablist (ตาม WAI-ARIA)
+  const tablist = document.querySelector('[role="tablist"]');
+  tablist.addEventListener('keydown', (e) => {
+    const visible = tabs.filter(t => t === 'forgot' || document.getElementById('tab-' + t).offsetParent !== null || getComputedStyle(document.getElementById('tab-' + t)).display !== 'none');
+    const current = visible.findIndex(t => document.getElementById('tab-' + t).getAttribute('aria-selected') === 'true');
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (current + 1) % visible.length;
+    else if (e.key === 'ArrowLeft') next = (current - 1 + visible.length) % visible.length;
+    if (next >= 0) { e.preventDefault(); selectTab(visible[next]); }
+  });
+
+  // ── แสดง/ซ่อนช่องเลขที่ใบอนุญาตตามประเภทสมาชิก ──
+  const licenseField = document.getElementById('licenseField');
+  const licenseInput = document.getElementById('license-no');
+  document.querySelectorAll('input[name="memberType"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const isLawyer = radio.value === 'lawyer' && radio.checked;
+      if (isLawyer) { licenseField.removeAttribute('hidden'); licenseInput.setAttribute('required', 'required'); }
+      else { licenseField.setAttribute('hidden', ''); licenseInput.removeAttribute('required'); }
+    });
+  });
+</script>
+</body>
+</html>

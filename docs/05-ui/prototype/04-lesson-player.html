@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>บทเรียน 2.3 การทำสัญญาซื้อขายอสังหาริมทรัพย์ · ระบบอีเลิร์นนิ่ง สภาทนายความ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  colors: {
+    brand:{50:'#F0F6FC',100:'#DCE9F6',200:'#B9D3EB',300:'#8AB4DC',400:'#5793CB',500:'#3375B5',600:'#245E9B',700:'#1B4B7E',800:'#133A61',900:'#0E2B4A',950:'#081B31'},
+    gold:{50:'#FBF7EC',100:'#F5ECD3',200:'#E9D8A4',300:'#DCC072',500:'#B8922E',700:'#7A5B1D'},
+    ink:{400:'#64788E',500:'#54687F',600:'#41556E',700:'#31445C',900:'#0E1B2C'},
+    mist:{50:'#F7F9FC',100:'#EEF3F9',200:'#E3EAF2',300:'#D3DDE9'},
+    success:{50:'#E4F4EA',100:'#CBE9D8',600:'#166B43'},
+    warning:{50:'#FCF3E1',100:'#F7E4BC',600:'#92610A'},
+    danger:{50:'#FBEDEB',100:'#F5D4D0',600:'#B3261E'}
+  },
+  fontFamily:{sans:['Sarabun','ui-sans-serif','system-ui','sans-serif'],heading:['"IBM Plex Sans Thai"','Sarabun','sans-serif']},
+  boxShadow:{card:'0 1px 2px rgba(14,43,74,.06), 0 6px 20px rgba(14,43,74,.08)',pop:'0 12px 40px rgba(14,43,74,.18)'}
+}}};
+</script>
+<style>
+body{font-family:'Sarabun',ui-sans-serif,system-ui,sans-serif;color:#31445C;background:#F7F9FC;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-serif}
+:focus-visible{outline:3px solid #3375B5;outline-offset:2px;border-radius:6px}
+.skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:#0E2B4A;color:#fff;padding:.75rem 1.25rem;border-radius:0 0 10px 0}
+.skip-link:focus{left:0}
+[hidden]{display:none!important}
+.tnum{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body class="min-h-screen">
+<a href="#main" class="skip-link">ข้ามไปยังเนื้อหาหลัก</a>
+
+<!-- ═══ topbar ผู้เรียน ═══ -->
+<header class="sticky top-0 z-40 border-b border-brand-950/40 bg-brand-900 text-white">
+  <div class="flex h-14 items-center gap-3 px-4 sm:px-6">
+    <button id="menuBtn" type="button" aria-expanded="false" aria-controls="sidebar"
+      class="rounded-[10px] p-2 text-brand-200 hover:bg-white/10 lg:hidden">
+      <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      <span class="sr-only">เปิดรายการบทเรียน</span>
+    </button>
+    <a href="07-learner-dashboard.html" class="flex items-center gap-2.5">
+      <svg viewBox="0 0 48 48" class="h-8 w-8" role="img" aria-label="ตราสัญลักษณ์สภาทนายความ (จำลอง)">
+        <circle cx="24" cy="24" r="22.5" fill="#0E2B4A" stroke="#DCC072" stroke-width="1.5"/>
+        <g stroke="#DCC072" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M24 12v22"/><path d="M12 16h24"/><path d="M17 34h14"/>
+          <path d="M12 16 8 23"/><path d="M12 16l4 7"/><path d="M8 23a4.6 4.6 0 0 0 8 0"/>
+          <path d="M36 16l-4 7"/><path d="M36 16l4 7"/><path d="M32 23a4.6 4.6 0 0 0 8 0"/>
+        </g>
+      </svg>
+      <span class="hidden font-heading font-bold sm:block">กฎหมายที่ประชาชนควรรู้</span>
+    </a>
+
+    <p class="ml-auto hidden items-center gap-1.5 rounded-full bg-white/10 px-3 py-1.5 text-xs text-brand-100 md:flex" role="status">
+      <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 text-success-100" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+      บันทึกอัตโนมัติแล้ว เมื่อ 14:18:42
+    </p>
+    <a href="07-learner-dashboard.html" class="flex items-center gap-2.5">
+      <span class="hidden text-right text-xs leading-tight text-brand-100 sm:block">
+        <span class="block font-semibold text-white">ธนกร วัฒนกุล</span>
+        <span>ทนายความ · ทล. 25891</span>
+      </span>
+      <span class="flex h-9 w-9 items-center justify-center rounded-full bg-gold-300 font-heading text-sm font-bold text-brand-950" aria-hidden="true">ธ</span>
+      <span class="sr-only">ไปที่แดชบอร์ดของฉัน</span>
+    </a>
+  </div>
+</header>
+
+<div class="lg:flex">
+  <!-- ═══ sidebar: โครงสร้างบทเรียน ═══ -->
+  <aside id="sidebar" aria-label="โครงสร้างหลักสูตร"
+    class="fixed inset-y-0 left-0 top-14 z-30 w-80 max-w-[85vw] overflow-y-auto bg-brand-800 text-brand-100 lg:sticky lg:top-14 lg:z-auto lg:h-[calc(100vh-3.5rem)] lg:max-w-none lg:shrink-0" hidden>
+    <div class="p-5">
+      <p class="font-heading text-sm font-bold text-white">ความคืบหน้าหลักสูตร</p>
+      <div class="mt-2 flex items-center justify-between text-xs text-brand-200">
+        <span>บทเรียนที่ 4 จาก 12</span>
+        <span class="tnum font-semibold text-white">35%</span>
+      </div>
+      <div class="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-white/15" role="progressbar" aria-valuenow="35" aria-valuemin="0" aria-valuemax="100" aria-label="ความคืบหน้าหลักสูตร 35 เปอร์เซ็นต์">
+        <div class="h-full rounded-full bg-gold-300" style="width:35%"></div>
+      </div>
+    </div>
+
+    <nav aria-label="รายการบทเรียน" class="pb-8">
+      <!-- โมดูล 1 เสร็จ -->
+      <div>
+        <button type="button" aria-expanded="false" aria-controls="lm1" class="flex w-full items-center gap-2.5 px-5 py-3 text-left hover:bg-white/5">
+          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-success-600 text-white">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7"/></svg>
+          </span>
+          <span class="flex-1">
+            <span class="block font-heading text-sm font-semibold text-white">โมดูล 1 · พื้นฐานกฎหมายไทย</span>
+            <span class="text-xs text-brand-300">เสร็จสมบูรณ์ 3/3 บท</span>
+          </span>
+          <svg viewBox="0 0 24 24" class="h-4 w-4 -rotate-90 text-brand-300 transition-transform" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <ul id="lm1" class="mx-3 hidden rounded-[10px] bg-brand-900/50 py-1" hidden></ul>
+      </div>
+
+      <!-- โมดูล 2 ปัจจุบัน -->
+      <div>
+        <button type="button" aria-expanded="true" aria-controls="lm2" class="flex w-full items-center gap-2.5 px-5 py-3 text-left hover:bg-white/5">
+          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-600 font-heading text-xs font-bold text-white">2</span>
+          <span class="flex-1">
+            <span class="block font-heading text-sm font-semibold text-white">โมดูล 2 · สัญญาในชีวิตประจำวัน</span>
+            <span class="text-xs text-brand-300">กำลังเรียน 2/5 บท</span>
+          </span>
+          <svg viewBox="0 0 24 24" class="h-4 w-4 text-brand-300 transition-transform" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <ul id="lm2" class="mx-3 rounded-[10px] bg-brand-900/50 py-1">
+          <li>
+            <a href="#" class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-brand-200 hover:bg-white/5">
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-success-100" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 5-5.5"/></svg>
+              2.1 นิติกรรมและสัญญา <span class="ml-auto text-xs text-brand-300 tnum">18:40</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-brand-200 hover:bg-white/5">
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-success-100" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 5-5.5"/></svg>
+              2.2 การซื้อขายและคุ้มครองผู้บริโภค <span class="ml-auto text-xs text-brand-300 tnum">16:12</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" aria-current="page" class="flex items-center gap-2.5 rounded-r-lg border-l-[3px] border-gold-300 bg-white/10 px-3 py-2.5 text-sm font-semibold text-white">
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-gold-300" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>
+              2.3 การทำสัญญาซื้อขายอสังหาริมทรัพย์ <span class="ml-auto text-xs text-brand-200 tnum">14:32</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-brand-200 hover:bg-white/5">
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-brand-400" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg>
+              2.4 สัญญาจ้างทำของ จ้างแรงงาน และการกู้ยืม <span class="ml-auto text-xs text-brand-300 tnum">17:05</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-brand-200 hover:bg-white/5">
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-brand-400" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 11a3.5 3.5 0 1 1 6 0v1H9z"/><rect x="4" y="12" width="16" height="8" rx="2"/><path d="M12 15v2"/></svg>
+              2.5 แบบทดสอบย่อยท้ายโมดูล (5 ข้อ)
+            </a>
+          </li>
+        </ul>
+      </div>
+
+      <!-- โมดูล 3 -->
+      <div>
+        <button type="button" aria-expanded="false" aria-controls="lm3" class="flex w-full items-center gap-2.5 px-5 py-3 text-left hover:bg-white/5">
+          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/15 font-heading text-xs font-bold text-brand-100">3</span>
+          <span class="flex-1">
+            <span class="block font-heading text-sm font-semibold text-white">โมดูล 3 · กฎหมายเกี่ยวกับทรัพย์สิน</span>
+            <span class="text-xs text-brand-300">ยังไม่เริ่ม 0/3 บท</span>
+          </span>
+          <svg viewBox="0 0 24 24" class="h-4 w-4 -rotate-90 text-brand-300 transition-transform" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <ul id="lm3" class="mx-3 hidden rounded-[10px] bg-brand-900/50 py-1" hidden></ul>
+      </div>
+
+      <!-- โมดูล 4 -->
+      <div>
+        <button type="button" aria-expanded="false" aria-controls="lm4" class="flex w-full items-center gap-2.5 px-5 py-3 text-left hover:bg-white/5">
+          <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/15 font-heading text-xs font-bold text-brand-100">4</span>
+          <span class="flex-1">
+            <span class="block font-heading text-sm font-semibold text-white">โมดูล 4 · ครอบครัวและมรดกเบื้องต้น</span>
+            <span class="text-xs text-brand-300">ยังไม่เริ่ม 0/2 บท</span>
+          </span>
+          <svg viewBox="0 0 24 24" class="h-4 w-4 -rotate-90 text-brand-300 transition-transform" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <ul id="lm4" class="mx-3 hidden rounded-[10px] bg-brand-900/50 py-1" hidden></ul>
+      </div>
+
+      <!-- การสอบ (ล็อก) -->
+      <div class="mx-5 mt-4 rounded-[10px] border border-white/10 bg-brand-900/60 p-4">
+        <p class="flex items-center gap-2 font-heading text-sm font-semibold text-brand-200">
+          <svg viewBox="0 0 24 24" class="h-4 w-4 text-gold-300" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4.5" y="10" width="15" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          การสอบปลายหลักสูตร
+        </p>
+        <p class="mt-1.5 text-xs leading-relaxed text-brand-300">ต้องเรียนจบครบทุกบทเรียนจึงจะเข้าสอบได้ (เหลืออีก 8 บท)</p>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- ═══ เนื้อหาบทเรียน ═══ -->
+  <main id="main" class="min-w-0 flex-1 px-4 py-6 sm:px-8">
+    <nav aria-label="เส้นทาง" class="mb-4">
+      <ol class="flex flex-wrap items-center gap-2 text-sm text-ink-500">
+        <li><a href="03-course-detail.html" class="hover:text-brand-700 hover:underline">กฎหมายที่ประชาชนควรรู้</a></li>
+        <li aria-hidden="true" class="text-mist-300">/</li>
+        <li><a href="#" class="hover:text-brand-700 hover:underline">โมดูล 2 · สัญญาในชีวิตประจำวัน</a></li>
+        <li aria-hidden="true" class="text-mist-300">/</li>
+        <li aria-current="page" class="font-medium text-ink-700">บทเรียน 2.3</li>
+      </ol>
+    </nav>
+
+    <h1 class="font-heading text-2xl font-bold leading-tight text-ink-900 sm:text-3xl">การทำสัญญาซื้อขายอสังหาริมทรัพย์</h1>
+    <p class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-500">
+      <span class="inline-flex items-center gap-1.5">
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        วิดีโอ 14:32 นาที
+      </span>
+      <span class="inline-flex items-center gap-1.5">
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        ผศ.ดร.สมชาย วัฒนศิริ
+      </span>
+    </p>
+
+    <!-- วิดีโอ -->
+    <figure class="mt-5">
+      <div class="group relative aspect-video w-full overflow-hidden rounded-[14px] bg-gradient-to-br from-brand-950 via-brand-900 to-brand-700 shadow-card">
+        <svg class="pointer-events-none absolute inset-0 h-full w-full opacity-30" viewBox="0 0 800 450" fill="none" aria-hidden="true">
+          <circle cx="400" cy="225" r="190" stroke="#DCC072" stroke-width="1.5"/>
+          <circle cx="400" cy="225" r="130" stroke="#DCC072" stroke-width="1"/>
+        </svg>
+        <button id="playBtn" type="button" aria-pressed="false"
+          class="absolute inset-0 flex items-center justify-center" aria-label="เล่นวิดีโอ บทเรียน 2.3 การทำสัญญาซื้อขายอสังหาริมทรัพย์">
+          <span class="flex h-20 w-20 items-center justify-center rounded-full bg-white/95 text-brand-800 shadow-pop transition group-hover:scale-105">
+            <svg id="playIcon" viewBox="0 0 24 24" class="ml-1 h-9 w-9" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>
+          </span>
+        </button>
+        <span id="playingBadge" hidden class="absolute left-4 top-4 rounded-full bg-brand-950/70 px-3 py-1 text-xs font-semibold text-gold-200">กำลังเล่น — บันทึกอัตโนมัติเมื่อดูครบ</span>
+
+        <!-- แถบควบคุม (จำลอง) -->
+        <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-brand-950/90 to-transparent px-4 pb-3 pt-8">
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/25">
+            <div id="videoBar" class="h-full w-[29%] rounded-full bg-gold-300"></div>
+          </div>
+          <div class="mt-2.5 flex items-center gap-3 text-white">
+            <button id="playBtn2" type="button" class="rounded p-1 hover:bg-white/15" aria-label="เล่น/หยุดวิดีโอ">
+              <svg id="playIcon2" viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>
+            </button>
+            <span class="text-xs tnum">04:12 / 14:32</span>
+            <span class="ml-auto hidden items-center gap-1 text-xs sm:flex">คำบรรยาย: ไทย</span>
+            <button type="button" class="rounded p-1 hover:bg-white/15" aria-label="เต็มหน้าจอ">
+              <svg viewBox="0 0 24 24" class="h-4.5 w-4.5" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <figcaption class="mt-2 text-sm text-ink-500">ดูวิดีโอครบทั้งบท ระบบจะบันทึกว่า "บทเรียนเสร็จสมบูรณ์" โดยอัตโนมัติ</figcaption>
+    </figure>
+
+    <!-- เอกสารประกอบ -->
+    <section aria-labelledby="docs-title" class="mt-8">
+      <h2 id="docs-title" class="font-heading text-xl font-bold text-ink-900">เอกสารประกอบบทเรียน</h2>
+      <ul class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <li class="flex items-center gap-3 rounded-[10px] bg-white p-4 shadow-card">
+          <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] bg-danger-50 text-danger-600">
+            <svg viewBox="0 0 24 24" class="h-5.5 w-5.5" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-medium text-ink-900">ใบความรู้ บทที่ 2.3 — สัญญาซื้อขายอสังหาริมทรัพย์</p>
+            <p class="text-sm text-ink-500">PDF · 1.2 MB · 8 หน้า</p>
+          </div>
+          <a href="#" class="rounded-[10px] p-2.5 text-brand-700 hover:bg-brand-50" aria-label="ดาวน์โหลด ใบความรู้ บทที่ 2.3 (PDF 1.2 MB)">
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+          </a>
+        </li>
+        <li class="flex items-center gap-3 rounded-[10px] bg-white p-4 shadow-card">
+          <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] bg-danger-50 text-danger-600">
+            <svg viewBox="0 0 24 24" class="h-5.5 w-5.5" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-medium text-ink-900">ตัวอย่างสัญญาซื้อขายอสังหาริมทรัพย์ (ฉบับวิเคราะห์)</p>
+            <p class="text-sm text-ink-500">PDF · 0.4 MB · 3 หน้า</p>
+          </div>
+          <a href="#" class="rounded-[10px] p-2.5 text-brand-700 hover:bg-brand-50" aria-label="ดาวน์โหลด ตัวอย่างสัญญาซื้อขายอสังหาริมทรัพย์ (PDF 0.4 MB)">
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 21h16"/></svg>
+          </a>
+        </li>
+      </ul>
+    </section>
+
+    <!-- โน้ต -->
+    <section aria-labelledby="note-title" class="mt-8">
+      <h2 id="note-title" class="font-heading text-xl font-bold text-ink-900">หมายเหตุของฉัน</h2>
+      <div class="mt-3 rounded-[14px] bg-white p-4 shadow-card">
+        <label for="lessonNote" class="sr-only">หมายเหตุประจำบทเรียน 2.3</label>
+        <textarea id="lessonNote" rows="3" placeholder="จดประเด็นสำคัญของบทเรียนนี้… บันทึกอัตโนมัติขณะพิมพ์"
+          class="w-full resize-y rounded-[10px] border-[1.5px] border-mist-300 bg-white px-3.5 py-2.5 text-ink-900 placeholder:text-ink-400 focus:border-brand-500">จำไว้: การซื้อขายอสังหาริมทรัพย์ต้องทำเป็นหนังสือและจดทะเบียนโอนต่อพนักงานศาล มิฉะนั้นสัญญายังไม่สมบูรณ์</textarea>
+        <div class="mt-3 flex items-center justify-between">
+          <p class="text-sm text-ink-500" id="noteSavedAt">บันทึกล่าสุด 14:20:11</p>
+          <button id="noteSave" type="button" class="rounded-[10px] border-[1.5px] border-brand-600 bg-white px-4 py-2 font-heading text-sm font-semibold text-brand-700 hover:bg-brand-50">บันทึกหมายเหตุ</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- นำทางบทเรียน -->
+    <nav aria-label="นำทางบทเรียน" class="mt-10 flex flex-col gap-3 border-t border-mist-200 pt-6 sm:flex-row sm:items-center sm:justify-between">
+      <a href="#" class="inline-flex items-center justify-center gap-2 rounded-[10px] border-[1.5px] border-mist-300 bg-white px-5 py-3 font-heading font-semibold text-ink-700 hover:border-brand-600 hover:text-brand-700">
+        <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>
+        บทเรียนก่อนหน้า
+      </a>
+      <a href="#" class="inline-flex items-center justify-center gap-2 rounded-[10px] bg-brand-600 px-6 py-3 font-heading font-semibold text-white shadow-card hover:bg-brand-700 active:translate-y-px">
+        บทเรียนถัดไป: สัญญาจ้างทำของ จ้างแรงงาน และการกู้ยืม
+        <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+      </a>
+    </nav>
+  </main>
+</div>
+
+<!-- toast -->
+<div id="toast" class="fixed bottom-5 right-5 z-50 flex w-[340px] max-w-[calc(100vw-2.5rem)] items-start gap-3 rounded-[14px] bg-white p-4 shadow-pop" role="status" aria-live="polite">
+  <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-success-50 text-success-600">
+    <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 5-5.5"/></svg>
+  </span>
+  <div class="min-w-0 flex-1">
+    <p id="toastTitle" class="font-heading text-sm font-semibold text-ink-900">บันทึกความคืบหน้าการเรียนแล้ว</p>
+    <p id="toastBody" class="mt-0.5 text-sm leading-relaxed text-ink-500">บทเรียน 2.3 · ดูวิดีโอไปแล้ว 29%</p>
+  </div>
+  <button id="toastClose" type="button" class="rounded-[6px] p-1 text-ink-400 hover:bg-mist-100 hover:text-ink-700" aria-label="ปิดการแจ้งเตือน">
+    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+  </button>
+</div>
+
+<script>
+  // ── sidebar มือถือ ──
+  const menuBtn = document.getElementById('menuBtn'), sidebar = document.getElementById('sidebar');
+  menuBtn.addEventListener('click', () => {
+    const open = sidebar.hasAttribute('hidden');
+    if (open) sidebar.removeAttribute('hidden'); else sidebar.setAttribute('hidden', '');
+    menuBtn.setAttribute('aria-expanded', String(open));
+  });
+
+  // ── accordion โมดูล ──
+  document.querySelectorAll('#sidebar [aria-controls^="lm"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const list = document.getElementById(btn.getAttribute('aria-controls'));
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', String(!expanded));
+      if (expanded) { list.setAttribute('hidden', ''); } else { list.removeAttribute('hidden'); }
+      const chevron = btn.querySelector('svg');
+      if (!expanded) chevron.classList.remove('-rotate-90'); else chevron.classList.add('-rotate-90');
+    });
+  });
+
+  // ── เล่น/หยุดวิดีโอ (จำลอง) ──
+  const pausePath = '<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>';
+  const playPath = '<path d="M7 4.5v15l12-7.5z"/>';
+  let playing = false;
+  function togglePlay() {
+    playing = !playing;
+    document.getElementById('playIcon').innerHTML = playing ? pausePath : playPath;
+    document.getElementById('playIcon2').innerHTML = playing ? pausePath : playPath;
+    document.getElementById('playBtn').setAttribute('aria-pressed', String(playing));
+    document.getElementById('playBtn').setAttribute('aria-label', playing ? 'หยุดวิดีโอชั่วคราว' : 'เล่นวิดีโอ บทเรียน 2.3 การทำสัญญาซื้อขายอสังหาริมทรัพย์');
+    if (playing) document.getElementById('playingBadge').removeAttribute('hidden');
+    else document.getElementById('playingBadge').setAttribute('hidden', '');
+  }
+  document.getElementById('playBtn').addEventListener('click', togglePlay);
+  document.getElementById('playBtn2').addEventListener('click', togglePlay);
+
+  // ── toast ──
+  const toast = document.getElementById('toast');
+  document.getElementById('toastClose').addEventListener('click', () => toast.setAttribute('hidden', ''));
+  document.getElementById('noteSave').addEventListener('click', () => {
+    const now = new Date();
+    const t = now.toTimeString().slice(0, 8);
+    document.getElementById('noteSavedAt').textContent = 'บันทึกล่าสุด ' + t;
+    document.getElementById('toastTitle').textContent = 'บันทึกหมายเหตุเรียบร้อย';
+    document.getElementById('toastBody').textContent = 'บทเรียน 2.3 · ' + t;
+    toast.removeAttribute('hidden');
+  });
+</script>
+</body>
+</html>

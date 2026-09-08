@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>แกลเลอรีต้นแบบ UI — ระบบอีเลิร์นนิ่ง สภาทนายความแห่งประเทศไทย</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  colors: {
+    brand:{50:'#F0F6FC',100:'#DCE9F6',200:'#B9D3EB',300:'#8AB4DC',400:'#5793CB',500:'#3375B5',600:'#245E9B',700:'#1B4B7E',800:'#133A61',900:'#0E2B4A',950:'#081B31'},
+    gold:{50:'#FBF7EC',100:'#F5ECD3',200:'#E9D8A4',300:'#DCC072',500:'#B8922E',700:'#7A5B1D'},
+    ink:{400:'#64788E',500:'#54687F',600:'#41556E',700:'#31445C',900:'#0E1B2C'},
+    mist:{50:'#F7F9FC',100:'#EEF3F9',200:'#E3EAF2',300:'#D3DDE9'},
+    success:{50:'#E4F4EA',100:'#CBE9D8',600:'#166B43'},
+    warning:{50:'#FCF3E1',100:'#F7E4BC',600:'#92610A'},
+    danger:{50:'#FBEDEB',100:'#F5D4D0',600:'#B3261E'}
+  },
+  fontFamily:{sans:['Sarabun','ui-sans-serif','system-ui','sans-serif'],heading:['"IBM Plex Sans Thai"','Sarabun','sans-serif']},
+  boxShadow:{card:'0 1px 2px rgba(14,43,74,.06), 0 6px 20px rgba(14,43,74,.08)',pop:'0 12px 40px rgba(14,43,74,.18)'}
+}}};
+</script>
+<style>
+body{font-family:'Sarabun',ui-sans-serif,system-ui,sans-serif;color:#31445C;background:#F7F9FC;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4,h5,h6,.font-heading{font-family:'IBM Plex Sans Thai','Sarabun',sans-serif}
+:focus-visible{outline:3px solid #3375B5;outline-offset:2px;border-radius:6px}
+.skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:#0E2B4A;color:#fff;padding:.75rem 1.25rem;border-radius:0 0 10px 0}
+.skip-link:focus{left:0}
+</style>
+</head>
+<body class="min-h-screen">
+<a href="#main" class="skip-link">ข้ามไปยังเนื้อหาหลัก</a>
+
+<!-- header -->
+<header class="bg-brand-900 text-white">
+  <div class="mx-auto flex max-w-7xl items-center gap-4 px-4 py-4 sm:px-6">
+    <svg viewBox="0 0 48 48" class="h-12 w-12 shrink-0" role="img" aria-label="ตราสัญลักษณ์สภาทนายความแห่งประเทศไทย (จำลอง)">
+      <circle cx="24" cy="24" r="22.5" fill="#0E2B4A" stroke="#DCC072" stroke-width="1.5"/>
+      <g stroke="#DCC072" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M24 12v22"/><path d="M12 16h24"/><path d="M17 34h14"/>
+        <path d="M12 16 8 23m0 0 4-7"/><path d="M12 16l4 7"/>
+        <path d="M8 23a4.6 4.6 0 0 0 8 0"/>
+        <path d="M36 16l-4 7m4-7 4 7"/><path d="M32 23a4.6 4.6 0 0 0 8 0"/>
+      </g>
+      <circle cx="24" cy="11" r="1.6" fill="#DCC072"/>
+    </svg>
+    <div class="min-w-0">
+      <p class="text-xs tracking-wide text-brand-200">สภาทนายความแห่งประเทศไทย</p>
+      <h1 class="font-heading text-lg font-bold leading-tight sm:text-xl">แกลเลอรีต้นแบบ UI — ระบบอีเลิร์นนิ่ง</h1>
+    </div>
+    <span class="ml-auto hidden rounded-full bg-gold-300/15 px-3 py-1 text-xs font-semibold text-gold-300 sm:inline">Wave A · v0.1.0</span>
+  </div>
+</header>
+
+<main id="main" class="mx-auto max-w-7xl px-4 py-10 sm:px-6">
+  <!-- intro -->
+  <section aria-labelledby="intro-h" class="rounded-[14px] bg-white p-6 shadow-card sm:p-8">
+    <h2 id="intro-h" class="font-heading text-2xl font-bold text-ink-900">ต้นแบบหน้าจอ 9 หน้า (HTML แบบ standalone)</h2>
+    <p class="mt-3 max-w-3xl leading-relaxed">
+      ทุกไฟล์เปิดด้วยเบราว์เซอร์ได้โดยตรง (ใช้ Tailwind CDN + Google Fonts — ต้องต่ออินเทอร์เน็ต)
+      token สี ฟอนต์ และระยะห่างอ้างอิงตาม <span class="font-semibold text-brand-700">docs/05-ui/DESIGN-SYSTEM.md</span>
+      ข้อมูลทั้งหมด (ชื่อ ตัวเลข สถานะ) เป็นข้อมูลตัวอย่างเพื่อการออกแบบ
+    </p>
+    <div class="mt-5 flex flex-wrap items-center gap-2 text-sm">
+      <span class="inline-flex items-center gap-2 rounded-full border border-mist-300 bg-mist-50 px-3 py-1">
+        <span class="h-4 w-4 rounded-full bg-brand-900" aria-hidden="true"></span>brand-900 <code class="text-xs">#0E2B4A</code>
+      </span>
+      <span class="inline-flex items-center gap-2 rounded-full border border-mist-300 bg-mist-50 px-3 py-1">
+        <span class="h-4 w-4 rounded-full bg-brand-600" aria-hidden="true"></span>brand-600 <code class="text-xs">#245E9B</code>
+      </span>
+      <span class="inline-flex items-center gap-2 rounded-full border border-mist-300 bg-mist-50 px-3 py-1">
+        <span class="h-4 w-4 rounded-full bg-gold-300" aria-hidden="true"></span>gold-300 <code class="text-xs">#DCC072</code>
+      </span>
+      <span class="inline-flex items-center gap-2 rounded-full border border-mist-300 bg-mist-50 px-3 py-1">
+        <span class="h-4 w-4 rounded-full bg-mist-50 ring-1 ring-mist-300" aria-hidden="true"></span>พื้นหลัง <code class="text-xs">#F7F9FC</code>
+      </span>
+      <span class="inline-flex items-center gap-2 rounded-full border border-mist-300 bg-mist-50 px-3 py-1">
+        IBM Plex Sans Thai (หัวข้อ) · Sarabun (เนื้อหา)
+      </span>
+    </div>
+  </section>
+
+  <!-- gallery grid -->
+  <section aria-labelledby="pages-h" class="mt-8">
+    <h2 id="pages-h" class="font-heading text-xl font-bold text-ink-900">หน้าทั้งหมด</h2>
+    <ul class="mt-4 grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="01-home.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-900 to-brand-600">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-300" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 3v18"/><path d="M8 21h8"/><path d="M6 6h12"/><path d="M6 6 4 10m2-4 2 4"/><path d="M4 10a2.9 2.9 0 0 0 4 0"/><path d="M18 6l-2 4m2-4 2 4"/><path d="M16 10a2.9 2.9 0 0 0 4 0"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">สาธารณะ</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">01 · หน้าแรก</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">Hero + ค้นหา, หมวดหลักสูตร 6 หมวด, การ์ดหลักสูตรแนะนำ, ประกาศ, footer ติดต่อสภาทนายความ</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 01-home.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="02-auth.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-900 to-brand-700">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-300" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">สาธารณะ</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">02 · เข้าสู่ระบบ / สมัครสมาชิก</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">แยกประเภทประชาชน/ทนายความ (เลขที่ใบอนุญาต), ลืมรหัสผ่าน, validation ข้อความไทย — tab ใช้คีย์บอร์ดได้จริง</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 02-auth.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="03-course-detail.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-800 to-brand-500">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-200" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">สาธารณะ</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">03 · รายละเอียดหลักสูตร</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">ภาพปก, คำอธิบาย, โครงสร้างโมดูล/บทเรียน (accordion), วิทยากร, เงื่อนไขรับประกาศนียบัตร + หน่วยกิต, ปุ่มลงทะเบียน (sticky sidebar)</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 03-course-detail.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="04-lesson-player.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-800 to-brand-600">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-200" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">ผู้เรียน</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">04 · หน้าบทเรียน (Lesson Player)</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">วิดีโอ + เอกสารประกอบ + โน้ต, sidebar โมดูล/บทเรียน + progress 35%, ปุ่มบทก่อนหน้า/บทถัดไป, toast บันทึกอัตโนมัติ</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 04-lesson-player.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="05-exam.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-950 to-brand-700">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-300" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">ผู้เรียน</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">05 · หน้าสอบ</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">header รหัส attempt + timer จริง (JS นับถอยหลัง + เตือนเมื่อเหลือ 5 นาที), กริดสถานะข้อ 30 ข้อ (ทำ/ยังไม่ทำ/ธง), ตั้งธงได้จริง, autosave, modal ยืนยันส่ง</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 05-exam.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="06-exam-result.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-success-600 to-brand-700">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-white" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 5-5.5"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">ผู้เรียน</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">06 · ผลสอบ</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">สถานะ "ผ่าน" ชัดเจน, คะแนน 84/100 (เกณฑ์ 70), คะแนนตามหมวด, ดูเฉลย, ดาวน์โหลดประกาศนียบัตร PDF, หน่วยกิตที่ได้รับ</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 06-exam-result.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="07-learner-dashboard.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-900 to-brand-600">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-300" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">ผู้เรียน</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">07 · แดชบอร์ดผู้เรียน</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">Continue learning (เรียนต่อจากที่ค้าง), หลักสูตรที่ลงทะเบียน + progress, <span class="font-semibold">Credit Bank: 22/36 หน่วย vs เป้าหมายรอบต่ออายุ</span>, ประวัติ credit, ประกาศนียบัตร</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 07-learner-dashboard.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="08-admin-dashboard.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-brand-950 to-brand-800">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-300" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 20v-6M12 20V6M18 20v-9"/><path d="M3 20h18"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">เจ้าหน้าที่</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">08 · หลังบ้านเจ้าหน้าที่</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">KPI 4 การ์ด (ผู้เรียน/ผลสอบ/ประกาศนียบัตร/รออนุมัติ), กราฟ SVG, ตารางล่าสุด + pagination, ลิงก์ section จัดการ (ผู้ใช้/หลักสูตร/ข้อสอบ/credit/audit), ป้าย MFA</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 08-admin-dashboard.html →</span>
+          </div>
+        </a>
+      </li>
+      <li class="group overflow-hidden rounded-[14px] bg-white shadow-card transition hover:-translate-y-0.5 hover:shadow-pop">
+        <a href="09-certificate-verify.html" class="flex h-full flex-col">
+          <div class="relative flex h-28 items-center justify-center bg-gradient-to-br from-gold-500 to-brand-700">
+            <svg viewBox="0 0 24 24" class="h-9 w-9 text-gold-100" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="9" r="5.5"/><path d="m8.5 13.5-1.7 7 5.2-2.8 5.2 2.8-1.7-7"/></svg>
+            <span class="absolute left-3 top-3 rounded-full bg-black/25 px-2 py-0.5 text-xs font-semibold text-white">สาธารณะ</span>
+          </div>
+          <div class="flex flex-1 flex-col p-5">
+            <h3 class="font-heading font-semibold text-ink-900">09 · ตรวจสอบประกาศนียบัตร</h3>
+            <p class="mt-1.5 text-sm leading-relaxed">ฟอร์มกรอกรหัส + ผลยืนยัน (ชื่อ-นามสกุล หลักสูตร วันที่ออก สถานะ — ไม่แสดงข้อมูลเกินจำเป็นตาม PDPA), ตราสภาทนายความจำลอง, ตัวอย่างสถานะไม่พบข้อมูล</p>
+            <span class="mt-auto pt-3 font-semibold text-brand-600 group-hover:underline">เปิดหน้า 09-certificate-verify.html →</span>
+          </div>
+        </a>
+      </li>
+    </ul>
+  </section>
+</main>
+
+<footer class="mt-10 border-t border-mist-200 bg-white">
+  <div class="mx-auto max-w-7xl px-4 py-6 text-sm text-ink-500 sm:px-6">
+    <p>ต้นแบบเพื่อการออกแบบ (design prototype) — ข้อมูลเป็นตัวอย่างทั้งหมด ไม่ใช่ข้อมูลจริง ·
+      รายละเอียด token ทั้งหมดดูที่ <span class="font-semibold text-brand-700">docs/05-ui/DESIGN-SYSTEM.md</span></p>
+    <p class="mt-1">สังกัดโครงการ LTC E-Learning · Wave A · 2026</p>
+  </div>
+</footer>
+</body>
+</html>
