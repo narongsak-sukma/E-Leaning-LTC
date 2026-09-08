@@ -113,7 +113,7 @@
 | M4        | Credit Bank สรุปยอดตามรอบต่ออายุ + admin back-office ครบ sub-role + รายงาน/export                |
 | M5        | Security hardening ผ่าน ASVS L2 + VA/pentest ปิด High/Critical ทั้งหมด + UAT ผ่านเกณฑ์ + ส่งมอบ 21 รายการครบ |
 
-**Dependency สำคัญ:** Wave B ต้องรอ M1; Q1–Q6 ต้องได้คำตอบก่อนสิ้น Wave C (R-18) มิฉะนั้นทีมใช้ค่า default ตาม §11 และทำ config-driven
+**Dependency สำคัญ:** Wave B ต้องรอ M1; Q1–Q7 ต้องได้คำตอบก่อนสิ้น Wave C (R-18 — Q7 ผูกงบ cloud tier ของ staging ตาม §10) มิฉะนั้นทีมใช้ค่า default ตาม §11 และทำ config-driven
 
 ## 6. โครงสร้างทีมและบทบาท
 
@@ -192,6 +192,7 @@
 | ด้าน            | เครื่องมือ/บริการ                                                                     |
 | --------------- | --------------------------------------------------------------------------------------- |
 | Dev environment | 100% local Docker — Supabase local stack (PostgreSQL 15 + Auth + Storage) ผ่าน docker-compose |
+| Staging environment | Cloud preview ก่อนขึ้น prod (brief 0.2.0 §6, DCR-1) — **Vercel staging + Supabase staging branch + Cloudflare staging domain**; config ชุดเดียวกับ prod แยกด้วย env vars เท่านั้น · เริ่มใช้ตั้งแต่ **Wave D** สำหรับ k6 10k/5k + security test และ UAT (TEST-PLAN §4) · งบ cloud tier **ผูกกับ Q7** — ต้องได้คำตอบก่อนสิ้น Wave C |
 | Production      | 100% cloud — Vercel (app) + Supabase Cloud (data/auth/storage) + Cloudflare (DNS, WAF, CDN, rate limit, R2/Stream) |
 | Stack           | Next.js 15 (App Router, RSC) + TypeScript strict + Tailwind CSS + zod ทุก input          |
 | Migration       | SQL migrations ที่ `supabase/migrations` (parity กับ prod) + RLS ทุกตาราง                |
@@ -210,6 +211,8 @@
 4. เนื้อหาหลักสูตร/ธนาคารข้อสอบ ทีมฝั่งสภาฯ จัดเตรียมให้ทัน Wave D (R-12)
 
 **พารามิเตอร์ธุรกิจที่ยังไม่ยืนยัน (default + "รอยืนยัน Q#"):**
+
+> หมายเหตุ (D8-5): ค่า default canonical ของโครงการยึด **SRS Appendix A** เป็นหลัก — ตารางนี้เป็นสรุปเพื่อการวางแผน หากค่าขัดกันให้ยึด SRS Appendix A
 
 | พารามิเตอร์                | ค่า default (เหตุผล)                        | สถานะ      |
 | --------------------------- | -------------------------------------------- | ---------- |
