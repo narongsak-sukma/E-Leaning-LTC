@@ -1,0 +1,394 @@
+# SDS — Software Design Specification (การออกแบบระบบเชิงลึก)
+
+|          |                                                   |
+| -------- | ------------------------------------------------- |
+| เวอร์ชัน | 0.1.0                                             |
+| วันที่    | 2026-09-08                                        |
+| เจ้าของ  | worker-3 (Wave A — deliverable 5)                 |
+| สถานะ    | รอ CTO gate                                       |
+| อ้างอิงบังคับ | PROJECT-BRIEF.md §5–§10, GLOSSARY.md          |
+| เอกสารเชื่อมโยง | ARCHITECTURE.md, DATA-DICTIONARY.md, SRS.md, API-SPECIFICATION.md, RBAC-DESIGN.md, AUDIT-LOG-DESIGN.md |
+
+> โครงสร้างข้อมูล (ตาราง/คอลัมน์) ระบุไว้ที่ DATA-DICTIONARY.md ฉบับเดียว — SDS อ้างอิงชื่อตารางโดยไม่ซ้ำซ้อนรายละเอียด
+> ถ้าโค้ดพบปัญหาในเอกสารนี้ ยื่น DCR (brief §9.1) ก่อนแก้เสมอ
+
+## 1. ภาพรวมและวัตถุประสงค์
+
+### 1.1 วัตถุประสงค์
+
+แปลงความต้องการจาก SRS ให้เป็นการออกแบบที่นำไปเขียนโค้ดได้ทันทีใน Wave B–E ครอบคลุม: การแบ่งระบบเป็น module, การออกแบบเชิงลึกของกลไกที่มีความเสี่ยงสูง (exam engine, credit bank, progress tracking, certificate), การไหลของงานหลัก (sequence), แนวทางความปลอดภัย, การจัดการ error/log และ config และแนวทางขยายระบบ
+
+### 1.2 ขอบเขต
+
+- ครอบคลุม v1 ตาม brief §2: หลักสูตร self-paced, สอบปลายหลักสูตร, ประกาศนียบัตร + verify, credit bank, สมาชิก/บัญชี, admin back-office, รายงาน, audit log, แจ้งเตือนพื้นฐาน
+- ไม่ครอบคลุม (นอกขอบเขต v1): ชำระเงิน, live class, SCORM เต็มรูปแบบ, mobile native, AI assistant
+
+### 1.3 หลักการออกแบบ (binding — ต้องเป็นจริงในโค้ดทุกจุด)
+
+1. **Single codebase / dev-prod parity**: โค้ดชุดเดียวรันได้ทั้ง local Docker และ prod cloud ต่างกันแค่ env vars (brief §6) — ห้าม branch business logic ตาม environment โดยตรง ให้เข้าผ่าน config layer เท่านั้น
+2. **Config-driven**: ค่ากฎทั้งหมด (เกณฑ์ผ่าน, จำนวนครั้ง, credit, รอบต่ออายุ, proctoring) เป็น config พร้อมค่าเริ่มต้น + ธง "รอยืนยัน Q#" (CTO decision D3) — ห้าม hardcode
+3. **RLS เปิดทุกตาราง** + บทบาท DB แบบ least-privilege (brief §8)
+4. **Audit ทุก action สำคัญ** append-only บังคับด้วย DB privileges + RLS (decision D6)
+5. TypeScript strict + ตรวจ input ด้วย zod ทุกขอบเขต (API, Server Action, DB write path)
+6. ห้าม log PII — อ้างอิงด้วย `user_id` เสมอ (brief §8)
+
+## 2. การแบ่งระบบเป็น Module (ตาม 8 โดเมน brief §5)
+
+ระบบเป็น Next.js application ชุดเดียว (deploy แบบเดียวกันทั้ง dev/prod) แบ่งเป็น module เชิงตรรกะตาม bounded context — module คือขอบเขตของโค้ด + ขอบเขตการเป็นเจ้าของตาราง ไม่ใช่ process แยก
+
+| ID | Module | ความรับผิดชอบหลัก | Interface ที่เปิด | การพึ่งพา |
+| -- | ------ | ---------------- | ----------------- | --------- |
+| M1 | Identity & License | สมัคร/ยืนยันตัวตน, profile, ผูกเลขที่ใบอนุญาต, การยืนยันโดยเจ้าหน้าที่ | `/api/v1/auth/*`, `/api/v1/me/*`, `/api/v1/me/licenses/*`, admin `/api/v1/admin/licenses/*` | Supabase Auth, shared (auth guard, rbac, audit) |
+| M2 | Catalog & Enrollment | หมวด/หลักสูตร/โมดูล/บทเรียน, ค้นหา, ลงทะเบียน, เงื่อนไขเข้าเรียน | `/api/v1/courses/*`, `/api/v1/enrollments/*` | M1 (สิทธิ์), M3 (เงื่อนไข prerequisite) |
+| M3 | Learning & Progress | ให้บริการเนื้อหาบทเรียน (วิดีโอ/เอกสาร/quiz), heartbeat, คำนวณความคืบหน้า, เกณฑ์จบบท/จบหลักสูตร | `/api/v1/lessons/*`, `/api/v1/progress/*`, `/api/v1/quiz-attempts/*` | M2, storage abstraction, media_assets |
+| M4 | Assessment & Certification | ธนาคารข้อสอบ, กติกาสอบ, exam engine (สุ่ม/จับเวลา/submit/ตรวจ), ออกประกาศนียบัตร + public verify | `/api/v1/assessments/*`, `/api/v1/attempts/*`, `/api/v1/admin/certificates/*`, `/api/v1/public/certificates/*` | M2, M3, M5 (hook หลังผ่าน), storage abstraction (PDF) |
+| M5 | Credit Bank | กฎ credit, ledger append-only, รอบต่ออายุ, ยอดรวม | `/api/v1/credits/*`, admin `/api/v1/admin/credits/*`, รับ event `certificate.issued` | M4 (certificate), M1 (license) |
+| M6 | Notification | แจ้งเตือนในระบบ + อีเมล (เทมเพลตไทย), outbox + worker | `/api/v1/notifications/*`, service `notify(userIds, topic, payload)` ให้ module อื่นเรียก | email provider abstraction (dev: console/Mailpit, prod: Resend/SMTP) |
+| M7 | Admin & Reporting | dashboard, รายงานเรียน/สอบ/credit, export CSV, ค้นหาผู้ใช้ | `/api/v1/admin/reports/*`, `/api/v1/admin/dashboard` | ทุก module (อ่านผ่าน view/JOIN), M8 |
+| M8 | Audit | บันทึก action สำคัญ append-only, ค้นหา audit สำหรับ admin | service `audit(actor, action, entity, before, after)` — ไม่เปิด API เขียน/แก้/ลบ | shared (rbac) — ไม่พึ่งพา module อื่น (กัน loop) |
+
+### 2.1 Shared Kernel (ใช้ร่วมทุก module)
+
+| ส่วน | หน้าที่ |
+| ---- | ------ |
+| `auth guard` | อ่าน/verify session จาก Supabase Auth cookie (httpOnly), ให้ `requireUser()` / `requireRole()` |
+| `rbac` | ตรวจสิทธิ์ตาม role_assignments (helper เดียวกับ RLS policy ใน DB — canonical ที่ RBAC-DESIGN.md) |
+| `audit service` | เขียน audit_logs จาก server เท่านั้น, ไม่มี path แก้/ลบ |
+| `notification service` | สร้าง notifications + จัดคิวอีเมลลง email_outbox (ไม่ block request) |
+| `storage abstraction` | interface เดียว: dev = Supabase Storage (Docker), prod = Cloudflare R2/Stream — สลับด้วย `MEDIA_PROVIDER` |
+| `config` | อ่าน env + DB-config, มี default + ตรวจครบตอน boot, ธง "รอยืนยัน Q#" (ดู §7) |
+| `logger` | structured JSON + PII filter แบบ allowlist (ดู §6) |
+| `zod schemas` | schema กลางของ input ทุกจุด ใช้ร่วม API + Server Action |
+
+## 3. การออกแบบเชิงลึก
+
+### 3.1 Exam Engine (M4)
+
+องค์ประกอบ: `AssessmentOrchestrator` (เริ่ม/submit), `QuestionSampler` (สุ่มข้อ), `Grader` (ตรวจ), ใช้ `assessment_rules` เป็น config ต่อการสอบ (Q2)
+
+**a) เริ่มสอบ (`POST /api/v1/assessments/{id}/attempts`)** — เงื่อนไขก่อนสร้าง attempt (ตรวจใน transaction เดียว):
+- enrollment ของหลักสูตรนี้อยู่สถานะ `active`
+- ถ้า rules.require_course_complete = true → บทเรียนครบทุกโมดูลก่อน
+- จำนวนครั้งที่ใช้ < rules.max_attempts (นับทุก attempt ที่ไม่ `voided`)
+- ไม่มี attempt สถานะ `in_progress` ค้างอยู่ (ดู "ป้องกันสอบซ้อน")
+
+**b) สุ่มข้อ (snapshot ไม่ใช่ reference แบบเปลี่ยนได้)** — ภายใน transaction ของการ start:
+- คัด pool ตาม rules.selection (bank/category/difficulty) → `ORDER BY random() LIMIT rules.question_count`
+- สร้างแถว `attempt_answers` ทันทีทีละข้อ (answer = null) + `seq` ลำดับที่สุ่มได้ + `option_order` (ถ้า rules.shuffle_options) — ข้อสอบ "ตาตัว" ตลอด attempt แม้เจ้าหน้าที่แก้ธนาคารข้อสอบภายหลัง
+- ตั้ง `started_at = now()` (DB clock) และ `expires_at = started_at + rules.time_limit_minutes`
+
+**c) จับเวลา server-side** — แหล่งจริงเดียวคือ `expires_at` ใน DB:
+- client นับถอยหลังจากค่าที่ server ส่งมาเท่านั้น (ไม่เชื่อ client clock)
+- ทุกคำตอบที่บันทึก จะได้ `remaining_ms` กลับจาก server
+- คำตอบที่ส่งหลัง `expires_at` → ปฏิเสธ (409 `ATTEMPT_EXPIRED`) และ attempt ถูกปิดโดย auto-submit
+- auto-submit: scheduler (dev: คอนเทนเนอร์ cron / prod: Vercel Cron) เรียก path เดียวกันทุก 1 นาที ปิด attempt `in_progress` ที่เลยเวลา → ตรวจจากคำตอบที่บันทึกไว้
+
+**d) บันทึกคำตอบทีละข้อ (`PUT /api/v1/attempts/{id}/answers/{questionId}`)**
+- upsert บน UNIQUE(attempt_id, question_id) — idempotent ต่อข้อ (เขียนทับข้อเดิมได้ก่อน submit)
+- ตรวจ: ข้อนี้อยู่ใน snapshot ของ attempt, attempt ยัง `in_progress`, ยังไม่ถึง `expires_at`
+- rate limit ต่อ attempt (config) กัน spam; validation ด้วย zod (`selected_option_ids` ต้องเป็น subset ของ options ที่ถูกต้องตาม type)
+
+**e) Submit แบบ idempotent (`POST /api/v1/attempts/{id}/submit`)**
+- แกนคือ `UPDATE assessment_attempts SET submitted_at = now() WHERE id = $1 AND submitted_at IS NULL RETURNING ...`
+- ได้ 0 แถว = submit ไปแล้ว → ตอบผลเดิม (200) ไม่ตรวจซ้ำ ไม่นับ attempt เพิ่ม — retry/ดับเบิลคลิก/เน็ตหลุดปลอดภัย
+- ตรวจคะแนนใน transaction เดียวกัน (Grader): เทียบ `selected_option_ids` กับ `question_options.is_correct` (ฝั่ง server เท่านั้น — client ไม่เคยได้รู้ is_correct), คำนวณ `score_pct`, ตั้ง status `passed`/`failed` ตาม rules.pass_pct
+
+**f) ป้องกันสอบซ้อน (concurrent attempts)**
+- partial UNIQUE index: `(assessment_id, user_id) WHERE status = 'in_progress'` — DB บังคับแม้มี bug
+- เปิดแท็บ/อุปกรณ์ที่สอง → ได้ 409 พร้อม `attempt_id` เดิมเพื่อ resume (เข้า resume ได้จนกว่าจบเวลา)
+- attempt_no กำหนดจาก count ภายใน transaction + UNIQUE(assessment_id, user_id, attempt_no) กันแข่ง
+
+**g) Proctoring (Q4 — รอยืนยัน)**: `proctoring_mode = none | flag_events` default `none`; โหมด `flag_events` เก็บเหตุการณ์ client (tab blur ฯลฯ) ลง `assessment_attempts.client_events` (jsonb จำกัดขนาด, ไม่มี PII) — ไม่มีการบันทึกหน้าจอ/กล้องใน v1
+
+### 3.2 Credit Bank (M5)
+
+**a) โครงสร้าง**: `credit_rules` (กฎ แก้ได้) + `renewal_cycles` (รอบต่ออายุรายคน) + `credit_ledger_entries` (รายการเคลดิต **append-only**) — ยอด credit เป็น "ผลรวมที่คำนวณ" ไม่มีการเก็บยอดคงค้างแบบแก้ไขได้
+
+**b) การเกิดรายการ (accrual)**:
+- trigger จาก event `certificate.issued` (หลัง commit การออกประกาศนียบัตร — ดู 4.5)
+- หา `renewal_cycles` ที่วันออกใบประกาศตกในช่วง [starts_on, ends_on]; ถ้าไม่มี → สร้างรอบใหม่ตาม config (ความยาวรอบ + จุดเริ่ม = config Q1, รอยืนยัน)
+- จับคู่ `credit_rules` แบบเจาะจงก่อน (course_id ตรง) แล้วค่อยกฎทั่วไป ตาม `priority`
+- INSERT entry: {user_id, cycle_id, type=accrual, credit_type, amount, certificate_id, rule_id}
+
+**c) การแก้ไข = รายการชดเชย ไม่ใช่การแก้ย้อน**:
+- ผิดพลาด → entry `reversal` (amount ติดลบ อ้าง original entry) โดย staff:registrar/super_admin เท่านั้น + เหตุผล + audit
+- ปรับมือ → entry `adjustment` (signed) ด้วยเหตุผลบังคับ
+- `credit_ledger_entries` ไม่มี path UPDATE/DELETE ทุกชั้น (API, RLS, DB grants — เช่นเดียวกับ audit_logs ตาม D6)
+
+**d) ยอดและการปิดรอบ**:
+- ยอดต่อรอบ = SUM(amount) แยกตาม credit_type ผ่าน view `v_credit_balance` (reporting ใช้ view เดียวกัน)
+- ปิดรอบ: status `closed`, snapshot ยอด, รายการเก่าคงอยู่เพื่อประวัติ; กฎ carry-over/อายุ credit เป็น config (Q1, รอยืนยัน) — ถ้ากำหนดอายุ จะบันทึก entry `expiry` ตอนปิดรอบ
+- `required_credits` snapshot ไว้ในรอบตอนสร้าง เพื่อไม่ให้การแก้กฎย้อนหลังกระทบรอบเก่า
+
+### 3.3 Progress Tracking (M3)
+
+**a) หลักการ**: client ส่ง "หลักฐาน" (ตำแหน่งวิดีโอ, เวลาพำนัก) — server เป็นผู้ตัดสินความสมบูรณ์เสมอ client ส่ง `completed=true` ตรง ๆ ไม่ได้
+
+**b) วิดีโอ**:
+- player ส่ง heartbeat `PATCH /api/v1/progress/{lessonId}` ทุก `VIDEO_HEARTBEAT_SEC` (default 15, config) พร้อม `position_sec`
+- server: clamp position ไม่เกิน duration; `video_max_position_sec` เพิ่มอย่างเดียว (monotonic); `watch_pct = min(100, max_position/duration*100)`
+- จบบทเมื่อ `watch_pct >= VIDEO_COMPLETE_PCT` (default 90, config — รอยืนยัน Q6) → ตั้ง `completed_at` ครั้งเดียว (idempotent)
+- seek ข้ามไม่ช่วย เพราะนับจาก max position ที่ heartbeat ส่งมาจริงเท่านั้น (การเก็บ contiguous ละเอียด = นอกขอบเขต v1 จดไว้ใน open questions)
+
+**c) เอกสาร**: จบบทเมื่อเปิดอ่าน + `dwell_sec >= DOC_MIN_DWELL_SEC` (default 30, config)
+**d) แบบทดสอบย่อย (quiz)**: จบบทเมื่อ quiz attempt ล่าสุด `passed` (score >= pass_pct ของ quiz นั้น — คนละเกณฑ์กับข้อสอบปลายหลักสูตร) — quiz เรียนได้ไม่จำกัดครั้งตาม config ของ quiz
+
+**e) Rollup (denormalize เพื่อ query เร็ว — ต้นทางคือ lesson_progress)**:
+- บทเรียนครบ = ทุก lesson ของโมดูล completed → module complete
+- หลักสูตรจบ = ทุก module complete + (ถ้ามี final assessment) best attempt `passed` → `enrollments.status = completed, completed_at = now()`
+- rollup คำนวณใน transaction เดียวกับการปิดบทสุดท้าย + trigger ตรวจความถูกต้องย้อนหลังได้ (recompute จาก source rows)
+
+### 3.4 Certificate & Verification (M4)
+
+**a) การออก (หลักสิทธิ์อยู่ที่นายทะเบียน — brief §3)**:
+- รายการมีสิทธิ์ = enrollment `completed` และยังไม่มี certificate — UNIQUE(enrollment_id) ในตาราง certificates ทำให้ออกซ้ำไม่ได้ (idempotent)
+- `POST /api/v1/admin/certificates` (staff:registrar+): สร้าง `cert_no` รูปแบบ `LTC-<ปี>-<ลำดับประจำปี>` + `verify_code` (nanoid 43 อักขระ url-safe สุ่มด้วย CSPRNG) + snapshot ชื่อ/หลักสูตร/credit ณ วันออก (เอกสารไม่เปลี่ยนตามข้อมูลที่แก้ภายหลัง)
+- ออกแล้ว trigger credit accrual (3.2) + แจ้งเตือนอีเมลพร้อมลิงก์
+
+**b) QR payload**: `https://{CERT_PUBLIC_BASE_URL}/verify/{verify_code}` — มีแค่ URL นี้ **ไม่มี PII ใด ๆ ฝังใน QR** (ไม่มีชื่อ เลขใบอนุญาต เลขบัตร)
+
+**c) Public verify (`GET /verify/{verify_code}` + API `/api/v1/public/certificates/{verify_code}`)**:
+- ไม่ต้อง login, rate limit ต่อ IP (config), ไม่ใช้ PII เป็นคีย์ค้น
+- แสดงเฉพาะฟิลด์สาธารณะตาม config `CERT_PUBLIC_FIELDS` (default: cert_no, ชื่อตามที่พิมพ์บนใบประกาศ, ชื่อหลักสูตร, วันที่ออก, สถานะ) — ไม่แสดง email/เลขที่ใบอนุญาต/เลขบัตร
+- ผล: `valid` / `revoked` / `not_found` — not_found ตอบแบบเดียวกันทุกกรณี (กัน enumeration)
+- ทุกครั้งที่ตรวจ log ลง `certificate_verifications` (verify_code, result, ip_hash, user_agent ตัดทอน) เก็บ 90 วัน
+
+**d) เพิกถอน/แทนที่**: staff:registrar+ เท่านั้น — `revoked` (+เหตุผล+audit) หรือ `replaced` (โยง `replaced_by`) — รายการเดิมไม่ถูกลบ
+
+## 4. Sequence Diagrams หลัก (6 ภาพ)
+
+### 4.1 สมัครสมาชิก + ผูกใบอนุญาต (Lawyer onboarding)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as ผู้ใช้ (ทนายความ)
+    participant BFF as Next BFF
+    participant A as Supabase Auth
+    participant DB as Postgres + RLS
+    participant M as อีเมล
+    U->>BFF: POST /api/v1/auth/signup (email + รหัสผ่าน)
+    BFF->>A: signUp
+    A-->>BFF: uid
+    Note over DB: trigger on_auth_user_created สร้าง profiles + role citizen
+    A->>M: อีเมลยืนยันตัวตน
+    U->>BFF: POST /api/v1/me/licenses (เลขที่ใบอนุญาต)
+    BFF->>DB: INSERT lawyer_licenses (status=pending) + audit
+    BFF-->>U: 202 รอเจ้าหน้าที่ตรวจ
+    Note over DB: ภายหลัง staff:registrar ตรวจ (Q3)
+    alt อนุมัติ
+        DB->>DB: status=verified + INSERT role_assignments (lawyer)
+    else ปฏิเสธ
+        DB->>DB: status=rejected + เหตุผล + audit
+    end
+    DB->>M: แจ้งผลการตรวจ
+```
+
+### 4.2 ลงทะเบียนเรียน + ดูวิดีโอ
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as ผู้เรียน
+    participant BFF as Next BFF
+    participant ST as Storage (dev) / R2+CDN (prod)
+    participant DB as Postgres + RLS
+    U->>BFF: POST /api/v1/enrollments (course_id)
+    BFF->>DB: ตรวจสิทธิ์ + UNIQUE(user_id, course_id)
+    BFF->>DB: INSERT enrollments (active) + audit
+    BFF-->>U: 201 enrollment_id
+    U->>BFF: GET /api/v1/lessons/{id}
+    BFF->>DB: ตรวจ enrollment + UPSERT lesson_progress
+    BFF->>ST: ขอ signed URL อายุสั้น (config)
+    BFF-->>U: 200 player + signed URL
+    loop heartbeat ทุก VIDEO_HEARTBEAT_SEC
+        U->>BFF: PATCH /api/v1/progress/{lesson_id} (position)
+        BFF->>DB: clamp + max position + watch_pct
+    end
+    Note over DB: watch_pct >= threshold → completed_at + rollup จบหลักสูตร
+```
+
+### 4.3 สอบ + submit + ตรวจ
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as ผู้เรียน
+    participant BFF as Next BFF
+    participant DB as Postgres + RLS
+    U->>BFF: POST /api/v1/assessments/{id}/attempts
+    BFF->>DB: ตรวจ enrollment / จำนวนครั้ง / attempt ค้าง
+    alt มี attempt ค้าง (สอบซ้อน)
+        BFF-->>U: 409 + attempt_id เดิม (resume)
+    else ผ่านเงื่อนไข
+        DB->>DB: TX: INSERT attempt + สุ่มข้อ snapshot + expires_at
+        BFF-->>U: 201 ชุดข้อสอบ (ไม่มี is_correct) + เวลาจาก server
+    end
+    loop ตอบทีละข้อ
+        U->>BFF: PUT /api/v1/attempts/{id}/answers/{qid}
+        BFF->>DB: UPSERT คำตอบ + ตอบ remaining_ms
+    end
+    U->>BFF: POST /api/v1/attempts/{id}/submit
+    Note over BFF,DB: idempotent: UPDATE ... WHERE submitted_at IS NULL
+    DB->>DB: TX: Grader ตรวจ + score + status ผ่าน/ไม่ผ่าน + audit
+    BFF-->>U: 200 ผลสอบ (submit ซ้ำได้ผลเดิม)
+```
+
+### 4.4 ออกประกาศนียบัตร
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as นายทะเบียน (staff-registrar)
+    participant BFF as Next BFF
+    participant DB as Postgres + RLS
+    participant M as อีเมล
+    R->>BFF: GET /api/v1/admin/certificates/eligible
+    BFF->>DB: enrollment completed + ผ่านสอบ + ยังไม่มี certificate
+    R->>BFF: POST /api/v1/admin/certificates (enrollment_id)
+    BFF->>DB: TX: UNIQUE(enrollment) กันซ้ำ → INSERT certificates
+    Note over DB: cert_no + verify_code + snapshot ชื่อ/หลักสูตร + audit
+    DB->>DB: event certificate.issued → credit accrual (4.5)
+    BFF->>M: อีเมลแจ้ง + ลิงก์ดาวน์โหลด + QR (URL อย่างเดียว)
+    BFF-->>R: 201 ออกประกาศนียบัตรสำเร็จ
+```
+
+### 4.5 Credit accrual
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BFF as Next BFF
+    participant DB as Postgres + RLS
+    Note over BFF,DB: หลัง commit การออกประกาศนียบัตร
+    BFF->>DB: หา renewal_cycle ที่ครอบวันออกใบ
+    alt ไม่มีรอบ
+        BFF->>DB: สร้างรอบตาม config (ความยาวรอบ — รอยืนยัน Q1)
+    end
+    BFF->>DB: จับคู่ credit_rules (เจาะจงก่อนทั่วไป ตาม priority)
+    BFF->>DB: INSERT credit_ledger_entries (accrual) + audit
+    Note over DB: ยอด = SUM(entries) เท่านั้น ห้ามแก้/ลบรายการ
+    BFF->>DB: ตรวจครบเกณฑ์ของรอบ → สร้างแจ้งเตือน
+```
+
+### 4.6 Public certificate verify
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor V as ผู้ตรวจสอบ (ไม่ต้อง login)
+    participant E as Edge รอบคอบ (middleware หรือ Cloudflare)
+    participant BFF as Next BFF
+    participant DB as Postgres + RLS
+    V->>E: สแกน QR → GET /verify/{verify_code}
+    E->>BFF: rate limit ต่อ IP + WAF
+    BFF->>DB: SELECT ด้วย verify_code (คีย์สุ่ม ไม่ใช่ PII)
+    alt พบ + สถานะ issued
+        BFF-->>V: cert_no + ชื่อตามใบประกาศ + หลักสูตร + วันที่ + valid
+    else ถูกเพิกถอน
+        BFF-->>V: revoked
+    else ไม่พบ
+        BFF-->>V: not_found (ตอบเหมือนกันทุกกรณีพลาด)
+    end
+    BFF->>DB: INSERT certificate_verifications (ip_hash — ไม่มี PII)
+```
+
+## 5. Security Design
+
+### 5.1 Trust architecture (ใครเชื่อใคร)
+
+- browser คุยกับ **Next BFF เท่านั้น** (RSC, Route Handlers `/api/v1/*`, Server Actions) — ไม่มีการเปิด Postgres/Storage ให้ client ตรง
+- `SUPABASE_SERVICE_ROLE_KEY` อยู่เฉพาะฝั่ง server (env ของ Vercel/Docker) ห้ามขึ้นต้น `NEXT_PUBLIC_` — บังคับด้วย lint rule + secrets scan ใน CI
+- session ของผู้ใช้ = cookie httpOnly + Secure + SameSite=Lax (Supabase Auth ผ่าน `@supabase/ssr`) — JS ฝั่ง client อ่าน JWT ไม่ได้
+- สื่อ (วิดีโอ/เอกสาร/PDF): ออก **signed URL อายุสั้น** จาก BFF หลังตรวจสิทธิ์เรียนแล้วเท่านั้น (TTL เป็น config)
+- บริการภายนอก (R2/Stream, Resend/SMTP) เรียกจาก server เท่านั้น
+
+### 5.2 RLS เป็นชั้นสอง (defense-in-depth)
+
+- BFF ใช้ service_role (bypass RLS) แต่**ทุกตารางยังต้อง ENABLE RLS + policy ครบทุก path** เพราะ: (1) กันกรณีคีย์รั่ว/ถูกใช้จากที่อื่น, (2) รองรับเส้นทางอนาคตที่อ่านบางตารางด้วย user token, (3) บังคับนึกถึงการเข้าถึงข้อมูลตั้งแต่ออกแบบสคีมา
+- authorization ตัดสินที่ `rbac` service ใน BFF **ก่อน** ทุก mutation (ไม่พึ่ง RLS อย่างเดียว — service_role bypass มันอยู่แล้ว)
+- policy ใช้ helper เดียวกับโค้ด (`has_any_role(...)` ฯลฯ — canonical ที่ RBAC-DESIGN.md) เพื่อไม่ให้สองชั้นตีความไม่ตรงกัน
+- รายละเอียด policy ทุกตารางอยู่ใน DATA-DICTIONARY.md
+
+### 5.3 Rate limiting (ค่า config ชุดเดียวทั้ง dev/prod)
+
+- จุดบังคับ: auth (signup/login/OTP/resend), exam start/answer/submit, public verify, ทุก mutation ฝั่ง admin, API ทั่วไปต่อ IP+user
+- prod: Cloudflare rate limiting rules (edge) + Next middleware (ชั้นใน)
+- dev: Next middleware ใช้ in-memory token bucket ด้วยค่า default ชุดเดียวกัน (อ่านจาก config — ไม่ hardcode ต่างกันสอง env)
+
+### 5.4 CSRF
+
+- พื้นฐาน: cookie SameSite=Lax + middleware ตรวจ `Origin`/`Sec-Fetch-Site` ทุก mutation (POST/PUT/PATCH/DELETE) — ต่าง origin = ปฏิเสธ
+- Server Actions ของ Next 15 มี origin check ในตัว — ใช้เสริมด้วย double-submit token สำหรับ Route Handlers ที่ sensitive (auth, exam, admin)
+- GET เป็น read-only เสมอ (ไม่มี side effect)
+
+### 5.5 Session & admin hardening
+
+- ผู้ใช้ทั่วไป: JWT + refresh rotation ตาม default ของ Supabase Auth; logout = เคลียร์ cookie + revoke
+- ผู้ใช้บทบาท `staff*` และ `super_admin`: MFA บังคับ (brief §8), idle timeout 15 นาที, absolute session 8 ชั่วโมง, lockout หลังพลาด 5 ครั้ง/15 นาที (ทุกค่าเป็น config) — lifecycle บันทึกใน `admin_sessions` + audit
+- การเพิกถอน session ทันที: flag ใน `admin_sessions` + middleware ตรวจทุก request
+
+## 6. Error Handling + Logging Policy
+
+### 6.1 Error envelope + mapping
+
+- รูปแบบ: `{ "error": { "code": "ATTEMPT_EXPIRED", "message": "เวลาสอบหมดแล้ว ระบบตรวจคำตอบที่บันทึกไว้แล้ว", "request_id": "..." } }` — code รายการเต็มอยู่ที่ API-SPECIFICATION.md, ข้อความภาษาไทย (brief §9.3)
+- zod fail → 400 `VALIDATION` (ไม่สะท้อน input กลับ); เงื่อนไขธุรกิจไม่ผ่าน → 409/422 ตามกรณี; ไม่มีสิทธิ์รู้การมีอยู่ของ resource → 404 แทน 403 เมื่อการเปิดเผย existence ไม่ปลอดภัย
+- 5xx: ตอบ opaque + request_id เท่านั้น — detail อยู่ใน server log; ไม่ leak SQL/stack ออกนอกเครื่อง
+
+### 6.2 Logging
+
+- structured JSON ไป stdout (dev: docker logs / prod: Vercel logs) ฟิลด์: `ts, level, msg, request_id, route, user_id?, duration_ms, status`
+- **ห้าม log PII** (เลขบัตรประชาชน, เลขที่ใบอนุญาต, email, เบอร์โทร, ชื่อ-นามสกุล, คำตอบข้อสอบ) — logger เป็น wrapper ที่กรองแบบ allowlist field เท่านั้น (ข้อมูลเข้า logger โดยตรงไม่ได้)
+- ระดับ: dev default `debug`, prod default `info` — PII filter เปิดทุก environment
+- แยก "app log" ออกจาก "audit": action สำคัญเขียน `audit_logs` (DB, append-only) ผ่าน audit service เสมอ — log ไฟล์ไม่ใช่หลักฐานตรวจสอบ
+- ทุก request มี `x-request-id` (สร้างที่ middleware) ใช้เชื่อม log ↔ audit ↔ response
+
+## 7. Config Management
+
+### 7.1 หลักการ: สองชั้น
+
+- **ชั้น env/config ไฟล์**: สิ่งที่ต่างกันระหว่าง dev/prod (endpoint, คีย์, provider) — สลับ environment ด้วย env vars อย่างเดียว
+- **ชั้น DB-config**: กฎทางธุรกิจที่เจ้าหน้าที่ปรับได้โดยไม่ deploy (assessment_rules, credit_rules, quiz pass, course visibility) + default ตอน seed migration
+- ทุกค่าต้องมี default + เหตุผล + ธง "รอยืนยัน Q#" เมื่อเกี่ยวข้อง (D3) — config module ตรวจครบ/ตรวจรูปแบบตอน boot และ fail fast ถ้าขาด secret ที่บังคับ
+
+### 7.2 env vars (สิ่งที่ต่างระหว่าง dev/prod — ไม่มีอะไรอื่นต่าง)
+
+| กลุ่ม | ตัวแปร (ตัวอย่างหลัก) | หมายเหตุ |
+| ----- | --------------------- | -------- |
+| แอป | `PUBLIC_BASE_URL`, `APP_ENV=local|prod` (ใช้เฉพาะ infra/observability ห้ามใช้ใน business logic), `LOG_LEVEL` | QR ใช้ `CERT_PUBLIC_BASE_URL` |
+| Supabase | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_POOLER_URL` | service_role server เท่านั้น |
+| สื่อ | `MEDIA_PROVIDER=supabase_storage|r2|stream`, `R2_*`/`STREAM_*`, `MEDIA_SIGNED_URL_TTL_SEC` (default 900) | abstraction สลับ dev/prod |
+| อีเมล | `EMAIL_PROVIDER=console|smtp|resend`, `SMTP_*`, `EMAIL_FROM` | dev default `console` (+Mailpit ถ้ารัน) |
+| Rate limit | `RATE_LIMIT_AUTH_*`, `RATE_LIMIT_EXAM_*`, `RATE_LIMIT_VERIFY_*`, `RATE_LIMIT_DEFAULT_*` | ค่าเดียวกันทั้งสอง env |
+| Session | `SESSION_ADMIN_IDLE_MINUTES` (15), `SESSION_ADMIN_ABSOLUTE_HOURS` (8), `LOGIN_LOCKOUT_ATTEMPTS` (5) | |
+| การเรียน | `VIDEO_HEARTBEAT_SEC` (15), `VIDEO_COMPLETE_PCT` (90 — รอยืนยัน Q6), `DOC_MIN_DWELL_SEC` (30) | |
+
+### 7.3 คำถามค้าง → พารามิเตอร์ (ทุกตัว config-driven + default + รอยืนยัน)
+
+| # | คำถาม | พารามิเตอร์ที่รอค่า | Default ชั่วคราว |
+| - | ----- | ------------------ | --------------- |
+| Q1 | รอบต่ออายุกี่ปี + credit กี่หน่วย | `renewal_cycle_years` (credit_rules/config), `required_credits` ต่อ cycle | รอบ 1 ปี, ต้องมี 12 หน่วย |
+| Q2 | เกณฑ์ผ่าน / จำนวนครั้งสอบ | assessment_rules: `pass_pct`, `max_attempts`, `time_limit_minutes` | ผ่าน 70%, 3 ครั้ง, 60 นาที |
+| Q3 | การยืนยันตัวตนทนาย | `license_verification.mode = manual_staff|sso_council` + workflow | manual_staff (เจ้าหน้าที่ตรวจ) |
+| Q4 | proctoring | assessment_rules: `proctoring_mode` | `none` |
+| Q5 | Data residency | Supabase region + Vercel region (deploy-time) | SG (ใกล้ไทยที่สุด) |
+| Q6 | วิดีโอ จำกัดความยาว/ความละเอียด + ป้องกันดาวน์โหลด | `VIDEO_MAX_*`, `VIDEO_COMPLETE_PCT` | ไม่จำกัด, ดูครบ 90% |
+
+## 8. แนวทาง Scale (เป้าหมาย brief §7: 100k ผู้ใช้ / 10k เรียนพร้อมกัน / 5k สอบพร้อมกัน)
+
+- **การเชื่อมต่อ DB**: ทุกการเชื่อมผ่าน Supabase pooler (transaction mode) + Supabase client เป็น singleton ต่อ runtime; ห้ามเปิด connection ยาว; transaction สั้นเสมอ (โดยเฉพาะ answer upsert)
+- **วิดีโอไม่ผ่าน app server**: browser สตรีมจาก signed URL ตรง ๆ (dev: local storage / prod: CDN หน้า R2-Stream) — throughput สื่อแยกออกจาก compute ของแอป
+- **Cache**: หน้าสาธารณะ/แคตตาล็อกใช้ ISR + RSC cache + CDN cache; invalidate ด้วย revalidate tag เมื่อเนื้อหาเปลี่ยน; ผลการเรียน/สอบ cache สั้นและเป็น per-user
+- **Exam burst (5k submit พร้อมกัน)**: endpoint stateless ขยายตาม platform (Vercel auto-scale); grading ทำ set-based ใน SQL แบบชุดเดียวจบ (ไม่ loop ทีละข้อใน app); rate limit กระจาย spike; auto-submit เป็น job แบบ batch
+- **อีเมล**: ผ่าน email_outbox + worker แยก (ไม่ block request ผู้ใช้), retry + backoff
+- **Index เชิงกลยุทธ์**: partial index attempt ที่ยัง live, index progress ตาม (enrollment_id), index audit ตาม (entity_type, entity_id) + occurred_at — รายการเต็มใน DATA-DICTIONARY.md
+- **ระยะถัดไป (เมื่อโต)**: read replica สำหรับ reporting, materialized view ยอด credit, partition `audit_logs`/`certificate_verifications` รายเดือนตาม retention
+
+## 9. ข้อผูกพันข้ามเอกสาร + DCR
+
+- ชื่อตาราง/คอลัมน์/RLS: อ้างอิง DATA-DICTIONARY.md (blueprint ของ `supabase/migrations/*`)
+- path API + error code รายการเต็ม: API-SPECIFICATION.md (worker-4) — SDS ระบุ path หลักเพื่อเล่า flow เท่านั้น
+- นิยาม role + helper function ของ RLS: RBAC-DESIGN.md (worker-4)
+- รูปแบบ audit record: AUDIT-LOG-DESIGN.md (worker-4)
+- พบความขัดแย้งระหว่างเอกสาร → หยุด แล้วยื่น DCR ต่อ CTO (brief §9.1)

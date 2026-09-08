@@ -1,0 +1,266 @@
+# ARCHITECTURE — แบบจำลองสถาปัตยกรรม (C4 + Deployment + Data Flow)
+
+|          |                                                   |
+| -------- | ------------------------------------------------- |
+| เวอร์ชัน | 0.1.0                                             |
+| วันที่    | 2026-09-08                                        |
+| เจ้าของ  | worker-3 (Wave A — deliverable 6)                 |
+| สถานะ    | รอ CTO gate                                       |
+| อ้างอิงบังคับ | PROJECT-BRIEF.md §6 (stack ตัดสินแล้ว), §8     |
+| เอกสารเชื่อมโยง | SDS.md (การออกแบบเชิงลึก), DATA-DICTIONARY.md |
+
+> หลักการกลาง (บังคับ): **โค้ดชุดเดียว รันได้ทั้ง local Docker (dev) และ cloud (prod) ต่างกันเฉพาะ env vars** — ทุกแผนภาพด้านล่างต้องอ่านได้ทั้งสอง environment โดยสลับเพียงปลายทางของการเชื่อมต่อ
+
+## 1. System Context (C4-L1)
+
+```mermaid
+flowchart TB
+    Citizen["ประชาชน (Citizen)<br/>สมัครด้วย email/มือถือ เรียนหลักสูตรสาธารณะ"]
+    Lawyer["ทนายความ (Lawyer)<br/>เรียน + สอบ + สะสม credit ต่อใบอนุญาต"]
+    Instructor["วิทยากร (Instructor)<br/>สร้างเนื้อหา + ธนาคารข้อสอบ"]
+    Staff["เจ้าหน้าที่ (Staff 4 ระดับ)<br/>viewer / content / exam / registrar"]
+    Public["ผู้ตรวจสอบประกาศนียบัตร<br/>ไม่ระบุตัวตน ผ่าน QR"]
+    SYS[["ระบบ LTC E-Learning<br/>(Next.js + Supabase)"]]
+    MAIL[["ระบบอีเมลภายนอก<br/>dev: Mailpit / prod: Resend หรือ SMTP"]]
+    Citizen --> SYS
+    Lawyer --> SYS
+    Instructor --> SYS
+    Staff --> SYS
+    Public -->|"GET /verify/{code}"| SYS
+    SYS -->|"ส่งอีเมลแจ้งเตือน/ยืนยันตัวตน"| MAIL
+```
+
+ภาพระดับบนสุด: ผู้ใช้ 4 personas ตาม brief §3 บวก "ผู้ตรวจสอบประกาศนียบัตร" ที่ไม่ต้อง login ระบบมีระบบภายนอกเดียวคืออีเมล (นำเข้า payment/live class ทีหลังตามขอบเขต v1)
+
+## 2. Container (C4-L2)
+
+```mermaid
+flowchart TB
+    Browser["เบราว์เซอร์ผู้ใช้<br/>UI: RSC HTML + วิดีโอ player"]
+
+    subgraph EDGE["ปลายทางสาธารณะ"]
+        CF["Cloudflare<br/>DNS + WAF + Rate Limit + CDN<br/>(prod เท่านั้น — dev: Next.js โดยตรง)"]
+    end
+
+    subgraph APP["แอปพลิเคชัน (โค้ดชุดเดียว)"]
+        NEXT["Next.js 15 App Router<br/>RSC + Route Handlers /api/v1 + Server Actions<br/>= BFF ทั้งหมดของระบบ"]
+    end
+
+    subgraph SUPA["Supabase (dev: local Docker / prod: Cloud)"]
+        AUTH["Supabase Auth<br/>JWT + MFA"]
+        PG["PostgreSQL 15<br/>RLS ทุกตาราง + pooler"]
+        STG["Storage API<br/>(dev: local bucket)"]
+    end
+
+    MEDIA["Media abstraction<br/>dev: Supabase Storage<br/>prod: Cloudflare R2 / Stream"]
+    MAIL["อีเมล: dev = Mailpit/console<br/>prod = Resend/SMTP"]
+
+    Browser --> CF
+    CF --> NEXT
+    Browser -->|"dev: เข้า Next.js ตรง"| NEXT
+    NEXT -->|"service_role เฉพาะ server"| PG
+    NEXT --> AUTH
+    NEXT -->|"ออก signed URL"| MEDIA
+    NEXT --> MAIL
+    Browser -->|"สตรีมสื่อผ่าน signed URL อายุสั้น"| MEDIA
+```
+
+บริการที่ "เป็นแอป" มีตัวเดียวคือ Next.js (ทำหน้าที่ BFF) — browser ไม่คุยกับ Postgres โดยตรง สื่อและอีเมลอยู่หลัง abstraction ที่สลับด้วย `MEDIA_PROVIDER`/`EMAIL_PROVIDER` ตามหลัก single codebase
+
+## 3. Component (C4-L3) — ภายใน Next.js App
+
+```mermaid
+flowchart TB
+    subgraph NEXT["Next.js App (BFF)"]
+        subgraph MODS["Domain Modules (ตาม brief §5)"]
+            M1["M1 Identity & License"]
+            M2["M2 Catalog & Enrollment"]
+            M3["M3 Learning & Progress"]
+            M4["M4 Assessment & Certification"]
+            M5["M5 Credit Bank"]
+            M6["M6 Notification"]
+            M7["M7 Admin & Reporting"]
+            M8["M8 Audit"]
+        end
+        subgraph SHARED["Shared Kernel"]
+            GUARD["auth guard<br/>session httpOnly"]
+            RBAC["rbac<br/>has_any_role ฯลฯ"]
+            CFG["config<br/>env + DB-config + Q1-Q6"]
+            STAB["storage abstraction"]
+            AUD["audit service"]
+            NOTI["notification service"]
+            LOG["logger + PII filter"]
+        end
+    end
+    M1 --> GUARD
+    M1 --> RBAC
+    M2 --> GUARD
+    M3 --> STAB
+    M3 --> LOG
+    M4 --> RBAC
+    M4 --> AUD
+    M4 --> STAB
+    M5 --> AUD
+    M6 --> NOTI
+    M7 --> RBAC
+    M8 --> AUD
+    MODS --> CFG
+```
+
+module ทั้ง 8 ไม่เรียกกันเองโดยตรง แต่แลกเปลี่ยนผ่าน event ภายใน (เช่น `certificate.issued` จาก M4 ไป M5) และใช้ shared kernel ร่วมกัน — รายละเอียดความรับผิดชอบ/interface/dependency ของแต่ละ module อยู่ใน SDS.md §2
+
+## 4. Deployment — DEV (100% local Docker)
+
+```mermaid
+flowchart TB
+    Dev["เครื่องนักพัฒนา (browser :3000)"]
+    subgraph DC["docker-compose (local)"]
+        APPC["next-app :3000<br/>Next.js dev server"]
+        subgraph SUPA["Supabase local stack"]
+            KONG["Kong gateway :8000"]
+            AUTHL["Auth (GoTrue)"]
+            REST["PostgREST"]
+            STLJ["Storage API"]
+            DBL["PostgreSQL :5432<br/>migrations + RLS เหมือน prod ทุกประการ"]
+        end
+        MAILP["Mailpit :8025 / 1025<br/>จับอีเมลทดสอบ"]
+        CRONL["scheduler<br/>auto-submit + email worker (cron path เดียวกับ prod)"]
+    end
+    Dev --> APPC
+    APPC -->|"SUPABASE_URL=localhost:8000"| KONG
+    KONG --> AUTHL
+    KONG --> REST
+    KONG --> STLJ
+    AUTHL --> DBL
+    REST --> DBL
+    STLJ --> DBL
+    APPC -->|"EMAIL_PROVIDER = console หรือ smtp"| MAILP
+    CRONL -->|"เรียก route เดียวกับ Vercel Cron"| APPC
+```
+
+dev รัน Supabase ชุดเต็มใน Docker ผ่าน Kong gateway — URL/คีย์ทั้งหมดชี้ localhost ผ่าน env vars โดยไม่แก้โค้ด scheduler ใน dev เป็น container ที่เรียก endpoint เดียวกับที่ prod ใช้ Vercel Cron เพื่อ parity ของพฤติกรรมเวลา
+
+## 5. Deployment — PROD (100% cloud services)
+
+```mermaid
+flowchart TB
+    B["ผู้ใช้ (browser)"]
+    subgraph CFJ["Cloudflare"]
+        DNS["DNS + WAF + Rate Limit"]
+        CDN["CDN (สื่อ + หน้าสาธารณะ)"]
+        R2["R2 / Stream<br/>ไฟล์วิดีโอ-เอกสาร-PDF"]
+    end
+    subgraph VC["Vercel"]
+        NX["Next.js 15<br/>(region: รอยืนยัน Q5 — default SG)"]
+        CRONP["Vercel Cron<br/>auto-submit + email worker"]
+    end
+    subgraph SBC["Supabase Cloud (region SG/JP — รอยืนยัน Q5)"]
+        AUTHC["Auth"]
+        PGC["PostgreSQL + pooler + RLS"]
+    end
+    RESEND["Resend / SMTP"]
+    B --> DNS
+    DNS --> NX
+    B -->|"สตรีมผ่าน signed URL"| CDN
+    CDN --> R2
+    NX -->|"service_role"| PGC
+    NX --> AUTHC
+    NX --> RESEND
+    CRONP --> NX
+```
+
+prod วางเหมือน dev ทุกโครง ต่างเฉพาะปลายทาง: แอปบน Vercel, ข้อมูลบน Supabase Cloud, สื่อ/CDN/WAF บน Cloudflare — region ของ Vercel และ Supabase เลือกให้ใกล้กันและใกล้ไทย (Q5 PDPA cross-border, รอยืนยัน)
+
+## 6. Data Flow — สื่อ และ ช่วงคาบสอบ
+
+### 6.1 วิดีโอ streaming (dev ตรง vs prod ผ่าน CDN)
+
+```mermaid
+flowchart LR
+    subgraph DEVD["DEV"]
+        B1["browser"] -->|"1 เปิดบทเรียน"| N1["BFF"]
+        N1 -->|"2 ตรวจสิทธิ์ + ออก signed URL"| B1
+        B1 -->|"3 สตรีมตรงจาก local Storage"| S1["Supabase Storage (Docker)"]
+    end
+    subgraph PRODD["PROD (โค้ดเดียวกัน — ต่างแค่ MEDIA_PROVIDER)"]
+        B2["browser"] -->|"1"| N2["BFF (Vercel)"]
+        N2 -->|"2 ตรวจสิทธิ์ + ออก signed URL"| B2
+        B2 -->|"3 สตรีมผ่าน CDN"| C2["Cloudflare CDN"]
+        C2 --> R2["R2 / Stream"]
+    end
+```
+
+เส้นทางสตรีมไม่ผ่าน app server ทั้งสอง environment — BFF ทำแค่ "ตรวจสิทธิ์แล้วออก signed URL อายุสั้น" ผลต่างเดียวคือปลายทาง storage ที่ abstraction เลือกให้ตาม env var
+
+### 6.2 Exam submission burst (สอบพร้อมกัน ~5,000 คน)
+
+```mermaid
+flowchart LR
+    B["ผู้สอบจำนวนมาก<br/>(answer ทีละข้อ + submit พร้อมกัน)"]
+    CF["Rate limit + WAF<br/>(prod: Cloudflare / dev: middleware)"]
+    N["BFF stateless<br/>ขยายอัตโนมัติ (Vercel)"]
+    DB["PostgreSQL + pooler<br/>upsert สั้น + partial index"]
+    OB["email_outbox"]
+    W["email worker"]
+    B --> CF --> N
+    N -->|"transaction สั้นต่อรายการ"| DB
+    N -->|"ไม่ block request"| OB
+    OB --> W
+```
+
+answer save เป็น upsert transaction สั้น + rate limit ต่อ attempt เพื่อกระจายโหลด; งานส่งอีเมลปลอด path นี้ไป outbox แล้ว worker ดึงทีหลัง — รายละเอียดใน SDS §3.1 และ §8
+
+## 7. Sequence — request ธรรมดาพร้อม RLS check
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as ผู้ใช้
+    participant E as CDN / middleware
+    participant MW as Next middleware
+    participant RH as RSC / Route Handler
+    participant GU as auth guard + rbac
+    participant DB as PostgreSQL (RLS)
+    U->>E: GET /api/v1/courses (cookie session)
+    MW->>MW: rate limit + ตรวจ Origin (mutation) + x-request-id
+    MW->>RH: ส่งต่อพร้อม request context
+    RH->>GU: requireUser / requireRole
+    GU->>GU: verify JWT จาก httpOnly cookie
+    GU-->>RH: user_id + roles
+    RH->>DB: SELECT ผ่าน service_role (หลังตรวจ rbac แล้ว)
+    DB->>DB: RLS policy ยังตรวจอีกชั้น (defense-in-depth)
+    DB-->>RH: เฉพาะแถวที่ policy อนุญาต
+    RH-->>U: 200 + cache headers (CDN/ISR ตามชนิดหน้า)
+```
+
+แม้ BFF ใช้ service_role (bypass RLS) แบบจำลองยังถือว่า RLS เป็นด่านที่สองเสมอ — ทุกตารางเปิด policy ครบทุก path ตาม DATA-DICTIONARY.md และ authorization ตัดสินที่ rbac service ก่อนแตะข้อมูล
+
+## 8. Migration Path dev → prod (อะไรเปลี่ยน / อะไรเหมือน)
+
+```mermaid
+flowchart LR
+    subgraph SAME["เหมือนทุกอย่าง (ไม่แตะโค้ด)"]
+        C1["โค้ด Next.js ทั้งหมด<br/>(RSC + Route Handlers + Server Actions)"]
+        C2["SQL migrations + RLS policies<br/>+ seed กฎ (credit/assessment)"]
+        C3["กฎการทำงาน<br/>exam engine / progress / credit"]
+        C4["rate limit + CSRF + logging policy"]
+    end
+    subgraph SWAP["สลับเฉพาะ env vars"]
+        E1["SUPABASE_URL + keys<br/>local Kong → Supabase Cloud"]
+        E2["MEDIA_PROVIDER + คีย์ R2/Stream<br/>local Storage → R2/Stream"]
+        E3["EMAIL_PROVIDER + คีย์/SMTP<br/>Mailpit → Resend"]
+        E4["PUBLIC_BASE_URL + CERT_PUBLIC_BASE_URL"]
+    end
+    SAME --> SWAP
+```
+
+| ด้าน | DEV (local Docker) | PROD (cloud) | สิ่งที่สลับ |
+| ---- | ------------------ | ------------ | ---------- |
+| แอป | next-app container :3000 | Vercel | `PUBLIC_BASE_URL`, คีย์ platform |
+| DB/Auth/Storage | Supabase local (Kong :8000, PG :5432) | Supabase Cloud (region SG/JP) | `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_DB_POOLER_URL` |
+| สื่อ | Supabase Storage (Docker volume) | Cloudflare R2/Stream + CDN | `MEDIA_PROVIDER=r2|stream` + คีย์ |
+| อีเมล | Mailpit (จับทดสอบ) | Resend/SMTP จริง | `EMAIL_PROVIDER` + คีย์ |
+| WAF/Rate limit | Next middleware (in-memory) | Cloudflare + middleware ชั้นใน | ค่า config ชุดเดียวกัน |
+| Cron | container scheduler | Vercel Cron | endpoint เดียวกันทั้งคู่ |
+
+สรุป: การ "ขึ้น prod" = รัน migrations เดียวกัน + ตั้ง env vars ชุด prod — ไม่มีการแก้โค้ดหรือ branch ตาม environment (บังคับโดย review + lint)
