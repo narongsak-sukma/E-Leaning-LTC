@@ -13,19 +13,19 @@
 
 ## 1. แบบแผนกลาง (ใช้กับทุกตาราง)
 
-- **PK**: `id uuid NOT NULL DEFAULT gen_random_uuid()` (ระบุเฉพาะเมื่อต่างจากนี้)
+- **PK**: `id uuid NOT NULL DEFAULT gen_random_uuid()` — ยืนยันเป็น **UUID v4** (random, built-in ของ PG13+; ไม่ใช้ v7 ใน v1) (ระบุเฉพาะเมื่อต่างจากนี้)
 - **เวลา**: `created_at timestamptz NOT NULL DEFAULT now()`; ตารางที่มี `updated_at` อัปเดตด้วย trigger `set_updated_at()` (ดู §4.2); เวลาทั้งหมดเป็น timestamptz (UTC)
 - **Soft delete**: ตารางที่มี `deleted_at timestamptz NULL` = ห้าม hard delete ผ่านแอป — ดู §4.3; index ที่เกี่ยวกับ lookup ใช้ partial `WHERE deleted_at IS NULL`
 - **FK**: `ON DELETE RESTRICT` เป็นค่าเริ่มต้น (รักษาประวัติ/audit — ไม่ cascade ทิ้งข้อมูลอ้างอิง) ยกเว้นระบุชัด
 - **บทบาท DB**: `anon`, `authenticated`, `service_role` — BFF ใช้ `service_role` ฝั่ง server เท่านั้น; policy ที่เขียนด้านล่างมีผลกับ `anon`/`authenticated` (service_role bypass RLS แต่ทุกตารางยังต้อง enable + มี policy ครบ ตาม brief §8)
-- **helper ของ RLS** (นิยาม canonical ที่ RBAC-DESIGN.md): `auth.uid()`, `public.has_any_role(roles text[])`, `public.is_staff()`, `public.is_super_admin()` — policy ด้านล่างเรียก helper เหล่านี้ ห้ามเขียนเงื่อนไข role ซ้ำซ้อนแบบ inline
+- **helper ของ RLS** (canonical set ตาม D8/B-02 — นิยามเต็มที่ RBAC-DESIGN.md §3.1): `auth.uid()`, `public.my_roles()`, `public.has_any_role(text[])`, `public.is_staff()` — policy ด้านล่างเรียก helper ชุดนี้เท่านั้น ห้ามเขียนเงื่อนไข role ซ้ำซ้อนแบบ inline
 - ทุกตารางระบุ: วัตถุประสงค์ / คอลัมน์ / คีย์+index / นโยบาย RLS (ใครทำอะไรได้เงื่อนไขใด) / retention
 
 ## 2. ENUM Types
 
 | ENUM | ค่า |
 | ---- | -- |
-| `role_key` | citizen, lawyer, instructor, staff_viewer, staff_content, staff_exam, staff_registrar, super_admin |
+| `role_key` | citizen, lawyer, instructor, staff:viewer, staff:content, staff:exam, staff:registrar, super_admin (colon ตาม brief §4 — Postgres enum label ใส่ ':' ได้) |
 | `license_status` | pending, verified, rejected, expired |
 | `course_status` | draft, pending_review, published, archived |
 | `lesson_type` | video, document, quiz |
@@ -39,16 +39,19 @@
 | `question_difficulty` | easy, medium, hard |
 | `assessment_status` | draft, published, closed, archived |
 | `attempt_status` | in_progress, submitted, passed, failed, expired, voided |
-| `proctoring_mode` | none, flag_events |
-| `certificate_status` | issued, revoked, replaced |
-| `verification_result` | valid, revoked, not_found |
+| `proctoring_mode` | none, basic (basic = สุ่มข้อ + จับเวลา + block session ซ้อน ตาม SRS Appendix A) |
+| `certificate_status` | valid, revoked, superseded |
+| `verification_result` | valid, revoked, superseded, not_found |
 | `ledger_entry_type` | accrual, adjustment, reversal, expiry |
 | `cycle_status` | open, closed, grace |
 | `notification_channel` | in_app, email |
 | `email_status` | queued, sending, sent, failed |
 | `admin_session_end` | logout, timeout, revoke, rotation |
+| `license_application_status` | pending, approved, rejected |
+| `export_status` | queued, processing, completed, failed |
+| `security_event_type` | login_fail, mfa_fail, lockout, rate_limit_hit, session_revoke |
 
-## 3. ตารางตามโดเมน (31 ตาราง)
+## 3. ตารางตามโดเมน (37 ตาราง)
 
 ### 3.1 Identity & License
 
@@ -73,7 +76,7 @@ Retention: ตลอดอายุบัญชี + 10 ปีหลังลบ
 
 #### `lawyer_licenses` — การผูกเลขที่ใบอนุญาตว่าความ **(PII — PDPA)**
 
-วัตถุประสงค์: ผูกบัญชีกับเลขที่ใบอนุญาต + สถานะการยืนยันโดยเจ้าหน้าที่ (workflow Q3, default = เจ้าหน้าที่ตรวจ)
+วัตถุประสงค์: ทะเบียนเลขที่ใบอนุญาตที่ "ผูกกับบัญชีและยืนยันแล้ว" — แถวถูกสร้างจากการอนุมัติ `license_applications` เท่านั้น (workflow Q3, default = เจ้าหน้าที่ตรวจ)
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
@@ -87,8 +90,27 @@ Retention: ตลอดอายุบัญชี + 10 ปีหลังลบ
 | rejected_reason | text | NULL (เมื่อ status='rejected' ต้อง NOT NULL — CHECK) |
 | deleted_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(user_id, license_no) WHERE deleted_at IS NULL; INDEX(license_no) WHERE deleted_at IS NULL; CHECK (status='rejected' ↔ rejected_reason IS NOT NULL)
-RLS: **SELECT** เจ้าของแถว หรือ staff:exam/registrar + super_admin; **INSERT** เจ้าของบัญชี (ผ่าน BFF — ได้เฉพาะ status='pending'); **UPDATE** เจ้าหน้าที่ staff:registrar/super_admin เท่านั้น (เปลี่ยน status/verified_by/rejected_reason); **DELETE** ไม่อนุญาต
+RLS: **SELECT** เจ้าของแถว หรือ staff:exam/registrar + super_admin; **INSERT** service_role เท่านั้น (สร้างอัตโนมัติเมื่อ `license_applications` ได้รับอนุมัติ); **UPDATE** เจ้าหน้าที่ staff:registrar/super_admin เท่านั้น (เปลี่ยน status/verified_by/rejected_reason); **DELETE** ไม่อนุญาต
 Retention: ตลอดอายุบัญชี + 10 ปี (เกี่ยวเนื่องสิทธิต่อใบอนุญาต)
+
+#### `license_applications` — คำขอผูกเลขที่ใบอนุญาต **(PII — PDPA)**
+
+วัตถุประสงค์ (ตารางเสริม B-16): คำขอผูกเลขที่ใบอนุญาต + การตัดสินของเจ้าหน้าที่ — ยื่นผ่าน `PUT /me/license` แล้วตัดสินผ่าน `PATCH /admin/license-applications/{id}` (API-SPEC §3.2/§3.8; อนุมัติ → สร้าง lawyer_licenses + มอบบทบาท lawyer อัตโนมัติ + audit)
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| user_id | uuid | NOT NULL FK→profiles |
+| license_no | text | NOT NULL |
+| status | license_application_status | NOT NULL DEFAULT 'pending' |
+| evidence_media_id | uuid | NULL FK→media_assets (เอกสารประกอบ Q3) |
+| submitted_at | timestamptz | NOT NULL DEFAULT now() |
+| decided_by | uuid | NULL FK→profiles (เจ้าหน้าที่ผู้ตัดสิน) |
+| decided_at | timestamptz | NULL |
+| rejected_reason | text | NULL (CHECK: status='rejected' → NOT NULL) |
+| resulting_license_id | uuid | NULL FK→lawyer_licenses (แถวที่สร้างเมื่ออนุมัติ) |
+คีย์/Index: UNIQUE(user_id) WHERE status='pending' (กันยื่นซ้อน); INDEX(status, submitted_at)
+RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin; **INSERT** เจ้าของบัญชีผ่าน BFF (ได้เฉพาะ status='pending'); **UPDATE** service_role เท่านั้น (registrar ตัดสินผ่าน admin endpoint + audit `LICENSE_VERIFY`); **DELETE** ไม่อนุญาต
+Retention: ตลอดอายุบัญชี + 10 ปี (หลักฐานการตัดสิน)
 
 #### `role_assignments` — บทบาทของผู้ใช้
 
@@ -105,6 +127,22 @@ Retention: ตลอดอายุบัญชี + 10 ปี (เกี่ย�
 คีย์/Index: UNIQUE(user_id, role) WHERE revoked_at IS NULL; INDEX(user_id) WHERE revoked_at IS NULL; INDEX(role)
 RLS: **SELECT** เจ้าของแถว (ดูบทบาทตัวเอง) หรือ staff ทุกระดับ; **INSERT/UPDATE** service_role เท่านั้น (บังคับผ่าน BFF + audit ทุกครั้ง); **DELETE** ไม่อนุญาต (ใช้ revoked_at)
 Retention: ถาวร (ประวัติการมอบ/เพิกถอนบทบาท)
+
+#### `consents` — บันทึกความยินยอม PDPA **(PII — PDPA)**
+
+วัตถุประสงค์ (ตารางเสริม B-16): หลักฐานการให้/ถอน consent ตาม PDPA (ผ่าน `GET/PATCH /profile/consents` — API-SPEC §3.2) — เก็บเป็นประวัติแบบ append
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| user_id | uuid | NOT NULL FK→profiles |
+| consent_type | text | NOT NULL, CHECK IN ('pdpa_essential','marketing','email_notify') (ขยายได้ตาม DCR) |
+| action | text | NOT NULL, CHECK IN ('grant','revoke') |
+| policy_version | text | NOT NULL (เวอร์ชันนโยบาย ณ วันให้) |
+| source | text | NOT NULL, CHECK IN ('register','profile','staff') |
+| created_at | timestamptz | NOT NULL DEFAULT now() |
+คีย์/Index: INDEX(user_id, consent_type, created_at DESC)
+RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin; **INSERT** service_role ผ่าน BFF เท่านั้น; **UPDATE/DELETE** ไม่อนุญาต (หลักฐาน consent แก้ไม่ได้ — ถอน = เพิ่มแถว action='revoke')
+Retention: ตลอดอายุบัญชี + 10 ปี (PDPA)
 
 ### 3.2 Catalog & Enrollment
 
@@ -169,7 +207,7 @@ Retention: ถาวร
 | media_id | uuid | NULL FK→media_assets (type='video') |
 | quiz_id | uuid | NULL FK→lesson_quizzes (type='quiz') |
 | sort_order | int | NOT NULL |
-| completion_rule | jsonb | NULL (override เกณฑ์จบบท เช่น watch_pct — default จาก config ส่วนกลาง) |
+| completion_rule | jsonb | NULL (override เกณฑ์จบบท เช่น watch_pct — default จาก config ส่วนกลาง `video_complete_pct` ตาม SRS Appendix A) |
 | is_preview | boolean | NOT NULL DEFAULT false |
 | deleted_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(module_id, sort_order) WHERE deleted_at IS NULL; INDEX(quiz_id); CHECK (type='video' → media_id IS NOT NULL AND duration_sec IS NOT NULL); CHECK (type='quiz' → quiz_id IS NOT NULL)
@@ -178,7 +216,7 @@ Retention: ถาวร
 
 #### `media_assets` — ทรัพยากรสื่อ (ผ่าน storage abstraction)
 
-วัตถุประสงค์: metadata ของไฟล์ — ตัวไฟล์อยู่ที่ provider ตาม env (dev: Supabase Storage / prod: R2-Stream)
+วัตถุประสงค์: metadata ของไฟล์ — ตัวไฟล์อยู่ที่ provider ตาม env (dev: Supabase Storage / prod: R2-Stream); ความละเอียดสูงสุด 1080p ตาม SRS Appendix A (video_max_resolution — ธง Q6)
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
@@ -189,7 +227,7 @@ Retention: ถาวร
 | playback_id | text | NULL (ใช้เมื่อ provider='stream') |
 | mime_type | text | NOT NULL |
 | size_bytes | bigint | NOT NULL CHECK >= 0 |
-| duration_sec | int | NULL (วิดีโอ) |
+| duration_sec | int | NULL CHECK > 0 AND <= 3600 (วิดีโอ — คลิปจำกัด ≤ 60 นาที ตาม SRS Appendix A video_max_minutes, ธง Q6) |
 | checksum_sha256 | text | NULL |
 | status | media_status | NOT NULL DEFAULT 'uploading' |
 | uploaded_by | uuid | NOT NULL FK→profiles |
@@ -241,7 +279,7 @@ Retention: ตลอดอายุ enrollment (ถาวรตามประ�
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
 | title | text | NOT NULL |
-| pass_pct | smallint | NOT NULL DEFAULT 60, CHECK 1–100 (config — ระบุ "รอยืนยัน" ถ้าเจ้าหน้าที่ยังไม่ตกลง) |
+| pass_pct | smallint | NOT NULL DEFAULT 60, CHECK 1–100 (default ตาม SRS Appendix A `quiz_pass_percent`) |
 | max_attempts | int | NULL (NULL = ไม่จำกัด) |
 | shuffle_questions | boolean | NOT NULL DEFAULT true |
 | status | text | NOT NULL DEFAULT 'active', CHECK IN ('draft','active','archived') |
@@ -361,14 +399,14 @@ Retention: ถาวร
 | version | int | NOT NULL DEFAULT 1 |
 | time_limit_minutes | int | NOT NULL DEFAULT 60 CHECK BETWEEN 5 AND 480 |
 | question_count | int | NOT NULL DEFAULT 30 CHECK > 0 |
-| pass_pct | smallint | NOT NULL DEFAULT 70 CHECK 1–100 |
-| max_attempts | int | NOT NULL DEFAULT 3 CHECK > 0 |
-| attempt_cooldown_minutes | int | NOT NULL DEFAULT 0 CHECK >= 0 |
+| pass_pct | smallint | NOT NULL CHECK 1–100 — default seed อ้าง SRS Appendix A `exam_pass_threshold_percent` (ธง Q2) |
+| max_attempts | int | NOT NULL DEFAULT 3 CHECK > 0 (ตาม SRS Appendix A `exam_max_attempts`) |
+| attempt_cooldown_minutes | int | NOT NULL DEFAULT 1440 CHECK >= 0 (24 ชม. ตาม SRS Appendix A `exam_attempt_cooldown_hours`) |
 | shuffle_questions | boolean | NOT NULL DEFAULT true |
 | shuffle_options | boolean | NOT NULL DEFAULT true |
 | selection | jsonb | NOT NULL DEFAULT '{}' (เงื่อนไขคัด pool: bank_ids, categories, difficulty mix) |
 | require_course_complete | boolean | NOT NULL DEFAULT true |
-| proctoring_mode | proctoring_mode | NOT NULL DEFAULT 'none' (รอยืนยัน Q4) |
+| proctoring_mode | proctoring_mode | NOT NULL DEFAULT 'basic' (ตาม SRS Appendix A `proctoring_mode` — ธง Q4) |
 | effective_from | timestamptz | NOT NULL DEFAULT now() |
 คีย์/Index: UNIQUE(assessment_id, version); INDEX(assessment_id) WHERE effective_from <= now() — attempt ใช้ rules เวอร์ชันที่มีผล ณ วันสอบ (การแก้กฎไม่ย้อนหลัง)
 RLS: **SELECT** ผู้ลงทะเบียน (เห็นเฉพาะฟิลด์ที่เกี่ยวกับผู้สอบ เช่น เวลา/จำนวนครั้ง) + instructor/staff:exam เห็นเต็ม; **INSERT/UPDATE** staff:exam/super_admin ผ่าน BFF + audit (แก้ = สร้าง version ใหม่); **DELETE** ไม่อนุญาต
@@ -391,7 +429,7 @@ Retention: ถาวร (versioned)
 | passed | boolean | NULL |
 | question_count | int | NOT NULL |
 | correct_count | int | NULL |
-| client_events | jsonb | NULL (proctoring flag_events — จำกัดขนาด, ไม่มี PII) |
+| client_events | jsonb | NULL (proctoring ระดับ basic — บันทึก client events เช่น tab blur; จำกัดขนาด, ไม่มี PII) |
 คีย์/Index: UNIQUE(assessment_id, user_id, attempt_no); **UNIQUE(assessment_id, user_id) WHERE status='in_progress'** (ป้องกันสอบซ้อน — SDS §3.1f); INDEX(status) WHERE status='in_progress' (auto-submit job); INDEX(user_id)
 RLS: **SELECT** เจ้าของแถว/staff:exam/registrar/instructor เจ้าของ; **INSERT** เจ้าของผ่าน BFF (หลังตรวจเงื่อนไขครบ); **UPDATE** service_role เท่านั้น (answer/submit/grade ทั้งหมดฝั่ง server); **DELETE** ไม่อนุญาต (ยกเลิกด้วย status='voided' โดย staff:exam + audit)
 Retention: ถาวร (หลักฐานผลสอบ)
@@ -416,7 +454,7 @@ Retention: ถาวร
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
-| cert_no | text | NOT NULL UNIQUE (รูปแบบ `LTC-<ปี>-<ลำดับ 6 หลัก>` — ออกใน transaction ด้วย advisory lock หรือ sequence รายปี) |
+| cert_no | text | NOT NULL UNIQUE — รูปแบบ `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` ตาม SRS Appendix A `certificate_code_format` (สุ่มด้วย CSPRNG + ตรวจ UNIQUE ซ้ำใน transaction; **ไม่ใช้ sequence** เพราะลำดับถูกเดาเลขถัดไปได้ — รอยืนยันรูปแบบกับสภาฯ) |
 | verify_code | text | NOT NULL UNIQUE (nanoid 43 อักขระ, CSPRNG — คีย์สาธารณะ ไม่มี PII) |
 | enrollment_id | uuid | NOT NULL UNIQUE FK→enrollments (idempotent ของการออก) |
 | user_id | uuid | NOT NULL FK→profiles |
@@ -426,13 +464,13 @@ Retention: ถาวร
 | credit_snapshot | numeric(6,2) | NULL (credit ที่ให้ ณ วันออก) |
 | issued_by | uuid | NOT NULL FK→profiles (นายทะเบียน) |
 | issued_at | timestamptz | NOT NULL DEFAULT now() |
-| status | certificate_status | NOT NULL DEFAULT 'issued' |
+| status | certificate_status | NOT NULL DEFAULT 'valid' |
 | revoked_at | timestamptz | NULL |
 | revoked_reason | text | NULL |
 | pdf_media_id | uuid | NULL FK→media_assets |
-| replaced_by | uuid | NULL FK→certificates |
+| superseded_by | uuid | NULL FK→certificates (reissue → ใบเดิมเปลี่ยน status='superseded' และชี้ใบใหม่) |
 คีย์/Index: UNIQUE(cert_no); UNIQUE(verify_code); UNIQUE(enrollment_id); INDEX(user_id); CHECK (status='revoked' ↔ revoked_at IS NOT NULL)
-RLS: **SELECT** เจ้าของแถว, staff:registrar/super_admin, และ path สาธารณะแบบจำกัด (BFF ตอบ verify จาก verify_code — คืนเฉพาะฟิลด์สาธารณะตาม config CERT_PUBLIC_FIELDS, ไม่เปิด query ตรง); **INSERT** service_role ผ่าน BFF โดย staff:registrar/super_admin เท่านั้น + audit; **UPDATE** service_role (เปลี่ยน status พร้อมเหตุผล — registrar); **DELETE** ไม่อนุญาตเด็ดขาด
+RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin — path สาธารณะเป็น BFF อย่างเดียว: `GET /certificates/{code}` ตอบ **200 เสมอ** ด้วย 4 ฟิลด์ `{code, course_title, issued_at, status ∈ valid|revoked|superseded}` — **ห้ามแสดงชื่อเจ้าของ** (ชื่ออยู่บน PDF เท่านั้น — D8); **INSERT** service_role ผ่าน BFF โดย staff:registrar/super_admin เท่านั้น + audit; **UPDATE** service_role (เปลี่ยน status พร้อมเหตุผล — registrar); **DELETE** ไม่อนุญาตเด็ดขาด
 Retention: ถาวร (เอกสารสิทธิ)
 
 #### `certificate_verifications` — บันทึกการตรวจสอบสาธารณะ
@@ -535,6 +573,37 @@ Retention: 12 เดือน หรือตาม expires_at
 RLS: **SELECT** เจ้าของแถวเท่านั้น; **INSERT** service_role; **UPDATE** เจ้าของแถว (read_at/deleted_at ผ่าน BFF) เท่านั้น; **DELETE** ไม่อนุญาต
 Retention: ตาม notifications (12 เดือน)
 
+#### `notification_settings` — การตั้งค่าแจ้งเตือนรายบุคคล
+
+วัตถุประสงค์ (ตารางเสริม B-16): ช่องทาง/ประเภทแจ้งเตือนต่อผู้ใช้ (`GET/PATCH /me/notification-settings` — API-SPEC §3.9)
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| user_id | uuid | PK, FK→profiles (1:1) |
+| settings | jsonb | NOT NULL DEFAULT '{}' (โครงสร้าง topic → {in_app, email}) |
+| updated_at | timestamptz | NOT NULL DEFAULT now() |
+คีย์/Index: PK = (user_id)
+RLS: **SELECT** เจ้าของแถวเท่านั้น; **INSERT/UPDATE** service_role ผ่าน BFF (เจ้าของแก้ของตัวเอง); **DELETE** ไม่อนุญาต
+Retention: ตามอายุบัญชี
+
+#### `notification_templates` — เทมเพลตแจ้งเตือน (ไทยก่อน)
+
+วัตถุประสงค์ (ตารางเสริม B-16): เทมเพลตอีเมล/in-app ภาษาไทย (brief §5.6) — `email_outbox.template_key` อ้างมาที่นี่
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| template_key | text | NOT NULL |
+| locale | text | NOT NULL DEFAULT 'th', CHECK IN ('th','en') |
+| channel | notification_channel | NOT NULL |
+| subject_tpl | text | NOT NULL |
+| body_tpl | text | NOT NULL (ตัวแปรรูปแบบ {{var}}) |
+| version | int | NOT NULL DEFAULT 1 |
+| is_active | boolean | NOT NULL DEFAULT true |
+| updated_at | timestamptz | NOT NULL DEFAULT now() |
+คีย์/Index: UNIQUE(template_key, locale, channel) WHERE is_active; INDEX(template_key)
+RLS: **SELECT** service_role (BFF ใช้ render) + staff:content/super_admin; **INSERT/UPDATE** staff:content/super_admin ผ่าน BFF + audit (แก้ = สร้าง version ใหม่); **DELETE** ไม่อนุญาต (ปิดด้วย is_active)
+Retention: ถาวร (versioned)
+
 #### `email_outbox` — คิวอีเมลขาออก **(PII — PDPA: to_email)**
 
 วัตถุประสงค์ (ตารางเสริมที่เพิ่มนอกรายการขั้นต่ำ): แยกการส่งอีเมลออกจาก request path + retry ได้ (SDS §8) — dev ใช้ Mailpit จับ, prod ใช้ Resend/SMTP
@@ -555,7 +624,28 @@ Retention: ตาม notifications (12 เดือน)
 RLS: **SELECT** service_role เท่านั้น (มี PII — ผู้ใช้เห็นสถานะผ่าน notifications แทน); **INSERT** service_role; **UPDATE** service_role (worker); **DELETE** ไม่อนุญาต (purge ตาม retention)
 Retention: 90 วันหลัง sent/failed
 
-### 3.7 Admin & Reporting (ไม่มีตารางเก็บของตัวเอง — ใช้ view อ่าน)
+### 3.7 Admin & Reporting
+
+#### `report_exports` — งาน export ของเจ้าหน้าที่
+
+วัตถุประสงค์ (ตารางเสริม B-16): ตามงาน export CSV/JSON (`GET /admin/reports/{type}/export` — API-SPEC §3.8) เป็น job แบบ async + ไฟล์มีอายุสั้น
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| requested_by | uuid | NOT NULL FK→profiles |
+| report_type | text | NOT NULL (ตามกลุ่ม /admin/reports/*) |
+| params | jsonb | NOT NULL DEFAULT '{}' (ตัวกรอง — ห้ามบรรจุ PII เกินจำเป็น) |
+| format | text | NOT NULL DEFAULT 'csv', CHECK IN ('csv','json') |
+| status | export_status | NOT NULL DEFAULT 'queued' |
+| file_media_id | uuid | NULL FK→media_assets |
+| row_count | int | NULL |
+| error | text | NULL (ตัดทอน) |
+| requested_at | timestamptz | NOT NULL DEFAULT now() |
+| completed_at | timestamptz | NULL |
+| expires_at | timestamptz | NULL (อายุไฟล์ — default 7 วัน) |
+คีย์/Index: INDEX(requested_by, requested_at DESC); INDEX(status) WHERE status IN ('queued','processing')
+RLS: **SELECT** ผู้ขอเอง หรือ staff ทุกระดับ; **INSERT** service_role ผ่าน BFF (บังคับ audit `ADMIN_EXPORT`); **UPDATE** service_role (worker); **DELETE** ไม่อนุญาต (ล้างตาม expires_at ด้วย job ที่มี audit)
+Retention: แถว 12 เดือน (ไฟล์ 7 วันตาม expires_at)
 
 Reporting ทั้งหมดอ่านผ่าน view + สิทธิ์ staff เท่านั้น (SDS §2 M7): `v_credit_balance` (ยอด credit ต่อรอบ/ประเภท จาก SUM ledger), `v_enrollment_progress` (สรุปความคืบหน้าจาก lesson_progress), `v_assessment_statistics` (ผลสอบต่อหลักสูตร), `v_certificates_issued` — นิยามใน migration แยก; export CSV ทำที่ BFF โดย stream จาก view
 
@@ -579,6 +669,23 @@ Reporting ทั้งหมดอ่านผ่าน view + สิทธิ�
 คีย์/Index: INDEX(entity_type, entity_id, occurred_at DESC); INDEX(actor_user_id, occurred_at DESC); INDEX(action, occurred_at DESC); ไม่มี FK แบบ enforce ต่อ actor เพื่อกันการ rewrite ประวัติ (ใช้ lookup ที่แอป)
 RLS: **SELECT** staff ทุกระดับ + super_admin (สิทธิ์อ่านตามขอบเขต sub-role — รายละเอียดที่ AUDIT-LOG-DESIGN.md); **INSERT** service_role ผ่าน audit service เท่านั้น; **UPDATE/DELETE ไม่มี path เด็ดขาด** — `REVOKE UPDATE, DELETE ON audit_logs FROM anon, authenticated, service_role` + ไม่มี policy ใดอนุญาต (D6); ไม่มี API แก้/ลบ audit
 Retention: ≥ 5 ปี (นโยบายสภาฯ + PDPA) — partition รายเดือนเมื่อโต (SDS §8)
+
+#### `security_events` — เหตุการณ์ความปลอดภัย (ปริมาณสูง แยกจาก audit_logs)
+
+วัตถุประสงค์ (ตารางเสริม B-16): login ล้มเหลว / lockout / rate-limit hit / MFA fail — เก็บแยกจาก audit_logs เพื่อ correlation และไม่ให้หลักฐานธุรกิจถูก flood
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| event_type | security_event_type | NOT NULL |
+| occurred_at | timestamptz | NOT NULL DEFAULT now() |
+| target_user_id | uuid | NULL FK→profiles (NULL = ไม่ระบุตัวตน) |
+| ip_hash | text | NOT NULL (sha256 + salt — ไม่เก็บ IP ตรง) |
+| user_agent | text | NULL (ตัดทอน 128 อักขระ) |
+| request_id | text | NULL (เชื่อมกับ app log) |
+| detail | jsonb | NULL (ห้ามบรรจุ PII) |
+คีย์/Index: INDEX(occurred_at DESC); INDEX(target_user_id, event_type); INDEX(ip_hash, event_type, occurred_at DESC)
+RLS: **SELECT** super_admin เท่านั้น (รายละเอียด sensitive); **INSERT** service_role ผ่าน BFF/middleware; **UPDATE/DELETE** ไม่มี path — รวมอยู่ใน REVOKE append-only เดียวกับ audit_logs (§4.4)
+Retention: 12 เดือน
 
 #### `admin_sessions` — ติดตาม session ของ staff/admin
 
@@ -618,9 +725,9 @@ Retention: 24 เดือน
 - แอปไม่มีสิทธิ์ hard delete เลย (RLS ไม่มี policy DELETE ยกเว้นระบุ) — ลบ = ตั้ง deleted_at
 - การ purge ตาม retention เป็น job แยกที่ใช้ role เฉพาะ (ไม่ใช่ service_role ของแอป) + บันทึก audit ทุกครั้ง
 
-### 4.4 Append-only enforcement (audit_logs + credit_ledger_entries)
+### 4.4 Append-only enforcement (audit_logs + credit_ledger_entries + security_events)
 
-1. `REVOKE UPDATE, DELETE ON TABLE audit_logs, credit_ledger_entries FROM anon, authenticated, service_role` — เหลือ path เขียน INSERT อย่างเดียว
+1. `REVOKE UPDATE, DELETE ON TABLE audit_logs, credit_ledger_entries, security_events FROM anon, authenticated, service_role` — เหลือ path เขียน INSERT อย่างเดียว
 2. RLS ไม่มี policy สำหรับ UPDATE/DELETE เลย
 3. trigger guard สุดท้าย: ถ้ามีการ UPDATE/DELETE (โดน role ที่ยังมีสิทธิ์ เช่น ตอน migration) ให้ RAISE EXCEPTION
 4. ไม่มี API/Server Action ใดเปิด path แก้/ลบ (ตรวจด้วย codex gate ตอน review โค้ด auth/security/data)
@@ -630,8 +737,8 @@ Retention: 24 เดือน
 | ตาราง.คอลัมน์ | ข้อมูล | มาตรการ |
 | ------------ | ------ | ------- |
 | profiles.email, phone, first_name, last_name, display_name | ข้อมูลส่วนบุคคล | RLS เจ้าของ+staff, ห้าม log, แจ้งเหตุการเข้าถึงตามนโยบาย PDPA |
-| lawyer_licenses.license_no | ข้อมูลส่วนบุคคล (วิชาชีพ) | RLS เจ้าของ+staff:exam/registrar, ห้าม log, ไม่แสดงในหน้าสาธารณะ |
-| certificates.holder_name_snapshot | ชื่อตามใบประกาศ | เปิดเฉพาะหน้า verify ตาม CERT_PUBLIC_FIELDS |
+| lawyer_licenses.license_no, license_applications.license_no | ข้อมูลส่วนบุคคล (วิชาชีพ) | RLS เจ้าของ+staff:exam/registrar, ห้าม log, ไม่แสดงในหน้าสาธารณะ |
+| certificates.holder_name_snapshot | ชื่อตามใบประกาศ | แสดงเฉพาะบน PDF ที่เจ้าของ/registrar ดาวน์โหลด — ห้ามออกทาง public verify (D8) |
 | email_outbox.to_email | ข้อมูลติดต่อ | SELECT ได้เฉพาะ service_role; purge 90 วัน |
 | audit_logs.before/after | อาจมี PII ปน | audit service mask ก่อนเขียน (allowlist field) |
 
@@ -639,8 +746,9 @@ Retention: 24 เดือน
 
 | กลุ่มตาราง | Retention |
 | ---------- | --------- |
-| audit_logs, credit_ledger_entries, renewal_cycles, certificates, enrollments, assessment_attempts, attempt_answers | ถาวร |
-| profiles, lawyer_licenses | อายุบัญชี + 10 ปี |
+| audit_logs, credit_ledger_entries, renewal_cycles, certificates, enrollments, assessment_attempts, attempt_answers, notification_templates | ถาวร |
+| profiles, lawyer_licenses, license_applications, consents | อายุบัญชี + 10 ปี |
 | certificate_verifications, email_outbox | 90 วัน |
-| notifications + notification_recipients | 12 เดือน |
+| notifications, notification_recipients, security_events, report_exports | 12 เดือน (ไฟล์ export 7 วัน) |
 | admin_sessions | 24 เดือน |
+| notification_settings | ตามอายุบัญชี |
