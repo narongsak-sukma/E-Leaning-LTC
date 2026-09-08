@@ -175,7 +175,7 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
-| GET | /certificates/{code} | **ตรวจสอบสาธารณะ** ไม่ต้อง auth — ตอบ **200 เสมอ** (CRT-004) ด้วย 4 ฟิลด์เท่านั้น: `{code, course_title, issued_at, status}` โดย `status ∈ valid \| revoked \| superseded` — **ไม่มีชื่อเจ้าของ** (ชื่อ-นามสกุลอยู่บน PDF ที่เจ้าของ/registrar ดาวน์โหลดเท่านั้น) | guest | 200 เสมอ | RATE-001 (410 ERR-CERT-002 เฉพาะใบที่ถูกลบตาม retention) |
+| GET | /certificates/{code} | **ตรวจสอบสาธารณะ** ไม่ต้อง auth — `{code}` ยอมรับทั้ง `cert_no` (พิมพ์มือ, D10) และ `verify_code` (จาก QR, nanoid — D10) — ตอบ **200 เสมอ** (CRT-004) ด้วย 4 ฟิลด์เท่านั้น: `{code, course_title, issued_at, status}` โดย `status ∈ valid \| revoked \| superseded` — **ไม่มีชื่อเจ้าของ** (ชื่อ-นามสกุลอยู่บน PDF ที่เจ้าของ/registrar ดาวน์โหลดเท่านั้น) | guest | 200 เสมอ | RATE-001 (410 ERR-CERT-002 เฉพาะใบที่ถูกลบตาม retention) |
 | GET | /me/certificates | ประกาศนียบัตรของตัวเอง (พร้อมลิงก์ PDF) | citizen, lawyer | 200 + pagination | AUTH-001 |
 | GET | /certificates/{id}/pdf | ดาวน์โหลด PDF ตัวจริง (id = uuid ต้อง auth — ต่างจาก public verify ที่ใช้ code) | เจ้าของใบรับรอง, staff:registrar, super_admin | 200 `application/pdf` | NF-001, RBAC-001 |
 | POST | /admin/certificates | ออกประกาศนียบัติรายใบ (จาก attempt ที่ผ่านเกณฑ์) — audit `CERT_ISSUE` | staff:registrar, super_admin | 201 | RBAC-001, VAL-001 |
