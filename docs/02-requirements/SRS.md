@@ -106,7 +106,7 @@
 - AC: การเข้าสู่ระบบผิดพลาดนับเข้า lockout (AUTH-009) และถูกบันทึกใน security event + audit · บัญชี staff*/super_admin/instructor ต้องผ่าน MFA (AUTH-007)
 
 **AUTH-003 · S** — ระบบต้องรองรับการสมัคร/เข้าสู่ระบบด้วยเบอร์มือถือและรหัส OTP (default: เปิดเมื่อมี SMS provider — ระบุใน Appendix A)
-- AC: OTP 6 หลัก หมดอายุ 5 นาที ตรวจความถูกต้องได้ครั้งละ 1 บัญชี และจำกัด 3 OTP/เบอร์/ชั่วโมง
+- AC: OTP 6 หลัก หมดอายุ 5 นาที ตรวจความถูกต้องได้ครั้งละ 1 บัญชี และจำกัด 3 OTP/เบอร์/ชั่วโมง (ค่า canonical `otp_per_phone_per_hour=3` — Appendix A)
 - AC: เบอร์มือถือต้องผ่านการตรวจรูปแบบหมายเลขไทย (+66 / 0xxxxxxxxx)
 
 **AUTH-004 · M** — ระบบต้องรองรับการตั้งรหัสผ่านใหม่กรณีลืมผ่านลิงก์จากอีเมล
@@ -119,12 +119,16 @@
 - AC: ความยาว ≥ 12 ตัวอักษร (default) ผสมตัวอักษรพิมพ์ใหญ่/เล็ก/ตัวเลข/สัญลักษณ์อย่างน้อย 3 หมวด
 - AC: ปฏิเสธรหัสผ่านที่อยู่ในรายการรหัสผ่านที่ถูกบุกรุกบ่อย (top common/leaked list) พร้อม error ภาษาไทยชี้เหตุผล
 
-**AUTH-007 · M** — ระบบต้องบังคับ MFA (TOTP) สำหรับ `super_admin`, `staff` ทุกระดับ และ `instructor`
-- AC: บัญชีบทบาทดังกล่าวต้องลงทะเบียน TOTP จนสำเร็จก่อนใช้งานฟังก์ชันอื่นของระบบ
-- AC: มี backup code 8 รหัส ใช้ได้รหัสละครั้ง; ผู้ใช้ทั่วไป (citizen/lawyer) เปิด MFA ได้เองแบบ optional (instructor บังคับ)
+**AUTH-007 · M** — ระบบต้องบังคับ MFA (TOTP) สำหรับ `super_admin`, `staff` ทุกระดับ และ `instructor` — ใช้กฎเดียวกันกับทุกบทบาทที่บังคับ MFA
+- AC: หลังพิสูจน์ตัวตนด้วยรหัสผ่านสำเร็จ บัญชีบทบาทดังกล่าวได้รับเฉพาะ session แบบ "enrollment-only" (ใช้ได้เฉพาะปลายทางลงทะเบียน/ยืนยัน MFA และ logout เท่านั้น) จนกว่าจะลงทะเบียน MFA สำเร็จ จึงเข้าถึงฟังก์ชันอื่นของระบบได้
+- AC: ทุก request ถัดไปที่ต้องพิสูจน์ตัวตนต้องมี MFA claim ที่ server ตรวจทุกครั้ง — token ที่ไม่มี/ไม่ผ่าน MFA claim เรียกฟังก์ชันทั่วไปไม่ได้ (ตอบ 403)
+- AC: การปิด/ถอน MFA ต้องผ่านการยืนยัน recent-MFA (พิสูจน์ MFA ครั้งล่าสุดภายในกรอบเวลาที่กำหนดเป็น config) และห้ามปิด MFA เมื่อการปิดทำให้บัญชีเหลือ factor การพิสูจน์ตัวตนเป็น 0
+- AC: บัญชีที่ได้รับบทบาทที่บังคับ MFA ภายหลัง (ตาม IDENT-006) ต้องถูก force MFA enrollment ตั้งแต่การเข้าสู่ระบบครั้งถัดไป
+- AC: มี backup code 8 รหัส ใช้ได้รหัสละครั้ง; ผู้ใช้ทั่วไป (citizen/lawyer) เปิด MFA ได้เองแบบ optional
 
 **AUTH-008 · M** — ระบบต้องบริหาร session ตามนโยบาย (ค่าเป็น config)
 - AC: idle timeout: เจ้าหน้าที่ (staff*/super_admin/instructor) 15 นาที · ผู้เรียน (citizen/lawyer) 60 นาที (default) หมดอายุแล้วต้องพิสูจน์ตัวใหม่ — idle timeout ไม่ใช่ absolute session lifetime (อายุสูงสุดของ session กำหนดแยกเป็น config)
+- AC: ความถูกต้องของ session ตรวจฝั่ง server ทุก request ที่ต้องพิสูจน์ตัวตน ทุกบทบาท — staff*/super_admin/instructor ตรวจกับตาราง `admin_sessions` (session row ต้องยัง active) · ผู้เรียน (citizen/lawyer) ใช้ JWT อายุสั้น + refresh token โดย server ตรวจสถานะเพิกถอนทุกครั้ง — การเพิกถอน (logout, logout-all, เปลี่ยน/รีเซ็ตรหัสผ่าน, ปิดใช้งานบัญชี) มีผลทันที ห้ามมีกรณี token เดิมยังใช้งานได้หลัง sign-out
 - AC: refresh token rotation พร้อม reuse detection (ใช้ซ้ำ → เพิกถอนทั้งลำดับ) · ผู้ใช้มองเห็นรายการ session/อุปกรณ์ active ของตนเองได้
 
 **AUTH-009 · M** — ระบบต้องล็อกบัญชีชั่วคราวเมื่อพยายามเข้าสู่ระบบผิดติดต่อกัน
@@ -132,11 +136,12 @@
 - AC: เหตุการณ์ lockout ถูกบันทึกใน security event + audit โดยไม่เปิดเผยว่าบัญชีนั้นมีอยู่จริงหรือไม่ผ่านหน้าจอ
 
 **AUTH-010 · M** — ระบบต้องรองรับการออกจากระบบของ session ปัจจุบัน และการออกจากระบบทุกอุปกรณ์
-- AC: token ถูกเพิกถอนฝั่ง server ทันที (ไม่ใช่เพียงลบ cookie) · ปุ่มออกจากระบบเข้าถึงได้ภายใน 2 คลิกจากทุกหน้า
+- AC: token ถูกเพิกถอนฝั่ง server ทันที (ไม่ใช่เพียงลบ cookie) ตามกลไก AUTH-008 — logout-all และการรีเซ็ต/เปลี่ยนรหัสผ่านเพิกถอน session ทั้งหมดทันที และ access token ที่ออกก่อนหน้าถูกปฏิเสธทันที (ทดสอบด้วย integration test ว่า token เดิมเรียก API ต่อไม่ได้) · ปุ่มออกจากระบบเข้าถึงได้ภายใน 2 คลิกจากทุกหน้า
 
 **AUTH-011 · M** — ระบบต้องจำกัดอัตราการเรียก (rate limit) ปลายทางยืนยันตัวตนทั้งหมด
-- AC: login / ลืมรหัสผ่าน / OTP / ขอส่งอีเมลซ้ำ จำกัด 10 request/นาที/IP (default) เกินคือ HTTP 429 + ข้อความไทย
-- AC: ใช้กลไกเดียวกันทั้ง dev (middleware) และ staging/prod (Cloudflare rate rule) — พฤติกรรมตรงกัน
+- AC: login / ลืมรหัสผ่าน / OTP / ขอส่งอีเมลซ้ำ จำกัด 10 request/นาที ต่อ IP และต่อบัญชีรวมกัน (cumulative IP+user) (`auth_rate_limit_per_min=10` — Appendix A) เกินคือ HTTP 429 + ข้อความไทย
+- AC: รีเซ็ตรหัสผ่าน จำกัด 5 ครั้ง/ชั่วโมง/บัญชี (`password_reset_per_hour_per_account=5`) · OTP จำกัด 3 ครั้ง/เบอร์/ชั่วโมง (`otp_per_phone_per_hour=3` — ตรงกับ AUTH-003) — ทุกค่า rate limit ที่ระบบใช้รวมอยู่ใน Appendix A เป็นแหล่งเดียว (canonical)
+- AC: เมื่อคำขอเดียวเข้าเกณฑ์หลายกลุ่ม (เช่น per-IP และ per-account) ให้ใช้กฎที่จำกัดมากที่สุด/เฉพาะเจาะจงที่สุดเป็นค่าบังคับ (specific ชนะ); ใช้กลไกเดียวกันทั้ง dev (middleware) และ staging/prod (Cloudflare rate rule) — พฤติกรรมตรงกัน
 
 ### 3.2 IDENT — ตัวตน เนื้อหาประชาชน และการผูกใบอนุญาต
 
@@ -204,7 +209,7 @@
 
 **LRN-003 · M** — ระบบต้องรองรับการเรียนบทเรียนประเภทวิดีโอ
 - AC: เล่นผ่าน signed URL ที่หมดอายุตาม config (default 15 นาที) ไม่เปิด URL ตรงแบบถาวร; ปรับคุณภาพตามแบนด์วิดท์
-- AC: บันทึกตำแหน่งเล่นล่าสุด; การ seek ข้ามช่วงไม่ถูกนับเป็นเวลาดูจริง (นำไปใช้ใน LRN-008)
+- AC: บันทึกตำแหน่งเล่นล่าสุดเพื่อ resume (LRN-009) · ความคืบหน้าวิดีโอ = server สะสมช่วงการเล่นที่จำกัดขนาด (bounded playback intervals) จาก heartbeat ที่ client ส่งเป็นระยะ เทียบกับเวลาฝั่ง server — ตำแหน่ง/เวลาที่ client แจ้งล่วงหน้า (เช่น max position) ไม่ถูกใช้ตัดสินความคืบหน้า · การ seek ข้ามช่วงไม่ถูกนับเป็นเวลาดูจริง (LRN-008)
 
 **LRN-004 · M** — ระบบต้องรองรับการเรียนบทเรียนประเภทเอกสาร (PDF)
 - AC: แสดงในหน้าเว็บผ่าน viewer โดยไม่บังคับดาวน์โหลด; อนุญาตดาวน์โหลดเฉพาะเมื่อหลักสูตรเปิดตัวเลือก (config)
@@ -391,8 +396,8 @@
 **AUD-004 · M** — ระบบต้องไม่บรรจุ PII ใน audit payload
 - AC: ห้าม เลขบัตรประชาชน อีเมล เลขที่ใบอนุญาต ในทุก log — อ้างอิงด้วย user_id; ตรวจบังคับด้วย automated scan ใน CI (SEC-007)
 
-**AUD-005 · M** — ระบบต้องเก็บ audit log ตามนโยบาย retention (default ≥ 5 ปี — Appendix A)
-- AC: การลบตามอายุทำผ่านกระบวนการที่ได้รับอนุมัติและถูก audit; ค่า retention เป็น config
+**AUD-005 · M** — ระบบต้องเก็บ audit log ตามนโยบาย retention (default ≥ 5 ปี)
+- AC: ยึดตาราง retention canonical ใน `DATA-DICTIONARY §4.6` เป็นแหล่งเดียว (audit log = 5 ปี พร้อม purge job หลัง export) — ไม่ขัดกับค่า "≥ 5 ปี" ที่ Appendix A (`audit_retention_years=5`) · การลบ/purge ตามอายุทำผ่านกระบวนการที่ได้รับอนุมัติและถูก audit; ค่า retention เป็น config
 
 ---
 
@@ -426,8 +431,8 @@
 
 ### 4.2 SEC — ความมั่นคงปลอดภัยและความเป็นส่วนตัว (ขยาย Brief §8 ทุกข้อ)
 
-**SEC-001 · M** — ระบบต้องเป็นไปตาม OWASP ASVS Level 2 และ OWASP Top 10
-- AC: ทบทวน design ตาม checklist ASVS V1–V14; ผลการทดสอบ (ZAP + manual pass บน staging ตาม TEST-PLAN) ต้องไม่มีช่องโหว่ระดับ high/critical ค้างอยู่ก่อน release
+**SEC-001 · M** — ระบบต้องเป็นไปตาม OWASP ASVS 4.0.3 L2 และ OWASP Top 10 (2021)
+- AC: pin เวอร์ชันมาตรฐานเป็น **OWASP ASVS 4.0.3 L2** (canonical — ห้ามอ้างเวอร์ชันอื่น) · ทบทวน design ตาม checklist ASVS V1–V14; ผลการทดสอบ (ZAP + manual pass บน staging ตาม TEST-PLAN) ต้องไม่มีช่องโหว่ระดับ high/critical ค้างอยู่ก่อน release
 
 **SEC-002 · M** — ระบบต้องเปิด RLS ทุกตารางใน PostgreSQL ร่วมกับ RBAC
 - AC: ทุกตารางมี policy; integration test ยืนยันว่า anon/authenticated อ่านข้อมูลข้างผู้ใช้/ข้ามสิทธิ์ไม่ได้
@@ -455,6 +460,7 @@
 
 **SEC-010 · M** — ระบบต้องเก็บข้อมูลส่วนบุคคลน้อยที่สุดตามหลัก PDPA พร้อม consent
 - AC: ทุกฟิลด์ส่วนบุคคลมีเหตุผลการเก็บใน Data Dictionary; ข้อมูล optional เก็บเมื่อมี consent; มีหน้าแจ้งเก็บ-ใช้-เปิดเผย
+- AC: แยกชนิดบันทึกชัดเจน 2 แบบ: (ก) **notice acknowledgment** — การแจ้ง privacy notice สำหรับการประมวลผลที่จำเป็นตามสัญญา/กฎหมาย ซึ่งไม่ใช่ consent และไม่ต้องขอ consent (บันทึกเวอร์ชัน notice + เวลาแจ้ง) แยกจาก (ข) **optional consents** ที่เก็บแบบ versioned (บันทึกเวอร์ชัน + เวลาให้/เพิกถอน) เพิกถอนได้ทุกเมื่อ — การเพิกถอนต้องหยุดการประมวลผลที่อิงตาม consent นั้น (รวมถึงข้อมูลที่เก็บเพื่อวัตถุประสงค์ตาม consent ดังกล่าว)
 
 **SEC-011 · M** — ระบบต้องรองรับสิทธิเจ้าของข้อมูล PDPA (เข้าถึง แก้ไข ลบ โอนย้าย)
 - AC: ยึด IDENT-008; คำขอที่ต้องดำเนินการโดยเจ้าหน้าที่มี SLA ตอบ ≤ 30 วันและบันทึกการดำเนินการ
@@ -618,7 +624,7 @@
 | `max_video_resolution` | 1080p | ชัดพอต่อสไลด์/เนื้อหากฎหมาย บนทุกอุปกรณ์ | รอยืนยัน Q6 |
 | `video_prevent_download` | true | ปกป้องเนื้อหาตามเจตนารมณ์เจ้าของหลักสูตร | รอยืนยัน Q6 |
 
-**พารามิเตอร์ระบบทั่วไป (default กำหนดแล้ว เปลี่ยนได้โดยไม่ต้องรอคำตอบ Q):** `password_min_length=12`, `admin_idle_timeout_minutes=15`, `learner_idle_timeout_minutes=60`, `login_lockout_threshold=5`, `login_lockout_window_minutes=15`, `login_lockout_duration_minutes=15`, `auth_rate_limit_per_min=10`, `otp_per_phone_per_hour=3`, `otp_expiry_minutes=5`, `email_verification_expiry_hours=24`, `reset_token_expiry_minutes=30`, `exam_autosave_seconds=15`, `exam_disconnect_grace_minutes=5`, `video_complete_pct=80`, `quiz_pass_percent=60`, `progress_pass_score_policy=highest`, `certificate_code_format=LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` (ยืนยันรูปแบบแล้ว — พ.ศ. เฉพาะการแสดงผลตาม I18N-003; รอยืนยันการใช้งานกับสภาฯ), `certificate_auto_issue=false`, `renewal_notify_days_before=60,30,7`, `email_retry_max=3`, `page_size_default=20`, `media_signed_url_ttl_minutes=15`, `max_upload_mb=10` (เอกสาร) / `2000` (วิดีโอ), `audit_retention_years=5`, `backup_daily_rpo_hours=24`, `rto_hours=4`
+**พารามิเตอร์ระบบทั่วไป (default กำหนดแล้ว เปลี่ยนได้โดยไม่ต้องรอคำตอบ Q):** `password_min_length=12`, `admin_idle_timeout_minutes=15`, `learner_idle_timeout_minutes=60`, `login_lockout_threshold=5`, `login_lockout_window_minutes=15`, `login_lockout_duration_minutes=15`, `auth_rate_limit_per_min=10`, `password_reset_per_hour_per_account=5`, `public_read_rate_limit_per_min=120` (ปลายทางอ่านสาธารณะ เช่น verify/หลักสูตร), `otp_per_phone_per_hour=3`, `otp_expiry_minutes=5`, `email_verification_expiry_hours=24`, `reset_token_expiry_minutes=30`, `exam_autosave_seconds=15`, `exam_disconnect_grace_minutes=5`, `video_complete_pct=80`, `quiz_pass_percent=60`, `progress_pass_score_policy=highest`, `certificate_code_format=LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` (ยืนยันรูปแบบแล้ว — พ.ศ. เฉพาะการแสดงผลตาม I18N-003; รอยืนยันการใช้งานกับสภาฯ), `certificate_auto_issue=false`, `renewal_notify_days_before=60,30,7`, `email_retry_max=3`, `page_size_default=20`, `media_signed_url_ttl_minutes=15`, `max_upload_mb=10` (เอกสาร) / `2000` (วิดีโอ), `audit_retention_years=5`, `backup_daily_rpo_hours=24`, `rto_hours=4`
 
 ### Appendix B — สถิติ requirement
 

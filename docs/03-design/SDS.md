@@ -51,7 +51,7 @@
 
 | ส่วน | หน้าที่ |
 | ---- | ------ |
-| `auth guard` | อ่าน/verify session จาก Supabase Auth cookie (httpOnly), ให้ `requireUser()` / `requireRole()` |
+| `auth guard` | อ่าน/verify session จาก Supabase Auth cookie (httpOnly), ให้ `requireUser()` / `requirePermission()` (RBAC §1.2 ข้อ 4 — ห้าม requireRole) |
 | `rbac` | ตรวจสิทธิ์ตาม role_assignments (helper ชุด canonical เดียวกับ RLS policy ใน DB: `my_roles()` / `has_any_role(text[])` / `is_staff()` — นิยามที่ RBAC-DESIGN.md §3.1) |
 | `audit service` | เขียน audit_logs จาก server เท่านั้น, ไม่มี path แก้/ลบ |
 | `notification service` | สร้าง notifications + จัดคิวอีเมลลง email_outbox (ไม่ block request) |
@@ -75,6 +75,7 @@
 **b) สุ่มข้อ (snapshot ไม่ใช่ reference แบบเปลี่ยนได้)** — ภายใน transaction ของการ start:
 - คัด pool ตาม rules.selection (bank/category/difficulty) → `ORDER BY random() LIMIT rules.question_count`
 - สร้างแถว `attempt_answers` ทันทีทีละข้อ (answer = null) + `seq` ลำดับที่สุ่มได้ + `option_order` (ถ้า rules.shuffle_options) — ข้อสอบ "ตาตัว" ตลอด attempt แม้เจ้าหน้าที่แก้ธนาคารข้อสอบภายหลัง
+- **snapshot เก็บข้อมูลตรวจครบ (D11-16)**: แต่ละแถว `attempt_answers.question_snapshot` (jsonb) เก็บโจทย์/ตัวเลือก/is_correct/points + เวอร์ชันของ question ณ วินาที start — Grader ตรวจจาก snapshot ล้วน ๆ ไม่อ่านตาราง questions อีก ทำให้การแก้ไข/retire ข้อสอบระหว่างสอบไม่กระทบ attempt ที่กำลังดำเนินอยู่ และตรวจซ้ำภายหลังได้ผลเดิมเสมอ
 - ตั้ง `started_at = now()` (DB clock) และ `expires_at = started_at + rules.time_limit_minutes`
 
 **c) จับเวลา server-side** — แหล่งจริงเดียวคือ `expires_at` ใน DB:
@@ -105,11 +106,11 @@
 
 **a) โครงสร้าง**: `credit_rules` (กฎ แก้ได้) + `renewal_cycles` (รอบต่ออายุรายคน) + `credit_ledger_entries` (รายการเคลดิต **append-only**) — ยอด credit เป็น "ผลรวมที่คำนวณ" ไม่มีการเก็บยอดคงค้างแบบแก้ไขได้
 
-**b) การเกิดรายการ (accrual)**:
-- trigger จาก event `certificate.issued` (หลัง commit การออกประกาศนียบัตร — ดู 4.5)
-- หา `renewal_cycles` ที่วันออกใบประกาศตกในช่วง [starts_on, ends_on]; ถ้าไม่มี → สร้างรอบใหม่ตาม config (ความยาวรอบ + จุดเริ่ม = config Q1, รอยืนยัน)
+**b) การเกิดรายการ (accrual) — transactional outbox (D11-17)**:
+- การออกประกาศนียบัตร INSERT ลง `certificates` **พร้อม INSERT event `certificate.issued` ลง `event_outbox` ใน transaction เดียวกัน** — ไม่เรียก M5 ตรง ๆ กลาง request (กัน event หายเมื่อ TX หลัง fail และกัน partial write)
+- worker ดึง event หลัง commit (`FOR UPDATE SKIP LOCKED`) → หา `renewal_cycles` ที่วันออกใบประกาศตกในช่วง [starts_on, ends_on]; ถ้าไม่มี → สร้างรอบใหม่ตาม config (ความยาวรอบ + จุดเริ่ม = config Q1, รอยืนยัน)
 - จับคู่ `credit_rules` แบบเจาะจงก่อน (course_id ตรง) แล้วค่อยกฎทั่วไป ตาม `priority`
-- INSERT entry: {user_id, cycle_id, type=accrual, credit_type, amount, certificate_id, rule_id}
+- INSERT entry: {user_id, cycle_id, type=accrual, credit_type, amount, source_type/source_id, rule_id} — **idempotent กัน event ส่งซ้ำด้วย UNIQUE(source_type, source_id, credit_type)** (partial, WHERE entry_type='accrual' — DATA-DICTIONARY `credit_ledger_entries`); สำเร็จแล้ว worker mark event `processed`
 
 **c) การแก้ไข = รายการชดเชย ไม่ใช่การแก้ย้อน**:
 - ผิดพลาด → entry `reversal` (amount ติดลบ อ้าง original entry) โดย staff:registrar/super_admin เท่านั้น + เหตุผล + audit
@@ -127,9 +128,10 @@
 
 **b) วิดีโอ** (คลิปจำกัด ≤ 60 นาที / ความละเอียดสูงสุด 1080p ตาม SRS Appendix A `video_max_minutes`, `video_max_resolution` — ธง Q6):
 - player ส่ง heartbeat `POST /lessons/{id}/progress` ทุก `VIDEO_HEARTBEAT_SEC` (default 15, config) พร้อม `position_sec`
-- server: clamp position ไม่เกิน duration; `video_max_position_sec` เพิ่มอย่างเดียว (monotonic); `watch_pct = min(100, max_position/duration*100)`
+- **server สะสม bounded playback intervals (D11-15)**: แต่ละ heartbeat ที่ position เดินหน้า จะเพิ่มช่วงการรับชม `[prev_position, position]` โดยความยาวช่วงที่ยอมรับ **ต้อง ≤ เวลาที่ผ่านจริงฝั่ง server (elapsed นับจาก heartbeat ก่อนหน้า + grace ตาม config)** — client แจ้งเฉพาะตำแหน่ง ไม่มีสิทธิ์ยืนยัน "เวลาที่ดู" เอง; ช่วงที่ยาวเกิน elapsed ถูกตัดที่เพดาน elapsed
+- `watch_sec` สะสมจาก intervals ที่ยอมรับทั้งหมด → `watch_pct = min(100, watch_sec/duration*100)` (คอลัมน์ `watch_sec_accum` + `watch_pct` ที่ DATA-DICTIONARY `lesson_progress`)
 - จบบทเมื่อ `watch_pct >= VIDEO_COMPLETE_PCT` (default 80 ตาม SRS Appendix A `video_complete_pct` — ธง Q6) → ตั้ง `completed_at` ครั้งเดียว (idempotent)
-- seek ข้ามไม่ช่วย เพราะนับจาก max position ที่ heartbeat ส่งมาจริงเท่านั้น (การเก็บ contiguous ละเอียด = นอกขอบเขต v1 จดไว้ใน open questions)
+- seek ข้าม/เร่งความเร็วเข้าเกณฑ์ไม่ได้ เพราะช่วงที่ยาวเกิน elapsed ฝั่ง server ถูกตัดทิ้ง (การเก็บ interval map ละเอียดทุกช่วง = นอกขอบเขต v1 จดไว้ใน open questions)
 
 **c) เอกสาร**: จบบทเมื่อเปิดอ่าน + `dwell_sec >= DOC_MIN_DWELL_SEC` (default 30, config)
 **d) แบบทดสอบย่อย (quiz)**: จบบทเมื่อ quiz attempt ล่าสุด `passed` (score >= pass_pct ของ quiz นั้น — คนละเกณฑ์กับข้อสอบปลายหลักสูตร) — quiz เรียนได้ไม่จำกัดครั้งตาม config ของ quiz
@@ -152,6 +154,7 @@
 - ไม่ต้อง login, rate limit ต่อ IP (config), ไม่ใช้ PII เป็นคีย์ค้น — **กลไก D10**: สแกน QR = `verify_code` (nanoid 43) · พิมพ์มือ = `cert_no` (`LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>`) — endpoint เดียว `GET /certificates/{code}` match สองคอลัมน์ UNIQUE ทั้งคู่ (`certificates.verify_code` / `certificates.cert_no`)
 - **ตอบ 200 เสมอ** ด้วย 4 ฟิลด์คงที่ `{code, course_title, issued_at, status}` โดย status ∈ `valid | revoked | superseded` — **ห้ามแสดงชื่อเจ้าของ** (ชื่ออยู่บน PDF ที่เจ้าของ/นายทะเบียนดาวน์โหลดเท่านั้น — D8)
 - ไม่พบรหัส → ตอบ 200 เช่นกันโดย status = `not_found` (ฟิลด์ที่เหลือว่าง) — รูปแบบคำตอบสม่ำเสมอทุกกรณี กัน enumeration
+- **Enumeration tradeoff ที่ยอมรับ (D11-20)**: manual lookup ด้วย `cert_no` มีพื้นที่เดาแคบ (6 หลัก/ปี) ต่างจาก `verify_code` ที่ entropy สูง (nanoid 43 — ใช้กับ QR ตาม D10) — ยอมรับความเสี่ยงนี้เพราะ (1) rate limit public read 120/min/IP (API-SPECIFICATION), (2) response 4 ฟิลด์ไม่มี PII + ตอบ `not_found` แบบเดียวกันทุกกรณีพลาด, (3) ช่องทาง enumeration หลักคือ QR/`verify_code` ที่เดาไม่ได้ — ทบทวนใหม่ถ้าเปลี่ยนรูปแบบ `cert_no`
 - ทุกครั้งที่ตรวจ log ลง `certificate_verifications` (code ที่ค้น, result, ip_hash, user_agent ตัดทอน) เก็บ 90 วัน
 
 **d) เพิกถอน/ออกใหม่แทน**: staff:registrar+ เท่านั้น — `POST /admin/certificates/{id}/revoke` (status = `revoked` + เหตุผล + audit) หรือ `POST /admin/certificates/{id}/reissue` (ใบเดิม status = `superseded` + `superseded_by` ชี้ใบใหม่) — รายการเดิมไม่ถูกลบ
@@ -249,7 +252,7 @@ sequenceDiagram
     R->>BFF: POST /api/v1/admin/certificates (enrollment_id)
     BFF->>DB: TX: UNIQUE(enrollment) กันซ้ำ → INSERT certificates
     Note over DB: cert_no + verify_code + snapshot ชื่อ/หลักสูตร + audit
-    DB->>DB: event certificate.issued → credit accrual (4.5)
+    BFF->>DB: INSERT event_outbox (certificate.issued) — TX เดียวกับ certificates (4.5)
     BFF->>M: อีเมลแจ้ง + ลิงก์ดาวน์โหลด + QR (URL อย่างเดียว)
     BFF-->>R: 201 ออกประกาศนียบัตรสำเร็จ
 ```
@@ -259,17 +262,19 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant BFF as Next BFF
+    participant W as Outbox worker
     participant DB as Postgres + RLS
-    Note over BFF,DB: หลัง commit การออกประกาศนียบัตร
-    BFF->>DB: หา renewal_cycle ที่ครอบวันออกใบ
+    Note over BFF,DB: TX ออกประกาศนียบัตร INSERT แถว event ลง event_outbox ด้วย (TX เดียวกัน)
+    W->>DB: ดึง event หลัง commit (FOR UPDATE SKIP LOCKED)
+    W->>DB: หา renewal_cycle ที่ครอบวันออกใบ
     alt ไม่มีรอบ
-        BFF->>DB: สร้างรอบตาม config (ความยาวรอบ — รอยืนยัน Q1)
+        W->>DB: สร้างรอบตาม config (ความยาวรอบ — รอยืนยัน Q1)
     end
-    BFF->>DB: จับคู่ credit_rules (เจาะจงก่อนทั่วไป ตาม priority)
-    BFF->>DB: INSERT credit_ledger_entries (accrual) + audit
+    W->>DB: จับคู่ credit_rules (เจาะจงก่อนทั่วไป ตาม priority)
+    W->>DB: INSERT credit_ledger_entries (accrual) — UNIQUE(source_type, source_id, credit_type) กันซ้ำ + audit
     Note over DB: ยอด = SUM(entries) เท่านั้น ห้ามแก้/ลบรายการ
-    BFF->>DB: ตรวจครบเกณฑ์ของรอบ → สร้างแจ้งเตือน
+    W->>DB: ตรวจครบเกณฑ์ของรอบ → สร้างแจ้งเตือน
+    W->>DB: mark event_outbox.processed (consumer idempotent — รันซ้ำได้)
 ```
 
 ### 4.6 Public certificate verify
@@ -285,7 +290,7 @@ sequenceDiagram
     E->>BFF: rate limit ต่อ IP + WAF
     BFF->>DB: SELECT ด้วย verify_code (คีย์สุ่ม ไม่ใช่ PII)
     alt พบ + สถานะ issued
-        BFF-->>V: cert_no + ชื่อตามใบประกาศ + หลักสูตร + วันที่ + valid
+        BFF-->>V: 4 ฟิลด์ {code, course_title, issued_at, status=valid} — ไม่มีชื่อเจ้าของ
     else ถูกเพิกถอน
         BFF-->>V: revoked
     else ไม่พบ
@@ -304,10 +309,11 @@ sequenceDiagram
 - สื่อ (วิดีโอ/เอกสาร/PDF): ออก **signed URL อายุสั้น** จาก BFF หลังตรวจสิทธิ์เรียนแล้วเท่านั้น (TTL เป็น config)
 - บริการภายนอก (R2/Stream, Resend/SMTP) เรียกจาก server เท่านั้น
 
-### 5.2 RLS เป็นชั้นสอง (defense-in-depth)
+### 5.2 RLS เป็นชั้นบังคับจริง (user-first — D11-1)
 
-- BFF ใช้ service_role (bypass RLS) แต่**ทุกตารางยังต้อง ENABLE RLS + policy ครบทุก path** เพราะ: (1) กันกรณีคีย์รั่ว/ถูกใช้จากที่อื่น, (2) รองรับเส้นทางอนาคตที่อ่านบางตารางด้วย user token, (3) บังคับนึกถึงการเข้าถึงข้อมูลตั้งแต่ออกแบบสคีมา
-- authorization ตัดสินที่ `rbac` service ใน BFF **ก่อน** ทุก mutation (ไม่พึ่ง RLS อย่างเดียว — service_role bypass มันอยู่แล้ว)
+- **เส้นทางหลักของ request ธรรมดา = user JWT (role `authenticated`)**: BFF ส่ง JWT ของผู้ใช้ลง Postgres ตรง ๆ → RLS policy บังคับจริงทุก query (defense-in-depth แบบมีตัวตน ไม่ใช่ตกแต่ง); authorization ยังตัดสินที่ `rbac` service (`requirePermission()` — RBAC §1.2 ข้อ 4) **ก่อน** query เพื่อตอบ 403 เร็วและ log ได้ชัด
+- **`service_role` (bypass RLS) ใช้เฉพาะกิจแคบขอบเขตเท่านั้น**: (1) background job — retention purge / export worker / email worker / auto-submit scheduler, (2) server functions ที่จำเป็นจริง เช่น สร้าง attempt snapshot ตอนเริ่มสอบ, เขียน audit/append-only tables — ทุกจุดที่ใช้ต้องระบุเหตุผล + ขอบเขต query แคบ ๆ (WHERE เฉพาะงานนั้น) และผ่าน code review; **ห้ามใช้ service_role แทน user JWT ใน CRUD ทั่วไป** (RLS ไม่คุม service_role — การควบคุมทำที่การจำกัดจุดเรียกในโค้ด ไม่ใช่ที่ policy)
+- ทุกตาราง ENABLE RLS + policy ครบทุก path สำหรับ `anon`/`authenticated` เสมอ — เอกสารห้ามเขียนให้เข้าใจว่า RLS คุม service_role ได้
 - policy ใช้ helper ชุด canonical เดียวกับโค้ด (`my_roles()` / `has_any_role(text[])` / `is_staff()` — นิยามที่ RBAC-DESIGN.md §3.1) เพื่อไม่ให้สองชั้นตีความไม่ตรงกัน
 - รายละเอียด policy ทุกตารางอยู่ใน DATA-DICTIONARY.md
 
@@ -323,11 +329,12 @@ sequenceDiagram
 - Server Actions ของ Next 15 มี origin check ในตัว — ใช้เสริมด้วย double-submit token สำหรับ Route Handlers ที่ sensitive (auth, exam, admin)
 - GET เป็น read-only เสมอ (ไม่มี side effect)
 
-### 5.5 Session & admin hardening
+### 5.5 Session & admin hardening (server-checked ทุก role — D11-10)
 
-- ผู้ใช้ทั่วไป: JWT + refresh rotation ตาม default ของ Supabase Auth; logout = เคลียร์ cookie + revoke
-- ผู้ใช้บทบาท `staff*` และ `super_admin`: MFA บังคับ (brief §8), idle timeout 15 นาที, absolute session 8 ชั่วโมง, lockout หลังพลาด 5 ครั้ง/15 นาที (ทุกค่าเป็น config) — lifecycle บันทึกใน `admin_sessions` + audit
-- การเพิกถอน session ทันที: flag ใน `admin_sessions` + middleware ตรวจทุก request
+- **ทุก role ผ่านการตรวจ session ฝั่ง server ทุก request เสมอ** (middleware + auth guard) — ไม่มี path ใดเชื่อสถานะจาก client
+- ผู้เรียน (citizen/lawyer): JWT อายุสั้น + refresh rotation ของ Supabase Auth — server verify JWT ทุก request; **revoke ทันทีได้** เมื่อ logout / logout-all / reset รหัสผ่าน (revoke refresh token ทั้งหมดของ user นั้น)
+- staff/instructor/super_admin: MFA บังคับ (brief §8), idle timeout 15 นาที, absolute session 8 ชั่วโมง, lockout หลังพลาด 5 ครั้ง/15 นาที (ทุกค่าเป็น config) — lifecycle บันทึกใน `admin_sessions` + audit
+- การเพิกถอน session ทันที: flag ใน `admin_sessions` + middleware ตรวจทุก request (staff/instructor) และ revoke refresh token (ผู้เรียน)
 
 ## 6. Error Handling + Logging Policy
 
