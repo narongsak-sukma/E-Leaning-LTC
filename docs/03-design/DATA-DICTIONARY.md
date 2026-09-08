@@ -168,6 +168,7 @@ Retention: ถาวร (ข้อมูลอ้างอิง)
 | ------- | ---- | --------------------- |
 | code | text | NOT NULL UNIQUE (รหัสหลักสูตร) |
 | category_id | uuid | NOT NULL FK→course_categories |
+| created_by | uuid | NOT NULL FK→profiles (เจ้าของหลักสูตร — instructor ผู้สร้าง; ใช้กับ RLS ownership — D11-4/DCR-3) |
 | title_th / title_en | text | NOT NULL / NULL |
 | summary | text | NULL |
 | description_md | text | NULL |
@@ -340,6 +341,7 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | ------- | ---- | --------------------- |
 | code | text | NOT NULL UNIQUE |
 | name | text | NOT NULL |
+| created_by | uuid | NOT NULL FK→profiles (เจ้าของ bank; ใช้กับ RLS ownership — D11-4/DCR-3) |
 | course_id | uuid | NULL FK→courses (NULL = ใช้ร่วม) |
 | category_id | uuid | NULL FK→course_categories |
 | description | text | NULL |
