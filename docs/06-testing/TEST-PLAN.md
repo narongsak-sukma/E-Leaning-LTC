@@ -108,6 +108,31 @@
 - **คู่มือ:** จัดทำ UAT script ต่อ persona ครอบคลุม flow หลัก 16 scenarios ของ §3.3 + เคสธุรกิจจริง (เช่น ตรวจยอด credit ต่อรอบ) — เก็บผลใน `docs/07-results/UAT.md`
 - **เกณฑ์:** ผ่าน ≥ 95% ของขั้นตอนใน script; flow ระดับ Critical (สอบ/ประกาศนียบัตร/credit) ต้องผ่าน 100%; ข้อความ/คำอธิบายภาษาไทยเข้าใจได้
 
+### 3.7 Crosswalk ชั่วคราว: TC ของแผนนี้ ↔ RTM (ต้องครบก่อน CTO gate M1)
+
+RTM (`02-requirements/RTM.md`, worker-2) นิยาม TC ID ระบบเดียวของโครงการเป็นรูปแบบ `TC-<โดเมน>-<NN>` (134 ID) ส่วนแผนนี้ใช้ TC-001…TC-018 เป็นเคสตัวแทน — ตารางนี้ mapping ทั้ง 18 เคสให้ trace ได้ต่อเนื่องก่อน gate (ตาม M-02/D8) · หลัง M1 ให้ยุบรวมเป็นระบบ ID เดียวยึด RTM (DCR-2) · ค่า default ที่อ้างเป็นบริบทในเอกสารนี้ ยึด canonical จาก **SRS Appendix A** (D8-5)
+
+| TC ของแผนนี้       | RTM TC หลัก  | RTM TC เกี่ยวข้อง | หมายเหตุการ mapping                              |
+| ------------------ | ------------ | ----------------- | -------------------------------------------------- |
+| TC-001 สมัคร email ซ้ำ | TC-AUTH-01 | —                 | AUTH-001 (กรณีปฏิเสธ email ซ้ำ/anti-enumeration)  |
+| TC-002 lockout     | TC-AUTH-09   | TC-SEC-08         | AUTH-009 + ธง admin lockout ของ SEC-008            |
+| TC-003 ผูกใบอนุญาตผิดรูปแบบ | TC-IDENT-02 | TC-SEC-14   | IDENT-002 + zod negative ของ SEC-014              |
+| TC-004 เจ้าหน้าที่อนุมัติทนาย | TC-IDENT-03 | TC-IDENT-04, TC-AUD-01 | IDENT-003/004 + audit ของ AUD-001            |
+| TC-005 ลงทะเบียนหลักสูตร draft | TC-LRN-01 | TC-CAT-05     | LRN-001 + วงจรสถานะหลักสูตร CAT-005              |
+| TC-006 progress จบวิดีโอ | TC-LRN-06 | TC-LRN-08         | LRN-006 (server ตัดสิน) + เงื่อนไขผ่าน LRN-008   |
+| TC-007 quiz ย่อย   | TC-LRN-05    | —                 | LRN-005 (ทำซ้ำได้, ไม่นับ credit)                 |
+| TC-008 สุ่มชุดข้อสอบ | TC-ASM-04  | TC-ASM-13         | ASM-004 + เงื่อนไขเข้าสอบ ASM-013                |
+| TC-009 สอบเกินเวลา | TC-ASM-05    | —                 | ASM-005 (submit อัตโนมัติฝั่ง server)             |
+| TC-010 เกินจำนวนครั้ง | TC-ASM-06  | —                 | ASM-006 (จำนวนครั้ง + cooldown, config-driven)    |
+| TC-011 ออกประกาศนียบัตร | TC-CRT-02 | TC-CRT-03         | CRT-002 + รหัส unique/QR ของ CRT-003             |
+| TC-012 verify ปลอม/rate limit | TC-CRT-04 | TC-SEC-05, TC-SEC-09 | CRT-004 + rate limit SEC-005 + ไม่ leak PII SEC-009 |
+| TC-013 credit จากผลสอบ | TC-CRB-03 | TC-CRB-05         | CRB-003 (คำนวณอัตโนมัติ) + ยอดต่อรอบ CRB-005      |
+| TC-014 แก้/ลบ ledger ปฏิเสธ | TC-CRB-02 | TC-AUD-02, TC-SEC-04 | CRB-002 + AUD-002 + SEC-004 (append-only 3 มุม) |
+| TC-015 แจ้งเตือนออก cert | TC-NTF-01 | TC-NTF-03, TC-NTF-05 | NTF-001 (in-app) + NTF-003 (อีเมล) + ตั้งค่ารับ NTF-005 |
+| TC-016 RBAC staff:viewer | TC-IDENT-07 | TC-ADM-05        | IDENT-007 (union/explicit) + ADM-005 (จัดการหลักสูตร) |
+| TC-017 audit ครบ action | TC-AUD-01 | TC-AUD-04         | AUD-001 + ไม่บรรจุ PII AUD-004                    |
+| TC-018 RLS ข้ามผู้ใช้ | TC-SEC-02   | —                 | SEC-002 (RLS ทุกตาราง — ครอบทุกโดเมน)            |
+
 ## 4. สภาพแวดล้อมการทดสอบ
 
 | การทดสอบ      | Environment                                                                 |
@@ -136,7 +161,7 @@
 
 ## 6. เคสทดสอบตัวอย่าง (TC-xxx)
 
-> รูปแบบ: ชื่อ / เงื่อนไขเบื้องต้น / ขั้นตอน / ผลคาดหวัง / requirement ที่ผูกกัน (FR ตามโดเมน brief §5) — 18 เคสตัวแทน (ชุดเต็มขยายใน RTM)
+> รูปแบบ: ชื่อ / เงื่อนไขเบื้องต้น / ขั้นตอน / ผลคาดหวัง / requirement ที่ผูกกัน (FR ตามโดเมน brief §5) — 18 เคสตัวแทน (ชุดเต็มขยายใน RTM) · **mapping TC นี้ ↔ RTM อยู่ที่ §3.7**
 
 ### TC-001 สมัครสมาชิกด้วย email ที่ถูกใช้แล้ว — AUTH (Unit/Integration)
 
