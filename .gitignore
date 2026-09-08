@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# builds
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# env & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# local docker / supabase
+supabase/.temp/
+supabase/.branches/
+
+# logs & debug
+*.log
+npm-debug.log*
+.DS_Store
+
+# coverage / test artifacts
+coverage/
+playwright-report/
+test-results/
+
+# OMC operational state (committable exception: .omc/skills/**)
+.omc/
+!.omc/skills/
+
+# editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
