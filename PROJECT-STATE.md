@@ -21,8 +21,8 @@
 | A2   | SRS + RTM                              | worker-2 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
 | A3   | SDS + Architecture + Data Dictionary   | worker-3 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
 | A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
-| A5   | Design System + UI Prototype           | worker-5 | 🔄 in_progress |
-| A6   | Lead review + ข้อมูลตรงกัน (cross-doc consistency) + codex/CTO verdict | lead + CTO | ⏳ pending |
+| A5   | Design System + UI Prototype           | worker-5 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
+| A6   | Lead review + ข้อมูลตรงกัน (cross-doc consistency) + codex/CTO verdict | lead + CTO | 🔄 **กำลังทำ** (เริ่ม 2026-09-08) |
 
 ### ลำดับถัดไป (จะขยายเป็น task เมื่อ Wave A ผ่าน gate)
 
@@ -69,3 +69,5 @@
 - 2026-09-08 · **A1 follow-up เสร็จ** — TEST-PLAN 0.2.0-draft (337 บรรทัด): staging เป็น env หลักของ security/perf test, entry criteria + T-1 อัปเดต, ลบ QP-5 ออก · lead แก้ QP-5 เดิมใน PROJECT-PLAN §11 ยุบรวม Q7 · commit 4840b93 + merge d64e378 · **A1 ปิดสมบูรณ์**
 - 2026-09-08 · **A3 เสร็จ** — SDS 394 บรรทัด, ARCHITECTURE 266 บรรทัด (mermaid 15 block), DATA-DICTIONARY 646 บรรทัด (**31 ตาราง** ครบขั้นต่ำ 29 + course_categories + email_outbox พร้อมเหตุผล; RLS 31/31; REVOKE บังคับ append-only audit+ledger; PII registry 5 จุด) · ตรวจรับ: wc -l/grep ตรงรายงาน · commit 291952f + merge 73d0bc8 · ไม่มี DCR · **เพิ่มโจทย์ A6:** (4) role key `staff:viewer` (brief/RBAC) vs `staff_viewer` (DB enum) ต้องตกลงชื่อเดียว (5) นิยาม helper `has_any_role()`/`is_staff()` canonical ที่ RBAC doc (6) API paths ใน SDS ต้องตรง API-SPEC (7) รูปแบบ cert_no `LTC-<ปี>-<6หลัก>` รอยืนยันกับรูปแบบจริงของสภาฯ (ผูก Q1–Q6)
 - 2026-09-08 · **A2 เสร็จ** — SRS 647 บรรทัด (**134 requirements**: FR 83 + NFR 51, M114/S19/C1, ทุกตัวมี AC วัดได้) + RTM 252 บรรทัด (trace 5 มิติ coverage 100%) · ตรวจรับ: wc -l ตรง, unique Req ID = 134 พอดี · commit eb003e4 + merge c340531 · ไม่มี DCR · **เพิ่มโจทย์ A6:** (8) RTM อ้าง D13–D18 mapping เป็นสมมติฐาน — lead ยืนยัน (9) ชื่อตาราง/endpoint ใน RTM เป็นร่าง ต้องกระทบยอดกับ DATA-DICT + API-SPEC (10) SRS เขียนบน brief 0.1.0 — ต้องเช็คว่าขัดกับ staging (brief 0.2.0) ไหม (11) default `credits_required_per_cycle=12`, `renewal_cycle_years=1` เป็นสมมติฐานล้วน — **เร่งคำตอบ Q1–Q2 ก่อน Wave D–E**
+- 2026-09-08 · **A5 เสร็จ** — DESIGN-SYSTEM 595 บรรทัด + โปรโตไทป์ 10 หน้า (รวม 4,173 insertions) · Playwright: JS error 0/11 หน้า, responsive 375px ผ่าน, contrast 17 คู่ ≥4.5:1 · ตรวจรับ: 10 ไฟล์ + 356,079 bytes ตรงรายงาน, ไม่มีไฟล์หลงเหลือ · commit dc91f30 + merge 5857962 · ไม่มี DCR · **เพิ่มโจทย์ A6:** (12) **ค่า credit ขัดกัน**: SRS Appendix A default = 12 หน่วย/รอบ 1 ปี แต่ prototype ใช้ 36 หน่วย/รอบ 3 ปี (U2) — ต้องเลือกชุดเดียว (ธง Q1) (13) U1 สีอัตลักษณ์จริงของสภาฯ (ตอนนี้ navy/gold จำลอง)
+- 2026-09-08 · **Wave A execution ครบ (A1–A5)** → เริ่ม **A6**: spawn reviewer ตรวจ cross-doc consistency 13 ข้อ + sweep ทั่วไป → แก้ fix → codex gate → CTO verdict
