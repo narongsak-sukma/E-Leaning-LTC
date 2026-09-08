@@ -20,7 +20,7 @@
 | A1   | Project Plan + Risk Register + Test Plan | worker-1 | 🔄 in_progress |
 | A2   | SRS + RTM                              | worker-2 | 🔄 in_progress |
 | A3   | SDS + Architecture + Data Dictionary   | worker-3 | 🔄 in_progress |
-| A4   | API Spec + RBAC + Audit Log Design     | worker-4 | 🔄 in_progress |
+| A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
 | A5   | Design System + UI Prototype           | worker-5 | 🔄 in_progress |
 | A6   | Lead review + ข้อมูลตรงกัน (cross-doc consistency) + codex/CTO verdict | lead + CTO | ⏳ pending |
 
@@ -63,3 +63,4 @@
 ## เหตุการณ์สำคัญ (Event Log — append-only)
 
 - 2026-09-08 · เริ่มโครงการ · Wave A spawn workers 1–5 (docs) · lead = session นี้
+- 2026-09-08 · **A4 เสร็จ** — API-SPEC 350 บรรทัด (52 endpoints), RBAC 279 บรรทัด (47 permissions), AUDIT 257 บรรทัด (46 event types) · ตรวจรับ: wc -l ตรงรายงาน, ไม่แตะไฟล์อื่น · commit d02c574 + merge a031172 · ไม่มี DCR · **โจทย์ A6:** (1) ประสานชื่อตาราง/คอลัมน์/UUID กับ DATA-DICTIONARY ของ worker-3 (2) re-map AUD-01…12 ของ audit doc ให้ตรง SRS ของ worker-2 (3) ค่า default ทั้งหมด flag รอยืนยัน Q1–Q4 แล้ว
