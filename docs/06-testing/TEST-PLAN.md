@@ -1,12 +1,13 @@
 # TEST PLAN — ระบบ LTC E-Learning
 
-**เวอร์ชัน 0.1.0-draft · 2026-09-08 · LTC E-Learning**
+**เวอร์ชัน 0.2.0-draft · 2026-09-08 · LTC E-Learning**
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
 | เจ้าของเอกสาร | worker-1 (Wave A) — team ปฏิบัติตามแผนนี้ Wave B–F |
-| อ้างอิง   | `00-baseline/PROJECT-BRIEF.md` §2, §5, §6, §7, §8 · `01-management/PROJECT-PLAN.md` §9 · `01-management/RISK-REGISTER.md` |
+| อ้างอิง   | `00-baseline/PROJECT-BRIEF.md` (0.2.0) §2, §5, §6, §7, §8, §10 · `01-management/PROJECT-PLAN.md` §9 · `01-management/RISK-REGISTER.md` |
 | สถานะ    | draft — รอ CTO gate (Milestone M1)                |
+| แก้ไข 0.2.0 | ตาม **DCR-1 (CTO APPROVE)**: staging ตาม brief 0.2.0 §6 กลายเป็น environment หลักของ performance/security/UAT test (แทน workaround "preview deployment"); งบ cloud tier ของ staging รอยืนยัน Q7 (brief §10) |
 
 ## สารบัญ
 
@@ -82,7 +83,7 @@
 
 ### 3.4 Security Testing
 
-- **OWASP ZAP:** baseline scan ทุก build + active scan ต่อ milestone (M2–M5)
+- **OWASP ZAP:** baseline scan ทุก build (local) + active scan บน **staging** ต่อ milestone (M2–M5)
 - **Manual ASVS L2:** checklist ตาม OWASP ASVS 4.0 L2 ครอบคลุม V1–V14 (architecture, authentication, session, access control, validation, crypto, errors, logging, data protection) — ทำต่อ milestone + ก่อน M5
 - **Secrets scan:** CI ทุก commit (key/token ห้ามติด repo) — เป็น merge gate
 - **Dependency audit:** `npm audit` + Dependabot alerts ทุก PR; Critical ต้องแก้ก่อน merge
@@ -99,7 +100,7 @@
 | Spike (เปิดรอบสอบ)       | 0 → 5,000 ใน 60 s  | ระบบ recover ภายใน 2 นาที ไม่ล่ม; ไม่ reject ผู้เข้าสอบที่ถูกต้อง            |
 
 - Soak test: 10,000 VU ต่อเนื่อง 1 ชั่วโมง — ไม่มี memory leak / connection leak
-- รันใน Wave D (ก่อน M3) และ Wave F (ก่อน M5) — ดูข้อจำกัด environment ใน §4
+- รันบน **staging** (environment หลักของ performance test ตาม brief 0.2.0 §6) ใน Wave D (ก่อน M3) และ Wave F (ก่อน M5); cloud tier ของ staging รอยืนยัน Q7 — local Docker ใช้เฉพาะ smoke/shrink ระหว่างพัฒนา (ดู §4)
 
 ### 3.6 UAT (Wave F)
 
@@ -114,9 +115,11 @@
 | Unit          | local (ไม่พึ่ง network/DB)                                                    |
 | Integration   | **local Docker** — Supabase local stack (PostgreSQL 15 + Auth + Storage) ผ่าน docker-compose + seed data (ผู้ใช้ทุกบทบาท, หลักสูตรตัวอย่าง, ข้อสอบ) |
 | E2E           | local Docker + Playwright browser (Chromium/WebKit/Mobile Chrome)             |
-| Security      | local Docker (ZAP กับ environment ที่ใกล้ prod config ที่สุด) + review repo     |
-| Performance   | local Docker ใช้ได้เฉพาะ smoke/shrink profile; **profile 10k/5k ต้องรันบน preview deployment ที่ใกล้เคียง prod (cloud)** — รอ lead ยืนยัน staging (ดู §9) |
-| UAT           | preview deployment (ข้อมูลทดสอบแยกจาก prod)                                   |
+| Security      | **staging** (ZAP active scan + manual ASVS L2) + secrets scan/dependency audit บน repo ใน CI |
+| Performance   | **staging เป็น environment หลัก** — profile 10k/5k + spike + soak รันที่นี่; local Docker ใช้เฉพาะ smoke/shrink ระหว่างพัฒนา |
+| UAT           | **staging** (ข้อมูลทดสอบแยกจาก prod ด้วย Supabase staging branch)             |
+
+**นิยาม staging ตาม brief 0.2.0 §6:** cloud preview ก่อนขึ้น prod — Vercel preview/staging deployment + Supabase staging branch + Cloudflare (โดเมน staging) ใช้ config ชุดเดียวกับ prod แยกด้วย env vars เท่านั้น — หน้าที่คือพิสูจน์ performance (k6 10k/5k) + security test ก่อน promote ขึ้น prod; งบ cloud tier ที่ต้องรองรับ load test รอยืนยัน Q7 (brief §10)
 
 หลักการ: โค้ดชุดเดียว ต่างกันแค่ environment variables (brief §6) — seed script เดียวกันใช้ได้ทุก environment
 
@@ -127,8 +130,8 @@
 | Unit          | โค้ด module ผ่าน lint + tsc                                              | coverage ≥ 80% business logic; 0 fail; ทุก config rule มี boundary test |
 | Integration   | migrations รันผ่านใน Docker; unit ผ่านทั้งหมด                             | ทุก endpoint ≥ 1 happy + 1 denial; RLS ทุก policy มีเคส; audit append-only ยืนยันแล้ว |
 | E2E           | integration ผ่าน; seed data พร้อม; build ผ่าน                            | 16/16 scenarios ผ่าน; ไม่มี flaky ค้าง > 1 สัปดาห์                     |
-| Security      | build deploy ได้บน environment ทดสอบ; feature freeze ของ wave นั้น        | ZAP ไม่มี High+ ใหม่; ASVS L2 checklist ไม่มีช่องโหว่ High+; secrets scan สะอาด; dependency audit ไม่มี Critical |
-| Performance   | ฟีเจอร์ที่โหลดเสถียรแล้ว; environment เป้าหมายพร้อม                      | ผ่านเกณฑ์ทั้ง 3 profile ของ §3.5 + soak                              |
+| Security      | build deploy ได้บน staging; feature freeze ของ wave นั้น                   | ZAP ไม่มี High+ ใหม่; ASVS L2 checklist ไม่มีช่องโหว่ High+; secrets scan สะอาด; dependency audit ไม่มี Critical |
+| Performance   | ฟีเจอร์ที่โหลดเสถียรแล้ว; staging พร้อม (cloud tier อนุมัติตาม Q7)        | ผ่านเกณฑ์ทั้ง 3 profile ของ §3.5 + soak บน staging                  |
 | UAT           | ผ่านทุกระดับข้างต้น + คู่มือ UAT + บัญชีทดสอบพร้อม                         | ≥ 95% ขั้นตอนผ่าน; Critical flow 100%; sign-off ตาม QP-2              |
 
 ## 6. เคสทดสอบตัวอย่าง (TC-xxx)
@@ -326,7 +329,7 @@
 
 | ID  | ความเสี่ยง                                                            | ผลกระทบ                                    | แผนรับมือ                                                                       |
 | --- | ------------------------------------------------------------------------ | --------------------------------------------- | ---------------------------------------------------------------------------------- |
-| T-1 | ไม่มี staging/preview environment สำหรับ load test 10k/5k (local Docker ทำไม่ได้) | เกณฑ์ performance พิสูจน์ไม่ได้ก่อน M5        | เสนอ lead จัด preview deployment บน cloud + งบ (ผูก QP-5 ให้ lead ชี้ขาด); ใช้ shrink profile ที่ local ก่อน |
+| T-1 | staging (brief 0.2.0 §6) ยังไม่พร้อม หรืองบ cloud tier สำหรับ load test ยังไม่อนุมัติ (Q7 ค้าง) | เกณฑ์ performance 10k/5k พิสูจน์ไม่ได้ก่อน M3/M5 | ขอคำตอบ Q7 ก่อนสิ้น Wave C; ตั้ง staging ให้พร้อมต้น Wave D; ระหว่างรอใช้ shrink profile บน local Docker |
 | T-2 | การทดสอบ UAT ขึ้นกับความพร้อมเจ้าหน้าที่สภาฯ (QP-2)                          | M5 เลื่อน                                       | เตรียม script + บัญชีทดสอบล่วงหน้า; นัดล่วง 2 สัปดาห์                             |
 | T-3 | E2E บน flow สอบ (timer/สุ่มข้อสอบ) เปราะบางเป็น flaky                       | เสียเวลาดูแล มั่นใจผลต่ำ                        | คุม timer ผ่าน inject clock/config ในโหมดทดสอบ; retry policy + แยกชุด nightly      |
 | T-4 | ข้อมูลทดสอบไม่เหมือนของจริง (ปริมาณผู้ใช้/หลักสูตรน้อย)                       | พฤติกรรมต่างจาก production                     | seed script สร้างชุดข้อมูลใหญ่ (10k+ ผู้ใช้) + ใช้ profile ข้อมูลจากสถิติจริงเมื่อมี |
