@@ -1,0 +1,29 @@
+# Supabase project config — LTC E-Learning (Wave B / B-02)
+# PG15 ตาม ARCHITECTURE.md; migrations ต่อจาก DATA-DICTIONARY.md v1.0.0
+project_id = "ltc-elearning"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+
+[db]
+port = 54322
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000"]
+jwt_expiry = 3600
+enable_signup = true
+enable_email_confirmations = false
