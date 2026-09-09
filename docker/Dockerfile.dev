@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1
+# dev image ของ Next.js (ตาม brief §6: dev = 100% local Docker — ไม่มี prod image ในขั้นนี้)
+# deps layer แยกจากโค้ดเพื่อ cache npm install (เห็น package.json/package-lock เปลี่ยนเท่านั้นถึง rebuild)
+FROM node:22-alpine
+
+# libc6-compat: จำเป็นสำหรับ swc/next บน alpine (แนวทางทางการของ Next.js)
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+# cache deps: copy เฉพาะ manifests — แก้โค้ดไม่ต้อง install ใหม่
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+
+EXPOSE 3000
+# โค้ด mount ผ่าน volume (hot reload) — ไม่ COPY โค้ดลง image
+CMD ["npm", "run", "dev"]

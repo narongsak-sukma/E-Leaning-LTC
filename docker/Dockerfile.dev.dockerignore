@@ -1,0 +1,14 @@
+# build context ของ app image (dev) — ตัดสิ่งที่ไม่จำเป็น/ห้ามหลุดลง image
+.git
+.omc
+.playwright-mcp
+node_modules
+.next
+coverage
+playwright-report
+test-results
+*.log
+.DS_Store
+# ห้ามหลุด env จริงลง image/context
+.env
+.env.*

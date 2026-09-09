@@ -27,6 +27,9 @@ description = "เอกสาร/ตัวอย่าง/artifact build — �
 paths = [
   '''(^|/)\.gitleaks\.toml$''',   # ไฟล์ config นี้เอง (มี regex/คำว่า KEY แต่ไม่มีค่าลับ)
   '''(^|/)\.env\.example$''',     # ตัวอย่าง env — ค่าทั้งหมดเป็น placeholder (B-03)
+  '''(^|/)docker/kong/kong\.yml$''', # Kong local-dev — JWT placeholder มาตรฐานของ Supabase
+                                  #   (ref 0000…, sign ด้วย dev secret ใน .env.example เท่านั้น;
+                                  #    ค่าจริงของ prod อยู่ใน env ของ platform เท่านั้น) — D16
   '''(^|/)docs/''',               # เอกสารโปรเจกต์ — อ้างชื่อ variable ได้ ไม่มีค่าลับจริง
   '''(^|/)node_modules/''',
   '''(^|/)\.next/''',

@@ -1,0 +1,87 @@
+# Kong gateway (DB-less, declarative) — ประตูเดียวเข้า Supabase local
+# แนวเดียวกับ supabase/docker (self-hosting ทางการ) — route /auth/v1, /rest/v1, /storage/v1
+# key ของ consumer ต้องตรงกับ SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY ใน .env
+# (sign ด้วย SUPABASE_JWT_SECRET เดียวกัน — เปลี่ยน secret ต้อง regenerate แล้วแก้ที่นี่ด้วย)
+_format_version: "1.1"
+_transform: true
+
+services:
+  # ---- Auth: ลิงก์ verify ในอีเมล (browser คลิกโดยไม่มี header apikey) ----
+  - name: auth-v1-open
+    url: http://auth:9999/verify
+    routes:
+      - name: auth-v1-open-route
+        paths:
+          - /auth/v1/verify
+        strip_path: true
+    plugins:
+      - name: cors
+
+  # ---- Auth: เส้นทางทั่วไป (ต้องแนบ apikey เหมือนเรียกผ่าน supabase-js) ----
+  - name: auth-v1
+    url: http://auth:9999
+    routes:
+      - name: auth-v1-route
+        paths:
+          - /auth/v1
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          key_names:
+            - apikey
+          hide_credentials: true
+
+  # ---- PostgREST: /rest/v1 (apikey บังคับ) ----
+  - name: rest-v1
+    url: http://rest:3000
+    routes:
+      - name: rest-v1-route
+        paths:
+          - /rest/v1
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          key_names:
+            - apikey
+          hide_credentials: true
+
+  # ---- Storage: ลิงก์ signed URL / ไฟล์สาธารณะ (browser ใช้ token แทน apikey) ----
+  - name: storage-v1-open
+    url: http://storage:5000
+    routes:
+      - name: storage-v1-open-route
+        paths:
+          - /storage/v1/object/sign
+          - /storage/v1/object/authenticated
+          - /storage/v1/object/public
+        strip_path: true
+    plugins:
+      - name: cors
+
+  # ---- Storage: เส้นทางทั่วไป (apikey บังคับ) ----
+  - name: storage-v1
+    url: http://storage:5000
+    routes:
+      - name: storage-v1-route
+        paths:
+          - /storage/v1
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: key-auth
+        config:
+          key_names:
+            - apikey
+          hide_credentials: true
+
+consumers:
+  - username: anon
+    keyauth_credentials:
+      - key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzU2ODk2MDAsImV4cCI6MTg5MzQ1NjAwMH0.3jsTHD6cIxwRFtwetOAvCHSIQ0Z1xBxfki6n38cwPvk
+  - username: service_role
+    keyauth_credentials:
+      - key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczNTY4OTYwMCwiZXhwIjoxODkzNDU2MDAwfQ.4m7tXPHtzmhd8_oafj7Xt0PDZFXn0I1WkNXrxJzwYtQ
