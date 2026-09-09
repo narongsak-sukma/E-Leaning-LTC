@@ -13,7 +13,7 @@
 1. **Append-only สัมบูรณ์** — ห้าม UPDATE/DELETE/**TRUNCATE** ทุกกรณี ทุกบทบาท รวมถึง super_admin (D11-7); บังคับด้วย 3 ชั้น: DB privileges (REVOKE ครบ 3 คำสั่ง) + trigger กัน + ไม่มี API write path (มีแค่ `GET /admin/audit-logs`)
 2. **บันทึก 5W** — ใคร (`actor_user_id` + snapshot `actor_roles`), ทำอะไร (`action` + `context`), กับอะไร (`entity_type` + `entity_id`), เมื่อไร (`occurred_at`), จากไหน (`request_id`, `ip_hash`) — ชื่อคอลัมน์ตาม DATA-DICTIONARY.md §3.8 เป็น canonical (D11-6)
 3. **ไม่เก็บ PII โดยตรง** — อ้างคนด้วย `actor_user_id` (uuid) เท่านั้น; ห้ามใส่ email/เลขบัตรประชาชน/เลขที่ใบอนุญาต ลง `context`/`before`/`after` (BRIEF §8) — ถ้าจำเป็นต้องอ้าง ใช้ `entity_id`
-4. **เขียนผ่าน `append_audit_event()` เท่านั้น (D11-8 + D12-8)** — function แบบ SECURITY DEFINER (owner = `app_owner`; **EXECUTE ระบุเฉพาะ role นี้** ไม่ให้ service_role); **ห้าม direct INSERT แม้จาก `service_role`** (DD §4.4 REVOKE INSERT); client/anon เขียนไม่ได้ (RLS §4)
+4. **เขียนผ่าน `append_audit_event()` เท่านั้น (D11-8 + D12-8)** — function แบบ SECURITY DEFINER (owner = `app_owner`); EXECUTE ตาม contract เดียวของ §4 (**revoke จาก PUBLIC/anon ก่อน** แล้ว grant authenticated+service_role — D15-N1); **ห้าม direct INSERT แม้จาก `service_role`** (DD §4.4 REVOKE INSERT); client/anon เขียนไม่ได้ (RLS §4)
 5. **Atomic กับ business mutation (D11-8)** — event ที่บันทึกการเปลี่ยนแปลงข้อมูลจริงต้องเขียน audit ใน **transaction เดียวกัน** กับ mutation — ถ้า audit ล้มเหลว = rollback ทั้งรายการ (fail-closed); event ที่ไม่ได้คู่กับ mutation (เช่น AUDIT_READ, PII_ACCESS, RATE_LIMIT_HIT, CERT_VERIFY_PUBLIC) อนุญาต async ได้ (กัน latency) แต่ต้องมี retry + dead-letter
 6. **Tamper-evidence แบบ lightweight** — hash-chain ทุกแถว (§3.3) ไม่ใช้ external blockchain
 
@@ -226,13 +226,25 @@ revoke update, delete, truncate on public.audit_logs
 revoke insert on public.audit_logs from anon, authenticated, service_role; -- D12-8: เขียนผ่าน append_audit_event() เป็น path เดียว
 grant select on public.audit_logs to authenticated; -- อ่านผ่าน RLS
 
--- D13-F4: contract เดียวของการเขียน audit (ปิดความขัดแย้ง AUDIT↔DD↔flow):
+-- D13-F4 + D15-N1: contract เดียวของการเขียน audit (ปิดความขัดแย้ง AUDIT↔DD↔flow):
 --   INSERT ตรงถูกถอนจากทุก role (ด้านบน) — EXECUTE บน append_audit_event() คือสิทธิ์เดียวที่ caller ต้องมี
 --   (SECURITY DEFINER เปลี่ยนแค่ privilege ของเนื้อในฟังก์ชัน ไม่ข้ามการตรวจ EXECUTE — ผู้เรียกต้องถูก grant จริง)
+--   PG15 ให้ EXECUTE แก่ PUBLIC โดย default บน function ใหม่ → ต้อง revoke ก่อน grant ใน TX เดียวกัน (D15-N1)
+revoke execute on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text)
+  from public, anon;               -- ตัดสิทธิ์ default ของ PUBLIC — เหลือเฉพาะสอง role ด้านล่างเรียกได้ (D15-N1)
 grant execute on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text)
-  to authenticated, service_role;  -- authenticated = BFF เรียก RPC ด้วย user JWT (§6.2); service_role = jobs (anchor/verify/export cron)
+  to authenticated, service_role;  -- authenticated = BFF เรียก RPC ด้วย user JWT (§6.2 — เฉพาะ event class ข); service_role = jobs + write paths
 -- ฟังก์ชันตรวจเองภายในทุกครั้งก่อนเขียน: actor ต้อง valid (auth.uid() ของ session นั้น / job token),
 -- payload ต้องผ่าน schema ราย event (§3.2), chain sequence ภายใต้ advisory lock (§3.3) — ไม่ผ่าน = RAISE/rollback ทั้ง TX
+--
+-- D15-N1 (ความจริงของ event ไม่ใช่แค่ลำดับ): hash-chain รับรอง "ลำดับ" ไม่รับรอง "ความจริง" — แบ่ง path ตาม class ของ event:
+--   (ก) event ที่คู่ business mutation (ROLE_GRANT, CERT_ISSUE/REVOKE/REISSUE, CREDIT_ADJUST, EXAM_GRADE_OVERRIDE, USER_* ฯลฯ)
+--       เขียนได้จาก server path เท่านั้น: ภายใน SECURITY DEFINER write functions (DD §4.7 — ตรวจสิทธิ์ใน TX จริงแล้ว
+--       derive actor/roles/ผลลัพธ์จาก server ไม่รับจาก payload ของ caller) หรือ BFF service_role call (key ไม่ออกจาก server)
+--       — user-JWT generic RPC เรียก class นี้ไม่ได้ (allowlist ด้านล่างตัด)
+--   (ข) event ที่ไม่คู่ mutation เชิงสังเกต/ระบบ (CERT_VERIFY_PUBLIC, AUDIT_READ, RATE_LIMIT_HIT, PII_ACCESS, AUTH_* จาก BFF)
+--       เรียก RPC ด้วย user JWT ได้ ตาม allowlist ราย event ที่นิยามในฟังก์ชัน; actor derive จาก auth.uid() ของ session
+--       และ request_id/ip_hash มาจาก middleware header เท่านั้น — ฟิลด์อ้างตัวตนใน payload ถูก override ฝั่ง server เสมอ
 
 -- ชั้น 2: trigger บล็อกแม้ superuser/owner (ยกเว้น migration ที่ drop trigger อย่างชัดเจน)
 create or replace function public.prevent_audit_mutation()
@@ -287,7 +299,7 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 
 ### 6.2 การตรวจสอบไหล (สรุป)
 
-1. BFF handler → เรียก `append_audit_event()` (RPC) **ภายใน transaction เดียวกับ business mutation** (D11-8) — validate `context` ด้วย schema ราย event (§3.2) + คำนวณ chain
+1. BFF handler → เขียน audit **ภายใน transaction เดียวกับ business mutation** (D11-8): event ที่คู่ mutation (class ก) ถูกเขียนใน write path/business function ที่ตรวจสิทธิ์แล้ว ซึ่ง derive actor/roles/ผลลัพธ์จาก server (D15-N1(ก)); event ที่ไม่คู่ mutation (class ข) เรียก RPC ตรงด้วย user JWT ได้ตาม allowlist (§4) — ทั้งสอง path validate `context` ด้วย schema ราย event (§3.2) + คำนวณ chain
 2. **Atomic (D11-8)**: mutation + audit commit พร้อมกัน — ถ้า audit ล้มเหลว = rollback ทั้งรายการ (fail-closed; response = ERR-SYS-002 สำหรับ action อันตราย); event ที่ไม่คู่กับ mutation ยกเว้นได้ตาม §1.5
 3. cron: anchor รายวัน (เขียน `audit_chain_anchors`) + verify รายชั่วโมง/รายวัน + สรุปแจ้งเตือน
 4. retention job (เมื่อเปิดใช้) ทำงานหลัง export เท่านั้น
