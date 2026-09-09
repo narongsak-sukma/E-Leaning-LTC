@@ -26,7 +26,21 @@
 
 ### ลำดับถัดไป (Wave A ผ่าน gate แล้ว — ขยายเป็น task เมื่อ spawn ทีม Wave B)
 
-- **Wave B — active next**: repo scaffold + Docker dev env + CI (deliverable 13–16 เริ่มต้น) — ยึด DATA-DICTIONARY 1.0.0 เป็น blueprint ของ `supabase/migrations/*`; per-worker worktrees ตาม D4
+- **Wave B — ACTIVE (เริ่ม 2026-09-09)**: repo scaffold + Docker dev env + CI (deliverable 13–16 เริ่มต้น) — ยึด DATA-DICTIONARY 1.0.0 เป็น blueprint ของ `supabase/migrations/*`
+
+### Wave B — scaffold + dev env + CI (เริ่ม 2026-09-09 — lead ตัดสินตามอำนาจ D16)
+
+| Task | งาน | Owner | Status |
+| ---- | --- | ----- | ------ |
+| B-01 | Repo scaffold: Next.js 15 + TS strict + Tailwind + shared kernel (config/logger/errors/zod) + health route + vitest | worker-b1 (haiku) | 🔄 กำลังทำ |
+| B-02 | `supabase/migrations/*` จาก DATA-DICTIONARY 1.0.0 (40 ตาราง + helpers + RLS + index + trigger) — **auth/security/data → codex gate ก่อน merge** | worker-b2 (haiku) | 🔄 กำลังทำ |
+| B-03 | Docker dev env: docker-compose + Supabase local + Mailpit + .env.example + make targets | worker-b3 (haiku) | 🔄 กำลังทำ |
+| B-04 | CI 5 ด่าน: lint + tsc + test + build + secrets scan (GitHub Actions + gitleaks) | worker-b4 (haiku) | 🔄 กำลังทำ |
+
+การใช้งานจริงของกฎ (lead note):
+- **โครงสร้าง repo = single Next.js app ที่ root** (package.json/src ที่ root) ตาม SDS §2 "Next.js application ชุดเดียว" — README board deliverable 13 (`apps/*`) เป็น index hint เท่านั้น จะทำ `apps/` เมื่อมี runtime ที่สอง (worker แยก) จริง
+- **D4 "per-worker worktrees" ใช้ operationally เป็น shared checkout + strict disjoint file ownership + lead-only git** (Agent-tool workers ใช้ cwd เดียวกัน; ไฟล์ disjoint ทุก lane) — จะทบทวนถ้าเกิด conflict จริง
+- Script contract กลาง (CI↔scaffold): `npm run lint | typecheck | test | build | dev`
 - Wave C — MVP: courses, enrollment, progress
 - Wave D — Assessment + Certificates
 - Wave E — Credit Bank + admin/reporting
