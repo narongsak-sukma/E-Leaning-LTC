@@ -1,0 +1,53 @@
+# =============================================================================
+# LTC E-Learning — gitleaks config [B-04]
+# -----------------------------------------------------------------------------
+# อ้างอิง: SDS §5.1 — SUPABASE_SERVICE_ROLE_KEY ต้องเป็น server-only
+#   (ห้ามขึ้นต้น NEXT_PUBLIC_) + TEST-PLAN §3.4 (secrets scan เป็น merge gate)
+#
+# ใช้โดย:
+#   - CI: .github/workflows/ci.yml Gate 5/5 (gitleaks-action อ่านไฟล์นี้อัตโนมัติ)
+#   - local: bash scripts/ci-local.sh (gate 5) — ต้องมี gitleaks binary
+#
+# หมายเหตุ: ใช้ [extend] useDefault = true เพื่อได้ชุดกฎมาตรฐานของ gitleaks
+#   (generic api keys, AWS/GCP keys, private keys, JWT secret ฯลฯ) แล้วเพิ่ม
+#   กฎเฉพาะของโปรเจกต์ทับ — allowlist เฉพาะไฟล์ที่เป็นเอกสาร/ตัวอย่างเท่านั้น
+# =============================================================================
+
+title = "LTC E-Learning — secrets scan config [B-04]"
+
+[extend]
+useDefault = true
+
+# -----------------------------------------------------------------------------
+# Allowlist — ข้ามเฉพาะไฟล์ที่ "ไม่ใช่โค้ดที่ deploy จริง" (เอกสาร/ตัวอย่าง/artifact)
+# หมายเหตุ: [allowlist] = รูปแบบ gitleaks v8 (v8.19+ เรียก [[allowlists]] — ยังรองรับ)
+# -----------------------------------------------------------------------------
+[allowlist]
+description = "เอกสาร/ตัวอย่าง/artifact build — ไม่ใช่โค้ดที่ deploy"
+paths = [
+  '''(^|/)\.gitleaks\.toml$''',   # ไฟล์ config นี้เอง (มี regex/คำว่า KEY แต่ไม่มีค่าลับ)
+  '''(^|/)\.env\.example$''',     # ตัวอย่าง env — ค่าทั้งหมดเป็น placeholder (B-03)
+  '''(^|/)docs/''',               # เอกสารโปรเจกต์ — อ้างชื่อ variable ได้ ไม่มีค่าลับจริง
+  '''(^|/)node_modules/''',
+  '''(^|/)\.next/''',
+]
+
+# -----------------------------------------------------------------------------
+# กฎเฉพาะโปรจเกต (ต่อยอดจาก default rules ของ gitleaks)
+# หลักการ: จับ "การฝังค่าจริง" (literal ยาว 40+ ตัวอักษร) ไม่ใช่แค่การอ้างชื่อ
+#   ตัวแปร (process.env.X หรือ .env.example จึงไม่โดน) — กัน false positive
+# -----------------------------------------------------------------------------
+[[rules]]
+id = "ltc-supabase-service-role-key"
+description = "SUPABASE_SERVICE_ROLE_KEY เป็น server-only (SDS §5.1) — พบค่าลับถูกฝังจริงในไฟล์"
+# จับทั้งแบบ env (`KEY=<ค่า>`) และ code (`KEY: "<ค่า>"`) — ค่าลับจริงยาว 40+ ตัวอักษร
+regex = '''(?i)SUPABASE_SERVICE_ROLE_KEY["']?\s*[:=]\s*["']?([A-Za-z0-9+/_\-=.]{40,})'''
+keywords = ["SUPABASE_SERVICE_ROLE_KEY"]
+secretGroup = 1
+
+[[rules]]
+id = "ltc-next-public-secret-key"
+description = "ห้ามฝังค่าลับผ่านตัวแปร NEXT_PUBLIC_*KEY* — จะถูก bundle เข้าโค้ด client (SDS §5.1)"
+regex = '''(?i)NEXT_PUBLIC_[A-Z0-9_]*KEY["']?\s*[:=]\s*["']?([A-Za-z0-9+/_\-=.]{40,})'''
+keywords = ["NEXT_PUBLIC_"]
+secretGroup = 1
