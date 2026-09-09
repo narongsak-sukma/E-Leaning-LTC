@@ -69,10 +69,11 @@
 | assessment:approve (เปิดใช้จริง) | — | — | — | — | — | — | ✓ | — | ✓ |
 | attempt:start (ตัวเอง) | — | ✓ | ✓ | ✓ | — | — | — | — | ✓ |
 | attempt:view (ตัวเอง) | — | ✓ | ✓ | ✓ | — | — | — | — | ✓ |
-| attempt:view (ทุกคน) | — | — | — | — | ✓ | — | ✓ | ✓ | ✓ |
+| attempt:view (ทุกคน) | — | — | — | O† | ✓ | — | ✓ | ✓ | ✓ |
 | attempt:grade_override | — | — | — | — | — | — | ✓ | — | ✓ |
 
 *assessment:view แบบผู้เรียน = เห็นเฉพาะเมื่อมีสิทธิ์เข้าสอบ (จบเงื่อนไขหลักสูตร)
+†attempt:view แบบ instructor = เฉพาะ attempt ของ assessment ที่อยู่ในหลักสูตรที่ตนเป็นเจ้าของ (`courses.created_by`) — ผู้สอนต้องเห็นผลของรอบสอบที่ตนดูแลเพื่อปรับปรุงเนื้อหา (canonical ตาม policy attempts_owner_read — D14/D13-F5); แถว attempt_answers ยังติด answer-key deny (อ่านผ่าน projection เท่านั้น — D12-2) และ grade_override ยังเป็นของ staff:exam เท่านั้น (SoD)
 
 ### 2.3 Certificate / Credit (โดเมน 4–5)
 
@@ -167,7 +168,7 @@ create policy courses_public_read on public.courses for select to anon, authenti
 create policy courses_owner_read on public.courses for select to authenticated
   using (created_by = auth.uid());
 create policy courses_staff_read on public.courses for select to authenticated
-  using (public.is_staff());
+  using (public.has_any_role(array['staff:viewer','staff:content','super_admin'])); -- D13-F5: ตรง matrix §2.1 course:view(draft) = sv/sc/sa เท่านั้น (is_staff() กว้างเกิน — se/sr อ่าน draft ไม่ได้)
 create policy courses_owner_insert on public.courses for insert to authenticated
   with check (courses.created_by = auth.uid()
               and public.has_any_role(array['instructor'])
@@ -206,24 +207,6 @@ create policy lp_owner_read on public.lesson_progress for select to authenticate
                     join public.courses c on c.id = e.course_id
                     where e.id = lesson_progress.enrollment_id and c.created_by = auth.uid()));
 revoke insert, update, delete on public.lesson_progress from authenticated, anon; -- เขียนผ่าน function เท่านั้น (D12-1)
-
--- (4) lesson_progress (D11-5): ตารางนี้ไม่มีคอลัมน์ user_id (ตาม DD §3.3) — เจ้าของอ้างผ่าน enrollment
-create policy lp_owner_read on public.lesson_progress for select to authenticated
-  using (exists (select 1 from public.enrollments e
-                 where e.id = enrollment_id and e.user_id = auth.uid())
-         or public.is_staff()
-         or exists (select 1 from public.enrollments e
-                    join public.courses c on c.id = e.course_id
-                    where e.id = enrollment_id and c.created_by = auth.uid()));
-create policy lp_owner_insert on public.lesson_progress for insert to authenticated
-  with check (exists (select 1 from public.enrollments e
-                      where e.id = enrollment_id and e.user_id = auth.uid()));
-create policy lp_owner_update on public.lesson_progress for update to authenticated
-  using (exists (select 1 from public.enrollments e
-                 where e.id = enrollment_id and e.user_id = auth.uid()))
-  with check (exists (select 1 from public.enrollments e
-                 where e.id = enrollment_id and e.user_id = auth.uid()));
-revoke delete on public.lesson_progress from authenticated, anon; -- ไม่มี hard delete (D11-3)
 
 -- (5) questions (D11-4/D11-5 + D12-5): ชื่อคอลัมน์ตาม DD — questions.bank_id (ไม่ใช่ question_bank_id)
 --     instructor เห็นเฉพาะ bank ที่ตัวเองเป็นเจ้าของ (question_banks.created_by — DD §3.4, เพิ่มแล้วโดย DCR-3)
@@ -340,7 +323,7 @@ grant select, update (read_at, deleted_at) on public.notification_recipients to 
 | --- | --- | --- |
 | Session idle timeout — ผู้เรียน | **60 นาที** | config `SESSION_IDLE_MINUTES_LEARNER` |
 | Session idle timeout — staff (ทุก sub-role) | **15 นาที** | config `SESSION_IDLE_MINUTES_STAFF` |
-| **MFA state machine (เดียวทั้งระบบ — D12-10)** | states: `none` → `enrollment-only` → `verified` | transitions: login (password ผ่าน, ยังไม่มี MFA) → **enrollment-only** — allowlist = `/auth/mfa/enroll` + `/auth/mfa/verify` + **`/auth/logout` (ทุก state)**; enroll+verify สำเร็จ → **verified**; ทุก protected request เช็ค claim `mfa_verified` ทุกครั้ง (D11-11) |
+| **MFA state machine (เดียวทั้งระบบ — D12-10)** | states: `none` → `enrollment-only` → `verified` | transitions: login (password ผ่าน, ยังไม่มี MFA) → **enrollment-only** — allowlist = `/auth/mfa/enroll` + `/auth/mfa/verify` + **`/auth/logout` (ทุก state)** + **`GET /me` (read-only — ดูข้อมูลตัวเองได้ แก้ไม่ได้; ตรง SRS AUTH-007 — D13-F8)**; enroll+verify สำเร็จ → **verified**; ทุก protected request เช็ค claim `mfa_verified` ทุกครั้ง (D11-11) |
 | MFA บังคับกับใคร | instructor / staff ทุกระดับ / super_admin (TOTP) | บัญชีบังคับ MFA ที่ยังไม่ verified = state enrollment-only ทุก login (ERR-AUTH-004) |
 | ปิด MFA (`/auth/mfa/disable`) | **v1: เฉพาะบัญชี citizen/lawyer (MFA optional)** | เงื่อนไข: recent-MFA (≤ 15 นาที) + ห้ามเหลือ 0 factor; **บัญชี staff/instructor/super_admin block ใน v1** ตาม API §3.1; audit `AUTH_MFA_DISABLED` (WARN) |
 | Absolute timeout | 12 ชม. (ผู้เรียน) / 8 ชม. (staff) | บังคับ login ใหม่ |
@@ -381,7 +364,7 @@ grant select, update (read_at, deleted_at) on public.notification_recipients to 
 | T12 | staff:viewer | GET /api/v1/admin/users | 200 + audit PII_ACCESS เกิด 1 รายการ |
 | T13 | lawyer A | GET /api/v1/attempts/{ของ B}/result | 403/404 ERR-ASM-006 |
 | T14 | ทุกบทบาท | POST/PUT/PATCH/DELETE ใด ๆ บน /api/v1/admin/audit-logs | 404 — route ไม่มีอยู่ (ไม่มี write path เลย) |
-| T15 | staff:exam (ยังไม่ MFA) | POST /api/v1/auth/login | 200 — state = **enrollment-only**; `GET /api/v1/me` → ERR-AUTH-004 (เช็ค claim ทุก request); `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/logout` ยังใช้ได้ (allowlist รวม logout ทุก state — D12-10) |
+| T15 | staff:exam (ยังไม่ MFA) | POST /api/v1/auth/login | 200 — state = **enrollment-only**; `GET /api/v1/me` → **200 (allowlist รวม GET /me read-only — D13-F8)**; `PATCH /api/v1/me` → ERR-AUTH-004 (เช็ค claim ทุก request); `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/logout` ยังใช้ได้ (allowlist รวม logout ทุก state — D12-10) |
 | T16 | super_admin | DELETE /api/v1/admin/audit-logs/{id} | 404 — แม้ super_admin ก็ลบไม่ได้ |
 
 หมายเหตุ: T14/T16 ทดสอบว่า "write path ไม่มีในระบบ" ซึ่งแรงกว่าการทดสอบ 403 — audit เป็น append-only โดยการออกแบบ (AUDIT-LOG-DESIGN.md §4)

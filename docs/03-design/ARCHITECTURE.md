@@ -267,7 +267,7 @@ sequenceDiagram
     DB->>DB: RLS policy กรองแถวตาม user_id/roles ของผู้ใช้
     DB-->>RH: เฉพาะแถวที่ policy อนุญาต
     RH-->>U: 200 + cache headers (CDN/ISR ตามชนิดหน้า)
-    Note over RH,DB: service_role (bypass RLS) ใช้เฉพาะกิจ — background job (retention purge / export / email / auto-submit) + server functions แคบขอบเขต (attempt snapshot, audit append) · ควบคุมด้วยการจำกัดจุดเรียกในโค้ด + review ไม่ใช่โดย RLS (D11-1)
+    Note over RH,DB: service_role (bypass RLS) ใช้เฉพาะกิจ — background job (export / email / auto-submit) + server functions แคบขอบเขต (attempt snapshot, audit append) · **retention purge ใช้บทบาทเฉพาะ `purge_role` ไม่ใช่ service_role (DD §4.3/§4.6 — D13-F11)** · ควบคุมด้วยการจำกัดจุดเรียกในโค้ด + review ไม่ใช่โดย RLS (D11-1)
 ```
 
 เส้นทางหลักของ request ธรรมดา = **user JWT (role `authenticated`)** — RLS policy บังคับจริงทุก query; `service_role` (bypass RLS) ใช้เฉพาะงานเบื้องหลังและ server functions ที่ขอบเขตแคบ เช่น attempt snapshot / audit append — ความปลอดภัยของเส้นทาง service_role พึ่งการจำกัดจุดเรียกในโค้ด + code review **ไม่ใช่ RLS** (RLS ไม่คุม service_role — D11-1) · ทุกตารางยังต้อง ENABLE RLS + policy ครบทุก path สำหรับ anon/authenticated ตาม DATA-DICTIONARY.md และ authorization ตัดสินที่ rbac service (`requirePermission()` — RBAC §1.2 ข้อ 4) ก่อน query เสมอ

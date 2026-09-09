@@ -14,6 +14,7 @@
 ## 1. แบบแผนกลาง (ใช้กับทุกตาราง)
 
 - **PK**: `id uuid NOT NULL DEFAULT gen_random_uuid()` — ยืนยันเป็น **UUID v4** (random, built-in ของ PG13+; ไม่ใช้ v7 ใน v1) (ระบุเฉพาะเมื่อต่างจากนี้)
+- **Extensions ที่ migration ต้อง enable ก่อนสร้าง schema (D13-F13)**: `CREATE EXTENSION IF NOT EXISTS btree_gist;` — EXCLUDE ของ `renewal_cycles` (§3.5) ใช้ `user_id WITH =` (uuid) ใน GiST ต้องใช้ opclass จาก btree_gist (PG15 ไม่มี built-in สำหรับ uuid — ไม่ enable จะสร้าง constraint ไม่ได้); `gen_random_uuid()` ใช้ built-in ไม่ต้อง pgcrypto
 - **เวลา**: `created_at timestamptz NOT NULL DEFAULT now()`; ตารางที่มี `updated_at` อัปเดตด้วย trigger `set_updated_at()` (ดู §4.2); เวลาทั้งหมดเป็น timestamptz (UTC)
 - **Soft delete**: ตารางที่มี `deleted_at timestamptz NULL` = ห้าม hard delete ผ่านแอป — ดู §4.3; index ที่เกี่ยวกับ lookup ใช้ partial `WHERE deleted_at IS NULL`
 - **FK**: `ON DELETE RESTRICT` เป็นค่าเริ่มต้น (รักษาประวัติ/audit — ไม่ cascade ทิ้งข้อมูลอ้างอิง) ยกเว้นระบุชัด
@@ -529,7 +530,7 @@ Retention: **90 วัน** (ตัดด้วย job — เก็บสถิ
 | required_credits_per_cycle | numeric(6,2) | NULL (เกณฑ์ต่อรอบ — default 12, **รอยืนยัน Q1**) |
 | priority | int | NOT NULL DEFAULT 100 (ตัวเลขน้อย = จับคู่ก่อน) |
 | effective_from / effective_to | timestamptz | NOT NULL DEFAULT now() / NULL |
-| status | text | NOT NULL DEFAULT 'draft', CHECK IN ('draft','active','retired') (lifecycle versioned — คู่กับ effective window; จับคู่ได้เฉพาะ status='active' + window ครอบวันเกิดเหตุ — F17/D12) |
+| status | text | NOT NULL DEFAULT 'draft', CHECK IN ('draft','active','retired') (lifecycle versioned — **การจับคู่กฎเกิดครั้งเดียว ณ grading**: rule ที่ status='active' + effective window ครอบวันผ่าน **ณ ตอนตรวจ** จะถูก snapshot (`rule_id` + ค่าที่ใช้) ลง outbox event — credit worker ใช้ snapshot อย่างเดียว **ไม่ lookup ซ้ำ** แม้ rule ถูก retire ภายหลังระหว่าง event ค้างคิว — F17/D12 + D13-F6) |
 | renewal_cycle | text | NULL (ประเภทรอบที่กฎผูก เช่น 'annual' — NULL = ตามรอบ default ของ config — รอยืนยัน Q1 — F17/D12) |
 คีย์/Index: UNIQUE(code); INDEX(course_id, priority)
 RLS: **SELECT** ผู้ใช้ role lawyer (ดูกฎของตัวเองแบบสรุป) + `has_any_role('staff:viewer','staff:registrar','super_admin')` (credit_rule:view — RBAC §2); **INSERT/UPDATE** super_admin/staff:registrar ผ่าน BFF + audit (แก้ = สร้างเวอร์ชันใหม่ไม่แก้ย้อนหลัง); **DELETE** ไม่อนุญาต (retire ด้วย status='retired' / effective_to — F17/D12)
@@ -545,7 +546,7 @@ Retention: ถาวร (versioned ด้วย effective window)
 | required_credits | jsonb | NOT NULL (snapshot เกณฑ์ ณ สร้างรอบ แยกตาม credit_type) |
 | status | cycle_status | NOT NULL DEFAULT 'open' |
 | closed_at | timestamptz | NULL |
-คีย์/Index: UNIQUE(user_id, cycle_no); EXCLUDE USING gist (user_id WITH =, daterange(starts_on, ends_on) WITH &&) — ห้ามรอบซ้อนกัน; INDEX(user_id) WHERE status='open'
+คีย์/Index: UNIQUE(user_id, cycle_no); EXCLUDE USING gist (user_id WITH =, daterange(starts_on, ends_on) WITH &&) — ห้ามรอบซ้อนกัน; **migration prerequisite: `CREATE EXTENSION IF NOT EXISTS btree_gist;` ก่อน constraint นี้ (uuid ใน GiST ต้องใช้ opclass จาก extension — §1, D13-F13)**; INDEX(user_id) WHERE status='open'
 RLS: **SELECT** เจ้าของแถว + `has_any_role('staff:viewer','staff:registrar','super_admin')` (credit_ledger:view ผู้อื่น — RBAC §2); **INSERT/UPDATE** service_role เท่านั้น (สร้าง/ปิดรอบโดยระบบหรือ registrar ผ่าน BFF + audit); **DELETE** ไม่อนุญาต
 Retention: ถาวร (ประวัติการต่ออายุ)
 
@@ -558,7 +559,7 @@ Retention: ถาวร (ประวัติการต่ออายุ)
 | entry_type | ledger_entry_type | NOT NULL |
 | credit_type | text | NOT NULL DEFAULT 'general' |
 | amount | numeric(6,2) | NOT NULL (signed — reversal ติดลบ) |
-| certificate_id | uuid | NULL FK→certificates (ลิงก์ไปใบประกาศที่เกี่ยวข้อง — ตั้งภายหลังเมื่อออกใบ เพื่อ reporting เท่านั้น **ไม่ใช่ต้นทางของ accrual** — F15/D12) |
+| certificate_id | uuid | NULL FK→certificates (เติมได้เฉพาะตอน INSERT เมื่อมีใบแล้ว — เช่น รอบ bulk; **ห้าม backfill แถวที่ INSERT ไปแล้ว** เพราะ UPDATE ถูก REVOKE (§4.4) — D13-F7; reporting เชื่อมใบผ่าน enrollment แทน: `certificates.enrollment_id` = enrollment ของ `source_id` attempt; **ไม่ใช่ต้นทางของ accrual** — F15/D12) |
 | source_type | text | NOT NULL DEFAULT 'assessment_attempt' (ต้นทางของ accrual = attempt ที่ผ่าน — **การออกประกาศนียบัตรไม่ใช่ต้นทาง credit** — F15/D12) |
 | source_id | uuid | NULL (= assessment_attempts.id เมื่อ source_type='assessment_attempt') |
 | original_entry_id | uuid | NULL FK→credit_ledger_entries (ต้นทางของ reversal) |
@@ -701,7 +702,7 @@ Reporting ทั้งหมดอ่านผ่าน view + สิทธิ�
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
-| occurred_at | timestamptz | NOT NULL DEFAULT now() |
+| occurred_at | timestamptz | NOT NULL — **กำหนดโดย `append_audit_event()` ภายใต้ advisory lock ให้ strictly increasing เสมอ**: `greatest(now(), prev.occurred_at + 1µs)` ทำให้ traversal `(occurred_at, id)` = ลำดับ append ทุกกรณี แม้ `now()` จะคงที่ตลอด TX เดียวและ `id` เป็น UUID v4 สุ่ม (D13-F3 — ห้ามพึ่ง DEFAULT now() ตรง ๆ) |
 | actor_user_id | uuid | NULL FK→profiles (NULL = ระบบ/ผู้ไม่ระบุตัวตน) |
 | actor_roles | text[] | NOT NULL DEFAULT '{}' (snapshot ตอนเกิดเหตุการณ์) |
 | action | text | NOT NULL (คีย์จุด เช่น auth.login, certificate.issue, credit.adjust — รายการเต็มที่ AUDIT-LOG-DESIGN.md) |
@@ -713,7 +714,7 @@ Reporting ทั้งหมดอ่านผ่าน view + สิทธิ�
 | request_id | text | NULL (เชื่อมกับ app log) |
 | context | jsonb | NULL |
 | prev_hash | text | NOT NULL (hash ของแถวก่อนหน้าในสาย — แถวแรกของวันใช้ค่า seed ตาม AUDIT-LOG-DESIGN §3.3 — F7/D12) |
-| row_hash | text | NOT NULL UNIQUE — **sha256 บน canonical serialization ครบทุก evidentiary field** (prev_hash, id, actor_user_id, actor_roles, action, entity_type, entity_id, before, after, context, occurred_at — ลำดับฟิลด์ตามนิยาม AUDIT-LOG-DESIGN §3.3) · การไล่ตรวจสายใช้ traversal order `(occurred_at, id)` · anchor รายวันที่ `audit_chain_anchors` (F7/D12) |
+| row_hash | text | NOT NULL UNIQUE — **sha256 บน canonical serialization ครบทุก evidentiary field** (prev_hash, id, actor_user_id, actor_roles, action, entity_type, entity_id, before, after, context, occurred_at — ลำดับฟิลด์ตามนิยาม AUDIT-LOG-DESIGN §3.3) · การไล่ตรวจสายใช้ traversal order `(occurred_at, id)` **= ลำดับ append เป๊ะ (occurred_at strictly increasing ภายใต้ lock — D13-F3)** · anchor รายวันที่ `audit_chain_anchors` (F7/D12) |
 คีย์/Index: INDEX(entity_type, entity_id, occurred_at DESC); INDEX(actor_user_id, occurred_at DESC); INDEX(action, occurred_at DESC); INDEX(occurred_at, id) (traversal order ของ hash-chain — F7); ไม่มี FK แบบ enforce ต่อ actor เพื่อกันการ rewrite ประวัติ (ใช้ lookup ที่แอป)
 RLS: **SELECT** `has_any_role('staff:viewer','super_admin')` (audit_log:view ทั้งหมด — sv อ่านอย่างเดียว ตาม RBAC §2) + แถว activity ของตัวเอง (ทุกบทบาท — audit_log:view activity ตัวเอง); **INSERT ไม่มี policy/grant ใด** — เขียนผ่าน `append_audit_event()` SECURITY DEFINER (owner `app_owner`) เท่านั้น (F8/D12); **UPDATE/DELETE ไม่มี path เด็ดขาด** — `REVOKE UPDATE, DELETE, INSERT ON audit_logs FROM anon, authenticated, service_role` + ไม่มี policy ใดอนุญาต (D6); ไม่มี API แก้/ลบ audit
 Retention: 5 ปี (นโยบายสภาฯ + PDPA — canonical ที่ §4.6) — purge job หลัง export เป็นงาน v1.1; partition รายเดือนเมื่อโต (SDS §8)
@@ -788,9 +789,9 @@ Retention: 24 เดือน
 - แอปไม่มีสิทธิ์ hard delete เลย (RLS ไม่มี policy DELETE ยกเว้นระบุ) — ลบ = ตั้ง deleted_at
 - การ purge ตาม retention เป็น job แยกที่ใช้บทบาทเฉพาะ **`purge_role`** (ชื่อเดียวกับที่ API/AUDIT อ้าง — ไม่ใช่ service_role ของแอป — F19/D12) + บันทึก audit ทุกครั้ง
 
-### 4.4 Append-only enforcement (audit_logs + credit_ledger_entries + security_events)
+### 4.4 Append-only enforcement (audit_logs + credit_ledger_entries + security_events + notice_acknowledgments)
 
-1. `REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_logs, credit_ledger_entries, security_events, audit_chain_anchors FROM anon, authenticated, service_role` (D11-7) + **`REVOKE INSERT ON audit_logs FROM anon, authenticated, service_role` (F8/D12)** — เขียน audit ได้เฉพาะผ่าน `append_audit_event()` SECURITY DEFINER (owner เฉพาะ `app_owner` — grant EXECUTE ให้ service_role/authenticated ตามจำเป็น); ตารางอื่นในกลุ่มนี้ยังเหลือ path INSERT อย่างเดียว
+1. `REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_logs, credit_ledger_entries, security_events, audit_chain_anchors FROM anon, authenticated, service_role` (D11-7) + **`REVOKE UPDATE, DELETE ON notice_acknowledgments FROM anon, authenticated, service_role` (append-only — D13-F11; INSERT ยังเป็นสิทธิ์ของเจ้าของแถวตาม RLS §3.1)** + **`REVOKE INSERT ON audit_logs FROM anon, authenticated, service_role` (F8/D12)** — เขียน audit ได้เฉพาะผ่าน `append_audit_event()` SECURITY DEFINER (owner เฉพาะ `app_owner`; **EXECUTE grant เดียวกันทุกเอกสาร: `authenticated` + `service_role` — ฟังก์ชันตรวจ actor/payload ภายในเอง — D13-F4, AUDIT-LOG-DESIGN §4**); ตารางอื่นในกลุ่มนี้ยังเหลือ path INSERT อย่างเดียว
 2. RLS ไม่มี policy สำหรับ UPDATE/DELETE เลย
 3. trigger guard สุดท้าย: ถ้ามีการ UPDATE/DELETE (โดน role ที่ยังมีสิทธิ์ เช่น ตอน migration) ให้ RAISE EXCEPTION
 4. ไม่มี API/Server Action ใดเปิด path แก้/ลบ (ตรวจด้วย codex gate ตอน review โค้ด auth/security/data)
@@ -819,7 +820,7 @@ Retention: 24 เดือน
 | notifications, notification_recipients, report_exports | 12 เดือน (ไฟล์ export 7 วัน) | |
 | event_outbox | purge 30 วันหลัง processed | |
 | admin_sessions | 24 เดือน | |
-| profiles, lawyer_licenses, license_applications, consents | อายุบัญชี + 10 ปี | **anonymize เมื่อเจ้าของข้อมูลใช้สิทธิ์ลบ** (ระบบเก็บ audit/หลักฐานธุรกิจไว้ตาม §4.5) |
+| profiles, lawyer_licenses, license_applications, consents, notice_acknowledgments | อายุบัญชี + 10 ปี | **anonymize เมื่อเจ้าของข้อมูลใช้สิทธิ์ลบ** (ระบบเก็บ audit/หลักฐานธุรกิจไว้ตาม §4.5; notice_acknowledgments = หลักฐานการรับทราบต่อเวอร์ชันประกาศ — D13-F11) |
 | enrollments, lesson_progress, quiz_attempts, assessment_attempts, attempt_answers (learning records) | ตามอายุบัญชี | purge ด้วย `purge_role` + audit · **แถวที่ยังถูก certificates/credit_ledger_entries อ้าง FK อยู่ = anonymize ไม่ลบแถว** (FK RESTRICT บังคับ — ตัดค่าระบุตัวตนในคอลัมน์/snapshot คงโครง ledger/certificate ไว้ — F19/D12) |
 | notification_settings | ตามอายุบัญชี | |
 

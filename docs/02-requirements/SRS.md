@@ -589,7 +589,7 @@
 - REST + JSON ผ่าน Next.js Route Handlers ภายใต้ prefix `/api/v1/*`; input ตรวจด้วย zod ทุก endpoint (SEC-014)
 - การพิสูจน์ตัวตนใช้ session ที่ Supabase Auth ออกให้; การอนุญาตใช้ RBAC + RLS สองชั้น
 - error response มีรูปแบบเดียวกันทั้งระบบ (code + ข้อความไทย); pagination แบบ cursor; versioning ผ่าน prefix
-- กลุ่มปลายทางตามโดเมน (รายละเอียดเต็มอยู่ที่ API Spec ของ worker-4): `/api/v1/auth/*`, `/api/v1/profile*`, `/api/v1/license*`, `/api/v1/categories*`, `/api/v1/courses*`, `/api/v1/enrollments*`, `/api/v1/lessons*`+progress, `/api/v1/question-banks*`, `/api/v1/exams*`+attempts, `/api/v1/certificates*`, `/api/v1/verify/*` (สาธารณะ), `/api/v1/credits*`+transcripts, `/api/v1/notifications*`, `/api/v1/admin/*`, `/api/v1/audit*`, `/api/health`
+- กลุ่มปลายทางตามโดเมน (รายละเอียดเต็มอยู่ที่ API Spec ของ worker-4; ชื่อกลุ่มตรงทะเบียร์ API canonical — D13-F12): `/api/v1/auth/*`, `/api/v1/me*`+`/api/v1/profile*` (รวม license/credits/transcript ของตัวเอง), `/api/v1/categories*`, `/api/v1/courses*`+enroll, `/api/v1/lessons*`+progress, `/api/v1/assessments*`+`/api/v1/attempts*`, `/api/v1/certificates*` (รวม public verify `GET /certificates/{code}`), `/api/v1/credit-rules*`+`/api/v1/credit-adjustments*`+`/api/v1/users/{id}/credits`, `/api/v1/notifications*`, `/api/v1/admin/*` (รวม question-banks/assessments/reports/audit-logs/license-applications/exams), `/api/health`
 
 ### 5.3 อีเมล (ขาออก)
 - เข้าถึงผ่าน email abstraction เท่านั้น (C2): dev = SMTP/กล่องจดหมายจำลองใน Docker; staging/prod = ผู้ให้บริการ cloud ที่เลือกตาม config
