@@ -2,8 +2,8 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 0.4.0 — แก้ตามคำตัดสิน CTO D12 (codex security gate รอบ 2 = FAIL — รอบสุดท้าย): D12-6, D12-8, D12-10, D12-12, D12-15, D12-16, D12-17, D12-23 (เดิมแก้ D11 แล้วที่ 0.3.0) |
-| วันที่    | 2026-09-08                                         |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| วันที่    | 2026-09-09                                         |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md (canonical schema) · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
 

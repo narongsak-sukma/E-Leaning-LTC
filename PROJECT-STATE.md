@@ -5,7 +5,7 @@
 
 |          |                                        |
 | -------- | -------------------------------------- |
-| อัปเดตล่าสุด | 2026-09-08 · Wave A (เอกสาร) กำลังระหว่างดำเนินการ |
+| อัปเดตล่าสุด | 2026-09-09 · Wave A ผ่าน CTO gate (D17) — Wave B unlocked |
 | Lead/PM  | Claude Code session (GLM 5.3) — sole channel ของ user directives |
 | CTO gate | codex CLI (มีในเครื่อง ✅) — ใช้ตอน milestone gates / auth-security-data merges |
 | Repo     | local git · สาขาหลัก `develop`            |
@@ -17,16 +17,16 @@
 | Task | งาน                                    | Owner    | Status        |
 | ---- | -------------------------------------- | -------- | ------------- |
 | A0   | Repo init + baseline docs + brief      | lead     | ✅ done       |
-| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ เสร็จสมบูรณ์ + align brief 0.2.0 แล้ว (รอ A6 review) |
-| A2   | SRS + RTM                              | worker-2 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
-| A3   | SDS + Architecture + Data Dictionary   | worker-3 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
-| A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
-| A5   | Design System + UI Prototype           | worker-5 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
-| A6   | Lead review + ข้อมูลตรงกัน (cross-doc consistency) + codex/CTO verdict | lead + CTO | 🔄 **กำลังทำ** (เริ่ม 2026-09-08) |
+| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ เสร็จสมบูรณ์ + align brief 0.2.0 แล้ว (ผ่าน CTO gate D17) |
+| A2   | SRS + RTM                              | worker-2 | ✅ ส่งงาน+commit แล้ว (ผ่าน CTO gate D17) |
+| A3   | SDS + Architecture + Data Dictionary   | worker-3 | ✅ ส่งงาน+commit แล้ว (ผ่าน CTO gate D17) |
+| A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (ผ่าน CTO gate D17) |
+| A5   | Design System + UI Prototype           | worker-5 | ✅ ส่งงาน+commit แล้ว (ผ่าน CTO gate D17) |
+| A6   | Lead review + ข้อมูลตรงกัน (cross-doc consistency) + codex/CTO verdict | lead + CTO | ✅ done — codex r5 PASS + CTO APPROVE (D17, 2026-09-09) |
 
-### ลำดับถัดไป (จะขยายเป็น task เมื่อ Wave A ผ่าน gate)
+### ลำดับถัดไป (Wave A ผ่าน gate แล้ว — ขยายเป็น task เมื่อ spawn ทีม Wave B)
 
-- Wave B — repo scaffold + Docker dev env + CI (deliverable 13–16 เริ่มต้น)
+- **Wave B — active next**: repo scaffold + Docker dev env + CI (deliverable 13–16 เริ่มต้น) — ยึด DATA-DICTIONARY 1.0.0 เป็น blueprint ของ `supabase/migrations/*`; per-worker worktrees ตาม D4
 - Wave C — MVP: courses, enrollment, progress
 - Wave D — Assessment + Certificates
 - Wave E — Credit Bank + admin/reporting
@@ -54,6 +54,8 @@
 | D15 | 2026-09-09 | **codex gate round 4 (re-gate รอบเดียวตาม D14): FAIL — 0 BLOCKER / 2 MAJOR ใหม่ / 3 MINOR · 11/13 findings RESOLVED (F4/F5/F11 ยังไม่ครบ) · lead ตรวจรับรองด้วยตาทุก finding แล้ว = จริงทุกข้อ** · วงบรรจุต่อเนื่อง: r1 2B/17M/3m → r2 3B/21M → r3 0B/7M/6m → r4 0B/2M/3m · **N1 (MAJOR, regression ของ F4)**: AUDIT §4 มีแต่ GRANT execute ให้ authenticated+service_role **ไม่มี `revoke execute ... from public, anon`** — PG15 ให้ EXECUTE แก่ PUBLIC โดย default บน function ใหม่ → anon เรียก append_audit_event() ได้; และการตรวจภายใน (actor/schema/chain) ไม่ผูก event กับ mutation ที่ผ่าน authorization จริง — caller กล่าวอ้าง event (เช่น ROLE_GRANT) ที่ผ่าน schema ได้ (hash-chain รับรองลำดับ ไม่รับรองความจริง) → แก้: revoke จาก PUBLIC/anon ก่อน grant ใน TX เดียว + audit ของ mutation ต้องถูกสร้างใน business function ที่ตรวจสิทธิ์แล้ว (derive actor/roles/ผลจาก server) + generic RPC path เหลือเฉพาะ event ที่ไม่คู่ mutation พร้อม allowlist ราย event · **N2 (MAJOR, ความขัดแย้งจาก O† ใหม่)**: DD §3.4 attempt_answers L474 ยังให้ instructor เจ้าของหลักสูตร SELECT ตารางฐาน (มี question_snapshot.options[].is_correct = เฉลย) ขัดกับ RBAC §2.2 † ที่บอก "อ่านผ่าน projection เท่านั้น" — แถม learner_attempt_view จำกัดเฉพาะ attempt ตัวเอง ไม่รองรับ instructor อ่านผลผู้เรียน → แก้: DD ถอน raw SELECT ที่มาจาก ownership เฉย ๆ + เพิ่ม projection สำหรับ instructor (ตรวจ role + course ownership + ตัดเฉลยตามเงื่อนไข D14) · **M1**: AUDIT §1.4 L16 ยังเขียน "EXECUTE เฉพาะ app_owner ไม่ให้ service_role" ขัด contract §4 ใหม่ · **M2**: SDS §4.5 diagram L278 ยังให้ worker จับคู่ credit_rules ขัด §3.2b snapshot-only · **M3**: notice_acknowledgments REVOKE มีแค่ UPDATE/DELETE ขาด TRUNCATE (RLS ไม่ครอบ TRUNCATE) | ผู้ว่าจ้างอนุมัติแค่แก้ 1 รอบ + re-gate 1 ครั้ง (D14) — ใช้ครบแล้ว → ต้องถามผู้ว่าจ้างอีกครั้ง: (ก) รอบแก้จุดจบ 1 รอบเหมือนเดิม (งานเหลือ ~5 จุด เล็ก/เชิงกลไก/ระบุบรรทัดแล้ว — แนะนำ) (ข) ยอมรับ residual แบบมี waiver registry + ปลดล็อก Wave B (ค) หยุดรอผู้ว่าจ้างอ่าน findings |
 
 | D16 | 2026-09-09 | **ผู้ว่าจ้างมอบอำนาจตัดสินใจเต็มให้ CTO-lead (ข้อความตรง: "@cto you are who dicision all, no wait me") + อนุมัติรอบแก้จุดจบ 1 รอบ** — นับจากนี้ lead ตัดสินใจเองทุกเรื่อง (fix rounds / gate outcomes / wave transitions / DCR กลาง ๆ) โดยไม่ต้องรอถามผู้ว่าจ้าง และรายงานผลเป็นระยะ · ยังผูกกับ binding rules เดิมทุกข้อ (ห้าม commit secrets, no fake completion, ทุก completion มี evidence, doc-first + DCR, D9 model routing) · แก้จริง 9 จุด / 4 ไฟล์ ปิดทั้ง 5 findings ของ r4: **N1** AUDIT §4 — `revoke execute ... from public, anon` ก่อน grant (PG15 default ให้ PUBLIC) + แบ่ง event-class: (ก) mutation event = เขียนใน server path เท่านั้น (SECURITY DEFINER write functions/BFF service_role — derive actor/ผลจาก server) (ข) non-mutation event = user-JWT RPC ได้ตาม allowlist ราย event + actor/request context มาจาก auth.uid()/middleware เท่านั้น · §1.4 + §6.2 แก้ให้ตรง contract เดียว (M1) · **N2** DD §3.4 attempt_answers — ถอน raw SELECT ของ instructor (ownership เฉย ๆ ไม่เปิด raw ที่มีเฉลย) + เพิ่ม `instructor_attempt_view` (ตรวจ instructor + courses.created_by สองชั้น, ตัด is_correct/points_earned/question_snapshot/explanation, เปิดเฉลยตาม exam_review_mode) + RBAC † อ้างชื่อ view · **M2** SDS §4.5 diagram — worker อ่าน rule snapshot จาก event payload ไม่ lookup credit_rules ซ้ำ (ตรง §3.2b) · **M3** notice_acknowledgments — REVOKE เพิ่ม TRUNCATE (ทั้ง §3.1 + §4.4) + trigger guard ครอบ UPDATE/DELETE/TRUNCATE | self-check grep ผ่านทุกข้อ (revoke L234, stale §1.4 = 0, instructor raw = 0 + view นิยามครบ, worker-lookup เก่า = 0, TRUNCATE ครบ 2 จุด) · ต่อไป: codex gate รอบ 5 → PASS = CTO APPROVE + ปิด A6 + Wave B · FAIL = lead ตัดสินเองตามอำนาจ D16 |
+
+| D17 | 2026-09-09 | **codex gate round 5: PASS — 0 BLOCKER / 0 MAJOR ใหม่ / 1 MINOR (ไม่ block) → CTO APPROVE (lead ตัดสินตามอำนาจ D16) · Wave A ปิดสมบูรณ์** · 5/5 findings ของ r4 RESOLVED (N1/N2/M1/M2/M3) · codex ยืนยัน event-class split ใช้ได้ตาม contract (class ก = ข้อบังคับทั่วไปไม่จำกัดเฉพาะตัวอย่าง, class ข = allowlist ราย event + AUTH จาก BFF), instructor_attempt_view ไม่เปิดทางรั่ยเฉลยใหม่, EXECUTE/TRUNCATE ตรง PG15 semantics, **ไม่เปิด finding ซ้ำ**ของกลไก canonical (O†, hash-chain, cert backfill, credit snapshot, PDPA notice/consent/retention) · วงบรรจุเต็ม: r1 2B/17M/3m → r2 3B/21M → r3 0B/7M/6m → r4 0B/2M/3m → **r5 0B/0M/1m** · **R5-m1 (MINOR) แก้พร้อม approve**: AUDIT §4 class ข — ผูก producer ราย event: AUTH_* ทั้งชุด (ครบ 12 event ของ §2.1) = BFF เท่านั้น ในฐานะ trusted server บันทึก "ผลที่สังเกตได้" ของ Supabase Auth (ไม่ใช่ wildcard; ไม่ใช่ mutation ใน DB ของแอป จึงไม่ต้อง atomic กับ TX ธุรกิจ ตาม §1.5) · **version bump**: SRS/RTM/SDS/ARCH/DD/API/RBAC/AUDIT/DESIGN-SYSTEM → **1.0.0 baseline Wave B** (PROJECT-BRIEF คง 0.2.1 — DCR-controlled) · docs/README board 1–12 → ✅ + บันทึก gate ท้ายตาราง | gate เป็น documentation/design review — ไม่ใช่ implementation certification (codex ระบุเอง): โค้ด Wave B ต้องพิสูจน์กลไกด้วย lint/tsc/tests/RLS-integration test เอง; residual MINOR = 0 (แก้ครบในรอบ approve) |
 
 ## Git Protocol
 
@@ -85,3 +87,5 @@
 - 2026-09-08 · **A6 reviewer verdict = REVISE** (16 BLOCKING B-01..B-16, 6 MINOR, 6 NIT) → CTO บันทึก D8 (คำตัดสิน canonical 16 ข้อ) + M-05 DCR APPROVE (manual grading นอก scope, brief 0.2.1) · commit c14719d · **สั่งแก้คืนเจ้าของไฟล์พร้อมกัน 5 คน**: worker-1 (M-01/M-02/B-09c), worker-2 (SRS defaults master + RTM legend/API/data cols), worker-3 (role enum colon + 6 ตารางใหม่ 31→37 + staging view), worker-4 (เติม ~16 กลุ่ม endpoint + verify 200/4 ฟิลด์ + audit remap 46→49), worker-5 (credit 12/1yr + cert_no สุ่ม + meter labels) — รอรายงานครบ 5 คนแล้ว verify ก่อน codex gate
 - 2026-09-09 · **D14 convergence pass เสร็จ + codex gate round 4 = FAIL (0 BLOCKER/2 MAJOR/3 MINOR — 11/13 RESOLVED)** — lead แก้เอง 13 findings r3 (23 edits/6 ไฟล์, a6af421 → merge b745403) → re-gate ตามที่ผู้ว่าจ้างอนุมัติ → เหลือ N1 (EXECUTE ขาด revoke จาก PUBLIC/anon + generic RPC กล่าวอ้าง mutation ได้), N2 (DD attempt_answers ให้ instructor อ่าน raw ขัด RBAC †), M1 (AUDIT §1.4 ขัด §4), M2 (SDS diagram worker จับคู่ rule), M3 (notice_ack ขาด TRUNCATE) — lead ยืนยันจริงทุกข้อที่บรรทัดอ้าง · บันทึก D15 → ถามผู้ว่าจ้างอีกครั้ง (รอบแก้จุดจบ / waiver+Wave B / หยุดรอ)
 - 2026-09-09 · **ผู้ว่าจ้างมอบอำนาจตัดสินใจเต็มให้ CTO-lead (D16 — "no wait me") + อนุมัติรอบแก้จุดจบ** — lead แก้เอง 5 findings ของ r4 (9 edits/4 ไฟล์: N1 revoke PUBLIC + event-class split, N2 instructor_attempt_view, M1 §1.4, M2 diagram snapshot, M3 TRUNCATE) → grep ผ่านทุกข้อ → commit → codex gate round 5 → นับจากนี้ตัดสินใจเองทุกขั้น รายงานเป็นระยะ
+- 2026-09-09 · **codex gate round 5 = PASS (0 BLOCKER/0 MAJOR/1 MINOR) → CTO APPROVE (D17) — Wave A ปิดสมบูรณ์** — 5/5 RESOLVED (N1/N2/M1/M2/M3); R5-m1 (AUTH_* producer mapping) แก้พร้อม approve ใน AUDIT §4; เอกสาร 9 ฉบับ bump เป็น **1.0.0 baseline** (Brief คง 0.2.1); docs/README board 1–12 → ✅; วงบรรจุ 5 รอบ: 2B/17M → 3B/21M → 0B/7M → 0B/2M → 0B/0M
+- 2026-09-09 · **Wave B unlocked** — repo scaffold + Docker dev env + CI · per-worker worktrees ตาม D4 · ยึด DATA-DICTIONARY 1.0.0 เป็น blueprint ของ `supabase/migrations/*`

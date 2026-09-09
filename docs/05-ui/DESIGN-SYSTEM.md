@@ -2,10 +2,10 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 0.1.0                                             |
-| วันที่    | 2026-09-08                                        |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
+| วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-5 (UI/UX) — Wave A task A5                 |
-| สถานะ    | ต้นแบบ (prototype baseline) — แก้ผ่าน DCR         |
+| สถานะ    | ผ่าน CTO gate (D17) — แก้ไขถัดไปผ่าน DCR          |
 | อ้างอิง  | PROJECT-BRIEF §6 (Tailwind), §7 (WCAG 2.1 AA), §8 (PDPA — verify ไม่เปิดเผย PII เกินจำเป็น), §9 (UI string ไทย-first) |
 
 > เอกสารนี้เป็น source of truth ของ **ภาษาภาพ (visual language)** ของระบบ

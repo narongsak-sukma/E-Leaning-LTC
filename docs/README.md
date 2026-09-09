@@ -5,18 +5,18 @@
 
 | #  | Deliverable            | ไฟล์/ตำแหน่ง                          | Owner    | Wave | สถานะ |
 | -- | ---------------------- | ------------------------------------- | -------- | ---- | ----- |
-| 1  | Project Plan           | `01-management/PROJECT-PLAN.md`       | worker-1 | A    | ⏳    |
-| 2  | Risk Register          | `01-management/RISK-REGISTER.md`      | worker-1 | A    | ⏳    |
-| 3  | SRS                    | `02-requirements/SRS.md`              | worker-2 | A    | ⏳    |
-| 4  | RTM                    | `02-requirements/RTM.md`              | worker-2 | A    | ⏳    |
-| 5  | SDS                    | `03-design/SDS.md`                    | worker-3 | A    | ⏳    |
-| 6  | Architecture Diagram   | `03-design/ARCHITECTURE.md`           | worker-3 | A    | ⏳    |
-| 7  | Data Dictionary        | `03-design/DATA-DICTIONARY.md`        | worker-3 | A    | ⏳    |
-| 8  | API Specification      | `04-api-security/API-SPECIFICATION.md`| worker-4 | A    | 🔄    |
-| 9  | RBAC Design            | `04-api-security/RBAC-DESIGN.md`      | worker-4 | A    | 🔄    |
-| 10 | Audit Log Design       | `04-api-security/AUDIT-LOG-DESIGN.md` | worker-4 | A    | 🔄    |
-| 11 | UI Prototype           | `05-ui/DESIGN-SYSTEM.md` + `05-ui/prototype/*.html` | worker-5 | A | ⏳ |
-| 12 | Test Plan              | `06-testing/TEST-PLAN.md`             | worker-1 | A    | ⏳    |
+| 1  | Project Plan           | `01-management/PROJECT-PLAN.md`       | worker-1 | A    | ✅    |
+| 2  | Risk Register          | `01-management/RISK-REGISTER.md`      | worker-1 | A    | ✅    |
+| 3  | SRS                    | `02-requirements/SRS.md`              | worker-2 | A    | ✅    |
+| 4  | RTM                    | `02-requirements/RTM.md`              | worker-2 | A    | ✅    |
+| 5  | SDS                    | `03-design/SDS.md`                    | worker-3 | A    | ✅    |
+| 6  | Architecture Diagram   | `03-design/ARCHITECTURE.md`           | worker-3 | A    | ✅    |
+| 7  | Data Dictionary        | `03-design/DATA-DICTIONARY.md`        | worker-3 | A    | ✅    |
+| 8  | API Specification      | `04-api-security/API-SPECIFICATION.md`| worker-4 | A    | ✅    |
+| 9  | RBAC Design            | `04-api-security/RBAC-DESIGN.md`      | worker-4 | A    | ✅    |
+| 10 | Audit Log Design       | `04-api-security/AUDIT-LOG-DESIGN.md` | worker-4 | A    | ✅    |
+| 11 | UI Prototype           | `05-ui/DESIGN-SYSTEM.md` + `05-ui/prototype/*.html` | worker-5 | A | ✅ |
+| 12 | Test Plan              | `06-testing/TEST-PLAN.md`             | worker-1 | A    | ✅    |
 | 13 | Developed System       | `apps/*`                              | team     | B–E  | —    |
 | 14 | Source Code            | repo ทั้งหมด                          | team     | B–E  | —    |
 | 15 | Database Script        | `supabase/migrations/*`               | team     | B–E  | —    |
@@ -28,3 +28,5 @@
 | 21 | User Manual            | `docs/08-manuals/USER-MANUAL.md`      | team     | F    | —    |
 
 สถานะ: ⏳ รอ · 🔄 กำลังทำ · ✅ ผ่าน CTO gate · ❌ ตีกลับแก้ไข
+
+> **Wave A gate: PASS** — codex CTO gate รอบ 5 (2026-09-09,  decision D17): 0 BLOCKER / 0 MAJOR / 1 MINOR (R5-m1 แก้พร้อม approve) · วงบรรจุ r1→r5: 2B/17M → 3B/21M → 0B/7M → 0B/2M → **0B/0M** · เอกสาร Wave A = baseline 1.0.0 สำหรับ Wave B (Brief คง 0.2.1 — DCR-controlled)

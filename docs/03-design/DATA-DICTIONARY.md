@@ -2,10 +2,10 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 0.1.0                                             |
-| วันที่    | 2026-09-08                                        |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-3 (Wave A — deliverable 7)                 |
-| สถานะ    | รอ CTO gate                                       |
+| สถานะ    | ผ่าน CTO gate (codex รอบ 5: PASS — D17)           |
 | อ้างอิงบังคับ | PROJECT-BRIEF.md §5 (8 โดเมน), §8 (RLS/PDPA/audit) |
 | เอกสารเชื่อมโยง | SDS.md, ARCHITECTURE.md, RBAC-DESIGN.md, AUDIT-LOG-DESIGN.md |
 

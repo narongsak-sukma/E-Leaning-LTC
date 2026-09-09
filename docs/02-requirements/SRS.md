@@ -3,9 +3,9 @@
 |          |                                                                 |
 | -------- | --------------------------------------------------------------- |
 | เอกสาร   | SRS (Software Requirements Specification)                       |
-| เวอร์ชัน | 0.2.0 (แก้ตาม review A6)                                         |
-| วันที่    | 2026-09-08                                                       |
-| สถานะ    | Draft — รอ lead review + cross-doc consistency + CTO gate (Wave A) |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
+| วันที่    | 2026-09-09                                                       |
+| สถานะ    | Approved — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline Wave B |
 | เจ้าของ   | worker-2 (Task A2)                                               |
 | มาตรฐาน  | ISO/IEC/IEEE 29148:2018                                          |
 | Baseline | PROJECT-BRIEF v0.2.1 (source of truth) — ขัดแย้งฉบับใด ยึด Brief แล้วยื่น DCR |
