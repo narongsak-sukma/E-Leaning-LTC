@@ -1,0 +1,137 @@
+# =============================================================================
+# LTC E-Learning — CI merge gates [B-04]
+# -----------------------------------------------------------------------------
+# กฎ merge ของโปรเจกต์ (PROJECT-PLAN §3/§4 + TEST-PLAN §3.4):
+#   ทุก PR ต้องผ่านครบ 5 ด่าน — lint + typecheck + test + build + secrets scan
+#   โค้ด auth/security/data ต้องผ่าน codex gate เพิ่มอีกชั้น (อยู่นอก CI นี้ —
+#   ตรวจด้วย checklist ใน .github/PULL_REQUEST_TEMPLATE.md)
+#
+# รันชุด gates เดียวกันบนเครื่องก่อน push:
+#   bash scripts/ci-local.sh
+#
+# หมายเหตุ version pinning (ตัดสินใจตาม evidence ที่ตรวจสอบได้ ณ 2026-09-09):
+#   - actions/checkout pin ด้วย full commit SHA (ยืนยันจาก release v4.2.2 แล้ว)
+#   - actions/setup-node + gitleaks-action อ้าง major tag ของทางการ
+#     (แก้เป็น full SHA ภายหลังเมื่อตรวจ SHA จริงได้ — เครื่องพัฒนาเข้า
+#     api.github.com ไม่ได้ ณ วันทำงาน) + ล็อกเวอร์ชัน binary ของ gitleaks
+#     เองด้วย GITLEAKS_VERSION เพื่อให้ผล scan ทำซ้ำได้
+# =============================================================================
+
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main] # ทุก branch ที่เปิด PR เข้า develop/main
+  push:
+    branches: [develop]
+  workflow_dispatch: # อนุญาตรันมือเพื่อตรวจว่า pipeline พร้อม (เช่นหลัง merge workflow นี้)
+
+# สิทธิ์น้อยที่สุด — CI อ่าน repo อย่างเดียว ไม่เขียนอะไร
+permissions:
+  contents: read
+
+# การเปิด PR ใหม่ใน branch เดียวกัน ยกเลิกรอบเก่าที่ยังรันค้าง
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash # = bash --noprofile --norc -eo pipefail {0} (fail ตาม exit code เสมอ)
+
+jobs:
+  merge-gates:
+    name: merge-gates (lint → typecheck → test → build → secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # placeholder สำหรับ build เท่านั้น — ไม่ใช่ค่าจริง (ค่าจริง inject ตอน deploy
+      # ตามกฎ "โค้ดชุดเดียว ต่างกันแค่ environment variables" — PROJECT-PLAN §10)
+      # ตั้งชื่อตาม SDS §5.1: service role key ไม่มี NEXT_PUBLIC_ นำหน้าเสมอ
+      NEXT_PUBLIC_SUPABASE_URL: https://ci-placeholder.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+
+    steps:
+      - name: Checkout (full history — gitleaks ต้องใช้)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22 LTS + cache npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: CI summary header
+        run: |
+          set -euo pipefail
+          {
+            echo "## Merge gates — ${{ github.event_name }} \`${{ github.ref_name }}\`"
+            echo ""
+            echo "| ด่าน | ผล |"
+            echo "| ---- | ---- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Gate 1: lint -----------------------------------------------------
+      - name: "Gate 1/5 — lint"
+        run: |
+          set -euo pipefail
+          npm run lint
+          echo "| 1/5 lint | :white_check_mark: PASS |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Gate 2: typecheck ------------------------------------------------
+      - name: "Gate 2/5 — typecheck"
+        run: |
+          set -euo pipefail
+          npm run typecheck
+          echo "| 2/5 typecheck | :white_check_mark: PASS |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Gate 3: test -----------------------------------------------------
+      - name: "Gate 3/5 — test (vitest)"
+        run: |
+          set -euo pipefail
+          log="$(mktemp "${RUNNER_TEMP:-/tmp}/vitest.XXXXXX")"
+          status=0
+          npm run test 2>&1 | tee "$log" || status=$?
+          # สรุปจำนวน test ลง step summary (เป็น evidence ตาม DoD: test count)
+          {
+            echo "| 3/5 test | :white_check_mark: PASS — $(grep -Eo '[0-9]+ passed' "$log" | tail -1 || echo 'รันผ่าน (ไม่พบบรรทัดสรุปจำนวน test)') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # ---- Gate 4: build ----------------------------------------------------
+      - name: "Gate 4/5 — build"
+        run: |
+          set -euo pipefail
+          npm run build
+          echo "| 4/5 build | :white_check_mark: PASS |" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # ---- Gate 5: secrets scan (gitleaks, pin เวอร์ชัน binary) -------------
+      # .gitleaks.toml ใน repo root ถูกอ่านอัตโนมัติโดย gitleaks-action
+      - name: "Gate 5/5 — secrets scan (gitleaks)"
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # ใช้ api ของ repo — ไม่มีสิทธิ์เขียน
+          GITLEAKS_VERSION: 8.24.2 # pin เวอร์ชัน scanner binary ให้ผล scan ทำซ้ำได้
+        # ไม่ตั้ง GITLEAKS_ENABLE_UPLOAD — ไม่ส่งผลไป gitleaks.io
+
+      - name: Final summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "**ผลรวม: ผ่านครบ 5 ด่าน — merge ได้** (เงื่อนไขอื่นของ merge ยังผูกตาม PROJECT-PLAN §4)"
+            else
+              echo "**ผลรวม: ไม่ผ่าน — ห้าม merge** (ดู step ที่ fail ด้านบน — gates ที่ไม่ได้รันถือว่ายังไม่ผ่าน)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

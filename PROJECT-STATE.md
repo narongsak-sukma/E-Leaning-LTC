@@ -35,7 +35,7 @@
 | B-01 | Repo scaffold: Next.js 15 + TS strict + Tailwind + shared kernel (config/logger/errors/zod) + health route + vitest | worker-b1 (haiku) | 🔄 กำลังทำ |
 | B-02 | `supabase/migrations/*` จาก DATA-DICTIONARY 1.0.0 (40 ตาราง + helpers + RLS + index + trigger) — **auth/security/data → codex gate ก่อน merge** | worker-b2 (haiku) | 🔄 กำลังทำ |
 | B-03 | Docker dev env: docker-compose + Supabase local + Mailpit + .env.example + make targets | worker-b3 (haiku) | 🔄 กำลังทำ |
-| B-04 | CI 5 ด่าน: lint + tsc + test + build + secrets scan (GitHub Actions + gitleaks) | worker-b4 (haiku) | 🔄 กำลังทำ |
+| B-04 | CI 5 ด่าน: lint + tsc + test + build + secrets scan (GitHub Actions + gitleaks) | worker-b4 (haiku) | ✅ done — lead verify: gates local 4/5 PASS (exit 0, 28 tests) + secret-grep สะอาด; gate 5 (gitleaks) บังคับบน CI ตั้งแต่ PR แรกที่มี remote (2026-09-09) |
 
 การใช้งานจริงของกฎ (lead note):
 - **โครงสร้าง repo = single Next.js app ที่ root** (package.json/src ที่ root) ตาม SDS §2 "Next.js application ชุดเดียว" — README board deliverable 13 (`apps/*`) เป็น index hint เท่านั้น จะทำ `apps/` เมื่อมี runtime ที่สอง (worker แยก) จริง
@@ -103,3 +103,4 @@
 - 2026-09-09 · **ผู้ว่าจ้างมอบอำนาจตัดสินใจเต็มให้ CTO-lead (D16 — "no wait me") + อนุมัติรอบแก้จุดจบ** — lead แก้เอง 5 findings ของ r4 (9 edits/4 ไฟล์: N1 revoke PUBLIC + event-class split, N2 instructor_attempt_view, M1 §1.4, M2 diagram snapshot, M3 TRUNCATE) → grep ผ่านทุกข้อ → commit → codex gate round 5 → นับจากนี้ตัดสินใจเองทุกขั้น รายงานเป็นระยะ
 - 2026-09-09 · **codex gate round 5 = PASS (0 BLOCKER/0 MAJOR/1 MINOR) → CTO APPROVE (D17) — Wave A ปิดสมบูรณ์** — 5/5 RESOLVED (N1/N2/M1/M2/M3); R5-m1 (AUTH_* producer mapping) แก้พร้อม approve ใน AUDIT §4; เอกสาร 9 ฉบับ bump เป็น **1.0.0 baseline** (Brief คง 0.2.1); docs/README board 1–12 → ✅; วงบรรจุ 5 รอบ: 2B/17M → 3B/21M → 0B/7M → 0B/2M → 0B/0M
 - 2026-09-09 · **Wave B unlocked** — repo scaffold + Docker dev env + CI · per-worker worktrees ตาม D4 · ยึด DATA-DICTIONARY 1.0.0 เป็น blueprint ของ `supabase/migrations/*`
+- 2026-09-09 · **B-04 เสร็จ (lane แรกของ Wave B)** — worker-b4 (flash): ci.yml 137 บรรทัด (5 gates fail-fast, permissions read, checkout pin SHA, gitleaks pin 8.24.2) + .gitleaks.toml (2 rules + allowlist 5 paths) + PR template ไทย + ci-local.sh 190 บรรทัด (exit 0/1/2 semantics + fail-path ทดสอบแล้ว) · lead verify: wc ตรง, yaml-lint exit 0, TOML parse OK, ci-local 4/5 PASS (28 tests), secret-grep สะอาด · ข้อจำกัดตรงไปตรงมา: gate 5 เครื่อง local ไม่มี gitleaks binary (proxy block TLS) — บังคับจริงบน CI เมื่อมี remote · สังเกตุ: scaffold ของ B-01 ผ่าน lint/typecheck/test/build แล้ว ณ ตอนนี้ (28 tests)
