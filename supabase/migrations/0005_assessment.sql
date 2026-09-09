@@ -10,7 +10,8 @@ create table public.question_banks (
   course_id uuid null references public.courses (id),
   category_id uuid null references public.course_categories (id),
   description text null,
-  is_active boolean not null default true
+  is_active boolean not null default true,
+  created_at timestamptz not null default now() -- แบบแผนกลาง DD §1 (D18-M11)
 );
 create unique index uq_question_banks_code on public.question_banks (code);
 create index question_banks_course_idx on public.question_banks (course_id);
@@ -27,7 +28,8 @@ create table public.questions (
   status public.question_status not null default 'draft',
   tags text[] not null default '{}',
   created_by uuid not null references public.profiles (id),
-  version int not null default 1
+  version int not null default 1,
+  created_at timestamptz not null default now()
 );
 create index questions_bank_status_diff_idx on public.questions (bank_id, status, difficulty);
 create index questions_tags_gin_idx on public.questions using gin (tags);
@@ -38,7 +40,8 @@ create table public.question_options (
   question_id uuid not null references public.questions (id),
   option_text text not null,
   is_correct boolean not null,
-  sort_order int not null
+  sort_order int not null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_question_options_sort
   on public.question_options (question_id, sort_order);
@@ -53,7 +56,8 @@ create table public.assessments (
   is_final boolean not null default true,
   status public.assessment_status not null default 'draft',
   published_at timestamptz null,
-  deleted_at timestamptz null
+  deleted_at timestamptz null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_assessments_course_code
   on public.assessments (course_id, code) where deleted_at is null;
@@ -73,7 +77,8 @@ create table public.assessment_rules (
   selection jsonb not null default '{}'::jsonb,
   require_course_complete boolean not null default true,
   proctoring_mode public.proctoring_mode not null default 'basic',
-  effective_from timestamptz not null default now()
+  effective_from timestamptz not null default now(),
+  created_at timestamptz not null default now()
 );
 create unique index uq_assessment_rules_version
   on public.assessment_rules (assessment_id, version);
@@ -99,7 +104,8 @@ create table public.assessment_attempts (
   passed boolean null,
   question_count int not null,
   correct_count int null,
-  client_events jsonb null
+  client_events jsonb null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_assessment_attempts_no
   on public.assessment_attempts (assessment_id, user_id, attempt_no);
@@ -120,13 +126,16 @@ create table public.attempt_answers (
   question_snapshot jsonb not null,
   is_correct boolean null,
   points_earned smallint null,
-  answered_at timestamptz null
+  answered_at timestamptz null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_attempt_answers_question
   on public.attempt_answers (attempt_id, question_id);
 create index attempt_answers_question_idx on public.attempt_answers (question_id);
 -- Trigger ตรวจ options ถูกต้อง (DD §4.2)
 -- single_choice/true_false ต้องมี is_correct=true จำนวน 1
+-- D18-M6(ก): ครอบ UPDATE ด้วย — แถว option ที่ย้าย question_id ต้องตรวจซ้ำ question เดิม
+-- (เดิมตรวจเฉพาะ NEW.question_id ทำให้ question เดิมเสีย invariant ได้)
 create or replace function public.validate_option_correctness() returns trigger
 language plpgsql security definer
 set search_path = public
@@ -134,19 +143,29 @@ as $fn$
 declare
   v_qtype public.question_type;
   v_count int;
-  v_qid uuid;
 begin
-  v_qid := new.question_id;
-  select type into v_qtype from public.questions where id = v_qid;
-  if v_qtype is null then
-    -- ยังไม่เกี่ยวกับตาราง questions (โครง quiz_questions ของ DD ใช้ตาราง questions)
-    v_count := 0;
+  -- UPDATE ที่ย้าย question_id: ตรวจ question เดิม (OLD.question_id) ด้วย
+  if tg_op = 'UPDATE' and old.question_id is distinct from new.question_id then
+    select type into v_qtype from public.questions where id = old.question_id;
+    if v_qtype in ('single_choice','true_false') then
+      select count(*) into v_count
+      from public.question_options
+      where question_id = old.question_id and is_correct = true;
+      if v_count <> 1 then
+        raise exception 'options: single_choice/true_false ต้องมีคำตอบถูก 1 ตัว (DD §4.2)';
+      end if;
+    end if;
   end if;
-  select count(*) into v_count
-  from public.question_options
-  where question_id = v_qid and is_correct = true;
-  if v_qtype in ('single_choice','true_false') and v_count <> 1 then
-    raise exception 'options: single_choice/true_false ต้องมีคำตอบถูก 1 ตัว (DD §4.2)';
+
+  -- invariant เดิม ณ question ปัจจุบัน (NEW.question_id)
+  select type into v_qtype from public.questions where id = new.question_id;
+  if v_qtype in ('single_choice','true_false') then
+    select count(*) into v_count
+    from public.question_options
+    where question_id = new.question_id and is_correct = true;
+    if v_count <> 1 then
+      raise exception 'options: single_choice/true_false ต้องมีคำตอบถูก 1 ตัว (DD §4.2)';
+    end if;
   end if;
   return null;
 end;
@@ -157,7 +176,63 @@ create constraint trigger trg_question_options_correctness
   deferrable initially deferred
   for each row execute function public.validate_option_correctness();
 
+-- D18-M6(ข): เปลี่ยน type ของข้อ → ตรวจ invariant เดิมซ้ำ (DD §4.2)
+create or replace function public.validate_question_type_change() returns trigger
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_count int;
+begin
+  -- ตรวจเมื่อ type เปลี่ยนจริงเท่านั้น
+  if new.type is not distinct from old.type then
+    return null;
+  end if;
+  if new.type in ('single_choice','true_false') then
+    select count(*) into v_count
+    from public.question_options
+    where question_id = new.id and is_correct = true;
+    if v_count <> 1 then
+      raise exception 'questions: เปลี่ยน type เป็น % ต้องมีคำตอบถูก 1 ตัวเลือก (DD §4.2, D18-M6)', new.type;
+    end if;
+  end if;
+  return null;
+end;
+$fn$;
+
+create trigger trg_questions_type_correctness
+  after update on public.questions
+  for each row execute function public.validate_question_type_change();
+
+-- D18-M6(ข) ฝั่ง quiz — quiz_questions มี type เอง (0004) จึงตรวจซ้ำได้เช่นเดียวกัน
+create or replace function public.validate_quiz_question_type_change() returns trigger
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_count int;
+begin
+  if new.type is not distinct from old.type then
+    return null;
+  end if;
+  if new.type in ('single_choice','true_false') then
+    select count(*) into v_count
+    from public.quiz_options
+    where question_id = new.id and is_correct = true;
+    if v_count <> 1 then
+      raise exception 'quiz_questions: เปลี่ยน type เป็น % ต้องมีคำตอบถูก 1 ตัวเลือก (DD §4.2, D18-M6)', new.type;
+    end if;
+  end if;
+  return null;
+end;
+$fn$;
+
+create trigger trg_quiz_questions_type_correctness
+  after update on public.quiz_questions
+  for each row execute function public.validate_quiz_question_type_change();
+
 -- Trigger ตรวจ options ของ quiz (DD §4.2 - quiz_options)
+-- D18-M6(ก): ครอบ UPDATE ที่ย้าย question_id — ตรวจซ้ำ question เดิมด้วย
 create or replace function public.validate_quiz_option_correctness() returns trigger
 language plpgsql security definer
 set search_path = public
@@ -166,14 +241,32 @@ declare
   v_qtype public.question_type;
   v_count int;
 begin
+  -- UPDATE ที่ย้าย question_id: ตรวจ question เดิม (OLD.question_id) ด้วย
+  if tg_op = 'UPDATE' and old.question_id is distinct from new.question_id then
+    select qq.type into v_qtype
+    from public.quiz_questions qq
+    where qq.id = old.question_id;
+    if v_qtype in ('single_choice','true_false') then
+      select count(*) into v_count
+      from public.quiz_options o
+      where o.question_id = old.question_id and o.is_correct = true;
+      if v_count <> 1 then
+        raise exception 'quiz_options: single_choice/true_false ต้องมีคำตอบถูก 1 ตัว (DD §4.2)';
+      end if;
+    end if;
+  end if;
+
+  -- invariant เดิม ณ question ปัจจุบัน (NEW.question_id)
   select qq.type into v_qtype
   from public.quiz_questions qq
   where qq.id = new.question_id;
-  select count(*) into v_count
-  from public.quiz_options o
-  where o.question_id = new.question_id and o.is_correct = true;
-  if v_qtype in ('single_choice','true_false') and v_count <> 1 then
-    raise exception 'quiz_options: single_choice/true_false ต้องมีคำตอบถูก 1 ตัว (DD §4.2)';
+  if v_qtype in ('single_choice','true_false') then
+    select count(*) into v_count
+    from public.quiz_options o
+    where o.question_id = new.question_id and o.is_correct = true;
+    if v_count <> 1 then
+      raise exception 'quiz_options: single_choice/true_false ต้องมีคำตอบถูก 1 ตัว (DD §4.2)';
+    end if;
   end if;
   return null;
 end;

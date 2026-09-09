@@ -60,6 +60,8 @@ grant usage on schema auth to anon, authenticated, service_role;
 -- stub อ่าน request.jwt.claims (contract เดียวกับ Supabase จริง) เพื่อให้
 -- ทดสอบ RLS บน vanilla PG จำลองผู้ใช้ด้วย set_config('request.jwt.claims', ...)
 -- ได้ตั้งแต่ Wave C — บน Supabase จริงข้าม (ใช้ของแท้ที่ GoTrue จัดการ)
+-- ไร้ claims / claims ว่าง / json พัง = actor เป็น null ไม่ใช่ crash
+-- (เกิดจริงกับ SECURITY DEFINER path ไร้ JWT เช่น job/service + superuser maintenance)
 do $$
 begin
   if not exists (
@@ -69,12 +71,14 @@ begin
   ) then
     execute $fn$
       create function auth.uid() returns uuid
-      language sql stable
+      language plpgsql stable
+      set search_path = public
       as $body$
-        select nullif(
-          current_setting('request.jwt.claims', true)::jsonb ->> 'sub',
-          ''
-        )::uuid
+      begin
+        return nullif(current_setting('request.jwt.claims', true)::jsonb ->> 'sub', '')::uuid;
+      exception
+        when others then return null;
+      end;
       $body$
     $fn$;
   end if;

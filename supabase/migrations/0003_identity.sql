@@ -13,6 +13,7 @@ create table public.profiles (
   pdpa_consented_at timestamptz null,
   is_active boolean not null default true,
   deleted_at timestamptz null,
+  created_at timestamptz not null default now(), -- แบบแผนกลาง DD §1 (D18-M11)
   constraint profiles_locale_check check (preferred_locale in ('th','en')),
   constraint profiles_phone_e164_check check (phone is null or phone ~ '^\+[1-9]\d{1,14}$')
 );
@@ -27,7 +28,8 @@ create table public.role_assignments (
   granted_by uuid null references public.profiles (id),
   granted_at timestamptz not null default now(),
   revoked_at timestamptz null,
-  reason text null
+  reason text null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_role_assignments_user_role_active
   on public.role_assignments (user_id, role) where revoked_at is null;
@@ -49,6 +51,7 @@ create table public.lawyer_licenses (
   revoked_at timestamptz null,
   rejected_reason text null,
   deleted_at timestamptz null,
+  created_at timestamptz not null default now(),
   constraint lawyer_licenses_rejected_reason_check
     check ((status = 'rejected') = (rejected_reason is not null))
 );
@@ -71,6 +74,7 @@ create table public.license_applications (
   decided_at timestamptz null,
   rejected_reason text null,
   resulting_license_id uuid null references public.lawyer_licenses (id),
+  created_at timestamptz not null default now(),
   constraint license_applications_rejected_reason_check
     check (status <> 'rejected' or rejected_reason is not null)
 );
@@ -101,7 +105,8 @@ create table public.notice_acknowledgments (
   user_id uuid not null references public.profiles (id),
   notice_key text not null,
   version text not null,
-  acknowledged_at timestamptz not null default now()
+  acknowledged_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
 );
 create unique index uq_notice_ack_user_key_version
   on public.notice_acknowledgments (user_id, notice_key, version);
@@ -118,7 +123,8 @@ create table public.admin_sessions (
   ended_at timestamptz null,
   ended_reason public.admin_session_end null,
   ip_hash text not null,
-  user_agent text null
+  user_agent text null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_admin_sessions_session_id on public.admin_sessions (session_id);
 create index admin_sessions_user_active_idx

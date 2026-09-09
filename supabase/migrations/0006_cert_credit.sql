@@ -19,6 +19,7 @@ create table public.certificates (
   pdf_media_id uuid null, -- FK เพิ่มท้ายไฟล์ (media_assets อยู่ 0004)
   superseded_by uuid null,
   supersedes_cert_id uuid null,
+  created_at timestamptz not null default now(), -- แบบแผนกลาง DD §1 (D18-M11)
   constraint certificates_revoked_check
     check ((status = 'revoked') = (revoked_at is not null))
 );
@@ -53,7 +54,8 @@ create table public.credit_rules (
   effective_from timestamptz not null default now(),
   effective_to timestamptz null,
   status text not null default 'draft' check (status in ('draft','active','retired')),
-  renewal_cycle text null
+  renewal_cycle text null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_credit_rules_code on public.credit_rules (code);
 create index credit_rules_course_priority_idx on public.credit_rules (course_id, priority);
@@ -67,7 +69,8 @@ create table public.renewal_cycles (
   ends_on date not null,
   required_credits jsonb not null,
   status public.cycle_status not null default 'open',
-  closed_at timestamptz null
+  closed_at timestamptz null,
+  created_at timestamptz not null default now()
 );
 create unique index uq_renewal_cycles_user_no
   on public.renewal_cycles (user_id, cycle_no);

@@ -25,7 +25,8 @@ create table public.notification_recipients (
   channel public.notification_channel not null,
   sent_at timestamptz null,
   read_at timestamptz null,
-  deleted_at timestamptz null
+  deleted_at timestamptz null,
+  created_at timestamptz not null default now() -- แบบแผนกลาง DD §1 (D18-M11)
 );
 create unique index uq_notification_recipients_triplet
   on public.notification_recipients (notification_id, user_id, channel);
@@ -36,7 +37,8 @@ create index notification_recipients_user_channel_idx
 create table public.notification_settings (
   user_id uuid primary key references public.profiles (id),
   settings jsonb not null default '{}'::jsonb,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
 );
 create trigger trg_notification_settings_updated_at
   before update on public.notification_settings
@@ -52,7 +54,8 @@ create table public.notification_templates (
   body_tpl text not null,
   version int not null default 1,
   is_active boolean not null default true,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
 );
 create unique index uq_notification_templates_active
   on public.notification_templates (template_key, locale, channel) where is_active;
@@ -73,7 +76,8 @@ create table public.email_outbox (
   attempts int not null default 0,
   last_error text null,
   scheduled_at timestamptz not null default now(),
-  sent_at timestamptz null
+  sent_at timestamptz null,
+  created_at timestamptz not null default now()
 );
 create index email_outbox_queue_idx
   on public.email_outbox (status, scheduled_at) where status in ('queued','sending');
@@ -88,7 +92,8 @@ create table public.event_outbox (
   attempts int not null default 0,
   last_error text null,
   available_at timestamptz not null default now(),
-  processed_at timestamptz null
+  processed_at timestamptz null,
+  created_at timestamptz not null default now()
 );
 create index event_outbox_queue_idx
   on public.event_outbox (status, available_at) where status in ('pending','processing');
@@ -107,7 +112,8 @@ create table public.report_exports (
   error text null,
   requested_at timestamptz not null default now(),
   completed_at timestamptz null,
-  expires_at timestamptz null
+  expires_at timestamptz null,
+  created_at timestamptz not null default now()
 );
 create index report_exports_requester_idx
   on public.report_exports (requested_by, requested_at desc);
@@ -126,7 +132,8 @@ create table public.security_events (
   ip_hash text not null,
   user_agent text null,
   request_id text null,
-  detail jsonb null
+  detail jsonb null,
+  created_at timestamptz not null default now()
 );
 create index security_events_occurred_idx on public.security_events (occurred_at desc);
 create index security_events_target_type_idx on public.security_events (target_user_id, event_type);
