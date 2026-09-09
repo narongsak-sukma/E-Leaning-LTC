@@ -133,24 +133,25 @@
 `context` ของแต่ละ event ใช้ **schema เฉพาะของ event นั้น (strict)** — ไม่มี schema กลางแบบ free-form; ฟรีเท็กซ์ (`reason`, `rejected_reason`) ต้องผ่าน `FreeText` เสมอ:
 
 ```typescript
-// sanitize ฟรีเท็กซ์ — ใช้กับทุกฟรีเท็กซ์ฟิลด์ (reason, rejected_reason ฯลฯ) (D11-9 + D12-3 BLOCKER F9)
-// normalize ก่อน detect: ตัด whitespace/ขีด/จุด ออก เพื่อไม่ให้หลุดด้วยการเว้นวรรค/ขีดคั่น
-const normalizeForPiiScan = (s: string) => s.replace(/[\s\-–—_.]/g, "");
+// sanitize ฟรีเท็กซ์ — ใช้กับทุกฟรีเท็กซ์ฟิลด์ (reason, rejected_reason ฯลฯ) (D11-9 + D12-3 BLOCKER F9 + D13-F1)
+// ตรวจ 2 รูปแบบแยกกัน (D13-F1): กฎตัวเลขตรวจบน normalized (ตัด whitespace/ขีด/จุด — กันหลุดด้วยการคั่น)
+//   ส่วนอีเมลตรวจบนรูปที่ **คง "." ไว้** — regex อีเมลต้องเจอจุดของ domain จริง การ strip จุดก่อนตรวจทำให้อีเมลรอดทุกกฎ
+const normalizeForDigits = (s: string) => s.replace(/[\s\-–—_.]/g, "");
+const collapseForEmail = (s: string) => s.replace(/[\s\-–—]+/g, "");   // ตัดช่องว่าง/ขีดคั่น แต่คง "." ของ domain
 
-const PII_RULES: Array<[RegExp, string]> = [
-  [/\d{13}/, "thai_national_id"],            // ตรวจก่อนเสมอ (สตริง 13 หลักจะกลืน license 6–9 หลัก)
-  [/(?:\+66|66|0)\d{8,9}/, "phone"],         // 0XXXXXXXXX / +66XXXXXXXXX
-  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/, "email"],
-  [/\d{6,9}/, "license_no"],                 // หลังตัดขีด/ช่องว่าง — เลข 6–9 หลักตามรูปแบบใบอนุญาต
+const PII_RULES: Array<[RegExp, string, "digits" | "email"]> = [
+  [/\d{13}/, "thai_national_id", "digits"],            // ตรวจก่อนเสมอ (สตริง 13 หลักจะกลืน license 6–9 หลัก)
+  [/(?:\+66|66|0)\d{8,9}/, "phone", "digits"],         // 0XXXXXXXXX / +66XXXXXXXXX
+  [/[\w.+-]+@[\w-]+\.[\w.]{2,}/, "email", "email"],    // บนข้อความที่คง "." — ไม่ strip จุด (D13-F1)
+  [/\d{6,9}/, "license_no", "digits"],                 // หลังตัดขีด/ช่องว่าง — เลข 6–9 หลักตามรูปแบบใบอนุญาต
 ];
 
 const FreeText = z.string()
   .transform((s) => s.trim().replace(/\s+/g, " "))      // sanitize ผิว: trim + ยุบช่องว่าง
   .pipe(z.string().max(500))                            // จำกัดความยาว
-  .refine((v) => {
-    const n = normalizeForPiiScan(v);
-    return !PII_RULES.some(([re]) => re.test(n));
-  }, { message: "ฟรีเท็กซ์ห้ามมีรูปแบบ email / เบอร์โทร / เลขบัตร 13 หลัก / เลขใบอนุญาต 6–9 หลัก" });
+  .refine((v) => !PII_RULES.some(([re, , mode]) =>
+      re.test(mode === "digits" ? normalizeForDigits(v) : collapseForEmail(v))),
+    { message: "ฟรีเท็กซ์ห้ามมีรูปแบบ email / เบอร์โทร / เลขบัตร 13 หลัก / เลขใบอนุญาต 6–9 หลัก" });
 // นโยบายเมื่อตรวจพบ (D12-3): BFF **ปฏิเสธ** (400 ERR-VAL-001 — ไม่เขียน raw ลง audit เด็ดขาด);
 // กรณี event async ที่ต้องเขียนได้ต่อ (ไม่คู่ mutation, §1.5) → แทนที่ส่วนที่ตรวจพบด้วย `[redacted:<kind>]`
 // และ mark `sanitized=true` ใน context — ห้ามเก็บค่าดิบทั้งสองกรณี
@@ -208,7 +209,8 @@ row_hash = sha256( prev_hash
 
 - **ลำดับการไล่สาย (traversal): `(occurred_at, id)`** (D12-7) — prev_hash ของแถวแรกของสาย = anchor วันก่อนหน้า (`audit_chain_anchors.last_row_hash`); สายแรกของระบบ (genesis) ใช้ prev_hash = 40 ค่า 0; การไล่ตรวจเรียงตาม (occurred_at, id) เสมอ ไม่ใช้แค่ id (กันเวลา clock skew ข้าม node)
 
-- การแทรก **serialize ด้วย `pg_advisory_xact_lock(hashtag)` ในฟังก์ชัน `append_audit_event()`** (SECURITY DEFINER — เขียนในนามเจ้าของ function จึงไม่ต้องมีสิทธิ์ direct INSERT สำหรับ service_role, D11-8) — กัน chain แตกจาก concurrent write
+- การแทรก **serialize ด้วย `pg_advisory_xact_lock(hashtag)` ในฟังก์ชัน `append_audit_event()`** (SECURITY DEFINER — เขียนในนามเจ้าของ function จึงไม่ต้องมีสิทธิ์ direct INSERT สำหรับ caller, D11-8) — กัน chain แตกจาก concurrent write
+- **ลำดับสาย = ลำดับ append เสมอ (D13-F3)**: ภายใต้ lock ฟังก์ชันอ่านแถวสุดท้ายของสายแล้วกำหนด `occurred_at = greatest(now(), prev.occurred_at + 1 microsecond)` — เพราะ `now()` คงที่ตลอด TX เดียวและ `id` เป็น UUID v4 สุ่ม (เรียงไม่ได้) การบังคับให้ `occurred_at` **strictly increasing** เป็นเงื่อนไขเดียวที่ทำให้ traversal `(occurred_at, id)` ตรงกับลำดับ append เป๊ะ (ไม่เกิด tie ที่ต้องใช้ id ตัดสิน) — verifier จึงไม่แจ้ง chain แตกเท็จจากหลาย event ใน TX เดียวกัน; เวลาเกิดเหตุจริงที่ต้องการความละเอียดสูงกว่านั้นเก็บแยกใน `context` ได้; anchor ปิดวันอ้างแถวสุดท้ายตามลำดับเดียวกันนี้
 - **Anchor รายวัน**: cron job เก็บ `(day, last_id, last_row_hash)` ลงตาราง **`audit_chain_anchors`** (ตารางใหม่ที่ DATA-DICTIONARY.md เพิ่มให้ตาม D11-6 — append-only เช่นกัน) — anchor ใช้เทียบ/สืบสายต่อ
 - **ตรวจสาย**: cron รายชั่วโมง ตรวจ 1,000 แถวล่าสุด; รายวัน ตรวจทั้งวันก่อนหน้า → เจอ mismatch = event `AUDIT_CHAIN_VERIFY` ระดับ CRITICAL + แจ้ง super_admin ทันที
 - ข้อจำกัดที่ยอมรับ: ป้องกันการแก้แอบ (แก้แล้ว row_hash ไม่ตรงเดิม สายขาดและถูกจับได้) แต่ผู้ที่ลบ "ทั้งเส้น + สร้าง chain ใหม่" พร้อม anchor ปลอมตรวจไม่ได้ 100% — บรรเทาด้วยสิทธิ์ DB แคบ (§4) + anchor export ออกนอก DB เดือนละครั้ง (เก็บที่ object storage เขียนครั้งเดียว)
@@ -224,9 +226,13 @@ revoke update, delete, truncate on public.audit_logs
 revoke insert on public.audit_logs from anon, authenticated, service_role; -- D12-8: เขียนผ่าน append_audit_event() เป็น path เดียว
 grant select on public.audit_logs to authenticated; -- อ่านผ่าน RLS
 
--- D12-8: function เขียน audit มี path เดียว — EXECUTE ระบุเฉพาะ role `app_owner` (ไม่ใช่ service_role)
-revoke all on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text) from public, service_role;
-grant execute on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text) to app_owner;
+-- D13-F4: contract เดียวของการเขียน audit (ปิดความขัดแย้ง AUDIT↔DD↔flow):
+--   INSERT ตรงถูกถอนจากทุก role (ด้านบน) — EXECUTE บน append_audit_event() คือสิทธิ์เดียวที่ caller ต้องมี
+--   (SECURITY DEFINER เปลี่ยนแค่ privilege ของเนื้อในฟังก์ชัน ไม่ข้ามการตรวจ EXECUTE — ผู้เรียกต้องถูก grant จริง)
+grant execute on function public.append_audit_event(text, text, text, jsonb, jsonb, jsonb, jsonb, text, text, text)
+  to authenticated, service_role;  -- authenticated = BFF เรียก RPC ด้วย user JWT (§6.2); service_role = jobs (anchor/verify/export cron)
+-- ฟังก์ชันตรวจเองภายในทุกครั้งก่อนเขียน: actor ต้อง valid (auth.uid() ของ session นั้น / job token),
+-- payload ต้องผ่าน schema ราย event (§3.2), chain sequence ภายใต้ advisory lock (§3.3) — ไม่ผ่าน = RAISE/rollback ทั้ง TX
 
 -- ชั้น 2: trigger บล็อกแม้ superuser/owner (ยกเว้น migration ที่ drop trigger อย่างชัดเจน)
 create or replace function public.prevent_audit_mutation()

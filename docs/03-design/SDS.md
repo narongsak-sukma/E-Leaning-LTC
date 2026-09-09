@@ -83,7 +83,7 @@
 **c) จับเวลา server-side** — แหล่งจริงเดียวคือ `expires_at` ใน DB:
 - client นับถอยหลังจากค่าที่ server ส่งมาเท่านั้น (ไม่เชื่อ client clock)
 - ทุกคำตอบที่บันทึก จะได้ `remaining_ms` กลับจาก server
-- คำตอบที่ส่งหลัง `expires_at` → ปฏิเสธ (409 `ATTEMPT_EXPIRED`) และ attempt ถูกปิดโดย auto-submit
+- คำตอบที่ส่งหลัง `expires_at` → ปฏิเสธ (422 `ERR-ASM-004`) และ attempt ถูกปิดโดย auto-submit
 - auto-submit: scheduler (dev: คอนเทนเนอร์ cron / prod: Vercel Cron) เรียก path เดียวกันทุก 1 นาที ปิด attempt `in_progress` ที่เลยเวลา → ตรวจจากคำตอบที่บันทึกไว้
 
 **d) บันทึกคำตอบทีละข้อ (`POST /attempts/{id}/answers`)**
@@ -113,7 +113,7 @@
 **b) การเกิดรายการ (accrual) — เกิดตอนตรวจผ่าน (grading commit) ไม่ใช่ตอนออกประกาศนียบัตร (F15/D12) — ส่งผ่าน transactional outbox (D11-17)**:
 - **จุดเกิด credit = grading commit ที่ผล `passed`** (§3.1e): TX ตรวจข้อสอบ INSERT event `assessment_attempt.passed` ลง `event_outbox` **ใน transaction เดียวกัน** — กัน event หาย/partial write; **การออกประกาศนียบัตรภายหลังเป็นธุรกรรมงานทะเบียน ไม่มีผลกับ credit อีกต่อไป**
 - worker ดึง event หลัง commit (`FOR UPDATE SKIP LOCKED`) → หา `renewal_cycles` ที่**ครอบวันที่ผ่านสอบ** [starts_on, ends_on]; ถ้าไม่มี → สร้างรอบใหม่ตาม config (ความยาวรอบ + จุดเริ่ม = config Q1, รอยืนยัน)
-- จับคู่ `credit_rules` **เวอร์ชันที่มีผล ณ วันที่ผ่านสอบ** (effective window ครอบวัน passed) แบบเจาะจงก่อน (course_id ตรง) แล้วค่อยกฎทั่วไป ตาม `priority`
+- จับคู่ `credit_rules` **เกิดครั้งเดียว ณ grading (D13-F6)**: ใน TX ตรวจข้อสอบ (`submit_attempt()`) จับคู่ rule ที่ status='active' + effective window ครอบวันผ่าน แบบเจาะจงก่อน (course_id ตรง) แล้วค่อยกฎทั่วไปตาม `priority` แล้ว **snapshot ผลการจับคู่ (`rule_id` + credits + credit_type + renewal_cycle + valid_days) ลง payload ของ outbox event** — credit worker ใช้ snapshot จาก event อย่างเดียว **ไม่ lookup `credit_rules` ซ้ำ** (กันกรณี rule ถูก retire ระหว่าง event ค้างคิวทำให้ credit หาย — กฎ active ไม่แก้ย้อนหลังอยู่แล้วจึง snapshot ครั้งเดียวพอ)
 - INSERT entry: {user_id, cycle_id, type=accrual, credit_type, amount, **source_type='assessment_attempt' (source_id = attempt_id)**, rule_id} — **idempotent กัน event ส่งซ้ำด้วย UNIQUE(source_type, source_id, credit_type)** (partial, WHERE entry_type='accrual' — DATA-DICTIONARY `credit_ledger_entries`); สำเร็จแล้ว worker mark event `processed`
 
 **c) การแก้ไข = รายการชดเชย ไม่ใช่การแก้ย้อน**:
@@ -137,7 +137,7 @@
 - จบบทเมื่อ `watch_pct >= VIDEO_COMPLETE_PCT` (default 80 ตาม SRS Appendix A `video_complete_pct` — ธง Q6) → ตั้ง `completed_at` ครั้งเดียว (idempotent)
 - seek ข้าม/เร่งความเร็วเข้าเกณฑ์ไม่ได้ เพราะช่วงที่ยาวเกิน elapsed ฝั่ง server ถูกตัดทิ้ง (การเก็บ interval map ละเอียดทุกช่วง = นอกขอบเขต v1 จดไว้ใน open questions)
 
-**c) เอกสาร**: จบบทเมื่อเปิดอ่าน + `dwell_sec >= DOC_MIN_DWELL_SEC` (default 30, config)
+**c) เอกสาร**: จบบทเมื่อผู้เรียนยืนยันอ่านจบ — **client attestation** (`documentRead: true` ตาม API §4 `LessonProgressRequest` XOR positionSeconds — D12-12); ระบบเก็บ `dwell_sec` เป็น telemetry ประกอบเท่านั้น **ไม่ใช่เงื่อนไขผ่าน** (เอกสาร static ไม่มี server-side elapsed ให้วัด — tradeoff ที่ยอมรับตาม D12-12 ชดเชยด้วยวิดีโอ bounded intervals + ข้อสอบ/quiz ตรวจ server ล้วน — D13-F9)
 **d) แบบทดสอบย่อย (quiz)**: จบบทเมื่อ **คะแนนสูงสุดตลอดช่วง** (highest — `progress_pass_score_policy=highest` ตาม SRS Appendix A) เข้าเกณฑ์ `pass_pct` ของ quiz นั้น (คนละเกณฑ์กับข้อสอบปลายหลักสูตร) — quiz เรียนได้ไม่จำกัดครั้งตาม config; **สถานะ complete ที่ได้แล้วคงอยู่** (ทำใหม่ได้คะแนนต่ำกว่าภายหลัง ไม่ถอน completed_at ย้อนหลัง — F13/D12)
 
 **e) Rollup (denormalize เพื่อ query เร็ว — ต้นทางคือ lesson_progress)**:
@@ -148,7 +148,7 @@
 ### 3.4 Certificate & Verification (M4)
 
 **a) การออก (หลักสิทธิ์อยู่ที่นายทะเบียน — brief §3)**:
-- รายการมีสิทธิ์ = enrollment `completed` และยังไม่มี certificate (ดูจากรายงาน `GET /admin/reports/assessments`) — **partial UNIQUE(enrollment_id) WHERE status='valid'** ในตาราง certificates ทำให้ออกซ้ำไม่ได้ (idempotent — รองรับ reissue/supersede — F16/D12)
+- รายการมีสิทธิ์ = attempt ผ่านเกณฑ์ + enrollment `completed` และยังไม่มี certificate สถานะ `valid` (คิวงาน **`GET /admin/certificates/eligible`** — endpoint 82 ตาม D12-23, D13-F10) — **partial UNIQUE(enrollment_id) WHERE status='valid'** ในตาราง certificates ทำให้ออกซ้ำไม่ได้ (idempotent — รองรับ reissue/supersede — F16/D12)
 - `POST /admin/certificates` (staff:registrar+; มี `/bulk` สำหรับออกเป็นชุด): สร้าง `cert_no` รูปแบบ `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` ตาม SRS Appendix A `certificate_code_format` — **สุ่มด้วย CSPRNG + ตรวจ UNIQUE ซ้ำใน transaction ไม่ใช้ sequence** (sequence ถูกเดาเลขถัดไปได้; รูปแบบสุดท้ายรอยืนยันกับสภาฯ) + snapshot ชื่อ/หลักสูตร/credit ณ วันออก (เอกสารไม่เปลี่ยนตามข้อมูลที่แก้ภายหลัง)
 - credit เกิดแล้วตั้งแต่ผลสอบเป็น `passed` (ตอน grading commit — §3.2b, F15/D12) — การออกประกาศนียบัตรไม่กระทบ credit อีก; ออกแล้วแจ้งเตือนอีเมลพร้อมลิงก์ดาวน์โหลด + QR
 
@@ -252,7 +252,7 @@ sequenceDiagram
     participant BFF as Next BFF
     participant DB as Postgres + RLS
     participant M as อีเมล
-    R->>BFF: GET /api/v1/admin/reports/assessments (รายการมีสิทธิ์ออกใบ)
+    R->>BFF: GET /api/v1/admin/certificates/eligible (คิว attempt ผ่านที่ยังไม่มีใบ valid — D13-F10)
     BFF->>DB: enrollment completed + ผ่านสอบ + ยังไม่มี certificate
     R->>BFF: POST /api/v1/admin/certificates (enrollment_id)
     BFF->>DB: TX: partial UNIQUE(enrollment_id) WHERE status='valid' กันซ้ำ → INSERT certificates (supersedes_cert_id เมื่อ reissue — F16)
@@ -346,8 +346,8 @@ sequenceDiagram
 
 ### 6.1 Error envelope + mapping
 
-- รูปแบบ: `{ "error": { "code": "ATTEMPT_EXPIRED", "message": "เวลาสอบหมดแล้ว ระบบตรวจคำตอบที่บันทึกไว้แล้ว", "request_id": "..." } }` — code รายการเต็มอยู่ที่ API-SPECIFICATION.md, ข้อความภาษาไทย (brief §9.3)
-- zod fail → 400 `VALIDATION` (ไม่สะท้อน input กลับ); เงื่อนไขธุรกิจไม่ผ่าน → 409/422 ตามกรณี; ไม่มีสิทธิ์รู้การมีอยู่ของ resource → 404 แทน 403 เมื่อการเปิดเผย existence ไม่ปลอดภัย
+- รูปแบบ: `{ "error": { "code": "ERR-ASM-004", "message": "หมดเวลาสอบแล้ว ระบบไม่รับคำตอบเพิ่ม", "details": { "request_id": "..." } } }` — code ทั้งหมดมาจากทะเบียร์เดียวที่ API-SPECIFICATION.md §2 (`ERR-<DOMAIN>-<NNN>`) ห้ามคิด code นอกทะเบียร์ (D13-F12), ข้อความภาษาไทย (brief §9.3)
+- zod fail → 400 `ERR-VAL-001` (ไม่สะท้อน input กลับ); เงื่อนไขธุรกิจไม่ผ่าน → 409/422 ตามกรณี; ไม่มีสิทธิ์รู้การมีอยู่ของ resource → 404 แทน 403 เมื่อการเปิดเผย existence ไม่ปลอดภัย
 - 5xx: ตอบ opaque + request_id เท่านั้น — detail อยู่ใน server log; ไม่ leak SQL/stack ออกนอกเครื่อง
 
 ### 6.2 Logging
