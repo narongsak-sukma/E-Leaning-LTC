@@ -269,13 +269,13 @@ sequenceDiagram
     autonumber
     participant W as Outbox worker
     participant DB as Postgres + RLS
-    Note over DB: TX ตรวจข้อสอบ (4.3 — grading commit ผล passed) INSERT event assessment_attempt.passed ลง event_outbox ด้วย (TX เดียวกัน — F15)
+    Note over DB: TX ตรวจข้อสอบ (4.3 — grading commit ผล passed) INSERT event assessment_attempt.passed ลง event_outbox ด้วย (TX เดียวกัน — F15) **พร้อม credit rule snapshot ใน payload (rule_id+ค่าที่ใช้ — §3.2b, D13-F6)**
     W->>DB: ดึง event หลัง commit (FOR UPDATE SKIP LOCKED)
     W->>DB: หา renewal_cycle ที่ครอบ "วันที่ผ่านสอบ" (ไม่ใช่วันออกใบ)
     alt ไม่มีรอบ
         W->>DB: สร้างรอบตาม config (ความยาวรอบ — รอยืนยัน Q1)
     end
-    W->>DB: จับคู่ credit_rules เวอร์ชันที่มีผล ณ วันผ่าน (เจาะจงก่อนทั่วไป ตาม priority)
+    W->>DB: อ่าน credit rule snapshot จาก event payload (จับคู่ครั้งเดียวใน grading TX แล้ว — §3.2b — ไม่ lookup credit_rules ซ้ำ: D13-F6)
     W->>DB: INSERT credit_ledger_entries (accrual, source_type='assessment_attempt', source_id=attempt_id) — UNIQUE(source_type, source_id, credit_type) กันซ้ำ + audit
     Note over DB: ยอด = SUM(entries) เท่านั้น ห้ามแก้/ลบรายการ · ออกประกาศนียบัตรภายหลังไม่มีผลกับ credit (F15)
     W->>DB: ตรวจครบเกณฑ์ของรอบ → สร้างแจ้งเตือน

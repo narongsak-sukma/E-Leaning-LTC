@@ -158,7 +158,7 @@ Retention: ตลอดอายุบัญชี + 10 ปี (PDPA)
 | version | text | NOT NULL (เวอร์ชันของประกาศที่รับทราบ) |
 | acknowledged_at | timestamptz | NOT NULL DEFAULT now() |
 คีย์/Index: UNIQUE(user_id, notice_key, version); INDEX(notice_key, version)
-RLS: **SELECT** เจ้าของแถว; **INSERT** เจ้าของแถวผ่าน BFF (acknowledge ของตัวเอง); **UPDATE/DELETE ไม่มี path เด็ดขาด** (append-only — รวม REVOKE ใน §4.4); service_role อ่านเพื่อ gate ฟีเจอร์ที่ต้องรับทราบก่อน
+RLS: **SELECT** เจ้าของแถว; **INSERT** เจ้าของแถวผ่าน BFF (acknowledge ของตัวเอง); **UPDATE/DELETE/TRUNCATE ไม่มี path เด็ดขาด** (append-only — รวม REVOKE ใน §4.4; TRUNCATE อยู่นอก RLS จึงบังคับด้วย REVOKE — D15-M3); service_role อ่านเพื่อ gate ฟีเจอร์ที่ต้องรับทราบก่อน
 Retention: ตลอดอายุบัญชี (หลักฐานการรับทราบ — canonical ที่ §4.6)
 
 ### 3.2 Catalog & Enrollment
@@ -471,10 +471,12 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | points_earned | smallint | NULL |
 | answered_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(attempt_id, question_id); INDEX(question_id)
-RLS: **ผู้เรียนไม่มี SELECT policy บนตารางฐาน (F4/D12)** — แถวมี `question_snapshot` (is_correct = เฉลย) ผู้เรียนอ่านผ่าน view `learner_attempt_view` เท่านั้น; **SELECT** เฉพาะ `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` + instructor เจ้าของหลักสูตร; **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2)** — สร้าง snapshot โดย `start_attempt()`, บันทึกคำตอบ/ผลตรวจโดย `save_answer()`/`submit_attempt()`; **DELETE** ไม่อนุญาต
+RLS: **ผู้เรียนไม่มี SELECT policy บนตารางฐาน (F4/D12)** — แถวมี `question_snapshot` (is_correct = เฉลย) ผู้เรียนอ่านผ่าน view `learner_attempt_view` เท่านั้น; **SELECT** เฉพาะ `has_any_role('staff:viewer','staff:exam','staff:registrar','super_admin')` — **instructor ไม่มี SELECT ตรงแม้เป็นเจ้าของหลักสูตร (D15-N2: ownership เฉย ๆ ไม่เปิด raw table เพราะมีเฉลยใน `question_snapshot`) — instructor อ่านผ่าน `instructor_attempt_view` ตามนิยามด้านล่าง**; **INSERT/UPDATE ไม่มี policy ให้ผู้เรียน (F2)** — สร้าง snapshot โดย `start_attempt()`, บันทึกคำตอบ/ผลตรวจโดย `save_answer()`/`submit_attempt()`; **DELETE** ไม่อนุญาต
 Retention: ตามอายุบัญชี (learning records — canonical ที่ §4.6)
 
 **View สำหรับผู้เรียน (F4/D12)**: `learner_attempt_view` — SELECT เฉพาะแถวของตัวเอง (join ผ่าน `assessment_attempts.user_id = auth.uid()`) และ **ตัดคอลัมน์เฉลยออก** (`is_correct`, `points_earned`, `question_snapshot` และ explanation) — เปิดเฉลยเมื่อครบเงื่อนไขตาม `exam_review_mode` (SRS Appendix A; เงื่อนไขอยู่ในนิยาม view เช่น `submitted_at IS NOT NULL` + grace) ; grant SELECT ให้ authenticated — ผู้เรียนไม่ SELECT ตารางฐานโดยตรง
+
+**View สำหรับ instructor (D15-N2 — รองรับ `attempt:view O†` ของ RBAC §2.2)**: `instructor_attempt_view` — SELECT เฉพาะแถวของ attempt ที่อยู่ในหลักสูตรที่ตนเป็นเจ้าของ (ตรวจสองชั้นในนิยาม view: บทบาท `instructor` + `courses.created_by = auth.uid()` ผ่าน join assessment_attempts → enrollments → courses) และ **ตัดคอลัมน์เฉลยออกเหมือน learner view** (`is_correct`, `points_earned`, `question_snapshot`, explanation) — เหลือข้อมูลผลลัพธ์ระดับรายการ (`selected_option_ids`, `answered_at`, `seq`) + คะแนนรวม/สถานะจาก `assessment_attempts` เพื่อให้ผู้สอนเห็นผลรอบสอบที่ตนดูแลโดยไม่เปิดเฉลยข้อสอบ; เปิดเฉลยเฉพาะเมื่อครบเงื่อนไข `exam_review_mode` เช่นเดียวกับ learner view; grant SELECT ให้ authenticated (นิยาม view กรองเอง) — instructor ไม่ SELECT ตารางฐานโดยตรงเช่นกัน
 
 #### `certificates` — ประกาศนียบัตร **(PII — PDPA: holder_name_snapshot)**
 
@@ -791,9 +793,9 @@ Retention: 24 เดือน
 
 ### 4.4 Append-only enforcement (audit_logs + credit_ledger_entries + security_events + notice_acknowledgments)
 
-1. `REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_logs, credit_ledger_entries, security_events, audit_chain_anchors FROM anon, authenticated, service_role` (D11-7) + **`REVOKE UPDATE, DELETE ON notice_acknowledgments FROM anon, authenticated, service_role` (append-only — D13-F11; INSERT ยังเป็นสิทธิ์ของเจ้าของแถวตาม RLS §3.1)** + **`REVOKE INSERT ON audit_logs FROM anon, authenticated, service_role` (F8/D12)** — เขียน audit ได้เฉพาะผ่าน `append_audit_event()` SECURITY DEFINER (owner เฉพาะ `app_owner`; **EXECUTE grant เดียวกันทุกเอกสาร: `authenticated` + `service_role` — ฟังก์ชันตรวจ actor/payload ภายในเอง — D13-F4, AUDIT-LOG-DESIGN §4**); ตารางอื่นในกลุ่มนี้ยังเหลือ path INSERT อย่างเดียว
+1. `REVOKE UPDATE, DELETE, TRUNCATE ON TABLE audit_logs, credit_ledger_entries, security_events, audit_chain_anchors FROM anon, authenticated, service_role` (D11-7) + **`REVOKE UPDATE, DELETE, TRUNCATE ON notice_acknowledgments FROM anon, authenticated, service_role` (append-only — D13-F11 + D15-M3: TRUNCATE อยู่นอก RLS จึงต้อง revoke ด้วย; INSERT ยังเป็นสิทธิ์ของเจ้าของแถวตาม RLS §3.1)** + **`REVOKE INSERT ON audit_logs FROM anon, authenticated, service_role` (F8/D12)** — เขียน audit ได้เฉพาะผ่าน `append_audit_event()` SECURITY DEFINER (owner เฉพาะ `app_owner`; **EXECUTE contract เดียวทุกเอกสารตาม AUDIT-LOG-DESIGN §4: `revoke จาก PUBLIC/anon ก่อน` (PG15 ให้ PUBLIC โดย default — D15-N1) แล้ว grant `authenticated` + `service_role` — ฟังก์ชันตรวจ actor/payload/event-class ภายในเอง (mutation event = server path เท่านั้น — D15-N1(ก))**); ตารางอื่นในกลุ่มนี้ยังเหลือ path INSERT อย่างเดียว
 2. RLS ไม่มี policy สำหรับ UPDATE/DELETE เลย
-3. trigger guard สุดท้าย: ถ้ามีการ UPDATE/DELETE (โดน role ที่ยังมีสิทธิ์ เช่น ตอน migration) ให้ RAISE EXCEPTION
+3. trigger guard สุดท้าย: ถ้ามีการ UPDATE/DELETE/TRUNCATE (โดน role ที่ยังมีสิทธิ์ เช่น ตอน migration) ให้ RAISE EXCEPTION — ครอบทุกตารางในกลุ่มนี้รวม notice_acknowledgments (row trigger สำหรับ UPDATE/DELETE + statement trigger สำหรับ TRUNCATE ตามแบบ audit_logs — D15-M3)
 4. ไม่มี API/Server Action ใดเปิด path แก้/ลบ (ตรวจด้วย codex gate ตอน review โค้ด auth/security/data)
 
 ### 4.5 ทะเบียน PII (PDPA — ห้าม log/ห้ามเปิด API สาธารณะ)

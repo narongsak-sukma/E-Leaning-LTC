@@ -73,7 +73,7 @@
 | attempt:grade_override | — | — | — | — | — | — | ✓ | — | ✓ |
 
 *assessment:view แบบผู้เรียน = เห็นเฉพาะเมื่อมีสิทธิ์เข้าสอบ (จบเงื่อนไขหลักสูตร)
-†attempt:view แบบ instructor = เฉพาะ attempt ของ assessment ที่อยู่ในหลักสูตรที่ตนเป็นเจ้าของ (`courses.created_by`) — ผู้สอนต้องเห็นผลของรอบสอบที่ตนดูแลเพื่อปรับปรุงเนื้อหา (canonical ตาม policy attempts_owner_read — D14/D13-F5); แถว attempt_answers ยังติด answer-key deny (อ่านผ่าน projection เท่านั้น — D12-2) และ grade_override ยังเป็นของ staff:exam เท่านั้น (SoD)
+†attempt:view แบบ instructor = เฉพาะ attempt ของ assessment ที่อยู่ในหลักสูตรที่ตนเป็นเจ้าของ (`courses.created_by`) — ผู้สอนต้องเห็นผลของรอบสอบที่ตนดูแลเพื่อปรับปรุงเนื้อหา (canonical ตาม policy attempts_owner_read — D14/D13-F5); แถว attempt_answers ยังติด answer-key deny (อ่านผ่าน projection เท่านั้น — `instructor_attempt_view` DD §3.4, D12-2/D15-N2) และ grade_override ยังเป็นของ staff:exam เท่านั้น (SoD)
 
 ### 2.3 Certificate / Credit (โดเมน 4–5)
 
