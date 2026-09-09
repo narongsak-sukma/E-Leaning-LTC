@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/* Design tokens — DESIGN-SYSTEM §2–§4 (น้ำเงินกรมท่า/ทองสถาบัน) — ค่าตรงตาม doc §10 */
+@theme {
+  --color-brand-50: #f0f6fc;
+  --color-brand-100: #dce9f6;
+  --color-brand-200: #b9d3eb;
+  --color-brand-300: #8ab4dc;
+  --color-brand-400: #5793cb;
+  --color-brand-500: #3375b5;
+  --color-brand-600: #245e9b;
+  --color-brand-700: #1b4b7e;
+  --color-brand-800: #133a61;
+  --color-brand-900: #0e2b4a;
+  --color-brand-950: #081b31;
+  --color-gold-50: #fbf7ec;
+  --color-gold-100: #f5ecd3;
+  --color-gold-200: #e9d8a4;
+  --color-gold-300: #dcc072;
+  --color-gold-500: #b8922e;
+  --color-gold-700: #7a5b1d;
+  --color-ink-400: #64788e;
+  --color-ink-500: #54687f;
+  --color-ink-600: #41556e;
+  --color-ink-700: #31445c;
+  --color-ink-900: #0e1b2c;
+  --color-mist-50: #f7f9fc;
+  --color-mist-100: #eef3f9;
+  --color-mist-200: #e3eaf2;
+  --color-mist-300: #d3dde9;
+  --color-success-50: #e4f4ea;
+  --color-success-100: #cbe9d8;
+  --color-success-600: #166b43;
+  --color-warning-50: #fcf3e1;
+  --color-warning-100: #f7e4bc;
+  --color-warning-600: #92610a;
+  --color-danger-50: #fbedeb;
+  --color-danger-100: #f5d4d0;
+  --color-danger-600: #b3261e;
+
+  --font-sans: "Sarabun", ui-sans-serif, system-ui, sans-serif;
+  --font-heading: "IBM Plex Sans Thai", "Sarabun", sans-serif;
+  --shadow-card: 0 1px 2px rgba(14, 43, 74, 0.06), 0 6px 20px rgba(14, 43, 74, 0.08);
+  --shadow-pop: 0 12px 40px rgba(14, 43, 74, 0.18);
+}
+
+/* Base — DESIGN-SYSTEM §10 (global style ทุกหน้า) */
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  body {
+    background: var(--color-mist-50);
+    color: var(--color-ink-700);
+    font-family: var(--font-sans);
+    line-height: 1.65;
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-heading);
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+  }
+  .skip-link:focus {
+    left: 16px;
+    top: 16px;
+    z-index: 50;
+    background: var(--color-brand-900);
+    color: #ffffff;
+    padding: 8px 16px;
+    border-radius: 10px;
+  }
+}

@@ -1,41 +1,47 @@
-# LTC E-Learning — ระบบ E-Learning สภาทนายความแห่งประเทศไทย
+# ระบบฝึกอบรมออนไลน์ สภาทนายความแห่งประเทศไทย
 
-E-Learning platform for the **Lawyers Council of Thailand (สภาทนายความแห่งประเทศไทย)** —
-การเรียนรู้ออนไลน์ระดับมาตรฐานสากล (Coursera / university-LMS grade) สำหรับ:
+แอปเดียวจบ (single Next.js app) สำหรับหลักสูตรออนไลน์ การสอบ
+และธนาคารหน่วยกิต (Credit Bank) ของสภาทนายความแห่งประเทศไทย
 
-- 🎓 ประชาชนทั่วไป — หลักสูตรเพิ่มความรู้กฎหมาย
-- ⚖️ ทนายความ — การอบรมเพิ่มพูนความรู้ + สอบรับประกาศนียบัตรเพื่อต่อใบอนุญาตว่าความ
-- 🏦 Credit Bank — ติดตาม/สะสมคุณวุฒิตามรอบต่ออายุใบอนุญาต
-- 🛠️ เจ้าหน้าที่ — ระบบบริหารจัดการหลักสูตร การสอบ ผู้ใช้ และรายงาน
+## การติดตั้งและใช้งาน
 
-## Stack (ตัดสินแล้ว ดู `docs/00-baseline/PROJECT-BRIEF.md`)
-
-| Layer     | เทคโนโลยี                                                |
-| --------- | ------------------------------------------------------- |
-| Frontend  | Next.js 15 (App Router) + TypeScript strict + Tailwind |
-| API/BFF   | Next.js Route Handlers + Server Actions + zod           |
-| Data/Auth | Supabase (PostgreSQL + Auth + Storage + RLS ทุกตาราง)   |
-| Dev       | 100% local Docker (Supabase local stack)                |
-| Prod      | 100% cloud — Vercel + Supabase Cloud + Cloudflare       |
-
-## โครงสร้างเอกสาร (doc-first)
-
-```
-docs/
-├── 00-baseline/      # ขอบเขต + คำศัพท์ (source of truth)
-├── 01-management/    # Project Plan, Risk Register
-├── 02-requirements/  # SRS, RTM
-├── 03-design/        # SDS, Architecture, Data Dictionary
-├── 04-api-security/  # API Spec, RBAC, Audit Log Design
-├── 05-ui/            # Design System + UI Prototype
-└── 06-testing/       # Test Plan
+```bash
+npm install
+npm run dev       # รัน dev server บน http://localhost:3000
 ```
 
-สถานะโครงการและ wave board: `PROJECT-STATE.md`
+## คำสั่งหลัก
 
-## กฎการทำงาน
+| คำสั่ง | หน้าที่ |
+| --- | --- |
+| `npm run dev` | รัน dev server |
+| `npm run build` | สร้าง production build |
+| `npm run lint` | ตรวจ lint (ESLint) |
+| `npm run typecheck` | ตรวจ type (next typegen + tsc --noEmit) |
+| `npm run test` | รัน unit test (Vitest) |
 
-- Doc-first: เอกสารคือ source of truth — โค้ดขัดกับเอกสาร → ยื่น DCR ก่อนแก้
-- TypeScript strict, ข้อความผู้ใช้ Thai-first, Conventional Commits
-- ห้าม commit secrets, ห้าม log ข้อมูลส่วนบุคคลทุก environment
-- No fake completion — ทุก completion ต้องมี evidence
+## โครงสร้างโค้ด
+
+```
+src/
+  app/                 # Next.js App Router (หน้าเว็บ + /api/v1/*)
+    api/health/        # GET /api/health — health probe (นอก /api/v1 ตาม API-SPEC §3.10)
+  lib/                 # shared kernel
+    config.ts          # env schema + default + fail-fast (SDS §7)
+    errors.ts          # ทะเบียน error code กลาง (API-SPEC §2)
+    logger.ts          # structured JSON log + PII filter (SDS §6)
+    rbac.ts            # permission matrix + requirePermission (RBAC-DESIGN §2)
+    supabase/          # client.ts (user JWT) + server.ts (service role)
+  app/globals.css      # Tailwind v4 theme — สี/ฟอนต์ตาม DESIGN-SYSTEM §10
+```
+
+## สภาพแวดล้อม (env)
+
+คัดลอก `.env.example` (จัดเตรียมโดยงานด้าน Docker/infra)
+แล้วกรอกค่าบังคับ: `PUBLIC_BASE_URL`, `SUPABASE_URL`,
+`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+ระบบจะ fail fast ตอน boot ถ้าขาดหรือค่าไม่ถูกต้อง (SDS §7.1)
+
+## สถานะงาน
+
+ดูความคืบหน้ารวมได้ที่ `PROJECT-STATE.md`
