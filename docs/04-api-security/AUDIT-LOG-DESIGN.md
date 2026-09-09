@@ -2,8 +2,8 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 0.3.0 — แก้ตามคำตัดสิน CTO D11 (codex security gate รอบ 1 = FAIL): D11-6, D11-7, D11-8, D11-9 |
-| วันที่    | 2026-09-08                                      |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
+| วันที่    | 2026-09-09                                      |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน 8), §8 (security), กฎ CTO D6 · RBAC-DESIGN.md (§3.1 canonical helpers) · API-SPECIFICATION.md · SRS.md (AUD-001–005) |
 
 ---
@@ -242,9 +242,14 @@ grant execute on function public.append_audit_event(text, text, text, jsonb, jso
 --       เขียนได้จาก server path เท่านั้น: ภายใน SECURITY DEFINER write functions (DD §4.7 — ตรวจสิทธิ์ใน TX จริงแล้ว
 --       derive actor/roles/ผลลัพธ์จาก server ไม่รับจาก payload ของ caller) หรือ BFF service_role call (key ไม่ออกจาก server)
 --       — user-JWT generic RPC เรียก class นี้ไม่ได้ (allowlist ด้านล่างตัด)
---   (ข) event ที่ไม่คู่ mutation เชิงสังเกต/ระบบ (CERT_VERIFY_PUBLIC, AUDIT_READ, RATE_LIMIT_HIT, PII_ACCESS, AUTH_* จาก BFF)
+--   (ข) event ที่ไม่คู่ mutation เชิงสังเกต/ระบบ (CERT_VERIFY_PUBLIC, AUDIT_READ, RATE_LIMIT_HIT, PII_ACCESS, AUTH_*)
 --       เรียก RPC ด้วย user JWT ได้ ตาม allowlist ราย event ที่นิยามในฟังก์ชัน; actor derive จาก auth.uid() ของ session
 --       และ request_id/ip_hash มาจาก middleware header เท่านั้น — ฟิลด์อ้างตัวตนใน payload ถูก override ฝั่ง server เสมอ
+--       R5-m1 (ผูก producer ราย event — ไม่ใช่ wildcard): AUTH_* ทั้งชุด = **BFF เท่านั้น** (trusted server) ในฐานะผู้บันทึก
+--       "ผลที่สังเกตได้" ของ Supabase Auth/คำขอที่ผ่าน BFF ไปแล้ว — ครบทุก event ของ §2.1 (AUTH_REGISTER/LOGIN_OK/LOGIN_FAIL/
+--       LOGOUT/MFA_ENROLLED/MFA_DISABLED/MFA_BACKUPS_REGENERATED/PASSWORD_RESET_REQUEST/PASSWORD_RESET_DONE/PASSWORD_CHANGE/
+--       LOCKOUT/SESSION_REVOKE); การเปลี่ยนสถานะจริงของบัญชี (เช่น MFA ในระบบ Auth) เกิดที่ Supabase Auth ก่อน แล้ว BFF
+--       จึงบันทึกผลตามลำดับ — ไม่ใช่ mutation ใน DB ของแอป จึงไม่ต้อง atomic กับ TX ธุรกิจ (ตาม §1.5 async + retry)
 
 -- ชั้น 2: trigger บล็อกแม้ superuser/owner (ยกเว้น migration ที่ drop trigger อย่างชัดเจน)
 create or replace function public.prevent_audit_mutation()

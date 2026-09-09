@@ -3,9 +3,9 @@
 |          |                                                                           |
 | -------- | ------------------------------------------------------------------------- |
 | เอกสาร   | RTM (Requirement Traceability Matrix)                                     |
-| เวอร์ชัน | 0.2.0 (แก้ตาม review A6)                                                   |
-| วันที่    | 2026-09-08                                                                 |
-| สถานะ    | Draft — รอ lead review + CTO gate (Wave A)                                  |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B   |
+| วันที่    | 2026-09-09                                                                 |
+| สถานะ    | Approved — ผ่าน CTO gate (codex รอบ 5: PASS — D17)                          |
 | เจ้าของ   | worker-2 (Task A2)                                                         |
 | อ้างอิง  | SRS v0.2.0 (requirement ID ทั้งหมดมาจาก SRS) · PROJECT-BRIEF v0.2.1          |
 

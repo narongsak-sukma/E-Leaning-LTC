@@ -2,10 +2,10 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 0.1.0                                             |
-| วันที่    | 2026-09-08                                        |
+| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-3 (Wave A — deliverable 5)                 |
-| สถานะ    | รอ CTO gate                                       |
+| สถานะ    | ผ่าน CTO gate (codex รอบ 5: PASS — D17)           |
 | อ้างอิงบังคับ | PROJECT-BRIEF.md §5–§10, GLOSSARY.md          |
 | เอกสารเชื่อมโยง | ARCHITECTURE.md, DATA-DICTIONARY.md, SRS.md, API-SPECIFICATION.md, RBAC-DESIGN.md, AUDIT-LOG-DESIGN.md |
 
