@@ -16,7 +16,7 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getConfig } from "../config";
 import { hardenedCookieOptions } from "./cookies";
-import { selectPublishableAuthCookies } from "./auth-errors";
+import { authCookieBaseName, selectPublishableAuthCookies } from "./auth-errors";
 
 /**
  * สร้าง Supabase user-JWT client ผูกกับ cookie ของ request ปัจจุบัน
@@ -30,12 +30,28 @@ import { selectPublishableAuthCookies } from "./auth-errors";
 export async function createSupabaseSsrClient() {
   const cookieStore = await cookies();
   const { supabaseUrl, supabaseAnonKey } = getConfig();
+  const base = authCookieBaseName(supabaseUrl);
+  const isAuthCookieName = (name: string): boolean =>
+    name === base || name.startsWith(`${base}.`);
   return createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll: (cookiesToSet) => {
+        // gate r13 M1: เส้น query/RPC (.from/.rpc → _getSessionToken → getSession
+        // ภายใน SDK) หมุน refresh และลบ session ได้เหมือนเส้น auth ตรง — client นี้
+        // ไม่เคยเห็น error ของ refresh (query กลืนเป็น error ของ PostgREST) จึงใช้
+        // นโยบายกลางแบบ conservative: rotation เผยแพร่เสมอ (ไม่ทิ้ง token ใหม่
+        // กลางอากาศ) · การลบตระกูล auth ที่ไม่มี rotation มาในชุดเดียวกัน = ไม่เผยแพร่
+        // (gateway 401 ไร้ code / 429 / user_banned ต้องไม่ล้าง credential ที่ยัง
+        // มีชีวิต — codex r13 พิสูจน์ด้วย handler จริง) — การเก็บกวาดเมื่อตายจริงเป็น
+        // ของ middleware/getUser/logout ที่เห็น error ตาม allowlist เท่านั้น
+        const publish = selectPublishableAuthCookies(
+          cookiesToSet,
+          false,
+          isAuthCookieName,
+        );
         try {
-          for (const { name, value, options } of cookiesToSet) {
+          for (const { name, value, options } of publish) {
             cookieStore.set(name, value, hardenedCookieOptions(options));
           }
         } catch {
