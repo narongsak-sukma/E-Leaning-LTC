@@ -19,6 +19,7 @@ interface ChainRow {
 
 describe.skipIf(!DB_URL)("lessons_read — parent soft-delete guard (0013, gate r3)", () => {
   let learner: TestUser;
+  let staff: TestUser;
   let chain: ChainRow;
 
   /** อ่าน lesson ผ่าน PostgREST ในฐานะผู้เรียนที่ลงทะเบียน — จำนวนแถวที่ RLS ยอมให้เห็น */
@@ -34,6 +35,8 @@ describe.skipIf(!DB_URL)("lessons_read — parent soft-delete guard (0013, gate 
 
   beforeAll(async () => {
     learner = await createTestUser("c13-parentsd", "citizen");
+    // staff:content จริงผ่าน GoTrue + role_assignments — ใช้ทดสอบสิทธิ์กู้คืน/ลบผ่าน PostgREST (gate r6)
+    staff = await createTestUser("c13-restore", "staff:content");
     const rows = await psqlRows<ChainRow>(`
       select l.id::text as lesson_id, m.id::text as module_id, c.id::text as course_id
       from public.lessons l
@@ -85,6 +88,7 @@ describe.skipIf(!DB_URL)("lessons_read — parent soft-delete guard (0013, gate 
       `);
     }
     if (typeof learner !== "undefined") await deleteTestUser(learner.id);
+    if (typeof staff !== "undefined") await deleteTestUser(staff.id);
   });
 
   it("control: โซ่ปกติ (course+module+lesson มีชีวิต) → ผู้เรียนเห็นบทเรียน", async () => {
@@ -113,6 +117,62 @@ describe.skipIf(!DB_URL)("lessons_read — parent soft-delete guard (0013, gate 
     await psql(`update public.lessons set deleted_at = now() where id = '${chain.lesson_id}';`);
     try {
       expect(await visibleLessonCount()).toBe(0);
+    } finally {
+      await psql(`update public.lessons set deleted_at = null where id = '${chain.lesson_id}';`);
+    }
+  });
+
+  // ---- gate r6 MINOR-1: 0014 ปิดสิทธิ์ UPDATE ทั้งสองทิศของ staff โดยไม่ตั้งใจ ----
+  // (PostgreSQL นำ SELECT policy มาใช้กับ UPDATE ด้วย — ดู header ของ migration 0015)
+
+  it("staff:content กู้คืน lesson ที่ soft-delete ผ่าน PostgREST ได้จริง (0015) — ไม่ใช่ 204 เงียบ ๆ", async () => {
+    await psql(`update public.lessons set deleted_at = now() where id = '${chain.lesson_id}';`);
+    try {
+      expect(await visibleLessonCount()).toBe(0); // ตั้งต้น: ผู้เรียนมองไม่เห็น
+      const res = await restCall(
+        "PATCH",
+        `/rest/v1/lessons?id=eq.${chain.lesson_id}`,
+        { apiKey: ANON_KEY, token: staff.accessToken },
+        { deleted_at: null },
+      );
+      expect(res.status, res.text.slice(0, 300)).toBe(204);
+      // ต้องกู้คืนจริง ไม่ใช่ no-op: ผู้เรียนเห็นอีกครั้ง + แถวใน DB กลับมามีชีวิต
+      expect(await visibleLessonCount()).toBe(1);
+      const rows = await psqlRows<{ readonly deleted_at: string | null }>(
+        `select deleted_at from public.lessons where id = '${chain.lesson_id}';`,
+      );
+      expect(rows[0]?.deleted_at ?? null).toBeNull();
+    } finally {
+      await psql(`update public.lessons set deleted_at = null where id = '${chain.lesson_id}';`);
+    }
+  });
+
+  it("staff:content soft-delete บทเรียนผ่าน PostgREST ได้ (ทิศตั้งต้นที่ 0014 ปิดโดยไม่ตั้งใจ)", async () => {
+    const res = await restCall(
+      "PATCH",
+      `/rest/v1/lessons?id=eq.${chain.lesson_id}`,
+      { apiKey: ANON_KEY, token: staff.accessToken },
+      { deleted_at: new Date().toISOString() },
+    );
+    expect(res.status, res.text.slice(0, 300)).toBe(204);
+    try {
+      expect(await visibleLessonCount()).toBe(0);
+    } finally {
+      await psql(`update public.lessons set deleted_at = null where id = '${chain.lesson_id}';`);
+    }
+  });
+
+  it("staff:content SELECT เห็นแถวที่ soft-delete (หน้าจอบริหาร/กู้คืน) แต่ผู้เรียนยังไม่เห็น (0015)", async () => {
+    await psql(`update public.lessons set deleted_at = now() where id = '${chain.lesson_id}';`);
+    try {
+      const res = await restCall(
+        "GET",
+        `/rest/v1/lessons?select=id&id=eq.${chain.lesson_id}`,
+        { apiKey: ANON_KEY, token: staff.accessToken },
+      );
+      expect(res.status, res.text.slice(0, 300)).toBe(200);
+      expect((res.json as unknown[]).length).toBe(1); // staff เห็นแถวที่ถูกลบ
+      expect(await visibleLessonCount()).toBe(0); // ผู้เรียนไม่ได้รับสิทธิ์เพิ่ม
     } finally {
       await psql(`update public.lessons set deleted_at = null where id = '${chain.lesson_id}';`);
     }

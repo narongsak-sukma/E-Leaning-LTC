@@ -67,9 +67,30 @@ export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClie
   const cookieStore = await cookies();
   const { supabaseUrl, supabaseAnonKey } = getConfig();
   const pending = new Map<string, { value: string; options: CookieOptions | undefined }>();
+
+  /** @supabase/ssr ลบ cookie ด้วยการเขียนค่าว่าง + maxAge: 0 (dist/main/cookies.js) */
+  const isDeletion = (entry: { value: string; options: CookieOptions | undefined }): boolean =>
+    entry.value === "" || entry.options?.maxAge === 0;
+
   const client = createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
-      getAll: () => cookieStore.getAll(),
+      // gate r6: อ่านแบบ "merge" — cookie เดิม + pending writes/deletions ซ้อนกัน
+      // ไม่งั้นหลัง refresh ที่เปลี่ยนจำนวน chunks อ่านได้เฉพาะ chunk set เก่า ทำให้
+      // signOut ลบไม่ครบ แล้ว commit เขียน token เก่ากลับเครื่องทั้งที่ revoke แล้ว
+      getAll: () => {
+        const merged = new Map<string, string>();
+        for (const { name, value } of cookieStore.getAll()) {
+          merged.set(name, value);
+        }
+        for (const [name, entry] of pending) {
+          if (isDeletion(entry)) {
+            merged.delete(name);
+          } else {
+            merged.set(name, entry.value);
+          }
+        }
+        return [...merged].map(([name, value]) => ({ name, value }));
+      },
       setAll: (cookiesToSet) => {
         for (const { name, value, options } of cookiesToSet) {
           pending.set(name, { value, options });

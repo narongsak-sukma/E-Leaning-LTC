@@ -27,7 +27,8 @@ export const metadata: Metadata = {
  * หน้ารายละเอียดยังไม่มี GET /admin/courses/{id} ในสเปก §3.8 —
  * หน้าจึงดึงข้อมูลจาก list endpoint แล้วหาหลักสูตรตาม id โดย**ไล่ตาม cursor**
  * จนครบทุกหน้า (gate r5: เดิมอ่านเฉพาะ 100 แถวแรก หลักสูตรที่อยู่หลังหน้าแรก
- * ได้ 404 ผิด) · cap 20 หน้ากัน loop ไม่รู้จบ (ผิดปกติ — ถือว่าไม่พบ)
+ * ได้ 404 ผิด) · cap 20 หน้ากัน loop ไม่รู้จบ — ถ้าชน cap โดยยังมี cursor เหลือ
+ * ถือเป็นข้อผิดพลาดฝั่งเรา ไม่ใช่ 404 (gate r6 MINOR-2)
  */
 const DETAIL_LIST_LIMIT = 100;
 const DETAIL_MAX_PAGES = 20;
@@ -52,7 +53,9 @@ async function findCourseById(id: string): Promise<CourseDetailResult> {
       return { ok: true, course: null }; // ไล่ครบทุกหน้าแล้วไม่เจอ = ไม่มีจริง
     }
   }
-  return { ok: true, course: null }; // เกิน cap (ผิดปกติ) — ถือว่าไม่พบ ไม่ loop ต่อ
+  // เกิน cap แต่ cursor ยังเหลือ = สแกนไม่ครบ (ผิดปกติ) — ตอบ 404 จะเป็นเท็จ
+  // แสดงเป็นข้อผิดพลาดฝั่งเราแทน ให้ staff ลองใหม่จากหน้ารายการ (gate r6 MINOR-2)
+  return { ok: false, kind: "server" };
 }
 
 /** ปุ่มเผยแพร่ยังไม่เชื่อมต่อ — PATCH /admin/courses/{id} อยู่นอกขอบเขต C-8 Phase 1 */
