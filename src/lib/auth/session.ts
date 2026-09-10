@@ -13,7 +13,8 @@
 import "server-only";
 import { AppError } from "../errors";
 import { requiresMfa, type AalLevel } from "../rbac";
-import { createSupabaseSsrClient } from "../supabase/ssr";
+import { createSupabaseSsrClient, createSupabaseSsrClientBuffered } from "../supabase/ssr";
+import { isDefinitiveAuthError } from "../supabase/auth-errors";
 
 /** ระดับ assurance + ชุดบทบาทบังคับ MFA อยู่ที่ rbac.ts (แหล่งเดียว) — re-export ให้ผู้ใช้เดิมของ session.ts */
 export { MFA_REQUIRED_ROLES, requiresMfa } from "../rbac";
@@ -40,8 +41,15 @@ export interface SessionContext {
  *   (fail-closed: ไม่เดาค่า assurance เอง)
  */
 export async function getUser(): Promise<AuthUser | null> {
-  const supabase = await createSupabaseSsrClient();
+  // gate r12 M1: ใช้ client แบบ buffered + commit ตามนโยบาย — middleware รักษา
+  // credential ที่ยังมีชีวิตไว้แล้ว (r11) แต่ถ้าให้ SDK เขียน cookie ตรง ๆ ที่นี่
+  // การเรียก auth ซ้ำของ handler จะล้าง cookie กลับ browser เอง (SDK
+  // _removeSession ทันทีที่ refresh โดนปฏิเสธ non-retryable รวม 401 ไร้ code
+  // ของชั้น gateway) — เผยแพร่ rotation เสมอ / การลบเฉพาะเมื่อยืนยันตายจริง
+  // (allowlist เดียวกับ middleware และ logout route)
+  const { client: supabase, commitAuthWrites } = await createSupabaseSsrClientBuffered();
   const { data, error } = await supabase.auth.getUser();
+  commitAuthWrites(error !== null && isDefinitiveAuthError(error));
   if (error || !data.user) {
     return null;
   }

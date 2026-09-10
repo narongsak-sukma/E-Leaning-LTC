@@ -38,7 +38,19 @@ import type { CourseDetailSummary, CourseProgress, EnrollmentSummary } from "./l
 // mock เฉพาะ DB/auth/transport ตามแบบ route.test.ts ของ endpoint นั้น (mock module
 // ไม่กระทบ reader ซึ่งเป็น client-safe — ไม่มี import ร่วมกันนอก test นี้)
 vi.mock("server-only", () => ({}));
-vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
+vi.mock("@/lib/supabase/ssr", () => {
+  const createSupabaseSsrClient = vi.fn();
+  // gate r12: getUser ของ session.ts ใช้ buffered client — wrapper อ่าน stub จาก
+  // createSupabaseSsrClient ณ เวลาถูกเรียก (mockResolvedValue ตั้งทีหลังได้)
+  const createSupabaseSsrClientBuffered = vi.fn(async () => ({
+    client: await createSupabaseSsrClient(),
+    commitAuthWrites: () => {},
+    commit: () => {},
+    clearAuthCookies: () => {},
+    hasPendingAuthWrite: () => false,
+  }));
+  return { createSupabaseSsrClient, createSupabaseSsrClientBuffered };
+});
 vi.mock("@/lib/supabase/server", () => ({ createSupabaseServiceRoleClient: vi.fn() }));
 
 // env ขั้นต่ำที่ lib/config ต้องใช้เมื่อรัน handler (rate limit อ่าน config ตอน enforce)

@@ -16,6 +16,7 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getConfig } from "../config";
 import { hardenedCookieOptions } from "./cookies";
+import { selectPublishableAuthCookies } from "./auth-errors";
 
 /**
  * สร้าง Supabase user-JWT client ผูกกับ cookie ของ request ปัจจุบัน
@@ -60,6 +61,15 @@ export interface BufferedSsrClient {
   readonly client: SupabaseClient;
   /** ยืนยันการเขียน cookie ที่ค้างอยู่ทั้งหมดลง request ปัจจุบัน */
   commit(): void;
+  /**
+   * commit แบบมีนโยบาย (gate r12 M1) — เผยแพร่ "การเขียน" (rotation) เสมอ แต่
+   * "การลบ" เผยแพร่เฉพาะเมื่อ session ตายจริง (deathConfirmed ตาม allowlist ของ
+   * auth-errors) **หรือ** เป็นการเก็บกวาด chunk เก่าที่มาพร้อม rotation —
+   * ใช้หลังการเรียก auth ของ SDK เสร็จแล้วผ่านคำตอบ error เข้ามา
+   * (เช่น getUser ของ session.ts): ไม่ใช้ commit() เพราะอันนั้นเผยแพร่ทุกอย่าง
+   * เหมาะกับ route ที่ตัดสิน verdict ด้วยตัวเองแล้วเท่านั้น (logout)
+   */
+  commitAuthWrites(deathConfirmed: boolean): void;
   /**
    * เก็บคำสั่ง "ลบ cookie session ทั้งชุด" ลง buffer — ใช้เมื่อ session ตายแน่นอน
    * แล้วเท่านั้น (revoke สำเร็จ หรือ auth server ปฏิเสธชัด ๆ) โดยไม่พึ่ง SDK
@@ -120,6 +130,28 @@ export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClie
     client,
     commit: () => {
       for (const [name, { value, options }] of pending) {
+        cookieStore.set(name, value, hardenedCookieOptions(options));
+      }
+      pending.clear();
+    },
+    // นโยบายเดียวกับ middleware (selectPublishableAuthCookies) — gate r12 M1:
+    // handler เรียก SDK ซ้ำหลัง middleware รักษา credential ไว้แล้ว (เช่น getUser
+    // ของ requireUser) ต้องไม่ล้าง cookie ที่ยังมีชีวิตกลับ browser เพราะ refresh
+    // โดน 401 ไร้ code ของ gateway/429/user_banned
+    commitAuthWrites: (deathConfirmed: boolean) => {
+      // exactOptionalPropertyTypes: ห้ามส่ง options: undefined ตรง ๆ — แปลงเป็น
+      // รูปที่ไม่มี key (เหมือนที่ middleware ทำกับ pending ของตัวเอง)
+      const entries = [...pending].map(([name, entry]) =>
+        entry.options === undefined
+          ? { name, value: entry.value }
+          : { name, value: entry.value, options: entry.options },
+      );
+      const publish = selectPublishableAuthCookies(
+        entries,
+        deathConfirmed,
+        isAuthCookieName,
+      );
+      for (const { name, value, options } of publish) {
         cookieStore.set(name, value, hardenedCookieOptions(options));
       }
       pending.clear();

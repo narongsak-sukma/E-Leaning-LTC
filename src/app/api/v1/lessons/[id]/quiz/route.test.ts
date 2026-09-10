@@ -19,7 +19,19 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
 
 // session.ts import "server-only" — stub ใน vitest (แบบเดียวกับ route.test.ts อื่น)
 vi.mock("server-only", () => ({}));
-vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
+vi.mock("@/lib/supabase/ssr", () => {
+  const createSupabaseSsrClient = vi.fn();
+  // gate r12: getUser ของ session.ts ใช้ buffered client — wrapper อ่าน stub จาก
+  // createSupabaseSsrClient ณ เวลาถูกเรียก (mockResolvedValue ตั้งทีหลังได้)
+  const createSupabaseSsrClientBuffered = vi.fn(async () => ({
+    client: await createSupabaseSsrClient(),
+    commitAuthWrites: () => {},
+    commit: () => {},
+    clearAuthCookies: () => {},
+    hasPendingAuthWrite: () => false,
+  }));
+  return { createSupabaseSsrClient, createSupabaseSsrClientBuffered };
+});
 vi.mock("@/lib/supabase/server", () => ({ createSupabaseServiceRoleClient: vi.fn() }));
 vi.mock("@/lib/rate-limit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rate-limit")>();

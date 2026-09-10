@@ -26,7 +26,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { jsonError } from "./lib/api/response";
 import { hardenedCookieOptions } from "./lib/supabase/cookies";
-import { isDefinitiveAuthError } from "./lib/supabase/auth-errors";
+import {
+  authCookieBaseName,
+  isDefinitiveAuthError,
+  selectPublishableAuthCookies,
+} from "./lib/supabase/auth-errors";
 import { getConfig } from "./lib/config";
 
 /** safe methods ตาม RFC 9110 §9.2.1 — ทุกอย่างอื่นเป็น mutation และต้องผ่าน CSRF check */
@@ -120,13 +124,19 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       // (authorization เองเป็นของ handler/rbac ต่อไป)
       const { error: authError } = await supabase.auth.getUser();
       const deathConfirmed = authError !== null && isDefinitiveAuthError(authError);
-      const published: Array<{ name: string; value: string; options?: CookieOptions }> = [];
-      for (const [name, entry] of pending) {
-        if (isDeletion(entry.value, entry.options) && !deathConfirmed) {
-          continue; // ไม่ยืนยันว่าตายจริง — ทิ้งการลบ รักษา credential ล่าสุดทั้งสองฝั่ง
-        }
-        published.push({ name, ...entry });
-      }
+      // นโยบายเดียวกับ commitAuthWrites ของ SSR client (gate r12 M2): การลบสองความ
+      // หมายต้องแยก — "ล้าง session" เผยแพร่เฉพาะเมื่อยืนยันตายจริง · "เก็บกวาด chunk
+      // เก่าระหว่าง rotation" (SDK ลบชื่อ base/.N ที่ไม่อยู่ในชุดใหม่ ใน setAll เดียว
+      // กับการเขียนชุดใหม่) ต้องเผยแพร่พร้อม rotation เสมอ ไม่งั้น base เก่าค้างทั้ง
+      // browser และ render แล้ว combineChunks (อ่าน base ก่อน) ยังใช้ token เก่า
+      const base = authCookieBaseName(supabaseUrl);
+      const isAuthCookieName = (name: string): boolean =>
+        name === base || name.startsWith(`${base}.`);
+      const published = selectPublishableAuthCookies(
+        [...pending].map(([name, entry]) => ({ name, ...entry })),
+        deathConfirmed,
+        isAuthCookieName,
+      );
       if (published.length > 0) {
         for (const { name, value, options } of published) {
           if (isDeletion(value, options)) {
