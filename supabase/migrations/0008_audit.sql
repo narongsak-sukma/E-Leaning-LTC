@@ -111,7 +111,11 @@ begin
   if jsonb_typeof(p) = 'object' then
     for k, v in select * from jsonb_each(p) loop
       -- D21-B4: ชื่อคีย์ต้องเป็น identifier เช่นเดียวกับ path RPC (ปิดช่อง PII ในชื่อคีย์)
-      if k !~ '^[a-z][a-z0-9_]{0,63}$' then
+      -- D22-B4''(r5): identifier ยังพา digit-run ได้ — ปิดช่องเบอร์/บัตรซ่อนในชื่อคีย์
+      -- เช่น {"endpoint":{"phone_0812345678":true}} (license 6-9 / เบอร์ 9-10 / บัตร 13
+      -- หลัก ครอบครบด้วย digit-run >= 6 หลัง strip `_` — หลักเดียวกับ audit_free_text_ok)
+      if k !~ '^[a-z][a-z0-9_]{0,63}$'
+         or regexp_replace(k, '_', '', 'g') ~ '\d{6}' then
         return false;
       end if;
       if k = any (array['reason','rejected_reason','device_hint','purpose']) then
@@ -208,7 +212,8 @@ begin
       -- D21-B4: ชื่อคีย์ทุกชั้นต้องเป็น identifier — ปิดช่องซ่อน PII ใน "ชื่อคีย์"
       -- (เช่น {"group":"api","endpoint":{"person@example.com":true}}) เพราะ
       -- recursion เดิมสแกนเฉพาะค่า คีย์ที่มี @ / จุด / ขึ้นต้นด้วยตัวเลขจึงรอดทุกกฎ
-      if k !~ '^[a-z][a-z0-9_]{0,63}$' then
+      if k !~ '^[a-z][a-z0-9_]{0,63}$'
+         or regexp_replace(k, '_', '', 'g') ~ '\d{6}' then
         return false;
       end if;
       if k = any (array['row_count','count','fail_count']) then
