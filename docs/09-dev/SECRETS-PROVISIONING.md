@@ -30,7 +30,7 @@
 | --- | --- | --- | --- |
 | `CURSOR_HMAC_SECRET` | **generate เอง** — `openssl rand -base64 32` | Vercel env (server) | cursor ที่ออกก่อนหมุนใช้ไม่ได้ทันที (listing ตอบ 400 `ERR-VAL-001` — ผู้ใช้เริ่มหน้าใหม่ได้ตามปกติ) แต่ **ห้ามหมุนกลางช่วงสอบ** |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase platform (Project Settings → API) | Vercel env + อ้างอิงโดย compose ไม่ได้ใน prod | หมุน service key ที่ Supabase → อัปเดต Vercel env ให้ตรงกันในรอบเดียว |
-| `SUPABASE_DB_POOLER_URL` | Supabase pooler (transaction mode — SDS §8) | Vercel env | เปลี่ยนตาม project/region เท่านั้น |
+| `SUPABASE_DB_POOLER_URL` | Supabase pooler (transaction mode — SDS §8) | Vercel env | **connection string ฝังรหัสผ่าน DB** — หมุนรหัสผ่าน DB ที่ Supabase แล้วต้องอัปเดต env นี้ (ค่าใหม่) + deploy ใหม่ทุกครั้ง ไม่ใช่เปลี่ยนตาม project/region เท่านั้น |
 | `R2_*` (เมื่อ `MEDIA_PROVIDER=r2`) | Cloudflare R2 | Vercel env | rotate = คู่ Access Key/Secret พร้อมกัน |
 | `STREAM_ACCOUNT_ID` + `STREAM_CLIENT_SECRET` (เมื่อ `MEDIA_PROVIDER=stream`) | Cloudflare Stream — **ต้องครบทั้ง 2 ค่า** ตาม config schema | Vercel env | URL เซ็นก่อนหน้าตายตาม TTL เดิม |
 | `SMTP_USER` / `SMTP_PASSWORD` หรือ `RESEND_API_KEY` (เมื่อเปิดส่งอีเมลจริง) | ผู้ให้บริการอีเมล (Wave F) | Vercel env | อีเมลค้างส่งช่วงหมุน — ตรวจ outbox หลังหมุน |
