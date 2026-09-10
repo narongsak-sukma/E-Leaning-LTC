@@ -247,6 +247,13 @@ async function requestJson(
   if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
     headers.cookie = options.cookieHeader;
   }
+  // gate-cleanup r1 M1: ขาเรียกจาก server (RSC ผ่าน learning.server.ts) ประกาศตัวเป็นขาใน —
+  // middleware เห็น header นี้แล้วจะไม่หมุน token (Set-Cookie ของขาในไม่มีทางถึง browser —
+  // RSC ตั้ง cookie เองไม่ได้ หมุนตรงนั้น = ทิ้ง rotation กลางอากาศ) · เฉพาะฝั่ง server
+  // (typeof window) — โมดูลนี้ client ใช้ร่วมด้วย (logout keepalive) และขาบราวเซอร์คือขานอก
+  if (typeof window === "undefined") {
+    headers["x-ltc-bff-internal"] = "1";
+  }
   const requestInit: RequestInit = {
     method: init.method,
     headers,

@@ -91,7 +91,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // "การเขียน" (rotation) เผยแพร่เสมอ
   const isLogoutPath =
     request.method === "POST" && request.nextUrl.pathname === "/api/v1/auth/logout";
-  if (!isLogoutPath) {
+  // gate-cleanup r1 M1: ขาในของ server component (RSC loader เรียก BFF ของตัวเอง —
+  // catalog/learning/admin ใส่ header x-ltc-bff-internal: 1 ฝั่ง server เท่านั้น)
+  // ต้องไม่หมุน token: Set-Cookie ของขาในไม่มีทางถึง browser (RSC ตั้ง cookie เอง
+  // ไม่ได้) — ถ้าปล่อยหมุนที่นี่ rotation ตกอยู่ใน response ภายในอย่างเดียว = ทิ้ง
+  // กลางอากาศ (race ที่ PB-1 เดิมเพียงย้ายจากหน้าต่าง margin 90 → LEAD 180 วินาที)
+  // ขานอก (browser) เป็นเจ้าของ rotation คนเดียวตาม PB-1 · browser ปลอม header นี้
+  // เองได้ แต่ผลมีแค่ "request นั้นไม่ถูกหมุน" — ไม่ข้าม CSRF/authorization ใด ๆ
+  // (ไม่ใช่ช่องรั่ว) และ request ถัดไปที่ไม่ปลอมก็หมุนตาม LEAD ปกติ
+  const isInternalBffLeg = request.headers.get("x-ltc-bff-internal") === "1";
+  if (!isLogoutPath && !isInternalBffLeg) {
     try {
       const { supabaseUrl, supabaseAnonKey } = getConfig();
       const pending = new Map<string, { value: string; options?: CookieOptions }>();

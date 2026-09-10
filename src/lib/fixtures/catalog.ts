@@ -161,6 +161,13 @@ async function fetchCatalog(path: string, options?: CatalogFetchOptions): Promis
   if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
     headersInit.cookie = options.cookieHeader;
   }
+  // gate-cleanup r1 M1: ขาเรียกจาก server (RSC loader) ประกาศตัวเป็นขาใน — middleware
+  // เห็น header นี้แล้วจะไม่หมุน token (Set-Cookie ของขาในไม่มีทางถึง browser — RSC
+  // ตั้ง cookie เองไม่ได้ หมุนตรงนั้น = ทิ้ง rotation กลางอากาศ) · เฉพาะฝั่ง server
+  // เท่านั้น (typeof window) — บราวเซอร์เรียกโมดูลนี้เองได้แบบไม่มี cookieHeader
+  if (typeof window === "undefined") {
+    headersInit["x-ltc-bff-internal"] = "1";
+  }
   try {
     return await fetch(`${origin}${path}`, {
       cache: "no-store",

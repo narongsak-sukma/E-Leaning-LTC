@@ -158,7 +158,10 @@ async function bffGet(
   try {
     response = await fetch(url, {
       cache: "no-store",
-      headers: { cookie: headerBag.get("cookie") ?? "" },
+      // gate-cleanup r1 M1: ขาในของ server component — middleware เห็น header นี้แล้วจะ
+      // ไม่หมุน token (Set-Cookie ของขาในไม่มีทางถึง browser — RSC ตั้ง cookie เองไม่ได้
+      // หมุนตรงนั้น = ทิ้ง rotation กลางอากาศ) · โมดูลนี้ server-only อยู่แล้ว (next/headers)
+      headers: { cookie: headerBag.get("cookie") ?? "", "x-ltc-bff-internal": "1" },
     });
   } catch {
     return { ok: false, kind: "server" };
