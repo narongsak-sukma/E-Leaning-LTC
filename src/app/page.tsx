@@ -1,12 +1,34 @@
+/**
+ * หน้าแรก — hero + หลักสูตรแนะนำ (fixture) + ลิงก์ไป /courses
+ * หลักสูตรแนะนำดึงจาก fixture แคตตาล็อก (เฉพาะ published) — Phase 1 สลับเป็น BFF GET /courses
+ * หมายเหตุ: หน้านี้อยู่นอก route group (public) (สืบทอดจาก B-01) จึงมีโครง header/footer ของตัวเอง
+ */
+
+import type { Metadata } from "next";
+import Link from "next/link";
+
+import { CourseCard } from "@/components/course/CourseCard";
+import { getPublishedCourses } from "@/lib/fixtures/catalog";
+
+export const metadata: Metadata = {
+  title: "ระบบฝึกอบรมออนไลน์ สภาทนายความแห่งประเทศไทย",
+  description:
+    "หลักสูตรออนไลน์เพื่อรักษาใบอนุญาตทนายความ — เลือกหลักสูตรที่เปิดรับลงทะเบียน เรียนตามจังหวะของคุณ สอบออนไลน์ และสะสมหน่วยกิตเข้า Credit Bank",
+};
+
 const NAV_ITEMS = [
+  { href: "/", label: "หน้าแรก" },
   { href: "/courses", label: "หลักสูตรฝึกอบรม" },
   { href: "/login", label: "เข้าสู่ระบบ" },
 ] as const;
 
-export default function HomePage() {
+export default async function HomePage() {
+  const courseList = await getPublishedCourses();
+  const featuredCourses = courseList.data.slice(0, 3);
+
   return (
     <div className="min-h-dvh bg-mist-50">
-      <a href="#main" className="skip-link">
+      <a className="skip-link" href="#main">
         ข้ามไปยังเนื้อหาหลัก
       </a>
       <div className="bg-brand-900 text-center text-xs text-mist-100 sm:text-sm">
@@ -23,9 +45,9 @@ export default function HomePage() {
             <ul className="flex items-center gap-5 text-sm font-medium text-ink-600">
               {NAV_ITEMS.map((item) => (
                 <li key={item.href}>
-                  <a className="hover:text-brand-700" href={item.href}>
+                  <Link className="hover:text-brand-700" href={item.href}>
                     {item.label}
-                  </a>
+                  </Link>
                 </li>
               ))}
             </ul>
@@ -46,28 +68,55 @@ export default function HomePage() {
               และสอบออนไลน์อย่างเป็นทางการ ตั้งแต่ลงทะเบียนจนออกประกาศนียบัตรในระบบเดียว
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
-              <a
+              <Link
                 className="rounded-lg bg-gold-500 px-6 py-3 font-heading text-sm font-semibold text-brand-900 shadow-pop hover:bg-gold-300"
+                href="/courses"
+              >
+                ดูหลักสูตรที่เปิดรับ
+              </Link>
+              <Link
+                className="rounded-lg border border-mist-100 px-6 py-3 font-heading text-sm font-semibold text-mist-50 hover:bg-brand-700"
                 href="/login"
               >
                 เข้าสู่ระบบเพื่อเรียน
-              </a>
-              <a
-                className="rounded-lg border border-mist-100 px-6 py-3 font-heading text-sm font-semibold text-mist-50 hover:bg-brand-700"
-                href="/courses"
-              >
-                ดูหลักสูตรฝึกอบรม
-              </a>
+              </Link>
             </div>
           </div>
         </section>
-        <section className="mx-auto max-w-5xl px-4 py-14">
+
+        <section aria-labelledby="featured-heading" className="mx-auto max-w-5xl px-4 py-14">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="font-heading text-xl font-bold text-brand-900 sm:text-2xl" id="featured-heading">
+                หลักสูตรแนะนำ
+              </h2>
+              <p className="mt-1 text-sm text-ink-500">
+                เปิดรับลงทะเบียน เรียนได้ทันทีตามจังหวะของคุณ
+              </p>
+            </div>
+            <Link
+              className="font-heading text-sm font-semibold text-brand-600 hover:text-brand-700 hover:underline"
+              href="/courses"
+            >
+              ดูหลักสูตรทั้งหมด →
+            </Link>
+          </div>
+          <ul className="mt-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {featuredCourses.map((course) => (
+              <li key={course.id}>
+                <CourseCard course={course} />
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="mx-auto max-w-5xl px-4 pb-14">
           <h2 className="font-heading text-xl font-bold text-brand-900 sm:text-2xl">
             บริการหลักของระบบ
           </h2>
           <ul className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {FEATURES.map((f) => (
-              <li key={f.title} className="rounded-xl border border-mist-200 bg-white p-5 shadow-card">
+              <li className="rounded-xl border border-mist-200 bg-white p-5 shadow-card" key={f.title}>
                 <p className="font-heading text-base font-semibold text-brand-900">{f.title}</p>
                 <p className="mt-2 text-sm leading-relaxed text-ink-600">{f.body}</p>
               </li>
@@ -78,8 +127,8 @@ export default function HomePage() {
           <div className="mx-auto max-w-5xl px-4 py-6">
             <p className="text-sm leading-relaxed text-ink-600">
               <strong className="font-semibold text-ink-700">หมายเหตุ:</strong>{" "}
-              ระบบอยู่ระหว่างการพัฒนา (Wave B — โครงระบบพื้นฐาน)
-              ฟังก์ชันการเรียนและการสอบจะเปิดใช้งานในลำดับถัดไป
+              ระบบอยู่ระหว่างการพัฒนา (Wave C — แคตตาล็อก/ลงทะเบียน/ความคืบหน้า)
+              ข้อมูลหลักสูตรในหน้านี้เป็นข้อมูลตัวอย่างเพื่อการแสดงโครงหน้า
               ติดต่อสอบถามได้ที่สำนักงานสภาทนายความแห่งประเทศไทย โทร 0 2351 1128
             </p>
           </div>
