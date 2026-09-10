@@ -54,3 +54,18 @@ description = "ห้ามฝังค่าลับผ่านตัวแ�
 regex = '''(?i)NEXT_PUBLIC_[A-Z0-9_]*KEY["']?\s*[:=]\s*["']?([A-Za-z0-9+/_\-=.]{40,})'''
 keywords = ["NEXT_PUBLIC_"]
 secretGroup = 1
+
+# -----------------------------------------------------------------------------
+# Allowlist เฉพาะค่า — signature ของ JWT placeholder มาตรฐาน Supabase local dev
+# (ref 0000… เดียวกับ docker/kong/kong.yml — ค่าสาธารณะของ supabase/cli ทุกเครื่องเหมือนกัน)
+# tests/integration/helpers.ts ฝังไว้เป็น fallback ของ TEST_SUPABASE_*_KEY —
+# allowlist ที่ "บรรทัดที่มี signature สองค่านี้" เท่านั้น (ไม่ allowlist ทั้งไฟล์):
+# real key อื่นใน helpers.ts หรือที่อื่นยังโดนจับตามปกติ
+# -----------------------------------------------------------------------------
+[[allowlists]]
+description = "บรรทัดที่ฝัง JWT placeholder dev มาตรฐานของ Supabase (anon/service_role — ref 0000…)"
+regexTarget = "line"
+regexes = [
+  '''3jsTHD6cIxwRFtwetOAvCHSIQ0Z1xBxfki6n38cwPvk''',
+  '''4m7tXPHtzmhd8_oafj7Xt0PDZFXn0I1WkNXrxJzwYtQ''',
+]
