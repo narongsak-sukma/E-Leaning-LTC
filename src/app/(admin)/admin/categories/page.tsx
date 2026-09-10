@@ -2,25 +2,41 @@ import type { Metadata } from "next";
 import { CategoryFormModal } from "@/components/admin/CategoryFormModal";
 import { DataTable, type DataTableColumn } from "@/components/admin/DataTable";
 import { StatusBadge } from "@/components/admin/StatusBadge";
+import { AdminDataState } from "@/components/admin/AdminDataState";
+import { getAdminCategories, getAdminStaffSession, type AdminCategory } from "@/lib/fixtures/admin";
 import {
-  adminCategories,
-  adminFixtureStaff,
-  countCoursesInCategory,
-  type AdminCategory,
-} from "@/lib/fixtures/admin";
+  adminCanWrite,
+  adminPrimaryRole,
+} from "@/components/admin/RoleModeBanner";
 
 export const metadata: Metadata = {
   title: "หมวดหลักสูตร · หลังบ้านจัดการเนื้อหา",
   description:
-    "บริหารหมวดหลักสูตรแบบแม่-ลูก ลึก 2 ระดับ (โครงหน้าจอ — ข้อมูลจำลอง ยังไม่เชื่อมต่อ /api/v1/admin/categories)",
+    "บริหารหมวดหลักสูตรแบบแม่-ลูก ลึก 2 ระดับ (ข้อมูลจริงจาก GET /api/v1/admin/categories — Phase 1)",
 };
 
-export default function AdminCategoriesPage() {
-  const canCreate =
-    adminFixtureStaff.role === "staff:content" || adminFixtureStaff.role === "super_admin";
+export default async function AdminCategoriesPage() {
+  const sessionResult = await getAdminStaffSession();
+  const result = await getAdminCategories();
+  if (!result.ok) {
+    return (
+      <div>
+        <h1 className="font-heading text-xl font-bold text-ink-900 sm:text-2xl">หมวดหลักสูตร</h1>
+        <div className="mt-4">
+          <AdminDataState kind={result.kind} retryHref="/admin/categories" />
+        </div>
+      </div>
+    );
+  }
+  const rows = [...result.data].sort(
+    (a, b) => a.sortOrder - b.sortOrder || a.nameTh.localeCompare(b.nameTh, "th"),
+  );
 
-  const rows = [...adminCategories]
-    .sort((a, b) => a.sortOrder - b.sortOrder || a.nameTh.localeCompare(b.nameTh, "th"));
+  const primaryRole =
+    sessionResult.ok && sessionResult.staff !== null
+      ? adminPrimaryRole(sessionResult.staff.roles)
+      : "staff:viewer";
+  const canCreate = adminCanWrite(primaryRole);
 
   const columns: Array<DataTableColumn<AdminCategory>> = [
     {
@@ -45,7 +61,7 @@ export default function AdminCategoriesPage() {
       id: "courses",
       header: "หลักสูตรที่ใช้",
       align: "end",
-      render: (category) => <span>{countCoursesInCategory(category.id)}</span>,
+      render: (category) => <span>{category.courseCount}</span>,
     },
     {
       id: "sort",
@@ -74,7 +90,7 @@ export default function AdminCategoriesPage() {
             หมวดหลักสูตร
           </h1>
           <p className="mt-1 text-sm text-ink-500">
-            จัดกลุ่มหลักสูตรแบบแม่-ลูก ลึก 2 ระดับ (GET /api/v1/admin/categories — เชื่อมต่อในเฟสถัดไป)
+            จัดกลุ่มหลักสูตรแบบแม่-ลูก ลึก 2 ระดับ (GET /api/v1/admin/categories — ข้อมูลจริงจาก BFF)
           </p>
         </div>
         <CategoryFormModal
@@ -85,7 +101,7 @@ export default function AdminCategoriesPage() {
 
       <div className="mt-4">
         <DataTable
-          caption="ตารางหมวดหลักสูตร (ข้อมูลจำลอง)"
+          caption="ตารางหมวดหลักสูตร (ทุกสถานะ — รวมหมวดที่ปิดใช้งาน)"
           columns={columns}
           rows={rows}
           getKey={(category) => category.id}
@@ -95,7 +111,7 @@ export default function AdminCategoriesPage() {
       </div>
       {!canCreate ? (
         <p className="mt-3 text-sm leading-relaxed text-ink-500">
-          โหมดดูอย่างเดียว (staff:viewer) — ไม่มีสิทธิ์เพิ่มหมวดหลักสูตร
+          โหมดดูอย่างเดียว — บทบาทของท่านไม่มีสิทธิ์เพิ่มหมวดหลักสูตร
           (POST /api/v1/admin/categories เฉพาะ staff:content/super_admin ตาม RBAC §2)
         </p>
       ) : null}

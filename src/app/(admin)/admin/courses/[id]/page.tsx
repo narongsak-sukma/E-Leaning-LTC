@@ -3,23 +3,34 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CourseStatusBadge } from "@/components/admin/StatusBadge";
 import { CourseFormSkeleton } from "@/components/admin/CourseFormSkeleton";
+import { AdminDataState } from "@/components/admin/AdminDataState";
 import {
-  adminCategories,
-  adminCourses,
-  adminFixtureStaff,
+  adminCanWrite,
+  adminPrimaryRole,
+} from "@/components/admin/RoleModeBanner";
+import {
   formatThaiDate,
+  getAdminCategories,
+  getAdminCourses,
+  getAdminStaffSession,
 } from "@/lib/fixtures/admin";
 
 export const metadata: Metadata = {
   title: "รายละเอียดหลักสูตร · หลังบ้านจัดการเนื้อหา",
   description:
-    "ดูข้อมูลหลักสูตรและสถานะเผยแพร่ (โครงหน้าจอ — ปุ่มเผยแพร่ยังไม่เชื่อมต่อ PATCH /api/v1/admin/courses/{id})",
+    "ดูข้อมูลหลักสูตรและสถานะเผยแพร่ (ข้อมูลจริงจาก GET /api/v1/admin/courses — ปุ่มเผยแพร่ยังไม่เชื่อมต่อ PATCH /api/v1/admin/courses/{id})",
 };
 
+/**
+ * หน้ารายละเอียดยังไม่มี GET /admin/courses/{id} ในสเปก §3.8 —
+ * หน้าจึงดึงข้อมูลจาก list endpoint (ทุกสถานะ สูงสุด 100 รายการตาม PageQuery max)
+ * แล้วหาหลักสูตรตาม id เหมือนที่หน้าเดิมทำกับ fixture
+ */
+const DETAIL_LIST_LIMIT = 100;
+
+/** ปุ่มเผยแพร่ยังไม่เชื่อมต่อ — PATCH /admin/courses/{id} อยู่นอกขอบเขต C-8 Phase 1 */
 const PUBLISH_NEXT_NOTE =
   "ยังไม่เชื่อมต่อ API — เชื่อมต่อในเฟสถัดไป: PATCH /api/v1/admin/courses/{id} (เปลี่ยนสถานะเผยแพร่ พร้อมบันทึก audit COURSE_PUBLISH)";
-
-const canPublish = adminFixtureStaff.role === "staff:content" || adminFixtureStaff.role === "super_admin";
 
 export default async function AdminCourseDetailPage({
   params,
@@ -27,12 +38,34 @@ export default async function AdminCourseDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const course = adminCourses.find((course) => course.id === id);
-  if (!course) {
+  const sessionResult = await getAdminStaffSession();
+  const listResult = await getAdminCourses({ limit: DETAIL_LIST_LIMIT });
+  if (!listResult.ok) {
+    return (
+      <div>
+        <h1 className="font-heading text-xl font-bold text-ink-900 sm:text-2xl">
+          รายละเอียดหลักสูตร
+        </h1>
+        <div className="mt-4">
+          <AdminDataState kind={listResult.kind} retryHref="/admin/courses" />
+        </div>
+      </div>
+    );
+  }
+  const course = listResult.data.data.find((item) => item.id === id);
+  if (course === undefined) {
     notFound();
   }
+  const primaryRole =
+    sessionResult.ok && sessionResult.staff !== null
+      ? adminPrimaryRole(sessionResult.staff.roles)
+      : "staff:viewer";
+  const canPublish = adminCanWrite(primaryRole);
+  const categories = await getAdminCategories();
   const categoryName =
-    adminCategories.find((category) => category.id === course.categoryId)?.nameTh ?? "—";
+    (categories.ok
+      ? categories.data.find((category) => category.id === course.categoryId)?.nameTh
+      : undefined) ?? "—";
 
   return (
     <div>
@@ -67,7 +100,10 @@ export default async function AdminCourseDetailPage({
         <CourseFormSkeleton course={course} categoryName={categoryName} />
       </div>
 
-      <section aria-labelledby="publish-actions-heading" className="mt-4 rounded-[14px] border border-mist-200 bg-white p-5 shadow-card sm:p-6">
+      <section
+        aria-labelledby="publish-actions-heading"
+        className="mt-4 rounded-[14px] border border-mist-200 bg-white p-5 shadow-card sm:p-6"
+      >
         <h2 id="publish-actions-heading" className="font-heading text-lg font-semibold text-ink-900">
           การเผยแพร่
         </h2>
@@ -99,7 +135,7 @@ export default async function AdminCourseDetailPage({
           </div>
         ) : (
           <p className="mt-4 rounded-[10px] bg-brand-50 px-3 py-2 text-sm leading-relaxed text-brand-700">
-            บทบาท staff:viewer เป็นโหมดดูอย่างเดียว — ไม่มีสิทธิ์เผยแพร่/ยกเลิกการเผยแพร่
+            โหมดดูอย่างเดียว — บทบาทของท่านไม่มีสิทธิ์เผยแพร่/ยกเลิกการเผยแพร่
             (course:publish เฉพาะ staff:content/super_admin ตาม RBAC §2.1)
           </p>
         )}
