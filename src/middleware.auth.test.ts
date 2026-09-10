@@ -311,3 +311,283 @@ describe("middleware rotation cleanup ของ chunk (gate r12 M2) — ใช�
     expect(second.cookies.getAll().filter((c) => c.name.startsWith(AUTH_COOKIE) && (c.value === "" || c.maxAge === 0))).toEqual([]);
   });
 });
+
+/**
+ * PB-1 (refresh-ownership race) — middleware เป็นเจ้าของ rotation คนเดียว โดยหมุน
+ * "ล่วงหน้า" ที่ LEAD_SECONDS=180 ซึ่งกว้างกว่า margin ของ SDK เอง
+ * (EXPIRY_MARGIN_MS = 3 ticks × 30s = 90 วิ ใน @supabase/auth-js ที่ติดตั้ง)
+ *
+ * หน้าต่างแข่งที่ปิด: token เหลือ 91–180 วิ → SDK getSession ยังไม่หมุน (ยังไม่เข้า
+ * margin 90 วิ) → ถ้าไม่มีใครหมุน ระหว่าง render ขอบ 90 วิถูกผ่าน → BFF call ใน
+ * loader หมุนเอง → RSC ตั้ง cookie ไม่ได้ → rotation หายกลางอากาศ → browser ถือ
+ * refresh token เก่าจนโดน reuse
+ *
+ * โครงสร้าง verdict: death ตัดสินจาก error ของ getSession เอง (SDK propagate
+ * error ของ refresh เมื่อ token หมดจริง) — **ไม่มี getUser ในเส้นทางนี้แล้ว** เพราะ
+ * getUser หลัง session เป็น null จะโยน AuthSessionMissingError (definitive ตาม
+ * ชื่อ) → ล้าง credential ที่ยังมีชีวิต (r11 เรียกคืน)
+ */
+describe("middleware หมุนล่วงหน้าที่ LEAD 180 วิ — เจ้าของ rotation คนเดียว (PB-1)", () => {
+  /** session ที่เหลือเวลาตามที่ขอ (วิ) — คุมขอบ LEAD และ margin ของ SDK ได้ */
+  function sessionWith(secondsLeft: number, tokenPrefix = "near"): string {
+    return JSON.stringify({
+      access_token: `${tokenPrefix}-access-token`,
+      refresh_token: "refresh-token-test",
+      token_type: "bearer",
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) + secondsLeft,
+      user: {
+        id: "11111111-1111-4111-8111-000000000099",
+        aud: "authenticated",
+        app_metadata: {},
+        user_metadata: {},
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+  }
+
+  /** session ใหม่ที่ /auth/v1/token ตอบ — เหลืออีก 3500 วิ (พ้น LEAD และ margin) */
+  function freshSessionJson(tokenPrefix: string): string {
+    return JSON.stringify({
+      access_token: `${tokenPrefix}-fresh-access-token`,
+      refresh_token: `${tokenPrefix}-fresh-refresh`,
+      token_type: "bearer",
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) + 3500,
+      user: {
+        id: "11111111-1111-4111-8111-000000000099",
+        aud: "authenticated",
+        app_metadata: {},
+        user_metadata: {},
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+  }
+
+  function requestWithSession(path: string, sessionJson: string): NextRequest {
+    return new NextRequest(`http://localhost:3000${path}`, {
+      method: "GET",
+      headers: { cookie: `${AUTH_COOKIE}=${encodeURIComponent(sessionJson)}` },
+    });
+  }
+
+  it("token เหลือ 150 วิ (เข้า LEAD 180 แต่ยังไม่เข้า margin 90 ของ SDK) → middleware หมุนเองหนึ่งครั้ง: rotation ถึง browser + render, และไม่มีการเรียก /auth/v1/user เลย", async () => {
+    const calls: string[] = [];
+    let tokenCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/auth/v1/token")) {
+        tokenCalls += 1;
+        return jsonResponse(200, JSON.parse(freshSessionJson("lead")));
+      }
+      return jsonResponse(401, { message: "Invalid authentication credentials" });
+    });
+    const res = await middleware(requestWithSession("/courses", sessionWith(150)));
+    expect(res.status).toBe(200);
+    // หมุนหนึ่งครั้งพอดี (ไม่ double-rotate: getSession ไม่หมุนเพราะยังไม่เข้า margin)
+    expect(tokenCalls).toBe(1);
+    // เส้นทางใหม่ไม่มี getUser — ทุก network call คือ /token
+    expect(calls.every((url) => url.includes("/auth/v1/token"))).toBe(true);
+    // rotation ถึง browser (Set-Cookie เขียน token ใหม่)
+    const written = res.cookies.getAll().find((c) => c.name === AUTH_COOKIE && c.value !== "");
+    expect(written).toBeDefined();
+    const decoded = Buffer.from((written?.value ?? "").slice("base64-".length), "base64url").toString("utf8");
+    expect(decoded).toContain("lead-fresh-access-token");
+    // และถึง render ผ่าน request cookie ที่ forward
+    expect(res.headers.get("x-middleware-request-cookie") ?? "").toContain(AUTH_COOKIE);
+    expect(leakedDeletions(res)).toEqual([]); // rotation ไม่ใช่การตาย — ไม่มีการลบ
+  });
+
+  it("token เหลือ 600 วิ (พ้น LEAD) → ไม่หมุนเลย: ไม่มี network call, ไม่มีการเขียน cookie", async () => {
+    let tokenCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/v1/token")) {
+        tokenCalls += 1;
+        return jsonResponse(200, JSON.parse(freshSessionJson("unused")));
+      }
+      return jsonResponse(401, { message: "Invalid authentication credentials" });
+    });
+    const res = await middleware(requestWithSession("/courses", sessionWith(600)));
+    expect(res.status).toBe(200);
+    expect(tokenCalls).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled(); // getSession อ่าน storage ล้วน — ไม่มี network
+    // ไม่มีการเขียน/ลบ cookie ตระกูล auth ออกไปเลย
+    expect(res.cookies.getAll().filter((c) => c.name.startsWith(AUTH_COOKIE))).toEqual([]);
+    // credential เดิมเดินต่อไป render ครบ
+    expect(res.headers.get("x-middleware-request-cookie") ?? "").toContain(`${AUTH_COOKIE}=`);
+  });
+
+  it("หลัง lead rotation แล้ว ทุก call ใต้ render เห็น token ใหม่ (3500 วิ) — request ถัดมาผ่าน middleware ไม่หมุนซ้ำ (BFF ไม่มีโอกาสหมุนเองอีก)", async () => {
+    // รอบแรก: เหลือ 150 วิ → lead rotation
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/v1/token")) {
+        return jsonResponse(200, JSON.parse(freshSessionJson("lead")));
+      }
+      return jsonResponse(401, { message: "Invalid authentication credentials" });
+    });
+    const first = await middleware(requestWithSession("/courses", sessionWith(150)));
+    expect(first.cookies.getAll().some((c) => c.name === AUTH_COOKIE && c.value !== "")).toBe(true);
+
+    // request ถัดมา (จำลองทุกการเข้า BFF ใต้ render เดียวกัน/คำขอถัดไป) ถือ cookie
+    // ที่ได้กลับมา — token ใหม่เหลือ 3500 วิ พ้น margin ของ SDK และพ้น LEAD เรา
+    let tokenCalls = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/v1/token")) {
+        tokenCalls += 1;
+        return jsonResponse(400, { code: 400, error_code: "session_expired", msg: "should not refresh" });
+      }
+      return jsonResponse(401, { message: "Invalid authentication credentials" });
+    });
+    const cookieBack = first.cookies
+      .getAll()
+      .filter((c) => c.value !== "" && c.maxAge !== 0)
+      .map((c) => `${c.name}=${c.value}`)
+      .join("; ");
+    // เคลียร์ประวัติ spy ของรอบแรกก่อน (spy ตัวเดียวกันทั้งไฟล์) — วัดเฉพาะรอบสอง
+    fetchMock.mockClear();
+    const second = await middleware(
+      new NextRequest("http://localhost:3000/courses", { method: "GET", headers: { cookie: cookieBack } }),
+    );
+    expect(tokenCalls).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(leakedDeletions(second)).toEqual([]);
+  });
+
+  it("lead rotation โดน 401 ไร้ code จาก gateway ตอน token ยังไม่หมด → ไม่ลบ cookie (non-retryable ≠ ตายจริง — verdict จาก refreshSession ตรง ๆ ไม่ผ่าน getUser)", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(401, { message: "Invalid authentication credentials" }),
+    );
+    const res = await middleware(requestWithSession("/courses", sessionWith(150)));
+    expect(res.status).toBe(200);
+    expect(leakedDeletions(res)).toEqual([]);
+    // credential เดิม (ที่ยังมีชีวิตอีก ~150 วิ) ยังเดินต่อไป render
+    expect(res.headers.get("x-middleware-request-cookie") ?? "").toContain(`${AUTH_COOKIE}=`);
+  });
+
+  it("lead rotation โดน refresh_token_already_used แต่ access token ยังไม่หมด (150 วิ) → SDK รักษา session ไว้ ไม่มีการลบ — เก็บกวาดรอบถัดไปเมื่อ token หมดจริง (conservative เหมือน r13)", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(400, {
+        code: 400,
+        error_code: "refresh_token_already_used",
+        msg: "Invalid Refresh Token: Already Used",
+      }),
+    );
+    const res = await middleware(requestWithSession("/courses", sessionWith(150)));
+    expect(res.status).toBe(200);
+    // proactive-preserve ของ SDK: refresh พลาดแต่ token จริงยังไม่หมด → ไม่มี
+    // _removeSession → ไม่มี deletion ใน buffer → ไม่มีอะไรถูกเผยแพร่ — credential
+    // ที่ยังใช้ได้อีก ~150 วิ เดินต่อ · รอบถัดไป (token หมดจริง) getSession จะ
+    // propagate error ตัวนี้ → deathConfirmed → ลบครบทั้งชุด (r11 positive control)
+    expect(leakedDeletions(res)).toEqual([]);
+    expect(res.headers.get("x-middleware-request-cookie") ?? "").toContain(`${AUTH_COOKIE}=`);
+  });
+});
+
+/**
+ * gate-cleanup r1 M1 — ขาในของ server component (RSC loader เรียก BFF ของตัวเอง
+ * ผ่าน catalog/learning/admin ซึ่งใส่ header `x-ltc-bff-internal: 1`) ต้องไม่หมุน
+ * token: Set-Cookie ของขาในไม่มีทางถึง browser (RSC ตั้ง cookie เองไม่ได้) — ถ้า
+ * ปล่อยหมุน rotation ตกอยู่ใน response ภายในอย่างเดียว = ทิ้งกลางอากาศ (PB-1
+ * เดิมเพียงย้าย race จากหน้าต่าง margin 90 → LEAD 180 วินาที)
+ */
+describe("middleware ข้าม refresh สำหรับขาใน x-ltc-bff-internal (gate-cleanup r1 M1)", () => {
+  function sessionWith(secondsLeft: number, tokenPrefix = "near"): string {
+    return JSON.stringify({
+      access_token: `${tokenPrefix}-access-token`,
+      refresh_token: "refresh-token-test",
+      token_type: "bearer",
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) + secondsLeft,
+      user: {
+        id: "11111111-1111-4111-8111-000000000099",
+        aud: "authenticated",
+        app_metadata: {},
+        user_metadata: {},
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+  }
+
+  function internalRequest(path: string, sessionJson: string): NextRequest {
+    return new NextRequest(`http://localhost:3000${path}`, {
+      method: "GET",
+      headers: {
+        cookie: `${AUTH_COOKIE}=${encodeURIComponent(sessionJson)}`,
+        "x-ltc-bff-internal": "1",
+      },
+    });
+  }
+
+  it("ขาใน (header x-ltc-bff-internal) + token เหลือ 150 วิ → ไม่หมุนเลย: ไม่มี /token call, ไม่มี Set-Cookie ตระกูล auth, credential ส่งต่อเป็นเดิม (ขานอกคือเจ้าของ rotation)", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/auth/v1/token")) {
+        return jsonResponse(200, {
+          access_token: "should-never-be-used",
+          refresh_token: "should-never-be-used",
+          token_type: "bearer",
+          expires_in: 3600,
+          expires_at: Math.floor(Date.now() / 1000) + 3500,
+          user: {
+            id: "11111111-1111-4111-8111-000000000099",
+            aud: "authenticated",
+            app_metadata: {},
+            user_metadata: {},
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }
+      return jsonResponse(401, { message: "Invalid authentication credentials" });
+    });
+    const res = await middleware(internalRequest("/api/v1/courses", sessionWith(150)));
+    expect(res.status).toBe(200);
+    // ไม่มี network call ใด ๆ (getSession ก็ไม่หมุนเพราะ 150 > margin 90)
+    expect(fetchMock).not.toHaveBeenCalled();
+    // ไม่มีการเขียน/ลบ cookie auth ออกไปเลย — token ใหม่ต้องไม่เกิดเฉพาะใน response ภายใน
+    expect(res.cookies.getAll().filter((c) => c.name.startsWith(AUTH_COOKIE))).toEqual([]);
+    // credential เดิมเดินต่อถึง handler เป็นเดิมทุกประการ
+    expect(res.headers.get("x-middleware-request-cookie") ?? "").toContain(`${AUTH_COOKIE}=`);
+  });
+
+  it("ขานอก lead rotation ล้ม → credential คงเดิม แล้วขาในด้วย cookie ชุดเดียวกันต้องไม่มีการหมุนที่เหลือ token ใหม่เฉพาะใน response ภายใน", async () => {
+    // รอบขานอก: 150 วิ + /token ล้มแบบ non-retryable ที่ไม่ใช่ตายจริง (400 +
+    // error_code นอก allowlist) → SDK preserve → ไม่มี deletion, credential ที่ยัง
+    // มีชีวิตเดินต่อ (PB-1 doctrine) · (ไม่ใช้ 500: auth-js retry แบบ exponential
+    // backoff สูงสุด 10 ครั้ง ≈ 3 นาที ทำ test ค้าง — คุณสมบัติที่ M1 ต้องการคือ
+    // "ขานอกไม่ได้เผยแพร่ rotation" ซึ่งเหมือนกันทุกกรณีล้ม)
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(400, { code: 400, error_code: "unexpected_failure", msg: "auth server hiccup" }),
+    );
+    const outer = await middleware(
+      new NextRequest("http://localhost:3000/courses", {
+        method: "GET",
+        headers: { cookie: `${AUTH_COOKIE}=${encodeURIComponent(sessionWith(150))}` },
+      }),
+    );
+    expect(outer.status).toBe(200);
+    expect(leakedDeletions(outer)).toEqual([]);
+    expect(outer.headers.get("x-middleware-request-cookie") ?? "").toContain(`${AUTH_COOKIE}=`);
+    const jar = outer.headers.get("x-middleware-request-cookie") ?? `${AUTH_COOKIE}=${encodeURIComponent(sessionWith(150))}`;
+
+    // รอบขาใน: cookie ชุดเดียวกัน + x-ltc-bff-internal → ห้ามยิง /token เลย
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async () => {
+      throw new Error("internal leg must not touch the auth server");
+    });
+    const inner = await middleware(
+      new NextRequest("http://localhost:3000/api/v1/courses", {
+        method: "GET",
+        headers: { cookie: jar, "x-ltc-bff-internal": "1" },
+      }),
+    );
+    expect(inner.status).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // ไม่มี cookie auth ถูกเขียน/ลบใน response ภายใน — rotation ต้องไม่เกิดที่ขาในเด็ดขาด
+    expect(inner.cookies.getAll().filter((c) => c.name.startsWith(AUTH_COOKIE))).toEqual([]);
+    expect(inner.headers.get("x-middleware-request-cookie") ?? "").toContain(`${AUTH_COOKIE}=`);
+  });
+});

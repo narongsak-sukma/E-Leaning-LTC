@@ -192,6 +192,22 @@ describe("POST /courses/{id}/enroll — map ผล RPC ตาม 0011_functions.
     expect(body.error.message).toBe(errorDefinition("ERR-CRS-001").message);
   });
 
+  it("PB-7: คอร์สถูก soft-delete → RPC กรอง deleted_at is null แล้วโยน '(ERR-CRS-001)' → 404 (ลงทะเบียนไม่ได้)", async () => {
+    // eligibility อยู่ฝั่ง RPC enroll() — 0011_functions.sql L33-37: select ... where
+    // id = p_course_id and deleted_at is null → not found โยน '(ERR-CRS-001)' ก่อน
+    // ถึง INSERT (L48-52) → คอร์สที่ลบแล้วลงทะเบียนซ้ำ/ใหม่ไม่ได้ทุกกรณี (route ไม่แตะ SQL)
+    const { res, client } = await post(COURSE_ID, {
+      enroll: {
+        data: null,
+        error: { message: "ไม่พบหลักสูตร หรือหลักสูตรยังไม่เผยแพร่ (ERR-CRS-001)" },
+      },
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("ERR-CRS-001");
+    expect(client.rpc).toHaveBeenCalledWith("enroll", { p_course_id: COURSE_ID });
+  });
+
   it("audience lawyer-only แต่ผู้ขอเป็น citizen → '(ERR-ENR-002)' → 422", async () => {
     const { res } = await post(COURSE_ID, {
       roles: ["citizen"],

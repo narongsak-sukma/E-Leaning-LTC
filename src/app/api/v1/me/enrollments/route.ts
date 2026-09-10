@@ -1,8 +1,12 @@
 /**
  * GET /api/v1/me/enrollments — รายการที่ลงทะเบียนของตัวเอง (Wave C-3 · API-SPEC 1.0.1 §3.3)
  *
- * - ต้อง login — ไม่ login → 401 ERR-AUTH-001; ขอบเขต "เฉพาะของตัวเอง" บังคับสองชั้น:
- *   `.eq(user_id, ...)` + RLS SELECT เจ้าของแถว (DD §3.2)
+ * - ต้อง login — ไม่ login → 401 ERR-AUTH-001; ขอบเขต "เฉพาะของตัวเอง" บังคับที่ RPC
+ *   my_active_enrollments (0017 — e.user_id = auth.uid() ฝั่ง DB) · PB-7/M2+M3:
+ *   รายการตัดการลงทะเบียนของหลักสูตรที่ถูก soft-delete ออก โดยตรวจเงื่อนไขเดียวที่
+ *   ตั้งใจจริง (c.deleted_at is null) — ห้ามใช้ `courses!inner` embed เพราะ embed
+ *   ทำให้แถวตกใต้ RLS ของ courses (published-only) → หลักสูตรถูก archive หลังผู้เรียน
+ *   ลงทะเบียนแล้ว = ประวัติการเรียนหายเกินขอบเขต soft-delete
  * - envelope ตาม §1.2: { data: [...], page: { nextCursor, hasMore: true } }
  *   cursor signed (lib/api/pagination) · query ตรง PageQuery (§4 #12 — default 20, max 100)
  * - rate = READ (ตาราง §5: /me* → READ 120/min, user_id + ip)
@@ -43,9 +47,13 @@ export async function GET(request: Request): Promise<NextResponse> {
     const { limit, cursor } = parsePageQuery(new URL(request.url).searchParams);
     const supabase = await createSupabaseSsrClient();
     let query = supabase
-      .from("enrollments")
+      // PB-7 (M2+M3 แก้รูป): RPC security-definer ของ 0017 — ขอบเขตเจ้าของ +
+      // กรอง soft-delete ของหลักสูตรอยู่ใน SQL ฝั่ง DB (e.user_id = auth.uid() ·
+      // join courses c ... c.deleted_at is null) จึงไม่ต้อง (และไม่ควร) ใส่
+      // .eq("user_id") หรือ embed courses ซ้ำที่นี่ · RPC เป็น STABLE → PostgREST
+      // อนุญาตให้ chain .select/.order/.limit/.or บนผลลัพธ์ได้
+      .rpc("my_active_enrollments")
       .select("id, course_id, status, enrolled_at, expires_at, completed_at")
-      .eq("user_id", user.userId)
       .order("enrolled_at", { ascending: false })
       .order("id", { ascending: false })
       .limit(limit + 1);

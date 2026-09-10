@@ -1,8 +1,10 @@
 /**
- * unit tests — GET /api/v1/me/enrollments (Wave C-3)
+ * unit tests — GET /api/v1/me/enrollments (Wave C-3 · PB-7 ปรับรูป M2+M3)
  *
  * mock client ตามแบบ rbac.test.ts (vi.mock supabase/ssr) — ขอบเขต "เฉพาะของตัวเอง"
- * ตรวจที่ handler (.eq user_id) + RLS เจ้าของแถว (DD §3.2); mock จำลองฝั่งหลังผ่าน client
+ * + กรองหลักสูตร soft-delete อยู่ที่ RPC my_active_enrollments (0017 — SQL ฝั่ง DB
+ * e.user_id = auth.uid() + join courses c ... c.deleted_at is null); handler เรียก
+ * RPC แล้ว chain order/limit/cursor — จุดควบคุมของ unit test คือชื่อ RPC + รูป query
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -52,10 +54,14 @@ function row(index: number, enrolledAt: string): EnrollmentRow {
 
 /** thenable builder — `await query` ได้เหมือน PostgrestBuilder จริง */
 function makeBuilder(rows: EnrollmentRow[]) {
+  const selectCalls: string[] = [];
   const eqCalls: Array<{ column: string; value: unknown }> = [];
   const orCalls: string[] = [];
   const builder = {
-    select: vi.fn(() => builder),
+    select: vi.fn((columns: string) => {
+      selectCalls.push(columns);
+      return builder;
+    }),
     eq: vi.fn((column: string, value: unknown) => {
       eqCalls.push({ column, value });
       return builder;
@@ -70,17 +76,18 @@ function makeBuilder(rows: EnrollmentRow[]) {
       return res({ data: rows, error: null });
     },
   };
-  return { builder, eqCalls, orCalls };
+  return { builder, selectCalls, eqCalls, orCalls };
 }
 
 function mockClient(rows: EnrollmentRow[], roles: readonly string[] = ["citizen"]) {
-  const { builder, eqCalls, orCalls } = makeBuilder(rows);
+  const { builder, selectCalls, eqCalls, orCalls } = makeBuilder(rows);
   // profiles ของ session.getUser (SDS §5.5) — builder แยก: บัญชี active ค่าตั้งต้น
   const profilesBuilder = {
     select: vi.fn(() => profilesBuilder),
     eq: vi.fn(() => profilesBuilder),
     maybeSingle: vi.fn(async () => ({ data: { is_active: true, deleted_at: null }, error: null })),
   };
+  const rpcCalls: string[] = [];
   const client = {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: USER_ID } }, error: null })),
@@ -92,13 +99,19 @@ function mockClient(rows: EnrollmentRow[], roles: readonly string[] = ["citizen"
       },
     },
     // my_roles ของ requireMfaForRoles (AUTH-007 gate) — default citizen = ไม่ถูกบังคับ MFA
-    rpc: vi.fn(async (fn: string) =>
-      fn === "my_roles" ? { data: roles, error: null } : { data: null, error: null }),
+    // · my_active_enrollments ของ route (M2+M3) — คืน builder chain ได้เหมือน PostgrestBuilder จริง
+    rpc: vi.fn((fn: string) => {
+      rpcCalls.push(fn);
+      if (fn === "my_roles") {
+        return Promise.resolve({ data: roles, error: null });
+      }
+      return builder;
+    }),
     from: vi.fn((table: string) => (table === "profiles" ? profilesBuilder : builder)),
     _builder: builder,
   };
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
-  return { eqCalls, orCalls, order: builder.order, limit: builder.limit };
+  return { selectCalls, eqCalls, orCalls, rpcCalls, order: builder.order, limit: builder.limit };
 }
 
 function meUrl(query = ""): Request {
@@ -129,14 +142,29 @@ describe("GET /me/enrollments — envelope + resource (§1.2/§3.3)", () => {
     expect(res.headers.get("x-request-id")).toBe("req-c3-2");
   });
 
-  it("ผูกเจ้าของเสมอ: .eq(user_id) + เรียง (enrolled_at,id) desc + limit default+1", async () => {
+  it("ผูกเจ้าของเสมอ: ผ่าน RPC my_active_enrollments (ขอบเขต e.user_id=auth.uid() อยู่ใน SQL ของ 0017 — ไม่มี client-side user filter ให้รั่ว) + เรียง (enrolled_at,id) desc + limit default+1", async () => {
     const filters = mockClient([row(1, T1)]);
     const res = await GET(meUrl());
     expect(res.status).toBe(200);
-    expect(filters.eqCalls).toEqual([{ column: "user_id", value: USER_ID }]);
+    expect(filters.rpcCalls).toContain("my_active_enrollments");
+    // ห้ามมี filter เจ้าของ/soft-delete ฝั่ง client — ทั้งหมดอยู่ใน RPC
+    expect(filters.eqCalls).toEqual([]);
     expect(filters.order).toHaveBeenCalledWith("enrolled_at", { ascending: false });
     expect(filters.order).toHaveBeenCalledWith("id", { ascending: false });
     expect(filters.limit).toHaveBeenCalledWith(21);
+  });
+
+  it("PB-7 (M2+M3): ตัดคอร์ส soft-delete ผ่าน RPC — ไม่ใช้ courses!inner embed (embed ทำให้แถวตกใต้ RLS published-only ของ courses → คอร์สถูก archive = ประวัติผู้เรียนหายเกินขอบเขต soft-delete)", async () => {
+    // จุดควบคุมของ route คือรูปร่าง query — การกรองจริง (join c.deleted_at is null)
+    // เกิดที่ RPC 0017 ฝั่ง DB พิสูจน์โดย integration test ของ suite นี้แทน
+    const filters = mockClient([row(1, T1)]);
+    const res = await GET(meUrl());
+    expect(res.status).toBe(200);
+    expect(filters.rpcCalls).toContain("my_active_enrollments");
+    expect(filters.selectCalls.join(" ")).not.toContain("courses");
+    expect(filters.eqCalls).toEqual([]); // รวมถึง .eq(courses.deleted_at, null) แบบเดิม (M2)
+    const body = (await res.json()) as { data: Array<{ courseId: string }> };
+    expect(body.data).toHaveLength(1);
   });
 
   it("limit+1 แถว → hasMore=true + nextCursor signed ชี้แถวสุดท้ายของหน้า", async () => {
