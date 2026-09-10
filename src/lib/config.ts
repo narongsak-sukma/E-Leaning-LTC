@@ -8,6 +8,10 @@
  *
  * ขอบเขต: env vars ตามตาราง SDS §7.2 เท่านั้น (กฎธุรกิจที่ปรับได้โดยไม่ deploy เป็นชั้น DB-config)
  */
+// guard (PB-9): โมดูลนี้อ่าน process.env ทั้ง secret ของ server — ห้ามถูก bundle เข้า
+// client โดยเด็ดขาด; import เข้า Client Component ต้องพังตอน build ทันที (แบบเดียวกับ
+// lib/supabase/server.ts / lib/auth/session.ts)
+import "server-only";
 import { z } from "zod";
 
 const requiredString = z.string().trim().min(1);

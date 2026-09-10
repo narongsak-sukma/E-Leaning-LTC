@@ -34,7 +34,7 @@
 | `R2_*` (เมื่อ `MEDIA_PROVIDER=r2`) | Cloudflare R2 | Vercel env | rotate = คู่ Access Key/Secret พร้อมกัน |
 | `STREAM_ACCOUNT_ID` + `STREAM_CLIENT_SECRET` (เมื่อ `MEDIA_PROVIDER=stream`) | Cloudflare Stream — **ต้องครบทั้ง 2 ค่า** ตาม config schema | Vercel env | URL เซ็นก่อนหน้าตายตาม TTL เดิม |
 | `SMTP_USER` / `SMTP_PASSWORD` หรือ `RESEND_API_KEY` (เมื่อเปิดส่งอีเมลจริง) | ผู้ให้บริการอีเมล (Wave F) | Vercel env | อีเมลค้างส่งช่วงหมุน — ตรวจ outbox หลังหมุน |
-| `NEXT_PUBLIC_*` ที่มี `SERVICE_ROLE` ในชื่อ | — | — | **ห้ามใช้โดยกลไกจริง** — `loadConfig` ปฏิเสธทันที (`PUBLIC_SERVICE_ROLE_BAN`) + lint rule `ltc/no-public-service-role` (SDS §5.1) · หมายเหตุ: กลไกบังคับด้วยชื่อตรงเฉพาะกลุ่ม SERVICE_ROLE — secret ชนิดอื่นไม่ควรมีใน `NEXT_PUBLIC_*` เป็นวินัย (ฝั่ง client อ่าน env ไม่ได้อยู่แล้วเพราะทุก secret ถูกอ่านผ่าน server-only modules) |
+| `NEXT_PUBLIC_*` ที่มี `SERVICE_ROLE` ในชื่อ | — | — | **ห้ามใช้โดยกลไกจริง** — `loadConfig` ปฏิเสธทันที (`PUBLIC_SERVICE_ROLE_BAN`) + lint rule `ltc/no-public-service-role` (SDS §5.1) · ขอบเขตที่ต้องเข้าใจ: (1) Next.js inline ค่า `NEXT_PUBLIC_*` ลง client bundle ตอน build อัตโนมัติ — กลไกข้างต้นปิดเฉพาะชื่อที่มี SERVICE_ROLE secret ชนิดอื่นห้ามตั้งชื่อ `NEXT_PUBLIC_*` เป็นวินัย (2) ชั้นที่บังคับจริงสำหรับโมดูลอ่าน env ของเซิร์ฟเวอร์: `src/lib/config.ts` ประกาศ `import "server-only"` — Client Component ที่ import config จะ build พังทันที (secret ไม่มีทางไหลเข้า client bundle ทางโมดูลนี้) |
 
 **ห้ามตั้งใน staging/prod เด็ดขาด:** `TEST_*` ทั้งชุด (ใช้เฉพาะ dev/test harness —
 รวม `TEST_USER_PASSWORD`) และ `APP_ENV` ต้องเป็น `prod` (staging ก็ใช้ `prod` —
@@ -76,6 +76,7 @@ reload) แล้วพิสูจน์ว่าคีย์เก่าตา
 | --- | --- |
 | prod ไม่ตั้ง `CURSOR_HMAC_SECRET` → bootstrap throw + health 503 + call site พังหมด | `src/lib/config.ts` (superRefine PB-9) + `src/instrumentation.ts` (register) + `/api/health` (readiness) — tests: `config.test.ts` / `instrumentation.test.ts` / `health/route.test.ts` |
 | service key ขึ้นต้น `NEXT_PUBLIC_` → ไม่ start | `loadConfig` (`PUBLIC_SERVICE_ROLE_BAN`) + eslint rule `ltc/no-public-service-role` |
+| config module (อ่าน secret ทั้งหมด) เข้า client bundle → build พังทันที | `src/lib/config.ts` `import "server-only"` (แบบแผนเดียวกับ `lib/supabase/server.ts` / `lib/auth/session.ts`) |
 | provider ไม่ครบค่าประกอบ → ไม่ start | `envSchemaWithRules` (R2/stream/smtp/resend) |
 | secret หลุดเข้า repo → CI จับ (ยกเว้นไฟล์เอกสาร/ตัวอย่างที่ allowlist — ดู §1.4) | gitleaks 5 ด่าน (ci.yml) |
 
