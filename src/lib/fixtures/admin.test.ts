@@ -24,6 +24,7 @@ vi.mock("next/headers", () => ({
 }));
 
 import {
+  toAdminCategoryResource,
   toAdminCourseResource,
   type AdminCourseRow,
 } from "@/lib/schemas/admin-catalog";
@@ -242,6 +243,31 @@ describe("GET /admin/courses (ผ่านชั้นข้อมูล getAdmi
     const course = result.data.data[0] as AdminCourse;
     expect(course.createdAt).toBe("2026-08-31T00:00:00Z");
     expect(course.code).toBe("LTC-CONTRACT-1");
+  });
+
+  it("producer–consumer: toAdminCategoryResource ยอม sortOrder ติดลบ — parser ต้องผ่าน (gate r5)", async () => {
+    // เดิม parser ใช้ requiredCount (>= 0) แต่ BFF z.number().int() ยอมค่าลบ
+    // → sortOrder=-7 ทำทั้งรายการกลายเป็น kind=server
+    const resource = toAdminCategoryResource(
+      {
+        id: "11111111-1111-4111-8111-000000000020",
+        slug: "contract-cat-negative",
+        name_th: "หมวดเรียงต้นสุด",
+        name_en: null,
+        parent_id: null,
+        sort_order: -7,
+        is_active: true,
+      },
+      3,
+    );
+    fetchMock.mockResolvedValue(jsonResponse(200, { data: [resource] }));
+    const result = await getAdminCategories();
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.data[0]?.sortOrder).toBe(-7);
+    expect(result.data[0]?.courseCount).toBe(3);
   });
 });
 

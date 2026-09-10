@@ -13,6 +13,8 @@ import {
   getAdminCategories,
   getAdminCourses,
   getAdminStaffSession,
+  type AdminCourse,
+  type AdminDataErrorKind,
 } from "@/lib/fixtures/admin";
 
 export const metadata: Metadata = {
@@ -23,10 +25,35 @@ export const metadata: Metadata = {
 
 /**
  * หน้ารายละเอียดยังไม่มี GET /admin/courses/{id} ในสเปก §3.8 —
- * หน้าจึงดึงข้อมูลจาก list endpoint (ทุกสถานะ สูงสุด 100 รายการตาม PageQuery max)
- * แล้วหาหลักสูตรตาม id เหมือนที่หน้าเดิมทำกับ fixture
+ * หน้าจึงดึงข้อมูลจาก list endpoint แล้วหาหลักสูตรตาม id โดย**ไล่ตาม cursor**
+ * จนครบทุกหน้า (gate r5: เดิมอ่านเฉพาะ 100 แถวแรก หลักสูตรที่อยู่หลังหน้าแรก
+ * ได้ 404 ผิด) · cap 20 หน้ากัน loop ไม่รู้จบ (ผิดปกติ — ถือว่าไม่พบ)
  */
 const DETAIL_LIST_LIMIT = 100;
+const DETAIL_MAX_PAGES = 20;
+
+type CourseDetailResult =
+  | { ok: true; course: AdminCourse | null }
+  | { ok: false; kind: AdminDataErrorKind };
+
+async function findCourseById(id: string): Promise<CourseDetailResult> {
+  let cursor: string | undefined;
+  for (let page = 0; page < DETAIL_MAX_PAGES; page += 1) {
+    const result = await getAdminCourses({ limit: DETAIL_LIST_LIMIT, cursor });
+    if (!result.ok) {
+      return result;
+    }
+    const hit = result.data.data.find((item) => item.id === id);
+    if (hit !== undefined) {
+      return { ok: true, course: hit };
+    }
+    cursor = result.data.page.nextCursor ?? undefined;
+    if (cursor === undefined) {
+      return { ok: true, course: null }; // ไล่ครบทุกหน้าแล้วไม่เจอ = ไม่มีจริง
+    }
+  }
+  return { ok: true, course: null }; // เกิน cap (ผิดปกติ) — ถือว่าไม่พบ ไม่ loop ต่อ
+}
 
 /** ปุ่มเผยแพร่ยังไม่เชื่อมต่อ — PATCH /admin/courses/{id} อยู่นอกขอบเขต C-8 Phase 1 */
 const PUBLISH_NEXT_NOTE =
@@ -39,23 +66,23 @@ export default async function AdminCourseDetailPage({
 }) {
   const { id } = await params;
   const sessionResult = await getAdminStaffSession();
-  const listResult = await getAdminCourses({ limit: DETAIL_LIST_LIMIT });
-  if (!listResult.ok) {
+  const detail = await findCourseById(id);
+  if (!detail.ok) {
     return (
       <div>
         <h1 className="font-heading text-xl font-bold text-ink-900 sm:text-2xl">
           รายละเอียดหลักสูตร
         </h1>
         <div className="mt-4">
-          <AdminDataState kind={listResult.kind} retryHref="/admin/courses" />
+          <AdminDataState kind={detail.kind} retryHref="/admin/courses" />
         </div>
       </div>
     );
   }
-  const course = listResult.data.data.find((item) => item.id === id);
-  if (course === undefined) {
+  if (detail.course === null) {
     notFound();
   }
+  const course = detail.course;
   const primaryRole =
     sessionResult.ok && sessionResult.staff !== null
       ? adminPrimaryRole(sessionResult.staff.roles)

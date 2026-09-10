@@ -207,6 +207,12 @@ function requiredCount(record: Record<string, unknown>, key: string): number | n
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
+/** จำนวนเต็มติดลบได้ — สำหรับฟิลด์ที่ producer ยอมค่าลบ เช่น sortOrder (gate r5) */
+function requiredInt(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
 function parseCourse(raw: unknown): AdminCourse | null {
   if (!isRecord(raw)) {
     return null;
@@ -266,7 +272,9 @@ function parseCategory(raw: unknown): AdminCategory | null {
   const nameTh = requiredString(raw, "nameTh");
   const nameEn = nullableString(raw, "nameEn");
   const parentId = nullableString(raw, "parentId");
-  const sortOrder = requiredCount(raw, "sortOrder");
+  // gate r5: BFF AdminCategoryResource ยอม sortOrder เป็นจำนวนเต็มติดลบ (z.number().int())
+  // — parser เดิม (>= 0) ตีตกทั้งรายการเมื่อเจอค่าลบ
+  const sortOrder = requiredInt(raw, "sortOrder");
   const courseCount = requiredCount(raw, "courseCount");
   const isActive = raw["isActive"];
   if (

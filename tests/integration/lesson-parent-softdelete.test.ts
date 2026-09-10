@@ -108,4 +108,13 @@ describe.skipIf(!DB_URL)("lessons_read — parent soft-delete guard (0013, gate 
       await setCourseDeleted(false);
     }
   });
+
+  it("ตัวบทเรียนถูก soft-delete → หายจากผู้เรียนทันทีแม้ parent ยังมีชีวิต (0014, gate r5)", async () => {
+    await psql(`update public.lessons set deleted_at = now() where id = '${chain.lesson_id}';`);
+    try {
+      expect(await visibleLessonCount()).toBe(0);
+    } finally {
+      await psql(`update public.lessons set deleted_at = null where id = '${chain.lesson_id}';`);
+    }
+  });
 });

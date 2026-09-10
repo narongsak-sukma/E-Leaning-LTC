@@ -12,7 +12,8 @@
  */
 import "server-only";
 import { cookies } from "next/headers";
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getConfig } from "../config";
 import { hardenedCookieOptions } from "./cookies";
 
@@ -44,4 +45,45 @@ export async function createSupabaseSsrClient() {
       },
     },
   });
+}
+
+/**
+ * ตัวแปร buffered ของ SSR client — การเขียน cookie ทั้งหมด (เช่น การลบ session cookie
+ * ระหว่าง signOut) ถูกเก็บใน memory ก่อน และลง cookieStore จริงเฉพาะเมื่อเรียก commit()
+ *
+ * gate r5: SDK เคลียร์ cookie ทันทีที่ signOut ถูกเรียก แม้การ revoke ฝั่ง auth server
+ * จะล้ม (5xx/network) — ถ้าปล่อยตามกัน ผู้ใช้กด logout ซ้ำจะเจอ "ไม่มี session" (204)
+ * ทั้งที่ refresh token ยังไม่ถูกเพิกถอน — logout route จึงต้อง commit เฉพาะเมื่อ
+ * การเพิกถอนสำเร็จ หรือ auth server ยืนยันเองว่าไม่มี session จริง
+ */
+export interface BufferedSsrClient {
+  readonly client: SupabaseClient;
+  /** ยืนยันการเขียน cookie ที่ค้างอยู่ทั้งหมดลง request ปัจจุบัน */
+  commit(): void;
+}
+
+/** ใช้ใน Route Handler ที่ "ปฏิบัติการแล้วค่อยเขียน cookie" — ปัจจุบันคือ logout (Wave F: logout-all) */
+export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClient> {
+  const cookieStore = await cookies();
+  const { supabaseUrl, supabaseAnonKey } = getConfig();
+  const pending = new Map<string, { value: string; options: CookieOptions | undefined }>();
+  const client = createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      getAll: () => cookieStore.getAll(),
+      setAll: (cookiesToSet) => {
+        for (const { name, value, options } of cookiesToSet) {
+          pending.set(name, { value, options });
+        }
+      },
+    },
+  });
+  return {
+    client,
+    commit: () => {
+      for (const [name, { value, options }] of pending) {
+        cookieStore.set(name, value, hardenedCookieOptions(options));
+      }
+      pending.clear();
+    },
+  };
 }
