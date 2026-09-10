@@ -1,0 +1,109 @@
+/**
+ * POST /api/v1/assessments/[id]/attempts — เริ่มสอบ (API-SPEC 1.0.3 §3.5 · DCR-6)
+ *
+ * ลำดับ: path param → session+permission → rate EXAM → RPC start_attempt (DD §4.7 —
+ * เขียนผ่าน SECURITY DEFINER เท่านั้น) → อ่านโครงข้อจาก learner_attempt_view (0009 —
+ * เฉพาะคอลัมน์ที่ไม่ใช่เฉลย: question_id/seq/selected_option_ids/answered_at) →
+ * 201 หน้าต่างสอบ + ชุดข้อไร้เฉลย + serverTime
+ *
+ * RPC ไม่คืนชุดข้อ — BFF อ่านเองหลัง start; คอลัมน์เฉลย (is_correct/explanation/
+ * points_earned/question_snapshot) **ไม่ถูก select เลย** และ mapper สร้าง object แบบ
+ * whitelist จึงไม่มีช่องทางรั่วระหว่างสอบ (D19-B1)
+ *
+ * permission = attempt:start (citizen/lawyer — RBAC-DESIGN §2.3 L70 "attempt:start
+ * (ตัวเอง)") · ธงให้ lead: ชื่อ perm ในใบงาน "assessment:attempt" ไม่มีจริงใน rbac.ts
+ *
+ * Errors: VAL-001 (id ไม่ใช่ uuid) · AUTH-001/RBAC-001/AUTH-004 · RATE-001 ·
+ * จาก RPC: ASM-001 (ครบจำนวนครั้ง) · ASM-002 (มี attempt ค้าง) · ASM-003 (ปิด/ไม่พบ/
+ * คลังข้อไม่พอ/cooldown) · LRN-001/LRN-002 (ต้องลงทะเบียน/เรียนให้ครบ) · VAL-001
+ * (token ไม่มี session_id claim) · SYS-002 (RPC/query ล้มเหลว · contract ผิด)
+ */
+import { NextResponse } from "next/server";
+import { AppError } from "@/lib/errors";
+import { jsonCreated, jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
+import { parseRpcErrorCode } from "@/lib/api/rpc-errors";
+import { requirePermission } from "@/lib/rbac";
+import { enforceRateLimit } from "@/lib/rate-limit";
+import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import {
+  AttemptStartView,
+  StartAttemptResult,
+  type StartAttemptResultParsed,
+  parseAssessmentIdParams,
+  toExamQuestion,
+  type LearnerAttemptViewRow,
+} from "@/lib/schemas/v1/exam";
+
+/** x-request-id (SDS §5.4) → envelope options (exactOptionalPropertyTypes-safe) */
+function responseOptions(request: Request): JsonResponseOptions {
+  const requestId = request.headers.get("x-request-id");
+  return requestId === null ? {} : { requestId };
+}
+
+/** ตรวจ jsonb ของ RPC start_attempt แบบ fail-closed — ผิด contract → SYS-002 */
+function parseStartAttemptResult(data: unknown): StartAttemptResultParsed {
+  const parsed = StartAttemptResult.safeParse(data);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "start_attempt_bad_contract" } });
+  }
+  return parsed.data;
+}
+
+/** POST — 201 หน้าต่างสอบ + ชุดข้อไร้เฉลย (+ takeover เมื่อ ASM-011 lease หมด) */
+export async function POST(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const options = responseOptions(request);
+  try {
+    // 1) path param — ไม่ใช่ uuid → VAL-001 400
+    const parsed = parseAssessmentIdParams({ id: (await context.params).id });
+    // 2) session + permission (attempt:start — citizen/lawyer มี; ธง: "assessment:attempt" ไม่มีจริง)
+    const { userId } = await requirePermission("attempt:start");
+    // 3) rate EXAM (user_id + ip — D12-11)
+    enforceRateLimit(request, { group: "EXAM", secondaryKey: userId });
+    const supabase = await createSupabaseSsrClient();
+
+    // 4) เริ่ม/takeover ผ่าน RPC — session ผูกจาก claim ฝั่ง RPC เอง (D20-B5)
+    const { data, error } = await supabase.rpc("start_attempt", { p_assessment_id: parsed.id });
+    if (error !== null) {
+      const code = parseRpcErrorCode(error);
+      throw code === undefined
+        ? new AppError("ERR-SYS-002", { details: { reason: "start_attempt_failed" } })
+        : new AppError(code);
+    }
+    const start = parseStartAttemptResult(data);
+
+    // 5) อ่านโครงข้อของ attempt นี้จาก learner_attempt_view (WHERE auth.uid() ในตัว view —
+    //    select เฉพาะคอลัมน์ที่ไม่ใช่เฉลย)
+    const { data: rows, error: qError } = await supabase
+      .from("learner_attempt_view")
+      .select("question_id, seq, selected_option_ids, answered_at")
+      .eq("attempt_id", start.attempt_id)
+      .order("seq", { ascending: true });
+    if (qError !== null) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "attempt_questions_read_failed" } });
+    }
+    const viewRows = (rows ?? []) as unknown as LearnerAttemptViewRow[];
+    if (viewRows.length !== start.question_count) {
+      // start เขียน attempt_answers ครบทุกข้อใน TX เดียว — เหลื่อม = contract ผิด fail-closed
+      throw new AppError("ERR-SYS-002", { details: { reason: "attempt_questions_bad_contract" } });
+    }
+    const view = {
+      attemptId: start.attempt_id,
+      status: "in_progress" as const,
+      deadlineAt: start.expires_at,
+      serverTime: new Date().toISOString(),
+      questionCount: start.question_count,
+      questions: viewRows.map(toExamQuestion),
+      ...(start.takeover !== undefined ? { takeover: start.takeover } : {}),
+    };
+    const parsedView = AttemptStartView.safeParse(view);
+    if (!parsedView.success) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "attempt_start_view_bad_contract" } });
+    }
+    return jsonCreated(parsedView.data, options);
+  } catch (err: unknown) {
+    return jsonErrorResponse(err, options);
+  }
+}
