@@ -18,6 +18,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
+// gate r2: bffGet ใน admin.ts อ้าง origin จาก config (PUBLIC_BASE_URL) — mock กันแตะ env จริง
+vi.mock("@/lib/config", () => ({
+  getConfig: () => ({ publicBaseUrl: "http://bff-origin.test.local" }),
+}));
+
 vi.mock("next/headers", () => ({
   headers: async () =>
     new Headers({

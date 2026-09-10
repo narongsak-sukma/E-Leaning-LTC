@@ -7,13 +7,20 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
+// gate r2: origin ต้องมาจาก config เท่านั้น — mock getConfig กันแตะ env จริง
+vi.mock("@/lib/config", () => ({
+  getConfig: () => ({ publicBaseUrl: "http://bff-origin.test.local" }),
+}));
+
 vi.mock("next/headers", () => ({
-  headers: async () =>
+  // vi.fn เพื่อ override ต่อ test ได้ (SSRF regression ต้องปลอม x-forwarded-host)
+  headers: vi.fn(async () =>
     new Headers({
       host: "admin.test.local",
       "x-forwarded-proto": "https",
       cookie: "session-cookie=abc",
     }),
+  ),
 }));
 
 import {
@@ -108,7 +115,7 @@ describe("GET /admin/courses (ผ่านชั้นข้อมูล getAdmi
     expect(course.publishedAt).toBe("2026-08-20");
     expect(course.updatedAt).toBe("2026-08-20");
     const url = fetchMock.mock.calls[0]?.[0] as URL;
-    expect(url.origin).toBe("https://admin.test.local");
+    expect(url.origin).toBe("http://bff-origin.test.local");
     expect(url.pathname).toBe("/api/v1/admin/courses");
     expect(url.searchParams.get("status")).toBe("published");
     expect(url.searchParams.get("q")).toBe("กฎหมาย");
@@ -228,7 +235,7 @@ describe("GET /admin/categories (ผ่านชั้นข้อมูล getA
     expect(inactive.nameTh).toBe("จรรยาบรรณทนายความ");
     const url = fetchMock.mock.calls[0]?.[0] as URL;
     expect(url.pathname).toBe("/api/v1/admin/categories");
-    expect(url.origin).toBe("https://admin.test.local");
+    expect(url.origin).toBe("http://bff-origin.test.local");
   });
 
   it("error 403 → kind=forbidden", async () => {
@@ -335,6 +342,25 @@ describe("GET /me (ผ่านชั้นข้อมูล getAdminStaffSessi
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     const headers = new Headers(init.headers);
     expect(headers.get("cookie")).toBe("session-cookie=abc");
+  });
+
+  it("SSRF regression (gate r2): x-forwarded-host ปลอมต้องไม่กำหนดปลายทาง fetch — origin จาก config เท่านั้น", async () => {
+    const { headers } = await import("next/headers");
+    vi.mocked(headers).mockResolvedValueOnce(
+      new Headers({
+        host: "real-host.test.local",
+        "x-forwarded-host": "evil.example.com",
+        "x-forwarded-proto": "https",
+        cookie: "session-cookie=abc",
+      }),
+    );
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { data: { displayName: "ดิลดา", roles: ["staff:viewer"] } }),
+    );
+    await getAdminStaffSession();
+    const url = fetchMock.mock.calls[0]?.[0] as URL;
+    expect(url.origin).toBe("http://bff-origin.test.local");
+    expect(url.host).not.toBe("evil.example.com");
   });
 });
 

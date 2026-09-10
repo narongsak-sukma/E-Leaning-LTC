@@ -175,7 +175,7 @@ function makeStub(spec: StubSpec = {}) {
           ? questions.builder
           : options.builder),
   };
-  return { ssr, service, selects };
+  return { ssr, service, selects, lessonBuilder: lesson.builder };
 }
 
 function makeRequest(): Request {
@@ -320,6 +320,12 @@ describe("GET /lessons/{id}/quiz — enrollment + lesson/quiz validation", () =>
     expect(response.status).toBe(403);
     const body = (await response.json()) as { error: Record<string, unknown> };
     expect(body.error["code"]).toBe("ERR-LRN-001");
+  });
+
+  it("soft-delete filter (gate r2): อ่าน lessons ต้องส่ง .is(deleted_at, null) เสมอ", async () => {
+    const { lessonBuilder } = await callRoute();
+    const isCalls = (lessonBuilder.is as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(isCalls).toContainEqual(["deleted_at", null]);
   });
 
   it("ไม่มี enrollment active (ไม่ลงทะเบียน/หมดอายุ) → 403 ERR-LRN-001", async () => {

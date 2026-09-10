@@ -20,6 +20,7 @@
  */
 import "server-only";
 import { headers } from "next/headers";
+import { getConfig } from "@/lib/config";
 import { ROLES, type Role } from "@/lib/rbac";
 
 /** สถานะหลักสูตร — ตรง enum `course_status` (DATA-DICTIONARY §2 + migration 0001 + SRS CAT-005) */
@@ -136,7 +137,8 @@ type BffOutcome =
 
 /**
  * GET ไปยัง BFF ของตัวเองแบบ absolute origin (จำเป็นเมื่อ fetch จาก server component)
- * - origin: x-forwarded-proto (default http) + x-forwarded-host/host
+ * - origin จาก config เท่านั้น (PUBLIC_BASE_URL — gate r2: ห้ามสร้างปลายทางจาก header ที่
+ *   ผู้ใช้ควบคุมได้ เช่น x-forwarded-host → SSRF + ส่ง cookie session ไปโฮสต์ปลิ้น)
  * - ส่งต่อ cookie ของ request เดิม — BFF อ่าน session จาก httpOnly cookie เสมอ
  * - cache: "no-store" — ข้อมูลหลังบ้านต้อง fresh
  */
@@ -145,13 +147,7 @@ async function bffGet(
   query: Readonly<Record<string, string>> = {},
 ): Promise<BffOutcome> {
   const headerBag = await headers();
-  const host = headerBag.get("x-forwarded-host") ?? headerBag.get("host");
-  const proto = headerBag.get("x-forwarded-proto") ?? "http";
-  if (host === null || host.length === 0) {
-    // ไม่มี host ให้อ้าง origin = สภาพแวดล้อมผิดปกติ → ความล้มเหลวฝั่งระบบ (fail-closed)
-    return { ok: false, kind: "server" };
-  }
-  const url = new URL(path, `${proto}://${host}`);
+  const url = new URL(path, getConfig().publicBaseUrl);
   for (const [key, value] of Object.entries(query)) {
     url.searchParams.set(key, value);
   }

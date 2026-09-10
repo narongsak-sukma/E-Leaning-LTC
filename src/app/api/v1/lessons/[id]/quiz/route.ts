@@ -88,6 +88,7 @@ export async function GET(
       .from("lessons")
       .select("id, quiz_id, type, course_modules(course_id)")
       .eq("id", lessonId)
+      .is("deleted_at", null) // gate r2: lessons_read ไม่กรอง soft-delete — บทเรียนที่ลบแล้วต้องเหมือนไม่มีจริงก่อนเข้า service path
       .maybeSingle();
     if (lessonError) {
       throw new AppError("ERR-SYS-002", { details: { reason: "lessons_read_failed" } });
