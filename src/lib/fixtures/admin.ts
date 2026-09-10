@@ -9,9 +9,9 @@
  *   (API-SPECIFICATION §3.8 / §3.2 — lane c5 เป็นเจ้าของฝั่ง BFF ทั้งหมด src/app/api/**)
  *
  * หลักการ:
- * - server-side fetch ด้วย absolute origin จาก headers()
- *   (x-forwarded-proto + x-forwarded-host/host) และส่งต่อ cookie ของ request เดิมทุกครั้ง
- *   (session อยู่ที่ httpOnly cookie — ไม่มี token ฝั่ง browser ตาม SDS §5.1)
+ * - server-side fetch ด้วย absolute origin จาก config (PUBLIC_BASE_URL) เท่านั้น — ห้าม
+ *   สร้างปลายทางจาก header ที่ผู้ใช้ควบคุมได้ (gate r2 SSRF) — และส่งต่อ cookie ของ
+ *   request เดิมทุกครั้ง (session อยู่ที่ httpOnly cookie — ไม่มี token ฝั่ง browser ตาม SDS §5.1)
  * - cache: "no-store" ทุก call — ข้อมูลหลังบ้านต้อง fresh (ไม่ cache ที่ data cache/CDN)
  * - ลายเซ็นคงรูปร่าง fixture เดิม — หน้า/คอมโพเนนต์จึงไม่ต้องรื้อโครง
  * - ข้อมูลจำลอง static ถูกถอดออกจาก production path ทั้งหมด (คงเหลือเฉพาะใน *.test.ts)
