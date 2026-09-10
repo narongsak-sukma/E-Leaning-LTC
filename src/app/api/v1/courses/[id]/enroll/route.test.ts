@@ -49,6 +49,8 @@ type RpcResult = { data: unknown; error: { message: string } | null };
 
 interface Spec {
   userId: string | null;
+  /** ระดับ assurance ของ session — staff:* ทุก role ถูกบังคับ aal2 (D25-O4) */
+  aal: "aal1" | "aal2";
   roles: readonly string[];
   enroll: RpcResult;
   row: EnrollmentRow | null;
@@ -57,6 +59,7 @@ interface Spec {
 function makeClient(spec: Partial<Spec> = {}) {
   const full: Spec = {
     userId: "u1",
+    aal: "aal1",
     roles: ["citizen"],
     enroll: { data: NEW_ID, error: null },
     row: ROW,
@@ -67,12 +70,24 @@ function makeClient(spec: Partial<Spec> = {}) {
     eq: vi.fn(() => builder),
     maybeSingle: vi.fn(async () => ({ data: full.row, error: null })),
   };
+  // profiles ของ session.getUser (SDS §5.5) — builder แยกจาก enrollment: บัญชี active ค่าตั้งต้น
+  const profilesBuilder = {
+    select: vi.fn(() => profilesBuilder),
+    eq: vi.fn(() => profilesBuilder),
+    maybeSingle: vi.fn(async () => ({ data: { is_active: true, deleted_at: null }, error: null })),
+  };
   return {
     auth: {
       getUser: vi.fn(async () => ({
         data: { user: full.userId === null ? null : { id: full.userId } },
         error: null,
       })),
+      mfa: {
+        getAuthenticatorAssuranceLevel: vi.fn(async () => ({
+          data: { currentLevel: full.aal, nextLevel: null, currentAuthenticationMethods: [] },
+          error: null,
+        })),
+      },
     },
     rpc: vi.fn(async (fn: string) => {
       if (fn === "my_roles") {
@@ -80,7 +95,7 @@ function makeClient(spec: Partial<Spec> = {}) {
       }
       return full.enroll;
     }),
-    from: vi.fn(() => builder),
+    from: vi.fn((table: string) => (table === "profiles" ? profilesBuilder : builder)),
     _spec: full,
     _builder: builder,
   };
@@ -205,11 +220,18 @@ describe("POST /courses/{id}/enroll — auth / rbac / validation / rate", () => 
     expect(client.rpc).not.toHaveBeenCalledWith("enroll", expect.anything());
   });
 
-  it("staff:viewer (ไม่มี enroll:create) → 403 ERR-RBAC-001", async () => {
-    const { res } = await post(COURSE_ID, { roles: ["staff:viewer"] });
+  it("staff:viewer (ไม่มี enroll:create) → 403 ERR-RBAC-001 (aal2 — ผ่าน MFA gate แล้ว)", async () => {
+    const { res } = await post(COURSE_ID, { roles: ["staff:viewer"], aal: "aal2" });
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-RBAC-001");
+  });
+
+  it("staff:viewer aal1 (ยังไม่ MFA) → 403 ERR-AUTH-004 ก่อนพิจารณาสิทธิ์ (D25-O4)", async () => {
+    const { res } = await post(COURSE_ID, { roles: ["staff:viewer"] });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-AUTH-004");
   });
 
   it("path param ไม่ใช่ uuid → 400 ERR-VAL-001 (fields: courseId)", async () => {

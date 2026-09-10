@@ -63,6 +63,12 @@ function makeBuilder(rows: EnrollmentRow[]) {
 
 function mockClient(rows: EnrollmentRow[]) {
   const { builder, eqCalls, orCalls } = makeBuilder(rows);
+  // profiles ของ session.getUser (SDS §5.5) — builder แยก: บัญชี active ค่าตั้งต้น
+  const profilesBuilder = {
+    select: vi.fn(() => profilesBuilder),
+    eq: vi.fn(() => profilesBuilder),
+    maybeSingle: vi.fn(async () => ({ data: { is_active: true, deleted_at: null }, error: null })),
+  };
   const client = {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: USER_ID } }, error: null })),
@@ -73,7 +79,7 @@ function mockClient(rows: EnrollmentRow[]) {
         })),
       },
     },
-    from: vi.fn(() => builder),
+    from: vi.fn((table: string) => (table === "profiles" ? profilesBuilder : builder)),
     _builder: builder,
   };
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);

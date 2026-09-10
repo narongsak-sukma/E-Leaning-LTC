@@ -135,8 +135,11 @@ export async function loginAction(formData: FormData): Promise<void> {
 
 /**
  * สมัครสมาชิก (signUp) สำหรับประชาชนทั่วไป (citizen) — RBAC-DESIGN §1.1
- * สำเร็จ → ถ้า Supabase คืน session (auto-confirm) เข้าระบบทันที; ถ้าไม่ (ต้องยืนยันอีเมล)
- * → กลับ /login พร้อม notice registered
+ *
+ * AUTH-001: บัญชีต้องยืนยันอีเมลก่อนเปิดใช้งาน (config: enable_confirmations=true) —
+ * สำเร็จเสมอทางเดียว: กลับ /login พร้อม notice registered ("ตรวจสอบอีเมล")
+ * **ทั้งอีเมลใหม่และอีเมลซ้ำตอบเหมือนกันเป๊ะ** (กัน enumeration — API-SPEC §3.1 แนวเดียวกับ
+ * password-reset) แม้ Supabase คืน session ก็ไม่เข้าระบบทันที
  */
 export async function registerAction(formData: FormData): Promise<void> {
   const next = resolveSafeNextPath(formData.get("next"));
@@ -149,7 +152,7 @@ export async function registerAction(formData: FormData): Promise<void> {
     redirect(registerUrl(next, { error: "ERR-VAL-001" }));
   }
   const supabase = await createSupabaseSsrClient();
-  const { data, error } = await supabase.auth.signUp({
+  const { error } = await supabase.auth.signUp({
     email: parsed.data.email,
     password: parsed.data.password,
   });
@@ -158,11 +161,7 @@ export async function registerAction(formData: FormData): Promise<void> {
     if (outcome !== null) {
       redirect(registerUrl(next, outcome));
     }
-    // อีเมลซ้ำ = ตอบเหมือนสำเร็จ (กัน enumeration) → ไปยังขั้น "ตรวจอีเมล" ตามด้านล่าง
-  }
-  if (data?.session) {
-    // auto-confirm: ได้ session เลย
-    redirect(next);
+    // อีเมลซ้ำ = ตอบเหมือนสำเร็จ (กัน enumeration) → ขั้น "ตรวจอีเมล" เดียวกันด้านล่าง
   }
   redirect(loginUrl(DEFAULT_POST_LOGIN_PATH, { notice: "registered" }));
 }

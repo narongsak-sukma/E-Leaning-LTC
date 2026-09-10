@@ -14,12 +14,16 @@ import "server-only";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { getConfig } from "../config";
+import { hardenedCookieOptions } from "./cookies";
 
 /**
  * สร้าง Supabase user-JWT client ผูกกับ cookie ของ request ปัจจุบัน
  * ใช้ได้ใน Server Component / Server Action / Route Handler —
  * `setAll` เขียน cookie กลับได้จริงใน Server Action / Route Handler
- * (Server Component แบบ read-only จะกลืน error ไว้ — session refresh ผ่าน middleware ซึ่งเป็นงาน C-1)
+ * (Server Component แบบ read-only จะกลืน error ไว้ — session refresh ทำที่ middleware)
+ *
+ * cookie flags ผ่าน hardenedCookieOptions เสมอ — library ตั้ง default httpOnly:false
+ * (dist/utils/constants.js) ซึ่งขัด SDS §5.1 เราบังคับ httpOnly+sameSite=lax เองทุกจุด
  */
 export async function createSupabaseSsrClient() {
   const cookieStore = await cookies();
@@ -30,12 +34,12 @@ export async function createSupabaseSsrClient() {
       setAll: (cookiesToSet) => {
         try {
           for (const { name, value, options } of cookiesToSet) {
-            cookieStore.set(name, value, options);
+            cookieStore.set(name, value, hardenedCookieOptions(options));
           }
         } catch {
           // Next 15 อนุญาตให้ set cookie เฉพาะ Server Action / Route Handler —
           // ถ้าเรนเดอร์ Server Component ที่ set ไม่ได้ ให้ข้าม (ไม่พังการเรนเดอร์);
-          // refresh จริงทำที่ middleware (งาน C-1 ตาม wave-c-plan)
+          // refresh จริงทำที่ middleware (session refresh — SDS §5.1)
         }
       },
     },

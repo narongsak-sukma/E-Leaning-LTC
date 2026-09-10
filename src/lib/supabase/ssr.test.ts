@@ -66,15 +66,30 @@ it("getAll อ่าน session จาก cookie ของ request", async () =>
   expect(options.cookies.getAll()).toEqual([{ name: "sb-auth-token", value: "token-value" }]);
 });
 
-it("setAll เขียน cookie กลับผ่าน cookie store (Server Action / Route Handler)", async () => {
+it("setAll เขียน cookie กลับผ่าน cookie store พร้อม flags บังคับ (httpOnly+sameSite=lax+path)", async () => {
   const store = makeCookieStore();
   cookiesMock.mockResolvedValue(store as never);
   await createSupabaseSsrClient();
   const options = createServerClientMock.mock.calls[0]?.[2] as { cookies: CookieMethodsServer };
   options.cookies.setAll?.([{ name: "sb-auth-token", value: "new-token", options: { httpOnly: true } }], {});
+  // NODE_ENV=test → secure=false; flags อื่นบังคับเสมอ (SSD §5.1 — library default httpOnly:false)
   expect(store.entries).toEqual([
-    { name: "sb-auth-token", value: "new-token", options: { httpOnly: true } },
+    {
+      name: "sb-auth-token",
+      value: "new-token",
+      options: { httpOnly: true, sameSite: "lax", path: "/", secure: false },
+    },
   ]);
+});
+
+it("setAll บังคับ httpOnly=true ทับ options ของ library (regression: @supabase/ssr ตั้ง httpOnly:false)", async () => {
+  const store = makeCookieStore();
+  cookiesMock.mockResolvedValue(store as never);
+  await createSupabaseSsrClient();
+  const options = createServerClientMock.mock.calls[0]?.[2] as { cookies: CookieMethodsServer };
+  // จำลอง default จริงของ library (dist/utils/constants.js: httpOnly: false, sameSite: "lax")
+  options.cookies.setAll?.([{ name: "sb-auth-token", value: "t", options: { httpOnly: false, sameSite: "lax" } }], {});
+  expect(store.entries[0]?.options).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
 });
 
 it("setAll ไม่พังเมื่ออยู่ใน context ที่ set cookie ไม่ได้ (Server Component read-only)", async () => {

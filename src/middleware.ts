@@ -1,24 +1,31 @@
 /**
- * middleware — ชั้นกลางของทุก request /api/v1/* (SDS §5.4)
+ * middleware — ชั้นกลางของทุก request /api/v1/* (SDS §5.4 + §5.1)
  *
- * ขอบเขต (Wave C — C-1):
+ * ขอบเขต (Wave C — C-1 + codex-gate-c01 รอบแก้):
  * 1. request-id: สร้างใหม่ทุก request (crypto.randomUUID) — ใส่ request header x-request-id
  *    ให้ handler ใช้ต่อ (audit/log อ้างตัวเลขนี้) และสะท้อนกลับใน response header
- * 2. CSRF: mutating methods (POST/PUT/PATCH/DELETE) ตรวจ Origin / Sec-Fetch-Site ตรง host ตัวเอง
- *    — mismatch → 403 envelope ERR-RBAC-001 (code เดียวในทะเบียนที่เป็น 403 ทั่วไป — API-SPEC §2)
- *
- * ห้ามใส่ session logic ในไฟล์นี้ (ของ C-0/Phase 1 ตามแผน Wave C)
+ * 2. CSRF: ทุก method ที่ไม่ใช่ safe (GET/HEAD/OPTIONS) ต้องพิสูจน์ origin ได้ —
+ *    Origin ตรง host / Sec-Fetch-Site เป็น same-origin|same-site|none ·
+ *    ไม่มีทั้งคู่ → 403 (fail-closed — เครื่องมือ dev ต้องส่ง Origin เอง เช่น
+ *    `curl -H "Origin: http://localhost:3000"`)
+ * 3. session refresh (SDS §5.1): หมุน Supabase token ก่อนถึง handler — เขียน cookie
+ *    ทั้งฝั่ง request (ต่อไปยัง handler) และ response (กลับ browser) ด้วย flags
+ *    บังคับของ hardenedCookieOptions (httpOnly — library default เป็น false)
  */
 import { NextResponse, type NextRequest } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 import { jsonError } from "./lib/api/response";
+import { hardenedCookieOptions } from "./lib/supabase/cookies";
+import { getConfig } from "./lib/config";
 
-const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+/** safe methods ตาม RFC 9110 §9.2.1 — ทุกอย่างอื่นเป็น mutation และต้องผ่าน CSRF check */
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
  * ตรวจ CSRF เชิงโครงสร้าง (SDS §5.4) — ใช้ได้กับทุก mutating request
- * - มี Origin → host ต้องตรง host ของ request เท่านั้น
+ * - มี Origin → host ต้องตรง host ของ request เท่านั้น (ผิดรูปแบบ = ปฏิเสธ)
  * - ไม่มี Origin → Sec-Fetch-Site ต้องเป็น same-origin / same-site / none
- * - ไม่มีทั้งคู่ → ผ่าน (client ไม่ใช่ browser — CSRF เป็นภัยเฉพาะเบราว์เซอร์; cookie เป็น SameSite=Lax คู่กัน)
+ * - ไม่มีทั้งคู่ → ปฏิเสธ (fail-closed — พิสูจน์ไม่ได้ว่ามาจาก host เดียวกัน)
  */
 export function isCsrfAllowed(request: NextRequest): boolean {
   const origin = request.headers.get("origin");
@@ -33,7 +40,7 @@ export function isCsrfAllowed(request: NextRequest): boolean {
   if (secFetchSite !== null) {
     return secFetchSite === "same-origin" || secFetchSite === "same-site" || secFetchSite === "none";
   }
-  return true;
+  return false;
 }
 
 /** จุดเข้า middleware ของ Next — ใช้กับทุก request ใต้ /api/v1 เท่านั้น */
@@ -42,14 +49,36 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-request-id", requestId);
 
-  if (MUTATING_METHODS.has(request.method) && !isCsrfAllowed(request)) {
+  if (!SAFE_METHODS.has(request.method) && !isCsrfAllowed(request)) {
     return jsonError("ERR-RBAC-001", {
       requestId,
       details: { reason: "csrf_origin_mismatch" },
     });
   }
 
+  // session refresh (SDS §5.1) — token หมุนแล้วเดินต่อทั้งสองทิศทาง:
+  // request cookie (handler เห็น token ใหม่) + response cookie (browser เก็บลงถาวร)
   const response = NextResponse.next({ request: { headers: requestHeaders } });
+  try {
+    const { supabaseUrl, supabaseAnonKey } = getConfig();
+    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+      cookies: {
+        getAll: () => request.cookies.getAll(),
+        setAll: (cookiesToSet) => {
+          for (const { name, value, options } of cookiesToSet) {
+            request.cookies.set(name, value);
+            requestHeaders.set("cookie", request.cookies.toString());
+            response.cookies.set(name, value, hardenedCookieOptions(options));
+          }
+        },
+      },
+    });
+    // ตรวจ + หมุน token ถ้าใกล้หมดอายุ (ไม่ใช้ผลลัพธ์ — authorization เป็นของ handler/rbac)
+    await supabase.auth.getUser();
+  } catch {
+    // Auth server ล้มชั่วคราว — ไม่ block ที่นี่ (handler/rbac ตัดสิน fail-closed ต่อ)
+  }
+
   response.headers.set("x-request-id", requestId);
   return response;
 }

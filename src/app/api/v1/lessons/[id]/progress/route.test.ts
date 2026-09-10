@@ -15,6 +15,8 @@ process.env.SUPABASE_URL = "http://localhost:54321";
 process.env.SUPABASE_ANON_KEY = "test-anon-key";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
 
+// session.ts (โหลดผ่าน rbac.loadSessionFromSupabase) import "server-only" — stub ใน vitest
+vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
 vi.mock("@/lib/rate-limit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rate-limit")>();
@@ -47,6 +49,13 @@ function makeStubClient(options: StubOptions = {}) {
         data: { user: options.user === undefined ? { id: USER_ID } : options.user },
         error: null,
       })),
+      mfa: {
+        // ของ session.getUser (kernel) — aal1 ค่าตั้งต้น (ผู้เรียนไม่ถูกบังคับ MFA)
+        getAuthenticatorAssuranceLevel: vi.fn(async () => ({
+          data: { currentLevel: "aal1", nextLevel: null, currentAuthenticationMethods: [] },
+          error: null,
+        })),
+      },
     },
     rpc: vi.fn(async (fn: string, args: Row) => {
       if (fn === "my_roles") {
@@ -71,7 +80,8 @@ function makeStubClient(options: StubOptions = {}) {
           queues[table] = rest;
           return { data: first ?? null, error: null };
         }
-        return { data: spec ?? null, error: null };
+        // profiles ของ session.getUser (SDS §5.5) — default = บัญชี active; override ผ่าน single.profiles ได้
+        return { data: spec ?? (table === "profiles" ? { is_active: true, deleted_at: null } : null), error: null };
       });
       builder.then = (resolve: (v: { data: Row[]; error: null }) => unknown) =>
         Promise.resolve({ data: options.list?.[table] ?? [], error: null }).then(resolve);

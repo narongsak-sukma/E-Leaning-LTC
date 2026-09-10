@@ -18,7 +18,11 @@ export async function POST(): Promise<NextResponse> {
       return NextResponse.json(toErrorBody(new AppError("ERR-AUTH-001")), { status: 401 });
     }
     const supabase = await createSupabaseSsrClient();
-    await supabase.auth.signOut({ scope: "local" });
+    const { error } = await supabase.auth.signOut({ scope: "local" });
+    if (error) {
+      // เพิกถอน session ล้มเหลวฝั่ง Auth server — ห้ามตอบ 204 (token ยังใช้ได้อยู่)
+      throw new AppError("ERR-SYS-002");
+    }
     return new NextResponse(null, { status: 204 });
   } catch (err: unknown) {
     const appError = fromUnknown(err);

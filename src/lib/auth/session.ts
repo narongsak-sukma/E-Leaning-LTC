@@ -12,11 +12,12 @@
  */
 import "server-only";
 import { AppError } from "../errors";
-import type { Role } from "../rbac";
+import { requiresMfa, type AalLevel } from "../rbac";
 import { createSupabaseSsrClient } from "../supabase/ssr";
 
-/** ระดับ assurance ของ session (Supabase MFA) */
-export type AalLevel = "aal1" | "aal2";
+/** ระดับ assurance + ชุดบทบาทบังคับ MFA อยู่ที่ rbac.ts (แหล่งเดียว) — re-export ให้ผู้ใช้เดิมของ session.ts */
+export { MFA_REQUIRED_ROLES, requiresMfa } from "../rbac";
+export type { AalLevel } from "../rbac";
 
 /** ผู้ใช้ที่พิสูจน์ตัวตนแล้ว — อ้างด้วย userId เท่านั้น (ห้าม log PII — SDS §6.2) */
 export interface AuthUser {
@@ -31,27 +32,10 @@ export interface SessionContext {
 }
 
 /**
- * ชุดบทบาทที่บังคับ MFA — ยึด RBAC-DESIGN §1.1 (คอลัมน์ "MFA" ที่ระบุ "บังคับ") และ
- * §4.2 ("instructor / staff ทุกระดับ / super_admin (TOTP)") · SRS AUTH-007
- * (citizen/lawyer ไม่บังคับ — MFA optional, สมัครได้)
- */
-export const MFA_REQUIRED_ROLES: readonly Role[] = [
-  "instructor",
-  "staff:viewer",
-  "staff:content",
-  "staff:exam",
-  "staff:registrar",
-  "super_admin",
-] as const;
-
-/** pure — ชุดบทบาทมีบทบาทที่บังคับ MFA อย่างน้อย 1 ตัว → ต้องมี aal2 (union — RBAC §1.2-3) */
-export function requiresMfa(roles: readonly string[]): boolean {
-  return roles.some((role) => (MFA_REQUIRED_ROLES as readonly string[]).includes(role));
-}
-
-/**
  * อ่านผู้ใช้ปัจจุบันจาก session (cookie) ฝั่ง server
- * - คืน null = ไม่มี session ที่พิสูจน์ได้ (หมดอายุ/ไม่ได้ login)
+ * - คืน null = ไม่มี session ที่ใช้ได้: ไม่มีเลย / token หมดอายุ / **บัญชีถูกปิดหรือลบ**
+ *   (ตรวจ profiles.is_active + deleted_at ทุกครั้ง — SDS §5.5; trigger สร้างแถว profiles
+ *   ให้ผู้ใช้ใหม่เสมอ แถวหาย = สถานะไม่สอดคล้อง → ถือว่าไม่มี session — fail-closed)
  * - aal: อ่านจาก mfa.getAuthenticatorAssuranceLevel() — ถ้าอ่านไม่ได้ → โยน ERR-SYS-001
  *   (fail-closed: ไม่เดาค่า assurance เอง)
  */
@@ -64,6 +48,18 @@ export async function getUser(): Promise<AuthUser | null> {
   const { data: aalData, error: aalError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
   if (aalError) {
     throw new AppError("ERR-SYS-001");
+  }
+  // สถานะบัญชี (SDS §5.5): ปิดใช้งาน/ลบแล้ว = session นั้นใช้ไม่ได้ทันที แม้ JWT ยังไม่หมดอายุ
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("is_active, deleted_at")
+    .eq("id", data.user.id)
+    .maybeSingle();
+  if (profileError) {
+    throw new AppError("ERR-SYS-001"); // อ่านสถานะไม่ได้ = ไม่ปล่อยผ่าน (fail-closed)
+  }
+  if (profile === null || profile.is_active !== true || profile.deleted_at !== null) {
+    return null;
   }
   return { userId: data.user.id, aal: aalData?.currentLevel === "aal2" ? "aal2" : "aal1" };
 }
@@ -117,15 +113,18 @@ export const DEFAULT_POST_LOGIN_PATH = "/";
  * กัน open redirect — ยอมรับเฉพาะ path ภายในที่เริ่มด้วย "/" เท่านั้น
  * (แผน Wave C §4 และความเสี่ยง OWASP unvalidated redirect):
  * - ไม่ยอมรับค่าว่าง / ไม่ใช่ string / ยาวเกิน 512
- * - ปฏิเสธ protocol-relative (`//...`, `/\...`) และอักขระควบคุม (CR/LF/NUL)
+ * - ปฏิเสธ protocol-relative (`//...`, `/\...`) และ**อักขระควบคุมทุกตัว** (C0/C1)
+ *   — WHATWG URL parser ตัด tab/LF/CR ออกจาก input ก่อน parse เช่น `/\t/evil.example`
+ *   กลายเป็น `//evil.example` = protocol-relative ข้าม origin (จับได้ที่ชั้นนี้เท่านั้น
+ *   จึงต้องปฏิเสธก่อน ไม่ใช่แค่ CR/LF/NUL)
  * ทุกกรณีที่ไม่ผ่าน = คืน path default (ไม่ throw)
  */
 export function resolveSafeNextPath(raw: FormDataEntryValue | null | undefined): string {
   if (typeof raw !== "string") {
     return DEFAULT_POST_LOGIN_PATH;
   }
-  // ตรวจอักขระควบคุมบนค่าดิบ "ก่อน" trim (trim ตัด CR/LF ที่ขอบทิ้งได้)
-  if (/[\r\n\0]/.test(raw)) {
+  // อักขระควบคุมทั้งช่วง C0 (0x00–0x1F) + DEL (0x7F) + C1 (0x80–0x9F) — ตรวจบนค่าดิบ "ก่อน" trim
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(raw)) {
     return DEFAULT_POST_LOGIN_PATH;
   }
   const value = raw.trim();

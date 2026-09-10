@@ -86,6 +86,7 @@ export type Role = (typeof ROLES)[number];
  * ขอบเขตบังคับที่ handler/RLS; Wave C จะตรวจซ้ำกับ matrix ตอนเชื่อมจริง
  */
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
+  // หมายเหตุ registrar: attempt:view (ทุกคน — §2.3 L72) + audit_log:view (activity ตัวเอง — §2.4 L107)
   citizen: [
     "course:view",
     "lesson:view",
@@ -187,6 +188,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "course:view",
     "lesson:view",
     "assessment:view",
+    "attempt:view",
     "certificate:verify",
     "certificate:issue",
     "certificate:revoke",
@@ -200,6 +202,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "license:verify",
     "role:grant",
     "role:revoke",
+    "audit_log:view",
     "report:view",
     "report:export",
     "notification:view",
@@ -252,9 +255,33 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
 
 export type MyRolesFetcher = () => Promise<readonly string[]>;
 
+/** ระดับ assurance ของ session (Supabase MFA) — ใช้ตรวจ MFA fail-closed (D25-O4) */
+export type AalLevel = "aal1" | "aal2";
+
+/**
+ * ชุดบทบาทที่บังคับ MFA — ยึด RBAC-DESIGN §1.1 (คอลัมน์ "MFA" ที่ระบุ "บังคับ") และ
+ * §4.2 ("instructor / staff ทุกระดับ / super_admin (TOTP)") · SRS AUTH-007
+ * (citizen/lawyer ไม่บังคับ — MFA optional, สมัครได้)
+ */
+export const MFA_REQUIRED_ROLES: readonly Role[] = [
+  "instructor",
+  "staff:viewer",
+  "staff:content",
+  "staff:exam",
+  "staff:registrar",
+  "super_admin",
+] as const;
+
+/** pure — ชุดบทบาทมีบทบาทที่บังคับ MFA อย่างน้อย 1 ตัว → ต้องมี aal2 (union — RBAC §1.2-3) */
+export function requiresMfa(roles: readonly string[]): boolean {
+  return roles.some((role) => (MFA_REQUIRED_ROLES as readonly string[]).includes(role));
+}
+
 /** ผู้ใช้ที่ผ่านการตรวจ session แล้ว (ข้อมูลเท่าที่ RBAC ต้องใช้ — ไม่มี PII) */
 export interface SessionUser {
   readonly userId: string;
+  /** ระดับ assurance — ใช้บังคับ MFA fail-closed ใน requirePermission (D25-O4) */
+  readonly aal: AalLevel;
 }
 
 export type SessionFetcher = () => Promise<SessionUser | null>;
@@ -279,9 +306,11 @@ export interface RequirePermissionResult {
 }
 
 /**
- * ตรวจสิทธิ์ระดับ permission (RBAC §1.2-4) — deny = throw AppError("ERR-RBAC-001") → 403
+ * ตรวจสิทธิ์ระดับ permission (RBAC §1.2-4) — deny = throw AppError → 401/403
  *
- * ลำดับ: ไม่มี session → ERR-AUTH-001 (401) · มี session แต่ไม่มี permission → ERR-RBAC-001 (403)
+ * ลำดับ: ไม่มี session → ERR-AUTH-001 (401) · บทบาทบังคับ MFA แต่ aal ≠ aal2 →
+ * ERR-AUTH-004 (403 — MFA fail-closed ผูกกับเส้นทาง authorization หลัก D25-O4/AUTH-007) ·
+ * ไม่มี permission → ERR-RBAC-001 (403)
  * ขอบเขตเชิงทรัพยากร (owner) บังคับซ้ำที่ handler/RLS (RBAC §1.2-5) — ไม่ใช่หน้าที่ของฟังก์ชันนี้
  */
 export async function requirePermission(
@@ -295,6 +324,10 @@ export async function requirePermission(
   }
   const loadMyRoles = options.loadMyRoles ?? loadMyRolesFromDb;
   const roles = await loadMyRoles();
+  if (requiresMfa(roles) && session.aal !== "aal2") {
+    // บทบาทบังคับ MFA (instructor/staff:*/super_admin) ยังไม่ถึง aal2 = session enrollment-only
+    throw new AppError("ERR-AUTH-004");
+  }
   if (!hasPermission(roles, permission)) {
     throw new AppError("ERR-RBAC-001", { details: { permission } });
   }
@@ -319,12 +352,14 @@ async function createAuthedClient(): Promise<SupabaseClient> {
 
 /**
  * ตรวจ session จริงกับ Supabase Auth (SDS §5.5 — server-checked ทุก request)
- * ไม่มี session / token หมดอายุ/ใช้ไม่ได้ → คืน null (ผู้เรียก throw ERR-AUTH-001)
+ * ใช้ getUser() ของ session.ts (ตรวจ Auth server + aal + สถานะบัญชี profiles.is_active/
+ * deleted_at ในตัว — แหล่งเดียว ไม่ซ้ำซ้อน) · import แบบ lazy กัน module cycle
+ * (session.ts อ้างแค่ type จากไฟล์นี้) ไม่มี session ที่ใช้ได้ → คืน null
  */
 export async function loadSessionFromSupabase(): Promise<SessionUser | null> {
-  const supabase = await createAuthedClient();
-  const { data } = await supabase.auth.getUser();
-  return data.user ? { userId: data.user.id } : null;
+  const { getUser } = await import("./auth/session");
+  const user = await getUser();
+  return user === null ? null : { userId: user.userId, aal: user.aal };
 }
 
 /**
