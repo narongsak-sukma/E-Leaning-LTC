@@ -66,6 +66,8 @@ const envSchema = z.object({
   SESSION_ADMIN_IDLE_MINUTES: intFromEnv(15, 1, 240),
   SESSION_ADMIN_ABSOLUTE_HOURS: intFromEnv(8, 1, 24),
   LOGIN_LOCKOUT_ATTEMPTS: intFromEnv(5, 1, 100),
+  // — Cursor HMAC (API-SPEC §1.2 — cursor ต้อง signed) —
+  CURSOR_HMAC_SECRET: optionalString,
   // — การเรียน —
   VIDEO_HEARTBEAT_SEC: intFromEnv(15, 1, 600),
   VIDEO_COMPLETE_PCT: intFromEnv(80, 1, 100), // ธง Q6 — รอยืนยันกับสภาทนายความ
@@ -128,6 +130,14 @@ export interface AppConfig {
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
   supabaseDbPoolerUrl: string | null;
+  /**
+   * คีย์ HMAC สำหรับ signed cursor (API-SPECIFICATION §1.2) — optional env
+   * `CURSOR_HMAC_SECRET`; ไม่ตั้ง = null → helper ฝั่ง cursor (lib/api/pagination)
+   * fallback ใช้ `supabaseServiceRoleKey` เป็น PRF (dev-grade — ความเสี่ยงยอมรับได้เฉพาะ
+   * dev; prod ต้องตั้ง CURSOR_HMAC_SECRET เพื่อไม่ผูกความปลอดภัยของ cursor กับอายุ/การหมุน
+   * ของ service key) — HMAC เป็น one-way PRF จึงไม่เปิดเผยคีย์ต้นฉบับออกนอกกระบวนการ
+   */
+  cursorHmacSecret: string | null;
   mediaProvider: "supabase_storage" | "r2" | "stream";
   mediaSignedUrlTtlSec: number;
   r2: {
@@ -168,6 +178,7 @@ function toConfig(env: EnvRaw): AppConfig {
     supabaseAnonKey: env.SUPABASE_ANON_KEY,
     supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
     supabaseDbPoolerUrl: env.SUPABASE_DB_POOLER_URL ?? null,
+    cursorHmacSecret: env.CURSOR_HMAC_SECRET ?? null,
     mediaProvider: env.MEDIA_PROVIDER,
     mediaSignedUrlTtlSec: env.MEDIA_SIGNED_URL_TTL_SEC,
     r2:
