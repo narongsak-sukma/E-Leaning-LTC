@@ -167,6 +167,11 @@ export function authLogoutUrl(): string {
   return "/api/v1/auth/logout";
 }
 
+/** POST /courses/{id}/enroll — ลงทะเบียนเรียน (§3.3) */
+export function enrollCourseUrl(courseId: string): string {
+  return `/api/v1/courses/${encodeURIComponent(courseId)}/enroll`;
+}
+
 // ——— transport กลาง — absolute-origin helper + error envelope (§1.3) ———
 
 /**
@@ -484,6 +489,19 @@ export async function saveLessonProgress(
 /** POST /auth/logout — ออกจากระบบ (204 = สำเร็จ; 401 = ไม่มี session — ผู้เรียกจัดการเอง) */
 export async function logout(options?: FetchCallOptions): Promise<void> {
   await requestJson(authLogoutUrl(), { method: "POST" }, options);
+}
+
+/**
+ * POST /courses/{id}/enroll — ลงทะเบียนเรียน (§3.3) — 201 (ลงทะเบียนใหม่) / 200 (ซ้ำ
+ * idempotent คืน enrollment เดิม — DCR-3) · body ไม่มี (route อ่านเฉพาะ path param) ·
+ * error เป็น envelope จาก BFF: 401 AUTH-001 · 404 CRS-001 · 422 ENR-002 · 409 ENR-001
+ */
+export async function enrollCourse(
+  courseId: string,
+  options?: FetchCallOptions,
+): Promise<EnrollmentSummary> {
+  const { body } = await requestJson(enrollCourseUrl(courseId), { method: "POST" }, options);
+  return parseContract(EnrollmentResource, unwrapData(body));
 }
 
 // ——— ผู้ช่วยประกอบข้อมูล (pure — ใช้ทั้ง server pages และ test) ———

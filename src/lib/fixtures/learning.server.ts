@@ -1,8 +1,11 @@
 /**
  * learning.server — loaders ฝั่ง Server Component (RSC) ของผู้เรียน (Phase 1)
  *
- * - ประสาน data layer ใน ./learning ให้หน้า learner: แนบ origin จาก config (PUBLIC_BASE_URL)
+ * - ประสาน data layer ใน ./learning ผ่าน BFF: แนบ origin จาก config (PUBLIC_BASE_URL)
  *   และ forward cookie ของ request ให้ BFF เสมอ (fetch จาก RSC ไม่แนบ cookie ให้เอง)
+ * - เนื้อหาบทเรียน (PB-12): §3.4 ยังไม่มี endpoint เนื้อหาบทเรียน/media จึงอ่าน lessons
+ *   ตรงจาก DB ด้วย JWT ของผู้ใช้ (createSupabaseSsrClient — แบบเดียวกับ route ของ BFF)
+ *   RLS เป็นผู้ตัดสินการมองเห็นเสมอ (lessons_read / media_read)
  * - server-only: ห้าม import เข้า Client Component (ป้องกัน config/cookie เข้า browser bundle)
  * - แผนที่ error ของ BFF เป็นสถานะหน้าเว็บ: ไม่ login → unauthenticated · ยังไม่ลงทะเบียน →
  *   not_enrolled · ไม่พบหลักสูตร/บทเรียน → not_found · อื่น ๆ → unavailable
@@ -12,6 +15,7 @@ import "server-only";
 import { cookies } from "next/headers";
 
 import { getConfig } from "@/lib/config";
+import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
 import {
   ApiError,
@@ -57,12 +61,17 @@ export interface QuizPanelData {
   questions: LessonQuizView["questions"];
 }
 
-/** เนื้อหาบทเรียนที่หน้า learn เรนเดอร์ตามชนิดบทเรียน */
+/**
+ * เนื้อหาบทเรียนที่หน้า learn เรนเดอร์ตามชนิดบทเรียน — src/paragraphs มาจากข้อมูลจริง
+ * (lessons.content_md / media_assets ที่ RLS ให้อ่านได้) ไม่ใช่ค่า hardcode (PB-12)
+ */
 export type LessonContent =
   | {
       kind: "video";
       lessonId: string;
       title: string;
+      /** URL วิดีโอจาก media_assets ที่ RLS ให้อ่านได้ — null = ไม่มี URL ที่อ่านได้ (placeholder ไทย) */
+      src: string | null;
       durationSeconds: number;
       initialPositionSeconds: number;
     }
@@ -86,6 +95,139 @@ export interface LessonWorkspaceData {
 }
 
 export type LessonWorkspace = { kind: "ready"; data: LessonWorkspaceData } | LearnerPageError;
+
+/**
+ * สถานะผู้ชมของหลักสูตรบนหน้ารายละเอียด (PB-12) — กำหนด CTA:
+ * guest → /login?next= · not_enrolled → ปุ่มลงทะเบียน · enrolled → เข้าเรียนต่อ
+ */
+export type CourseViewerGate =
+  | { kind: "guest" }
+  | { kind: "not_enrolled" }
+  | { kind: "enrolled"; status: EnrollmentSummary["status"] };
+
+/**
+ * ตรวจสถานะการลงทะเบียนของผู้ชมต่อหลักสูตร (หน้ารายละเอียดหลักสูตร — PB-12)
+ *
+ * - ผ่าน BFF จริง (GET /me/enrollments — RLS เจ้าของ): 401 = guest · พบแถว = enrolled
+ * - แถวที่ expired/cancelled นับเป็น not_enrolled เพราะ RPC enroll() ปฏิเสธซ้ำด้วย
+ *   ERR-ENR-001 อยู่แล้ว (0011_functions.sql unique_violation) — ให้ผู้เรียนเห็นปุ่ม
+ *   ลงทะเบียนและได้ข้อความจริงจาก BFF แทนการเดาแทน
+ * - ระบบขัดข้อง (ไม่ใช่ 401) → not_enrolled: ปุ่มลงทะเบียนยังแสดงและจะได้ error
+ *   จริงจาก envelope ของ BFF ตอนกด (ไม่ปิดกั้นการใช้งานด้วยข้อผิดพลาดของการตรวจสถานะ)
+ */
+export async function loadCourseViewerGate(courseId: string): Promise<CourseViewerGate> {
+  const context = await serverContext();
+  try {
+    const page = await getMyEnrollments(context);
+    const existing = page.enrollments.find((enrollment) => enrollment.courseId === courseId);
+    if (existing === undefined) {
+      return { kind: "not_enrolled" };
+    }
+    if (existing.status === "expired" || existing.status === "cancelled") {
+      return { kind: "not_enrolled" };
+    }
+    return { kind: "enrolled", status: existing.status };
+  } catch (error: unknown) {
+    if (error instanceof ApiError && error.status === 401) {
+      return { kind: "guest" };
+    }
+    return { kind: "not_enrolled" };
+  }
+}
+
+/**
+ * แถวบทเรียนที่ผู้เรียนอ่านได้จริง (RLS lessons_read) — เนื้อหาเอกสาร + media ที่ฝังผ่าน
+ * lessons.media_id (media ฝังได้เท่าที่ RLS media_read อนุญาต — ผู้เรียนยังไม่ผ่าน policy
+ * จึงเป็น null และหน้าเว็บแสดง placeholder ไทยแทน URL ปลอม)
+ */
+interface LessonSourceRow {
+  readonly contentMd: string | null;
+  readonly media: {
+    readonly provider: string;
+    readonly bucket: string;
+    readonly storagePath: string;
+    readonly status: string;
+  } | null;
+}
+
+/** อ่านบทเรียนจาก DB ด้วย JWT ของผู้ใช้ — query ล้มเหลว = ไม่มีเนื้อหา (placeholder) ไม่พังหน้า */
+async function loadLessonSourceRow(lessonId: string): Promise<LessonSourceRow | null> {
+  const supabase = await createSupabaseSsrClient();
+  const { data } = await supabase
+    .from("lessons")
+    .select("content_md, media:media_assets(provider,bucket,storage_path,status)")
+    .eq("id", lessonId)
+    .maybeSingle();
+  if (data === null || typeof data !== "object") {
+    return null;
+  }
+  const row = data as unknown as {
+    content_md: unknown;
+    media: {
+      provider: unknown;
+      bucket: unknown;
+      storage_path: unknown;
+      status: unknown;
+    } | null;
+  };
+  const media =
+    row.media === null || typeof row.media !== "object"
+      ? null
+      : {
+          provider: typeof row.media.provider === "string" ? row.media.provider : "",
+          bucket: typeof row.media.bucket === "string" ? row.media.bucket : "",
+          storagePath: typeof row.media.storage_path === "string" ? row.media.storage_path : "",
+          status: typeof row.media.status === "string" ? row.media.status : "",
+        };
+  return {
+    contentMd: typeof row.content_md === "string" ? row.content_md : null,
+    media:
+      media !== null && media.bucket.length > 0 && media.storagePath.length > 0 ? media : null,
+  };
+}
+
+/**
+ * แยกเนื้อหา markdown (lessons.content_md) เป็นย่อหน้าสำหรับ DocumentViewer —
+ * ย่อหน้าคั่นด้วยบรรทัดว่าง · ตัดมาร์กอัปหัวข้อ/บุลเล็ต/อ้างอิงหัวแถวออกให้เหลือข้อความ
+ * (DocumentViewer เรนเดอร์เป็น <p> ข้อความ — ไม่มี markdown renderer ใน Phase 1)
+ */
+export function paragraphsOfContentMd(contentMd: string | null): readonly string[] {
+  if (contentMd === null || contentMd.trim().length === 0) {
+    return [];
+  }
+  return contentMd
+    .split(/\r?\n\s*\r?\n/)
+    .map((block) =>
+      block
+        .split(/\r?\n/)
+        .map((line) => line.replace(/^\s{0,3}(#{1,6}\s+|[-*+]\s+|>\s?)/, "").trim())
+        .join(" ")
+        .trim(),
+    )
+    .filter((paragraph) => paragraph.length > 0);
+}
+
+/**
+ * URL วิดีโอจากแถว media_assets ที่ RLS ให้อ่านได้จริง — เฉพาะ supabase_storage สถานะ ready
+ * (สร้าง signed URL ด้วยสิทธิ์ผู้ใช้ — TTL ตาม config MEDIA_SIGNED_URL_TTL_SEC) ·
+ * อ่านไม่ได้/provider อื่น (r2/stream ยังไม่มี CDN config) = null → placeholder ไทย ห้ามปลอม URL
+ */
+export async function resolveLessonMediaUrl(
+  media: LessonSourceRow["media"],
+): Promise<string | null> {
+  if (media === null || media.status !== "ready") {
+    return null;
+  }
+  const config = getConfig();
+  if (config.mediaProvider !== "supabase_storage" || media.provider !== "supabase_storage") {
+    return null;
+  }
+  const supabase = await createSupabaseSsrClient();
+  const { data } = await supabase.storage
+    .from(media.bucket)
+    .createSignedUrl(media.storagePath, config.mediaSignedUrlTtlSec);
+  return data?.signedUrl ?? null;
+}
 
 /** แผนที่ unknown → สถานะหน้า (401/LRN-001/404/unavailable) — ข้อความไทยเขียนที่หน้าเว็บ */
 function toPageError(error: unknown): LearnerPageError {
@@ -193,16 +335,23 @@ export async function loadLessonWorkspace(
             },
           };
   } else if (current.lesson.type === "document") {
-    // เนื้อหาเอกสารอยู่นอก /api/v1 (SDS §1-1) — §3.4 ยังไม่มี endpoint เนื้อหาบทเรียน
+    // เนื้อหาเอกสารจริงจาก lessons.content_md (RLS lessons_read — ผู้เรียนที่ลงทะเบียน
+    // หรือบท is_preview อ่านได้เอง) — §3.4 ยังไม่มี endpoint เนื้อหาบทเรียน จึงอ่านตรงจาก
+    // DB ด้วย JWT ของผู้ใช้ (แบบเดียวกับ route ของ BFF) · อ่านไม่ได้/ไม่มีเนื้อหา =
+    // ย่อหน้าว่าง → DocumentViewer แสดงสถานะว่างภาษาไทยและยังไม่เปิดยืนยันการอ่าน
+    const source = await loadLessonSourceRow(current.lesson.id);
     lesson = {
       kind: "document",
       lessonId: current.lesson.id,
       title: current.lesson.title,
       documentTitle: current.lesson.title,
-      paragraphs: [],
+      paragraphs: paragraphsOfContentMd(source?.contentMd ?? null),
     };
   } else {
-    // วิดีโอ — media URL ยังไม่มี endpoint ตาม spec (media เสิร์ฟผ่าน Storage/CDN โดยตรง)
+    // วิดีโอ — URL จาก media_assets ที่ฝังผ่าน lessons.media_id (RLS media_read ปัจจุบัน
+    // จำกัด instructor/staff — ผู้เรียนยังไม่ผ่าน policy จึงได้ null → placeholder ไทย
+    // ห้ามปลอม URL ผ่าน) เมื่อ Wave ถัดไปเปิดสิทธิ์ media/storage ให้ผู้เรียน URL ไหลผ่านเส้นนี้ทันที
+    const source = await loadLessonSourceRow(current.lesson.id);
     const durationSeconds = durationOf(detail, current.lesson.id) ?? 0;
     const initialPositionSeconds =
       current.lesson.status === "completed" || durationSeconds <= 0
@@ -212,6 +361,7 @@ export async function loadLessonWorkspace(
       kind: "video",
       lessonId: current.lesson.id,
       title: current.lesson.title,
+      src: await resolveLessonMediaUrl(source?.media ?? null),
       durationSeconds,
       initialPositionSeconds,
     };
