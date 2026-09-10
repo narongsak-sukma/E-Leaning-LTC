@@ -152,10 +152,10 @@ export async function createTestUser(localPart: string, role?: string): Promise<
   const userId = signupBody.id;
   // MAILER_AUTOCONFIRM=false — ยืนยันอีเมลฝั่ง DB เพื่อให้ password grant ผ่าน (dev เท่านั้น)
   // note: confirmed_at เป็น GENERATED column จาก email_confirmed_at — อัปเดตเฉพาะ email_confirmed_at
-  // note: compose ตั้ง GOTRUE_JWT_DEFAULT_GROUP_NAME=supabase → GoTrue ออก JWT role=supabase
-  //  (ไม่มี role นี้ในฐานข้อมูล → PostgREST 4xx) — จัด role ของผู้ใช้ทดสอบให้ตรง contract จริง (authenticated)
+  // note: role ของ JWT ถูกต้องนับจาก signup (PB-6: compose ตั้ง
+  //  GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated) — ไม่ต้อง patch auth.users.role อีกต่อไป
   await psql(
-    `update auth.users set role = 'authenticated', email_confirmed_at = now() where id = '${userId}';`,
+    `update auth.users set email_confirmed_at = now() where id = '${userId}';`,
   );
   if (role !== undefined) {
     await assignRole(userId, role);
