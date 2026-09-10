@@ -34,6 +34,19 @@ import {
 } from "./learning";
 import type { CourseDetailSummary, CourseProgress, EnrollmentSummary } from "./learning";
 
+// ——— (gate r8 m2) producer↔consumer จริง: รัน handler จริงของ GET /lessons/{id}/quiz —
+// mock เฉพาะ DB/auth/transport ตามแบบ route.test.ts ของ endpoint นั้น (mock module
+// ไม่กระทบ reader ซึ่งเป็น client-safe — ไม่มี import ร่วมกันนอก test นี้)
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
+vi.mock("@/lib/supabase/server", () => ({ createSupabaseServiceRoleClient: vi.fn() }));
+
+// env ขั้นต่ำที่ lib/config ต้องใช้เมื่อรัน handler (rate limit อ่าน config ตอน enforce)
+process.env.PUBLIC_BASE_URL = "http://test.local";
+process.env.SUPABASE_URL = "http://localhost:53227";
+process.env.SUPABASE_ANON_KEY = "test-anon-key";
+process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
+
 // ——— fixture กลาง — uuid จริงรูปแบบ v4 ทั้งหมด (id ต้องมาจาก BFF ไม่ใช่ slug) ———
 const COURSE = "00000000-0000-4000-8000-000000000001";
 const MODULE_A = "00000000-0000-4000-8000-000000000002";
@@ -669,5 +682,119 @@ describe("pure helpers", () => {
     expect(card.lessonCount).toBe(0);
     expect(card.continueLesson).toBeNull();
     expect(card.isLoaded).toBe(false);
+  });
+});
+
+// ——— producer↔consumer จริง (gate r8 m2) — handler จริงส่งตรงเข้า reader ———
+// คู่ contract เดิม (QUIZ_WIRE_BODY ↔ route.test.ts) ยึด "literal สองฝั่ง" ไว้ด้วยกัน
+// แต่ถ้า producer เปลี่ยน wire พร้อมแก้ expected ของตัวเอง ฝั่ง consumer ยังผ่านได้
+// ด้วย literal เก่า — test นี้ตัด literal ทิ้ง: รัน GET handler จริง (mock เฉพาะ
+// DB/auth) แล้วส่ง response จริงเข้า getLessonQuiz — wire ไม่ตรงกันเมื่อไหร่แตกทันที
+import { GET as getLessonQuizHandler } from "@/app/api/v1/lessons/[id]/quiz/route";
+import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
+
+const QUIZ_ID = "00000000-0000-4000-8000-000000000063";
+const OWNER = "00000000-0000-4000-8000-000000000099";
+
+/** builder จำลอง PostgREST แบบย่อ (เหมือน route.test.ts ของ quiz) — ผลลัพธ์คงที่รายตาราง */
+function pgBuilder(result: { data: unknown; error: { message: string } | null }) {
+  const builder: Record<string, unknown> = {
+    select: vi.fn(() => builder),
+    eq: vi.fn(() => builder),
+    is: vi.fn(() => builder),
+    in: vi.fn(() => builder),
+    order: vi.fn(() => builder),
+    maybeSingle: vi.fn(async () => result),
+  };
+  builder.then = (resolve: (value: unknown) => unknown) => Promise.resolve(result).then(resolve);
+  return builder;
+}
+
+describe("producer↔consumer จริง: GET /lessons/{id}/quiz → getLessonQuiz (gate r8 m2)", () => {
+  it("response จริงของ handler ผ่าน reader ได้ครบทุก field (ไม่มี literal คั่นกลาง)", async () => {
+    // แถว DB ตามที่ handler อ่านจริง (snake_case) — ครบทั้ง 5 ตาราง
+    const lessonRow = {
+      id: LESSON_Q,
+      type: "quiz",
+      quiz_id: QUIZ_ID,
+      course_modules: { course_id: COURSE },
+    };
+    const quizRow = {
+      title: "แบบทดสอบย่อยท้ายหลักสูตร",
+      pass_pct: 70,
+      max_attempts: 3,
+      shuffle_questions: false,
+      status: "active",
+    };
+    const questionRows = [
+      { id: QUESTION_1, question_text: "ข้อใดเป็นพฤติกรรมที่ต้องห้ามตามจรรยาบรรณ", type: "single_choice", points: 1, sort_order: 1 },
+      { id: QUESTION_2, question_text: "การรับโอนสินจ้างเกินอัตราที่ตกลงกันไว้ มีโทษอย่างไร", type: "true_false", points: 2, sort_order: 2 },
+    ];
+    const optionRows = [
+      { id: CHOICE_A, question_id: QUESTION_1, option_text: "รับโอนสินจ้างเกินอัตราที่ตกลงกันไว้", sort_order: 1 },
+      { id: CHOICE_B, question_id: QUESTION_1, option_text: "แจ้งความประพฤติของตนเองให้ลูกความทราบ", sort_order: 2 },
+      { id: CHOICE_C, question_id: QUESTION_2, option_text: "ต้องรับโทษทางวินัยตามระเบียบสภาทนายความฯ", sort_order: 1 },
+    ];
+    const ok = (data: unknown) => ({ data, error: null });
+    const ssrStub = {
+      auth: {
+        getUser: vi.fn(async () => ({ data: { user: { id: OWNER } }, error: null })),
+        mfa: {
+          getAuthenticatorAssuranceLevel: vi.fn(async () => ({
+            data: { currentLevel: "aal1", nextLevel: null, currentAuthenticationMethods: [] },
+            error: null,
+          })),
+        },
+      },
+      rpc: vi.fn(async (fn: string) =>
+        fn === "my_roles" ? { data: ["citizen"], error: null } : { data: null, error: null }),
+      from: vi.fn((table: string) =>
+        table === "profiles"
+          ? pgBuilder(ok({ is_active: true, deleted_at: null }))
+          : table === "lessons"
+            ? pgBuilder(ok(lessonRow))
+            : pgBuilder(ok({ id: ENROLLMENT }))),
+    };
+    const serviceStub = {
+      from: vi.fn((table: string) =>
+        table === "lesson_quizzes"
+          ? pgBuilder(ok(quizRow))
+          : table === "quiz_questions"
+            ? pgBuilder(ok(questionRows))
+            : pgBuilder(ok(optionRows))),
+    };
+    vi.mocked(createSupabaseSsrClient).mockResolvedValue(ssrStub as never);
+    vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(serviceStub as never);
+
+    // 1) รัน producer จริง (shuffle=false → ลำดับ deterministic)
+    const handlerResponse = await getLessonQuizHandler(
+      new Request(`http://localhost:3000/api/v1/lessons/${LESSON_Q}/quiz`),
+      { params: Promise.resolve({ id: LESSON_Q }) },
+    );
+    expect(handlerResponse.status).toBe(200);
+
+    // 2) response จริงของ handler คือสิ่งที่ reader ประมวลผล — ไม่มี fixture คั่นกลาง
+    stubFetch(() => handlerResponse);
+    const quiz = await getLessonQuiz(LESSON_Q, { origin: ORIGIN });
+
+    expect(quiz.lessonId).toBe(LESSON_Q);
+    expect(quiz.passPct).toBe(70);
+    expect(quiz.maxAttempts).toBe(3);
+    expect(quiz.questions.map((q) => q.prompt)).toEqual([
+      "ข้อใดเป็นพฤติกรรมที่ต้องห้ามตามจรรยาบรรณ",
+      "การรับโอนสินจ้างเกินอัตราที่ตกลงกันไว้ มีโทษอย่างไร",
+    ]);
+    // id ผ่านตรงทั้งข้อและตัวเลือก — submit ตัดสินด้วย id คู่กันต้องเจอกัน
+    expect(quiz.questions.map((q) => q.id)).toEqual([QUESTION_1, QUESTION_2]);
+    expect(quiz.questions[0]?.choices.map((c) => c.id)).toEqual([CHOICE_A, CHOICE_B]);
+    expect(quiz.questions[0]?.choices.map((c) => c.label)).toEqual([
+      "รับโอนสินจ้างเกินอัตราที่ตกลงกันไว้",
+      "แจ้งความประพฤติของตนเองให้ลูกความทราบ",
+    ]);
+    expect(quiz.questions[1]?.choices.map((c) => c.id)).toEqual([CHOICE_C]);
+    // เฉลยไม่หลุดมากับเส้นนี้ (DCR-5)
+    expect(JSON.stringify(quiz)).not.toContain("is_correct");
+    expect(JSON.stringify(quiz)).not.toContain("explanation");
   });
 });

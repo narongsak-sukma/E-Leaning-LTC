@@ -1,7 +1,7 @@
 /**
  * POST /api/v1/auth/logout — ออกจากระบบ (Wave C-0 · API-SPECIFICATION §3.1)
  *
- * หลัก (สะสมจาก gate r4→r7): **ไม่มีทางจบ "เหมือนสำเร็จ" (204 + ล้าง cookie) จนกว่า
+ * หลัก (สะสมจาก gate r4→r8): **ไม่มีทางจบ "เหมือนสำเร็จ" (204 + ล้าง cookie) จนกว่า
  * refresh token จะถูก revoke จริง หรือ auth server ยืนยันเองว่า session ตายแล้ว**
  * - buffered client (r5): การเขียน/ลบ cookie ทั้งหมดอยู่ใน memory จนกว่า commit()
  * - อ่าน session พร้อม**ตรวจ error ของ getSession** (r7 M1): token หมดอายุ → SDK
@@ -12,11 +12,16 @@
  * - **revoke ด้วย fetch ตรงเอง** (r7 M2): _signOut ของ SDK กลืน 401/403/404 เป็น
  *   error:null (bad_jwt) — ทางเดียวที่รู้ผล revoke จริงคืออ่าน status เอง
  * - revoke โดน 401/403 ทั้งที่ token ยังไม่หมดอายุตามเครื่องเรา (clock skew / ถูกเพิกถอน
- *   ฝั่ง server) → หมุน token ใหม่ 1 ครั้งแล้วลอง revoke ซ้ำอีกครั้งเดียว — ยังโดนปฏิเสธ
- *   = ตายจริง → ล้าง cookie + 204
- * - upstream ล้ม (429/5xx/network) → 503 ERR-SYS-002 ไม่ commit — ผู้ใช้กดลองใหม่ได้;
- *   ยกเว้นถ้าหมุน token ไปแล้ว commit เก็บ refresh token ใหม่ไว้ก่อน (ตัวเก่าถูกใช้
- *   ไปในการหมุน — ทิ้งการเขียน = ทิ้ง credential ที่ยังมีชีวิตฝั่ง server ให้กลายเป็นเศษ)
+ *   ฝั่ง server) → หมุน token ใหม่ 1 ครั้งแล้วลอง revoke ซ้ำอีกครั้งเดียว — ซ้ำแล้วผ่าน
+ *   = revoke สำเร็จ → ล้าง cookie + 204 · **ซ้ำแล้วยังโดนปฏิเสธ ≠ ตายจริง** (r8 M1):
+ *   refresh เพิ่งสำเร็จ = session ยังมีชีวิตแน่นอน ส่วน bad_jwt กับ token ที่เพิ่งออก
+ *   ใหม่คือปัญหาฝั่งตรวจ JWT (เช่น signing key ของ auth instances ไม่ตรงกัน) ไม่ใช่
+ *   หลักฐานว่า session สิ้นสภาพ — ต้อง commit เก็บ session ใหม่แล้วตอบ 503 (ลองใหม่
+ *   ภายหลัง ไม่วน retry ต่อ) ห้ามล้าง cookie แกล้งว่าสำเร็จ
+ * - upstream ล้ม (429/5xx/network) → 503 ERR-SYS-002 — ผู้ใช้กดลองใหม่ได้; ถ้ามี
+ *   rotation ค้างอยู่ ( getSession หมุนภายในเอง — r8 m1 — หรือ refreshSession สำเร็จ)
+ *   ต้อง commit เก็บ refresh token ใหม่ไว้ก่อนทุกครั้ง (ตัวเก่าถูกใช้ไปในการหมุนแล้ว —
+ *   ทิ้งการเขียน = ทิ้ง credential ที่ยังมีชีวิตฝั่ง server ให้กลายเป็นเศษ)
  * - scope: "local" = ยกเลิกเฉพาะ session นี้ (logout-all เป็น endpoint แยกของ Wave F)
  */
 import { NextResponse } from "next/server";
@@ -66,7 +71,8 @@ async function revokeSession(url: string, apiKey: string, accessToken: string): 
 export async function POST(): Promise<NextResponse> {
   try {
     const { supabaseUrl, supabaseAnonKey } = getConfig();
-    const { client, commit, clearAuthCookies } = await createSupabaseSsrClientBuffered();
+    const { client, commit, clearAuthCookies, hasPendingAuthWrite } =
+      await createSupabaseSsrClientBuffered();
 
     /** session จบแล้ว (revoke สำเร็จ / ยืนยันตายจริง) — ล้าง cookie ทั้งชุด + 204 */
     const dead = (): NextResponse => {
@@ -91,8 +97,21 @@ export async function POST(): Promise<NextResponse> {
     }
 
     let accessToken = sessionData.session.access_token;
-    let rotated = false;
-    let revoke = await revokeSession(supabaseUrl, supabaseAnonKey, accessToken);
+    // r8 m1: getSession อาจหมุน token ภายในเอง (access หมดอายุ → SDK refresh แล้ว
+    // เขียน session ใหม่ลง buffer) — นับเป็น rotation ตั้งแต่ต้น ไม่งั้น transient
+    // ถัดไปทิ้ง refresh token ที่เพิ่งออกใหม่ให้กลายเป็นเศษ
+    let rotated = hasPendingAuthWrite();
+
+    let revoke: Response;
+    try {
+      revoke = await revokeSession(supabaseUrl, supabaseAnonKey, accessToken);
+    } catch {
+      // network ล้ม/ค้างตั้งแต่ revoke แรก — เก็บ rotation ที่เกิดไปแล้ว (ถ้ามี) ก่อน 503
+      if (rotated) {
+        commit();
+      }
+      throw new AppError("ERR-SYS-002");
+    }
 
     if (isRejected(revoke.status)) {
       const { data: refreshData, error: refreshError } = await client.auth.refreshSession();
@@ -100,7 +119,10 @@ export async function POST(): Promise<NextResponse> {
         if (isDefinitiveAuthError(refreshError)) {
           return dead();
         }
-        throw new AppError("ERR-SYS-002"); // upstream ล้มระหว่าง refresh — ไม่ commit
+        if (rotated) {
+          commit(); // upstream ล้มระหว่าง refresh — เก็บ rotation เดิมไว้ก่อน 503
+        }
+        throw new AppError("ERR-SYS-002");
       }
       const refreshed = refreshData.session;
       if (refreshed === null) {
@@ -117,13 +139,14 @@ export async function POST(): Promise<NextResponse> {
       }
     }
 
-    if (revoke.ok || isRejected(revoke.status)) {
-      // revoke สำเร็จ หรือปฏิเสธซ้ำด้วย token ที่เพิ่งออกใหม่ = session ตายจริง
+    if (revoke.ok) {
       return dead();
     }
+    // ถึงตรงนี้ = transient (429/5xx) หรือถูกปฏิเสธซ้ำ — ทั้งคู่เกิดหลัง (r8 M1)
+    // refresh สำเร็จแล้วเท่านั้น แปลว่า session ยังมีชีวิตแน่นอน จึงห้ามล้าง cookie
+    // แกล้งว่าสำเร็จ: commit เก็บ session ใหม่ไว้ (ถ้าหมุนแล้ว) แล้วตอบ 503 ให้ลอง
+    // ใหม่ภายหลัง — ไม่วน retry เพิ่มใน request เดียวกัน
     if (rotated) {
-      // transient (429/5xx) หลังหมุน token — ไม่มีอะไรให้ revoke ด้วยตัวเก่าอีก:
-      // commit เก็บ session หมุนแล้วไว้ แล้วให้ลองใหม่ (ครั้งหน้าต่อจาก token ใหม่)
       commit();
     }
     throw new AppError("ERR-SYS-002");

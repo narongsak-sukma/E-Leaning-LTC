@@ -63,10 +63,17 @@ export interface BufferedSsrClient {
   /**
    * เก็บคำสั่ง "ลบ cookie session ทั้งชุด" ลง buffer — ใช้เมื่อ session ตายแน่นอน
    * แล้วเท่านั้น (revoke สำเร็จ หรือ auth server ปฏิเสธชัด ๆ) โดยไม่พึ่ง SDK
-   * signOut ที่กลืน error ได้ (gate r7): ลบชื่อ base + ทุก chunk .N ที่ยังอยู่ใน
-   * jar จริง — ครบทุกชื่อแม้จำนวน chunk จะเปลี่ยนระหว่าง request ไปมา
+   * signOut ที่กลืน error ได้ (gate r7): ลบชื่อ base + ทุก chunk .N ทั้งจาก jar จริง
+   * และจากที่ SDK เพิ่งเขียนลง buffer (gate r8) — ครบทุกชื่อแม้ refresh ระหว่าง
+   * request เดียวกันจะเปลี่ยน base เดี่ยว ↔ หลาย chunk
    */
   clearAuthCookies(): void;
+  /**
+   * true เมื่อ buffer มี "การเขียน session ใหม่" (rotation จาก getSession/
+   * refreshSession ของ SDK) ที่ยังไม่ commit — ผู้เรียกใช้ต้อง commit ก่อนตอบ
+   * ล้มเหลว ไม่งั้น refresh token ที่เพิ่งออกใหม่ถูกทิ้งกลางอากาศ (gate r8)
+   */
+  hasPendingAuthWrite(): boolean;
 }
 
 /** ใช้ใน Route Handler ที่ "ปฏิบัติการแล้วค่อยเขียน cookie" — ปัจจุบันคือ logout (Wave F: logout-all) */
@@ -74,6 +81,10 @@ export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClie
   const cookieStore = await cookies();
   const { supabaseUrl, supabaseAnonKey } = getConfig();
   const pending = new Map<string, { value: string; options: CookieOptions | undefined }>();
+  // ชื่อ cookie ตามสูตรเดียวกับ supabase-js: sb-<hostname.split(".")[0]>-auth-token
+  const base = `sb-${new URL(supabaseUrl).hostname.split(".")[0]}-auth-token`;
+  const isAuthCookieName = (name: string): boolean =>
+    name === base || name.startsWith(`${base}.`);
 
   /** @supabase/ssr ลบ cookie ด้วยการเขียนค่าว่าง + maxAge: 0 (dist/main/cookies.js) */
   const isDeletion = (entry: { value: string; options: CookieOptions | undefined }): boolean =>
@@ -114,16 +125,34 @@ export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClie
       pending.clear();
     },
     clearAuthCookies: () => {
-      // ชื่อ cookie ตามสูตรเดียวกับ supabase-js: sb-<hostname.split(".")[0]>-auth-token
-      const base = `sb-${new URL(supabaseUrl).hostname.split(".")[0]}-auth-token`;
-      pending.set(base, { value: "", options: { maxAge: 0 } });
-      // จำนวน chunk ของ session เดิมในเครื่องผู้ใช้อาจไม่ตรงกับ chunk ที่ SDK เพิ่ง
-      // เขียน (refresh เปลี่ยนขนาด) — ลบทุกชื่อที่ขึ้นต้น `<base>.` ที่ยังเหลือใน jar
+      // gate r8: ชื่อ chunk ใหม่อาจมีอยู่แค่ใน buffer (pending) — refresh ภายใน
+      // request เดียวกันเปลี่ยน base เดี่ยว → หลาย chunk ได้ (applyServerStorage
+      // ของ @supabase/ssr เขียน chunk ใหม่ผ่าน setAll ของเรา) ถ้าวนเฉพาะ jar จริง
+      // จะไม่เห็นชื่อเหล่านั้น แล้ว commit เขียน token ที่ยังมีชีวิตกลับ browser
+      // ทั้งที่ logout ตอบ 204 — จึงลบจาก union ของ jar + pending (มี base เสมอ)
+      // โดยการ set ชื่อเดียวกันซ้ำ "ทับ" pending write เดิมของชื่อนั้น
+      const names = new Set<string>([base]);
       for (const { name } of cookieStore.getAll()) {
-        if (name.startsWith(`${base}.`)) {
+        names.add(name);
+      }
+      for (const name of pending.keys()) {
+        names.add(name);
+      }
+      for (const name of names) {
+        if (isAuthCookieName(name)) {
           pending.set(name, { value: "", options: { maxAge: 0 } });
         }
       }
+    },
+    hasPendingAuthWrite: () => {
+      // rotation ของ SDK (getSession หมดอายุ → refresh ภายใน / refreshSession)
+      // เกิดผ่าน applyServerStorage เป็น "การเขียน" เสมอ — การลบอย่างเดียวไม่นับ
+      for (const [name, entry] of pending) {
+        if (isAuthCookieName(name) && !isDeletion(entry)) {
+          return true;
+        }
+      }
+      return false;
     },
   };
 }

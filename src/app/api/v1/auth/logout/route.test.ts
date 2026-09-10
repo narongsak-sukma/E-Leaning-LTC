@@ -1,10 +1,12 @@
 /**
- * unit tests — POST /api/v1/auth/logout (gate r4→r7) — ใช้ SDK จริงทั้งเส้น
+ * unit tests — POST /api/v1/auth/logout (gate r4→r8) — ใช้ SDK จริงทั้งเส้น
  * (createServerClient ของ @supabase/ssr ผ่าน createSupabaseSsrClientBuffered)
  * mock เฉพาะ transport (global fetch) และ cookieStore (next/headers) — แนวเดียวกับ
  * ที่ codex ใช้พิสูจน์จุดรั่ว: r4 (upstream ล้ม→401 โดยไม่ signOut) · r5 (SDK เคลียร์
  * cookie แม้ revoke ล้ม → กดซ้ำได้ 204) · r6 (SDK กลืน bad_jwt) · r7 (getSession คืน
  * error จาก refresh 429 แต่ route กลืน → 204 เท็จ · bad_jwt 403 โดยไม่พยายาม refresh)
+ * · r8 (ปฏิเสธซ้ำหลัง refresh สำเร็จ ≠ ตายจริง · rotation ภายใน getSession ถูกทิ้ง ·
+ * base→chunks ล้างไม่ครบชื่อที่เกิดใหม่ใน buffer)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -70,20 +72,25 @@ function expiredSessionJson(padBytes: number): string {
 }
 
 /** session ใหม่ที่ refresh endpoint คืน (เล็ก — พอ chunk เดียว) */
-const FRESH_SESSION = {
-  access_token: "access-token-fresh-2",
-  refresh_token: "refresh-token-2",
-  token_type: "bearer",
-  expires_in: 3600,
-  expires_at: Math.floor(Date.now() / 1000) + 3500,
-  user: {
-    id: "11111111-1111-4111-8111-000000000099",
-    aud: "authenticated",
-    app_metadata: {},
-    user_metadata: {},
-    created_at: "2026-01-01T00:00:00Z",
-  },
-};
+const FRESH_SESSION = freshSessionJson(0);
+
+/** session ใหม่พร้อมขยายขนาด (pad ASCII — บังคับให้แตกเป็นหลาย chunk ตาม chunker จริง) */
+function freshSessionJson(padBytes: number) {
+  return {
+    access_token: "access-token-fresh-2",
+    refresh_token: "refresh-token-2",
+    token_type: "bearer",
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3500,
+    user: {
+      id: "11111111-1111-4111-8111-000000000099",
+      aud: "authenticated",
+      app_metadata: {},
+      user_metadata: padBytes > 0 ? { pad: "x".repeat(padBytes) } : {},
+      created_at: "2026-01-01T00:00:00Z",
+    },
+  };
+}
 
 const fetchMock = vi.fn();
 
@@ -94,12 +101,24 @@ beforeEach(() => {
   jar.length = 0;
 });
 
+/** cookie sb-* ที่ถูก commit ลงเครื่อง (คู่ [name, value, options]) */
+function sbCookieWrites(): Array<[string, string, { maxAge?: number }]> {
+  const writes = cookieSet.mock.calls as unknown as Array<[string, string, { maxAge?: number }]>;
+  return writes.filter(([name]) => String(name).startsWith("sb-"));
+}
+
+/** ถอดรหัสค่า cookie ที่ SDK เขียน (ค่าเริ่มต้น cookieEncoding=base64url → นำหน้า base64-) */
+function decodedWriteValue(value: string): string {
+  return value.startsWith("base64-")
+    ? Buffer.from(value.slice("base64-".length), "base64url").toString("utf8")
+    : value;
+}
+
 /** ทุก cookie sb-* ที่ commit ลงเครื่องต้องเป็น "การลบ" เท่านั้น */
 function expectOnlySbDeletions(): void {
-  const sbWrites = cookieSet.mock.calls as unknown as Array<[string, string, { maxAge?: number }]>;
-  const sbCookieWrites = sbWrites.filter(([name]) => String(name).startsWith("sb-"));
-  expect(sbCookieWrites.length).toBeGreaterThan(0);
-  for (const [name, value, options] of sbCookieWrites) {
+  const sbWrites = sbCookieWrites();
+  expect(sbWrites.length).toBeGreaterThan(0);
+  for (const [name, value, options] of sbWrites) {
     const isDeletion = value === "" || options?.maxAge === 0;
     expect(isDeletion, `cookie ${name} ต้องเป็นการลบ ไม่ใช่เขียน token กลับ (value=${value.slice(0, 40)}…)`).toBe(true);
   }
@@ -321,7 +340,7 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     expectOnlySbDeletions();
   });
 
-  it("revoke โดน 403 ซ้ำแม้หมุน token ใหม่แล้ว → ตายจริง → 204 + commit (ไม่วนลูป)", async () => {
+  it("revoke โดน 403 bad_jwt ซ้ำกับ token ที่เพิ่งออกใหม่ → ไม่ใช่ตายจริง → 503 + commit เก็บ session ใหม่ (จุดรั่ว r8 M1)", async () => {
     jar.push(SESSION_COOKIE);
     fetchMock
       .mockResolvedValueOnce(
@@ -343,9 +362,79 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
         }),
       );
     const res = await POST();
-    expect(res.status).toBe(204);
+    // refresh เพิ่งสำเร็จ = session ยังมีชีวิตแน่นอน — bad_jwt กับ token ใหม่คือปัญหา
+    // ฝั่งตรวจ JWT (เช่น signing key ไม่ตรงกัน) ไม่ใช่หลักฐานว่า session สิ้นสภาพ
+    // ห้ามตอบ 204 + ล้าง cookie แกล้งว่า logout สำเร็จ
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
     expect(fetchMock).toHaveBeenCalledTimes(3); // จบที่ retry เดียว — ไม่วนไม่รู้จบ
-    expect(cookieSet).toHaveBeenCalled();
+    // commit เก็บ session ที่หมุนแล้วไว้ (เขียนกลับ ไม่ใช่การลบ) — ลองใหม่ภายหลังได้
+    const writes = sbCookieWrites();
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.some(([, value]) => decodedWriteValue(value).includes("access-token-fresh-2"))).toBe(true);
+    expect(writes.some(([, value]) => decodedWriteValue(value).includes("access-token-test"))).toBe(false); // token เก่าไม่ถูกเขียนกลับ
+  });
+
+  // ---- gate r8 m1: rotation ภายใน getSession — transient ถัดไปห้ามทิ้ง token ใหม่ ----
+
+  it("getSession หมุน token ภายในเอง + revoke โดน network ล้ม → 503 + commit เก็บ session ใหม่ (จุดรั่ว r8 m1)", async () => {
+    // base เดี่ยว access หมดอายุ → SDK refresh ภายใน getSession เอง (ไม่มี rotation
+    // ที่ route มองเห็นก่อน r8) แล้ว revoke ตัวแรกโดน network ล้ม
+    jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(FRESH_SESSION), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError("network down"));
+    const res = await POST();
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(fetchMock).toHaveBeenCalledTimes(2); // refresh ภายใน + revoke ที่ล้ม
+    // ต้อง commit เก็บ refresh token ใหม่ไว้ — ไม่ใช่ทิ้งการเขียนทิ้งทั้งหมด
+    const writes = sbCookieWrites();
+    expect(writes.some(([, value]) => decodedWriteValue(value).includes("access-token-fresh-2"))).toBe(true);
+  });
+
+  // ---- gate r8 M2: refresh เปลี่ยน base เดี่ยว → หลาย chunk ต้องล้างครบทุกชื่อ ----
+
+  it("base เดี่ยว + refresh โตเป็น 3 chunks + revoke สำเร็จ → commit ลบครบทั้ง base/.0/.1/.2 ไม่มี token หลุดกลับ (จุดรั่ว r8 M2)", async () => {
+    // jar เริ่มจาก base เดี่ยว (session เล็ก หมดอายุ) — refresh คืน session ใหญ่
+    // จน @supabase/ssr แตกเป็น chunk .0/.1/.2 ใหม่ใน buffer เท่านั้น (jar ไม่มีชื่อเหล่านี้)
+    const small = expiredSessionJson(0);
+    expect(small.length).toBeLessThanOrEqual(3180);
+    jar.push({ name: SESSION_COOKIE.name, value: small });
+    const bigFresh = freshSessionJson(6400);
+    expect(JSON.stringify(bigFresh).length).toBeGreaterThan(2 * 3180); // 3 chunks จริง
+
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/auth/v1/token")) {
+        return new Response(JSON.stringify(bigFresh), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.includes("/auth/v1/logout")) {
+        return new Response(null, { status: 204 });
+      }
+      return new Response(`unexpected ${url}`, { status: 500 });
+    });
+
+    const res = await POST();
+    expect(res.status).toBe(204);
+
+    // ปลายทางของ clearAuthCookies แบบ union (jar+pending): ทุกชื่อ sb-* ที่ commit
+    // เป็นการลบ และครอบคลุม chunk ใหม่ทุกชื่อที่เพิ่งเกิดใน buffer ระหว่าง request
     expectOnlySbDeletions();
+    const deletedNames = new Set(sbCookieWrites().map(([name]) => String(name)));
+    expect(deletedNames).toContain(SESSION_COOKIE.name);
+    expect(deletedNames).toContain(`${SESSION_COOKIE.name}.0`);
+    expect(deletedNames).toContain(`${SESSION_COOKIE.name}.1`);
+    expect(deletedNames).toContain(`${SESSION_COOKIE.name}.2`);
   });
 });
