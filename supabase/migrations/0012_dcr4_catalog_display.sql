@@ -64,6 +64,8 @@ where c.status = 'published'
 -- draft/published/closed/archived — ไม่มี label 'active' ใน enum) + ยังไม่ soft-delete
 -- + is_final (DD §3.2: "assessments ปลายหลักสูตร" — แบบทดสอบซ้อม non-final ไม่นับแม้ published)
 -- — หนึ่งแถวต่อหลักสูตร: เลือก assessment ที่ published ล่าสุด (published_at → created_at → id)
+-- + หลักสูตรแม่ต้อง published และยังไม่ soft-delete ด้วย (gate r1: ไม่งั้น assessment
+--   published ของหลักสูตร draft/archived/deleted รั่วผ่าน view ที่ anon เรียกตรง ๆ)
 -- time_limit_minutes / pass_score_pct / max_attempts ← assessment_rules เวอร์ชันที่มีผล ณ now()
 --   (effective_from <= now() ใส่ตอน query เท่านั้น — ห้ามเป็น index predicate — F21/D12)
 -- question_count = นับ questions สถานะ 'active' ของ question_banks ที่ผูก course_id นี้
@@ -84,6 +86,7 @@ select
   r.pass_pct as pass_score_pct,
   r.max_attempts
 from public.assessments a
+join public.courses c on c.id = a.course_id
 left join lateral (
   select ar.time_limit_minutes, ar.pass_pct, ar.max_attempts
   from public.assessment_rules ar
@@ -92,7 +95,9 @@ left join lateral (
   order by ar.effective_from desc, ar.version desc
   limit 1
 ) r on true
-where a.deleted_at is null
+where c.status = 'published'
+  and c.deleted_at is null
+  and a.deleted_at is null
   and a.status = 'published'
   and a.is_final
   and a.id = (

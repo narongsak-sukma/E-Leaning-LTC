@@ -208,6 +208,64 @@ describe.skipIf(!DB_URL)("DCR-4 views + cc_read_admin", () => {
     }
   });
 
+  it("course_exam_summary: หลักสูตรแม่ draft/archived/soft-deleted ต้องไม่รั่วผ่าน view แม้ final exam published (gate r1)", async () => {
+    // ช่องรั่วที่ codex gate r1 จับ: view เดิมกรองเฉพาะฝั่ง assessments ไม่ดูสถานะหลักสูตรแม่
+    // anon เรียก view ตรง ๆ ผ่าน PostgREST → เห็น course_id + เงื่อนไขสอบของหลักสูตรที่ยังไม่เผยแพร่
+    const categoryId = "33333333-3333-4333-8333-000000000003";
+    const owner = "11111111-1111-4111-8111-000000000002";
+    const variants = [
+      { course: "44444444-4444-4444-8444-0000000000d1", exam: "cccccccc-cccc-4ccc-8ccc-0000000000d1", rule: "dddddddd-dddd-4ddd-8ddd-0000000000d1", code: "LTC-GATE-DRAFT", status: "draft", deleted: "null" },
+      { course: "44444444-4444-4444-8444-0000000000d2", exam: "cccccccc-cccc-4ccc-8ccc-0000000000d2", rule: "dddddddd-dddd-4ddd-8ddd-0000000000d2", code: "LTC-GATE-ARCHIVED", status: "archived", deleted: "null" },
+      { course: "44444444-4444-4444-8444-0000000000d3", exam: "cccccccc-cccc-4ccc-8ccc-0000000000d3", rule: "dddddddd-dddd-4ddd-8ddd-0000000000d3", code: "LTC-GATE-DELETED", status: "published", deleted: "now()" },
+    ];
+    const cleanup = () =>
+      psql(`
+        delete from public.assessment_rules where assessment_id in (${variants.map((v) => `'${v.exam}'`).join(",")});
+        delete from public.assessments where id in (${variants.map((v) => `'${v.exam}'`).join(",")});
+        delete from public.courses where id in (${variants.map((v) => `'${v.course}'`).join(",")});
+      `);
+    await cleanup();
+    await psql(`
+      insert into public.courses (id, code, category_id, created_by, title_th, status, published_at, deleted_at) values
+        ${variants.map((v) => `('${v.course}', '${v.code}', '${categoryId}', '${owner}', 'หลักสูตรรั่ว (${v.code})', '${v.status}', now(), ${v.deleted})`).join(",\n        ")}
+      on conflict do nothing;
+    `);
+    await psql(`
+      insert into public.assessments (id, course_id, code, title, description, is_final, status, published_at) values
+        ${variants.map((v) => `('${v.exam}', '${v.course}', 'EXAM-${v.code}', 'ข้อสอบปลายหลักสูตรหลักสูตรไม่เผยแพร่', null, true, 'published', now())`).join(",\n        ")}
+      on conflict do nothing;
+    `);
+    await psql(`
+      insert into public.assessment_rules
+        (id, assessment_id, version, time_limit_minutes, question_count, pass_pct, max_attempts,
+         attempt_cooldown_minutes, shuffle_questions, shuffle_options, selection, require_course_complete,
+         proctoring_mode, effective_from) values
+        ${variants.map((v) => `('${v.rule}', '${v.exam}', 1, 45, 4, 88, 2, 0, false, false, '{"bank_ids":["eeeeeeee-eeee-4eee-8eee-000000000001"]}'::jsonb, false, 'none', now() - interval '1 day')`).join(",\n        ")}
+      on conflict do nothing;
+    `);
+    try {
+      // ช่องทางรั่วจริง: anon เรียก view ผ่าน PostgREST โดยตรง
+      const leak = await restCall(
+        "GET",
+        `/rest/v1/course_exam_summary?select=course_id&course_id=in.(${variants.map((v) => `"${v.course}"`).join(",")})`,
+        { apiKey: ANON_KEY },
+      );
+      expect(leak.status, leak.text.slice(0, 300)).toBe(200);
+      expect(leak.json, `ต้องไม่เห็นเงื่อนไขสอบของหลักสูตร ${variants.map((v) => v.code).join("/")}`).toEqual([]);
+
+      // positive control ในเทสต์เดียวกัน: หลักสูตร published จริง (LTC-103) ยังอยู่
+      const control = await restCall(
+        "GET",
+        `/rest/v1/course_exam_summary?select=course_id&course_id=eq.${String(ids.get("LTC-103"))}`,
+        { apiKey: ANON_KEY },
+      );
+      expect(control.status).toBe(200);
+      expect(control.json).toHaveLength(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("ทั้งสาม view: security_invoker = off (pg_class.reloptions) — definer view ตาม convention 0009", async () => {
     const rows = await psqlRows<{ relname: string; reloptions: string[] | null }>(`
       select relname, reloptions::text[] from pg_class

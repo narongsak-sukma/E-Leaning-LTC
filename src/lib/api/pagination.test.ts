@@ -1,10 +1,18 @@
 /**
  * pagination.test — unit test ของ src/lib/api/pagination.ts (API-SPECIFICATION §1.2)
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { createHmac } from "node:crypto";
 import { AppError } from "../errors";
+import { getConfig } from "../config";
 import { encodeCursor, decodeCursor, buildPage } from "./pagination";
+
+// gate r1: ทดสอบ default path ของ cursorSecret() ต้องอ่าน config จริง (mock ไม่ให้ loadConfig แตะ env)
+vi.mock("../config", () => ({ getConfig: vi.fn() }));
+
+beforeEach(() => {
+  vi.mocked(getConfig).mockReset();
+});
 
 const SECRET = "test-secret-key-for-cursors";
 
@@ -119,5 +127,40 @@ describe("buildPage — envelope { data, page } ตาม §1.2", () => {
   it("data และ page อยู่ชุดกันเป็น envelope เดียว (§1.2)", () => {
     expect(Object.keys(page1).sort()).toEqual(["data", "page"]);
     expect(Object.keys(page1.page).sort()).toEqual(["hasMore", "nextCursor"]);
+  });
+});
+
+describe("การหมุนคีย์ HMAC (rotation) — gate r1: คีย์ cursor ต้องหมุนแยกจาก service key ได้", () => {
+  const PAYLOAD = { sortKey: "2026-09-01T00:00:00Z", id: "00000000-0000-4000-8000-000000000009" };
+
+  it("cursor เซ็นด้วยคีย์เก่า ตรวจด้วยคีย์ใหม่ → ERR-VAL-001 bad_signature", () => {
+    const oldCursor = encodeCursor(PAYLOAD, { secret: "cursor-hmac-old" });
+    expect(() => decodeCursor(oldCursor, { secret: "cursor-hmac-new" })).toThrow(AppError);
+  });
+
+  it("cursor ที่เซ็นหลังหมุน (คีย์ใหม่) round-trip ได้ตามปกติ", () => {
+    const fresh = encodeCursor(PAYLOAD, { secret: "cursor-hmac-new" });
+    expect(decodeCursor(fresh, { secret: "cursor-hmac-new" })).toEqual(PAYLOAD);
+  });
+});
+
+describe("cursor secret จาก config (gate r1: CURSOR_HMAC_SECRET ต้องมีผลจริง ไม่ใช่ service key เสมอ)", () => {
+  it("ตั้ง cursorHmacSecret → default path ใช้ค่านั้น (service key ตรวจไม่ผ่าน)", () => {
+    vi.mocked(getConfig).mockReturnValue({
+      cursorHmacSecret: "cursor-hmac-from-config",
+      supabaseServiceRoleKey: "svc-key-should-not-be-used",
+    } as unknown as ReturnType<typeof getConfig>);
+    const cursor = encodeCursor({ sortKey: "2026-09-01T00:00:00Z", id: "00000000-0000-4000-8000-000000000010" });
+    expect(decodeCursor(cursor, { secret: "cursor-hmac-from-config" }).sortKey).toBe("2026-09-01T00:00:00Z");
+    expect(() => decodeCursor(cursor, { secret: "svc-key-should-not-be-used" })).toThrow(AppError);
+  });
+
+  it("ไม่ตั้ง (null) → fallback supabaseServiceRoleKey ตามสัญญา config.ts", () => {
+    vi.mocked(getConfig).mockReturnValue({
+      cursorHmacSecret: null,
+      supabaseServiceRoleKey: "svc-key-fallback",
+    } as unknown as ReturnType<typeof getConfig>);
+    const cursor = encodeCursor({ sortKey: "2026-09-01T00:00:00Z", id: "00000000-0000-4000-8000-000000000011" });
+    expect(decodeCursor(cursor, { secret: "svc-key-fallback" }).sortKey).toBe("2026-09-01T00:00:00Z");
   });
 });
