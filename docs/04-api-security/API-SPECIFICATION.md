@@ -2,7 +2,7 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 1.0.2 — DCR-4/DCR-5 (D28): catalog fields (level/credits/learnerCount/outcomes/instructors/exam) + GET /lessons/{id}/quiz ไม่มีเฉลย · 1.0.1 DCR-3 (D25): duplicate enroll = 200 idempotent ตาม SRS LRN-001 · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.0.3 — DCR-6 (D36): submit ข้อสอบตอบผลตรวจทันที (ตาม RPC จริง — idempotency ระดับ RPC ไม่ใช้แคช BFF) · /admin/certificates/bulk + /admin/exams/monitoring|statistics เลื่อน Wave E · เฉลยเปิดตาม baseline `after_final_attempt` (ASM-012 config ต่อหลักสูตร = DCR อนาคต) · 1.0.2 — DCR-4/DCR-5 (D28): catalog fields (level/credits/learnerCount/outcomes/instructors/exam) + GET /lessons/{id}/quiz ไม่มีเฉลย · 1.0.1 DCR-3 (D25): duplicate enroll = 200 idempotent ตาม SRS LRN-001 · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                         |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md (canonical schema) · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
@@ -19,7 +19,7 @@
 5. **Error envelope มาตรฐาน** — ทุก error ใช้รูปแบบเดียว `{ "error": { "code", "message", "details?" } }` โดย `message` เป็นภาษาไทยเสมอ (i18n-ready ตาม BRIEF §9.3)
 6. **Pagination แบบ cursor-based** — ไม่ใช้ offset บนชุดข้อมูลใหญ่ (audit log, notifications, รายงาน)
 7. **Versioning ที่ path** — `/api/v1`; breaking change = เปิด `/api/v1` เดิมคู่กับ `/api/v2` พร้อม header `Deprecation` + `Sunset` (ระยะเปลี่ยน ≥ 90 วัน, config)
-8. **Idempotency-Key บังคับสำหรับ submit ข้อสอบ** — header `Idempotency-Key: <uuid>` ที่ client สร้าง; BFF เก็บผลลัพธ์ 24 ชม. (config) ต่อ (user, endpoint) — ยิงซ้ำได้โดยไม่สร้าง attempt ใหม่
+8. **Idempotency-Key บังคับสำหรับ submit ข้อสอบ** — header `Idempotency-Key: <uuid>` ที่ client สร้าง; BFF เก็บผลลัพธ์ 24 ชม. (config) ต่อ (user, endpoint) — ยิงซ้ำได้โดยไม่สร้าง attempt ใหม่ — **DCR-6: แคช BFF ไม่ต้องใช้จริง — idempotency บังคับที่ระดับ RPC `submit_attempt` (attempt ที่ส่งแล้วคืนผลเดิมพร้อม `already_submitted: true`)**
 9. **Rate limit ต่อ endpoint group** — ค่าเดียวต่อ endpoint ใช้ทุก environment (ดู §5) อ้างผ่าน config key ห้าม hardcode (BRIEF §6)
 10. **ห้าม log PII ใน request/response** — email, เลขบัตรประชาชน, เลขที่ใบอนุญาต ห้ามปรากฏใน log/error `details` (BRIEF §8) — อ้างด้วย `user_id` เสมอ
 
@@ -169,8 +169,8 @@ PDPA endpoints (สิทธิของเจ้าของข้อมูล 
 | POST | /assessments/{id}/attempts | **เริ่มสอบ**: ตรวจเงื่อนไข → สร้าง attempt + ส่งข้อสอบ (สุ่มแล้ว) โดยไม่มีเฉลย | citizen, lawyer (ที่ผ่านเงื่อนไขจบหลักสูตร) | 201 attempt + ชุดข้อ + `serverTime` + `deadlineAt` | ASM-001/002/003 |
 | GET | /me/attempts | ประวัติการสอบของตัวเองทุกหลักสูตร | citizen, lawyer | 200 + pagination | AUTH-001 |
 | POST | /attempts/{id}/answers | บันทึกคำตอบทีละข้อ (autosave — เรียกบ่อย, idempotent ต่อ question) | เจ้าของ attempt | 200 (savedAt) | ASM-004/005/006 |
-| POST | /attempts/{id}/submit | ส่งข้อสอบ — **ต้องมี `Idempotency-Key`**; ตรวจคะแนน server-side ทั้งหมด | เจ้าของ attempt | 200 (status=grading) หรือ ซ้ำ → คืนผลเดิม | ASM-004/005/006, VAL-002, IDM-001 |
-| GET | /attempts/{id}/result | ผลสอบ + เฉลย (เปิดตาม config หลังสูตร) + credit ที่ได้ | เจ้าของ attempt | 200 | ASM-006, NF-001 |
+| POST | /attempts/{id}/submit | ส่งข้อสอบ — **ต้องมี `Idempotency-Key`**; ตรวจคะแนน server-side ทั้งหมด — **DCR-6: ตอบผลตรวจทันที** (grading เป็น synchronous ใน RPC `submit_attempt` — คืน `status ∈ passed\|failed` + `scorePct` + `correctCount`/`questionCount`) | เจ้าของ attempt | 200 (ผลตรวจทันที) หรือ ซ้ำ → คืนผลเดิม (`already_submitted: true`) | ASM-004/005/006, VAL-002, IDM-001 |
+| GET | /attempts/{id}/result | ผลสอบ + เฉลย + credit ที่ได้ — **DCR-6: เฉลยเปิดตาม baseline `after_final_attempt` เท่านั้น** (บังคับใน `learner_attempt_view` — BFF เปิดเฉลยเองไม่ได้; config ต่อหลักสูตรของ ASM-012 = DCR อนาคตเมื่อมีคอลัมน์) | เจ้าของ attempt | 200 | ASM-006, NF-001 |
 
 Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกาก่อนได้ (read-only) → `POST /assessments/{id}/attempts` ตรวจสิทธิ์/จำนวนครั้ง/หน้าต่างสอบ → สร้าง attempt (`started_at`, `deadline_at = now + duration`) → client จับเวลาจาก `serverTime` ไม่ใช่นาฬิกาตัวเอง → autosave ทุกข้อ → `submit` (idempotent) → server ตรวจ → ถ้าผ่านเกณฑ์ → งานเบื้องหลังสร้างรายการรอออกประกาศนียบัตร (registrar ออกภายหลัง — separation of duties)
 
@@ -182,7 +182,7 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 | GET | /me/certificates | ประกาศนียบัตรของตัวเอง (พร้อมลิงก์ PDF) | citizen, lawyer | 200 + pagination | AUTH-001 |
 | GET | /certificates/{id}/pdf | ดาวน์โหลด PDF ตัวจริง (id = uuid ต้อง auth — ต่างจาก public verify ที่ใช้ code) | เจ้าของใบรับรอง, staff:registrar, super_admin | 200 `application/pdf` | NF-001, RBAC-001 |
 | POST | /admin/certificates | ออกประกาศนียบัติรายใบ (จาก attempt ที่ผ่านเกณฑ์) — audit `CERT_ISSUE` | staff:registrar, super_admin | 201 | RBAC-001, VAL-001 |
-| POST | /admin/certificates/bulk | ออกเป็นชุด (รอบเดียวกัน) — 202 job + สรุปผลทาง notification | staff:registrar, super_admin | 202 (job) | RBAC-001 |
+| POST | /admin/certificates/bulk | ออกเป็นชุด (รอบเดียวกัน) — **DCR-6: เลื่อน Wave E** (ต้องมี infra สถานะ job — ระหว่างนี้ใช้ออกรายใบ + คิว eligible) | staff:registrar, super_admin | 202 (job) | RBAC-001 |
 | GET | /admin/certificates/eligible | รายการ attempt ที่ผ่านเกณฑ์แล้ว**ที่ยังไม่มี certificate สถานะ `valid`** — คิวงานออกประกาศนียบัตร (pagination + filter ตามหลักสูตร/ช่วงเวลา) — audit `PII_ACCESS` (D12-23) | staff:registrar, super_admin | 200 + pagination | RBAC-001 |
 | POST | /admin/certificates/{id}/revoke | เพิกถอน (บังคับ reason) — audit `CERT_REVOKE` | staff:registrar, super_admin | 200 | RBAC-001, VAL-001 |
 | POST | /admin/certificates/{id}/reissue | ออกใหม่แทนใบเดิม (ใบเดิมเปลี่ยน status=superseded + ชี้ `supersedes_cert_id` lineage — DD; **idempotent ต่อ enrollment เพราะ UNIQUE(enrollment_id) เป็น partial `WHERE status='valid'` จึงมี valid ได้ 1 ใบ/คน/หลักสูตร แต่เก็บ superseded ได้หลายใบ**; reissue ไม่กระทบ credit ที่ accrual ไปแล้ว — D12-14/15) — CRT-007, audit `CERT_REISSUE` | staff:registrar, super_admin | 201 (ใบใหม่) | RBAC-001 |
@@ -224,8 +224,8 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 | GET | /admin/categories | หมวดหลักสูตรทุกสถานะ | staff:content, staff:viewer, super_admin | 200 | RBAC-001 |
 | POST | /admin/categories | สร้างหมวด | staff:content, super_admin | 201 | RBAC-001, VAL-001 |
 | PATCH | /admin/categories/{id} | แก้ชื่อ/เลิกใช้หมวด (มีหลักสูตรอ้างอยู่ห้ามลบ) | staff:content, super_admin | 200 | RBAC-001 |
-| GET | /admin/exams/monitoring | มอนิเตอร์ attempt ที่กำลังสอบ (จำนวน/ค้างเกินเวลา/แยกตามหลักสูตร) | staff:exam, super_admin | 200 | RBAC-001 |
-| GET | /admin/exams/statistics | สถิติผลสอบรวม (ผ่าน/ตก/คะแนนเฉลี่ย ต่อชุดข้อสอบ) | staff:exam, staff:viewer, super_admin | 200 | RBAC-001 |
+| GET | /admin/exams/monitoring | มอนิเตอร์ attempt ที่กำลังสอบ (จำนวน/ค้างเกินเวลา/แยกตามหลักสูตร) — **DCR-6: เลื่อน Wave E** (รวมกลุ่ม reports) | staff:exam, super_admin | 200 | RBAC-001 |
+| GET | /admin/exams/statistics | สถิติผลสอบรวม (ผ่าน/ตก/คะแนนเฉลี่ย ต่อชุดข้อสอบ) — **DCR-6: เลื่อน Wave E** (รวมกลุ่ม reports) | staff:exam, staff:viewer, super_admin | 200 | RBAC-001 |
 | GET | /admin/dashboard | ตัวเลขสรุปหน้าแรก admin (แสดงตามสิทธิ์ของบทบาทที่ถือ) | staff:viewer, staff:content, staff:exam, staff:registrar, super_admin | 200 | RBAC-001 |
 
 ### 3.9 Notifications (โดเมน 6)
