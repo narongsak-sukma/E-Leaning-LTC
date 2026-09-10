@@ -60,6 +60,13 @@ export interface BufferedSsrClient {
   readonly client: SupabaseClient;
   /** ยืนยันการเขียน cookie ที่ค้างอยู่ทั้งหมดลง request ปัจจุบัน */
   commit(): void;
+  /**
+   * เก็บคำสั่ง "ลบ cookie session ทั้งชุด" ลง buffer — ใช้เมื่อ session ตายแน่นอน
+   * แล้วเท่านั้น (revoke สำเร็จ หรือ auth server ปฏิเสธชัด ๆ) โดยไม่พึ่ง SDK
+   * signOut ที่กลืน error ได้ (gate r7): ลบชื่อ base + ทุก chunk .N ที่ยังอยู่ใน
+   * jar จริง — ครบทุกชื่อแม้จำนวน chunk จะเปลี่ยนระหว่าง request ไปมา
+   */
+  clearAuthCookies(): void;
 }
 
 /** ใช้ใน Route Handler ที่ "ปฏิบัติการแล้วค่อยเขียน cookie" — ปัจจุบันคือ logout (Wave F: logout-all) */
@@ -105,6 +112,18 @@ export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClie
         cookieStore.set(name, value, hardenedCookieOptions(options));
       }
       pending.clear();
+    },
+    clearAuthCookies: () => {
+      // ชื่อ cookie ตามสูตรเดียวกับ supabase-js: sb-<hostname.split(".")[0]>-auth-token
+      const base = `sb-${new URL(supabaseUrl).hostname.split(".")[0]}-auth-token`;
+      pending.set(base, { value: "", options: { maxAge: 0 } });
+      // จำนวน chunk ของ session เดิมในเครื่องผู้ใช้อาจไม่ตรงกับ chunk ที่ SDK เพิ่ง
+      // เขียน (refresh เปลี่ยนขนาด) — ลบทุกชื่อที่ขึ้นต้น `<base>.` ที่ยังเหลือใน jar
+      for (const { name } of cookieStore.getAll()) {
+        if (name.startsWith(`${base}.`)) {
+          pending.set(name, { value: "", options: { maxAge: 0 } });
+        }
+      }
     },
   };
 }

@@ -1,9 +1,10 @@
 /**
- * unit tests — POST /api/v1/auth/logout (gate r4+r5) — ใช้ SDK จริงทั้งเส้น
+ * unit tests — POST /api/v1/auth/logout (gate r4→r7) — ใช้ SDK จริงทั้งเส้น
  * (createServerClient ของ @supabase/ssr ผ่าน createSupabaseSsrClientBuffered)
  * mock เฉพาะ transport (global fetch) และ cookieStore (next/headers) — แนวเดียวกับ
- * ที่ codex ใช้พิสูจน์จุดรั่ว: r4 (upstream ล้ม→401 โดยไม่ signOut) และ r5
- * (SDK เคลียร์ cookie แม้ revoke ล้ม → กดซ้ำได้ 204 ทั้งที่ token ยังไม่ถูก revoke)
+ * ที่ codex ใช้พิสูจน์จุดรั่ว: r4 (upstream ล้ม→401 โดยไม่ signOut) · r5 (SDK เคลียร์
+ * cookie แม้ revoke ล้ม → กดซ้ำได้ 204) · r6 (SDK กลืน bad_jwt) · r7 (getSession คืน
+ * error จาก refresh 429 แต่ route กลืน → 204 เท็จ · bad_jwt 403 โดยไม่พยายาม refresh)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -93,8 +94,19 @@ beforeEach(() => {
   jar.length = 0;
 });
 
+/** ทุก cookie sb-* ที่ commit ลงเครื่องต้องเป็น "การลบ" เท่านั้น */
+function expectOnlySbDeletions(): void {
+  const sbWrites = cookieSet.mock.calls as unknown as Array<[string, string, { maxAge?: number }]>;
+  const sbCookieWrites = sbWrites.filter(([name]) => String(name).startsWith("sb-"));
+  expect(sbCookieWrites.length).toBeGreaterThan(0);
+  for (const [name, value, options] of sbCookieWrites) {
+    const isDeletion = value === "" || options?.maxAge === 0;
+    expect(isDeletion, `cookie ${name} ต้องเป็นการลบ ไม่ใช่เขียน token กลับ (value=${value.slice(0, 40)}…)`).toBe(true);
+  }
+}
+
 describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
-  it("revoke สำเร็จ → 204 + commit การลบ cookie", async () => {
+  it("revoke สำเร็จ → 204 + commit การลบ cookie (fetch ตรงมี apikey+Bearer)", async () => {
     jar.push(SESSION_COOKIE);
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
     const res = await POST();
@@ -104,7 +116,11 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     expect(String(url)).toContain("http://supabase.test.local/auth/v1/logout");
     expect(String(url)).toContain("scope=local");
     expect(init.method).toBe("POST");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["apikey"]).toBe("test-anon-key");
+    expect(headers["authorization"]).toBe("Bearer access-token-test");
     expect(cookieSet).toHaveBeenCalled(); // commit ลบ session cookie
+    expectOnlySbDeletions();
   });
 
   it("upstream 503 → 503 ERR-SYS-002 และไม่ commit ลบ cookie (ยัง retry ได้)", async () => {
@@ -131,27 +147,84 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     expect(cookieSet).toHaveBeenCalled(); // commit หลัง revoke สำเร็จ
   });
 
-  it("ไม่มี session cookie → 204 โดยไม่ยิง logout เลย (idempotent)", async () => {
+  it("ไม่มี session cookie → 204 โดยไม่ยิง logout เลย (idempotent — เก็บกวาด cookie เสียด้วย)", async () => {
     const res = await POST();
     expect(res.status).toBe(204);
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(cookieSet).not.toHaveBeenCalled();
+    // v4: ไม่มี session ที่ใช้ได้ = จบแล้ว — clearAuthCookies เก็บกวาดชื่อ base ให้เรียบร้อย
+    expectOnlySbDeletions();
   });
 
-  it("auth server ตอบ 401 (refresh token ตายแล้ว) → 204 + commit ล้าง cookie เก่า", async () => {
+  it("revoke โดน 401 แต่ refresh ได้ token ใหม่ → revoke ซ้ำด้วยตัวใหม่ + 204 (จุดรั่ว r6/r7)", async () => {
     jar.push(SESSION_COOKIE);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 401, msg: "bad jwt" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(FRESH_SESSION), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const res = await POST();
+    expect(res.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // revoke → refresh → revoke ใหม่
+    const secondRefresh = fetchMock.mock.calls[1] as [URL | string, RequestInit];
+    expect(String(secondRefresh[0])).toContain("/auth/v1/token");
+    const retryRevoke = fetchMock.mock.calls[2] as [URL | string, RequestInit];
+    expect(String(retryRevoke[0])).toContain("/auth/v1/logout");
+    expect((retryRevoke[1].headers as Record<string, string>)["authorization"]).toBe(
+      "Bearer access-token-fresh-2",
+    );
+    expect(cookieSet).toHaveBeenCalled();
+    expectOnlySbDeletions();
+  });
+
+  it("revoke โดน 401 + refresh ก็โดนปฏิเสธ (401) → session ตายจริง → 204 + commit ล้าง cookie เก่า", async () => {
+    jar.push(SESSION_COOKIE);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Invalid refresh token" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "invalid_grant", error_description: "Token is expired" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const res = await POST();
+    expect(res.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(cookieSet).toHaveBeenCalled();
+  });
+
+  // ---- gate r7 M1: getSession คืน error จาก refresh ภายใน (429) — ห้าม 204 เท็จ ----
+
+  it("access หมดอายุ + refresh โดน 429 (rate-limit) → 503 ERR-SYS-002 ไม่ commit (จุดรั่ว r7 M1)", async () => {
+    jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ message: "Invalid refresh token" }), {
-        status: 401,
+      new Response(JSON.stringify({ code: 429, msg: "rate_limit" }), {
+        status: 429,
         headers: { "content-type": "application/json" },
       }),
     );
     const res = await POST();
-    expect(res.status).toBe(204);
-    expect(cookieSet).toHaveBeenCalled();
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(fetchMock).toHaveBeenCalledTimes(1); // แค่ refresh ภายในของ getSession — ไม่มีการล้าง/204
+    expect(cookieSet).not.toHaveBeenCalled(); // SDK queue การลบไว้ใน buffer แต่เราทิ้งมัน
   });
 
-  // ---- gate r6: access token หมดอายุ → refresh ก่อน revoke (SDK กลืน bad_jwt) ----
+  // ---- gate r6/r7: access token หมดอายุ → SDK refresh ภายใน getSession ----
 
   it("access หมดอายุ + refresh ถูกปฏิเสธด้วย 400 invalid_grant (GoTrue) → 204 + commit (session ตายจริง)", async () => {
     jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
@@ -163,7 +236,7 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     );
     const res = await POST();
     expect(res.status).toBe(204);
-    expect(fetchMock).toHaveBeenCalledTimes(1); // ไม่ signOut — ไม่มี session ที่ใช้ได้เหลืออยู่
+    expect(fetchMock).toHaveBeenCalledTimes(1); // ไม่ revoke — ไม่มี session ที่ใช้ได้เหลืออยู่
     const [url] = fetchMock.mock.calls[0] as [URL | string, RequestInit];
     expect(String(url)).toContain("/auth/v1/token");
     expect(String(url)).toContain("grant_type=refresh_token");
@@ -180,7 +253,7 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     );
     const res = await POST();
     expect(res.status).toBe(204);
-    expect(fetchMock).toHaveBeenCalledTimes(1); // ไม่ signOut — ไม่มี session ที่ใช้ได้เหลืออยู่
+    expect(fetchMock).toHaveBeenCalledTimes(1); // ไม่ revoke — ไม่มี session ที่ใช้ได้เหลืออยู่
     expect(cookieSet).toHaveBeenCalled(); // ล้าง cookie เก่าทิ้ง
   });
 
@@ -213,14 +286,66 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     expect(res.status).toBe(204);
     expect(fetchMock).toHaveBeenCalledTimes(2); // refresh แล้ว logout — ไม่กลืน bad_jwt
 
-    // คุณสมบัติปลายทางของ merged getAll: ทุก cookie sb-* ที่ commit ลงเครื่อง
-    // ต้องเป็นการ "ลบ" เท่านั้น — ห้ามมี session token (เก่า/ใหม่) ถูกเขียนกลับ
-    const sbWrites = cookieSet.mock.calls as unknown as Array<[string, string, { maxAge?: number }]>;
-    const sbCookieWrites = sbWrites.filter(([name]) => String(name).startsWith("sb-"));
-    expect(sbCookieWrites.length).toBeGreaterThan(0);
-    for (const [name, value, options] of sbCookieWrites) {
-      const isDeletion = value === "" || options?.maxAge === 0;
-      expect(isDeletion, `cookie ${name} ต้องเป็นการลบ ไม่ใช่เขียน token กลับ (value=${value.slice(0, 40)}…)`).toBe(true);
-    }
+    // คุณสมบัติปลายทางของ merged getAll + clearAuthCookies: ทุก cookie sb-* ที่ commit
+    // ลงเครื่องต้องเป็นการ "ลบ" เท่านั้น — ห้ามมี session token (เก่า/ใหม่) ถูกเขียนกลับ
+    expectOnlySbDeletions();
+  });
+
+  // ---- gate r7 M2: bad_jwt 403 กับ token ที่ยังไม่หมดอายุ — refresh แล้ว revoke ซ้ำ ----
+
+  it("revoke โดน 403 bad_jwt (token ยังไม่หมดอายุตามเครื่อง) → refresh + revoke ใหม่ (จุดรั่ว r7 M2)", async () => {
+    jar.push(SESSION_COOKIE);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 403, msg: "bad_jwt" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(FRESH_SESSION), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const res = await POST();
+    expect(res.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const retryRevoke = fetchMock.mock.calls[2] as [URL | string, RequestInit];
+    expect(String(retryRevoke[0])).toContain("/auth/v1/logout");
+    expect((retryRevoke[1].headers as Record<string, string>)["authorization"]).toBe(
+      "Bearer access-token-fresh-2",
+    );
+    expect(cookieSet).toHaveBeenCalled();
+    expectOnlySbDeletions();
+  });
+
+  it("revoke โดน 403 ซ้ำแม้หมุน token ใหม่แล้ว → ตายจริง → 204 + commit (ไม่วนลูป)", async () => {
+    jar.push(SESSION_COOKIE);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 403, msg: "bad_jwt" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(FRESH_SESSION), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 403, msg: "bad_jwt" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const res = await POST();
+    expect(res.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // จบที่ retry เดียว — ไม่วนไม่รู้จบ
+    expect(cookieSet).toHaveBeenCalled();
+    expectOnlySbDeletions();
   });
 });

@@ -300,6 +300,18 @@ function parseContract<T extends z.ZodType>(schema: T, value: unknown): z.output
   return parsed.data;
 }
 
+/**
+ * คลาก envelope ของ single-resource 200 — BFF ตอบ `{data}` เสมอ (API-SPEC §1.1 ·
+ * jsonOk) ต่างจาก list `{data, page}` (§1.2 อ่านเองใน getMyEnrollments) —
+ * 200 ที่ไม่มี data = contract ผิดรูป → ERR-SYS-001 (gate r7 MAJOR-3)
+ */
+function unwrapData(body: unknown): unknown {
+  if (!isRecord(body) || !("data" in body)) {
+    throw contractViolation();
+  }
+  return body["data"];
+}
+
 // ——— data layer ผู้เรียน ———
 
 /** GET /me/enrollments — รายการหลักสูตรที่ลงทะเบียน (§3.3) */
@@ -322,7 +334,7 @@ export async function getCourseDetail(
   options?: FetchCallOptions,
 ): Promise<CourseDetailSummary> {
   const { body } = await requestJson(courseDetailUrl(courseId), { method: "GET" }, options);
-  return mapCourseDetail(body);
+  return mapCourseDetail(unwrapData(body));
 }
 
 function mapCourseDetail(body: unknown): CourseDetailSummary {
@@ -377,27 +389,34 @@ export async function getCourseProgress(
   options?: FetchCallOptions,
 ): Promise<CourseProgress> {
   const { body } = await requestJson(courseProgressUrl(courseId), { method: "GET" }, options);
-  return parseContract(CourseProgressView, body);
+  return parseContract(CourseProgressView, unwrapData(body));
 }
 
-/** GET /lessons/{id}/quiz — โจทย์+ตัวเลือก+กติกา ไม่มีเฉลย (§3.4 · DCR-5) */
+/**
+ * GET /lessons/{id}/quiz — โจทย์+ตัวเลือก+กติกา ไม่มีเฉลย (§3.4 · DCR-5)
+ *
+ * ชื่อ field ฝั่ง producer (QuizView ของ route): questions[].`text`/`options`[].`text`
+ * — view model ผู้เรียนใช้ `prompt`/`choices`/`label` จึงแปลงตรงนี้ (gate r7 MAJOR-4;
+ * คู่ producer–consumer ยึดไว้ด้วย contract test ใน learning.test.ts)
+ */
 export async function getLessonQuiz(
   lessonId: string,
   options?: FetchCallOptions,
 ): Promise<LessonQuizView> {
   const { body } = await requestJson(lessonQuizUrl(lessonId), { method: "GET" }, options);
-  if (!isRecord(body)) {
+  const quiz = unwrapData(body);
+  if (!isRecord(quiz)) {
     throw contractViolation();
   }
-  const rawQuestions = body["questions"];
+  const rawQuestions = quiz["questions"];
   if (!Array.isArray(rawQuestions)) {
     throw contractViolation();
   }
-  const passPct = body["passPct"];
+  const passPct = quiz["passPct"];
   if (typeof passPct !== "number") {
     throw contractViolation();
   }
-  const maxAttempts = body["maxAttempts"];
+  const maxAttempts = quiz["maxAttempts"];
   return {
     lessonId,
     passPct,
@@ -406,20 +425,20 @@ export async function getLessonQuiz(
       if (!isRecord(rawQuestion)) {
         throw contractViolation();
       }
-      const rawChoices = rawQuestion["choices"];
-      if (!Array.isArray(rawChoices)) {
+      const rawOptions = rawQuestion["options"];
+      if (!Array.isArray(rawOptions)) {
         throw contractViolation();
       }
       return {
         id: requiredString(rawQuestion, "id"),
-        prompt: requiredString(rawQuestion, "prompt"),
-        choices: rawChoices.map((rawChoice) => {
-          if (!isRecord(rawChoice)) {
+        prompt: requiredString(rawQuestion, "text"),
+        choices: rawOptions.map((rawOption) => {
+          if (!isRecord(rawOption)) {
             throw contractViolation();
           }
           return {
-            id: requiredString(rawChoice, "id"),
-            label: requiredString(rawChoice, "label"),
+            id: requiredString(rawOption, "id"),
+            label: requiredString(rawOption, "text"),
           };
         }),
       };
@@ -438,7 +457,7 @@ export async function submitLessonQuiz(
     { method: "POST", body: { answers: body.answers } },
     options,
   );
-  return parseContract(QuizSubmitView, payload);
+  return parseContract(QuizSubmitView, unwrapData(payload));
 }
 
 /** POST /lessons/{id}/progress — heartbeat วิดีโอ (positionSeconds) XOR อ่านจบเอกสาร (documentRead) */
@@ -452,7 +471,7 @@ export async function saveLessonProgress(
     { method: "POST", body: payload, keepalive: true },
     options,
   );
-  return parseContract(LessonProgressView, body);
+  return parseContract(LessonProgressView, unwrapData(body));
 }
 
 /** POST /auth/logout — ออกจากระบบ (204 = สำเร็จ; 401 = ไม่มี session — ผู้เรียกจัดการเอง) */

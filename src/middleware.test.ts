@@ -176,6 +176,25 @@ describe("session refresh (SDS §5.1) — cookie หมุน token เขีย
     expect(res.status).toBe(200);
     expect(res.headers.get("x-request-id")).toBeTruthy();
   });
+
+  // ---- gate r7 M1: logout path ต้องไม่มีการ refresh ใน middleware ----
+  // getUser ของ SDK อาจเจอ 429 ระหว่าง refresh แล้วเขียนการลบ session cookie ลง
+  // response กลับ browser ก่อน handler ทำงาน — logout route เป็นผู้ตัดสินเอง (buffered)
+
+  it("POST /api/v1/auth/logout ผ่าน CSRF แต่**ไม่**สร้าง Supabase client (ไม่ refresh ใน middleware)", async () => {
+    const res = await middleware(makeRequest("POST", "/api/v1/auth/logout", { origin: "http://localhost:3000" }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-request-id")).toBeTruthy();
+    expect(createServerClientMock).not.toHaveBeenCalled(); // ไม่มี getUser = ไม่มีการลบ cookie หลุดออกก่อน handler
+    expect(res.cookies.getAll()).toEqual([]); // middleware ไม่เขียน cookie ใด ๆ บนเส้นนี้
+  });
+
+  it("POST /api/v1/auth/logout คนละ origin → ยังโดน CSRF 403 (การข้าม refresh ไม่แตะการป้องกัน)", async () => {
+    const res = await middleware(makeRequest("POST", "/api/v1/auth/logout", { origin: "https://evil.example" }));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-RBAC-001");
+  });
 });
 
 describe("isCsrfAllowed + config", () => {

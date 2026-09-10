@@ -2,6 +2,8 @@
  * learning.test — unit test ของ data layer ผู้เรียน (mock fetch)
  *
  * - ครอบ shape mapping + error envelope (§1.3) + contract violation + ไม่มี enrollment
+ * - fixture ทุก 200 = wire จริงของ BFF: single-resource ห่อ `{data}` (§1.1 · gate r7 M3)
+ *   ส่วน quiz ใช้ชื่อ field ตาม producer (text/options — gate r7 M4) คู่กับ route.test.ts
  * - ยืนยันว่า request ที่ส่งไป BFF สะอาด: มีเฉพาะคำตอบ (questionId/choiceIds) — ไม่มีเฉลย/คะแนน
  * - ยืนยันว่าเฉลยไม่อยู่ใน client path — ดู learning.client-bundle-guard.test.ts
  */
@@ -134,22 +136,33 @@ const ENROLLMENT_BODY = {
   completedAt: null,
 };
 
-const QUIZ_BODY = {
+// ——— quiz ตาม wire จริงของ BFF (gate r7 MAJOR-3/4) ———
+// jsonOk ห่อ {data} (§1.1) และชื่อ field ตาม QuizView ของ route: questions[].`text` /
+// options[].`text` + type/points/shuffleQuestions/sortOrder ที่ view model ผู้เรียนไม่ใช้
+// literal นี้จับคู่กับที่ route.test.ts ยึด producer ไว้ (expect(body.data).toEqual(...)) —
+// แก้ฝั่งใดฝั่งหนึ่งโดยไม่แก้อีกฝั่ง คู่ test นี้ต้องแตก (แบบเดียวกับ contract r4)
+const QUIZ_WIRE_BODY = {
+  title: "แบบทดสอบย่อยท้ายหลักสูตร",
   passPct: 70,
   maxAttempts: 3,
+  shuffleQuestions: false,
   questions: [
     {
-      id: "00000000-0000-4000-8000-000000000061",
-      prompt: "ข้อใดเป็นพฤติกรรมที่ต้องห้ามตามจรรยาบรรณ",
-      choices: [
-        { id: CHOICE_A, label: "รับโอนสินจ้างเกินอัตราที่ตกลงกันไว้" },
-        { id: CHOICE_B, label: "แจ้งความประพฤติของตนเองให้ลูกความทราบ" },
+      id: QUESTION_1,
+      text: "ข้อใดเป็นพฤติกรรมที่ต้องห้ามตามจรรยาบรรณ",
+      type: "single_choice",
+      points: 1,
+      options: [
+        { id: CHOICE_A, text: "รับโอนสินจ้างเกินอัตราที่ตกลงกันไว้", sortOrder: 1 },
+        { id: CHOICE_B, text: "แจ้งความประพฤติของตนเองให้ลูกความทราบ", sortOrder: 2 },
       ],
     },
     {
-      id: "00000000-0000-4000-8000-000000000062",
-      prompt: "การรับโอนสินจ้างเกินอัตราที่ตกลงกันไว้ มีโทษอย่างไร",
-      choices: [{ id: CHOICE_C, label: "ต้องรับโทษทางวินัยตามระเบียบสภาทนายความฯ" }],
+      id: QUESTION_2,
+      text: "การรับโอนสินจ้างเกินอัตราที่ตกลงกันไว้ มีโทษอย่างไร",
+      type: "single_choice",
+      points: 1,
+      options: [{ id: CHOICE_C, text: "ต้องรับโทษทางวินัยตามระเบียบสภาทนายความฯ", sortOrder: 1 }],
     },
   ],
 };
@@ -288,7 +301,7 @@ describe("getMyEnrollments", () => {
 // ——— getCourseDetail — mapping โครงสร้างหลักสูตร ———
 describe("getCourseDetail", () => {
   it("แปลง titleTh/category.nameTh/modules/lessons + นับจำนวนบทเรียน", async () => {
-    stubFetch(okAlways(DETAIL_BODY));
+    stubFetch(okAlways({ data: DETAIL_BODY }));
     const detail = await getCourseDetail(COURSE, { origin: ORIGIN });
     expect(detail.id).toBe(COURSE);
     expect(detail.title).toBe("หลักสูตรจริยธรรมทนายความ");
@@ -305,8 +318,15 @@ describe("getCourseDetail", () => {
   });
 
   it("titleTh หายไป → contract violation ERR-SYS-001", async () => {
-    const broken = { ...DETAIL_BODY, titleTh: undefined };
+    const broken = { data: { ...DETAIL_BODY, titleTh: undefined } };
     stubFetch(okAlways(broken));
+    const error = await getCourseDetail(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-SYS-001");
+  });
+
+  it("200 ไม่มี envelope {data} (ข้อมูลอยู่ root) → ERR-SYS-001 ไม่ใช่ข้อมูลครึ่ง ๆ (gate r7 M3)", async () => {
+    stubFetch(okAlways(DETAIL_BODY)); // เหมือน shape เก่าที่ producer ไม่เคยส่ง
     const error = await getCourseDetail(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe("ERR-SYS-001");
@@ -316,7 +336,7 @@ describe("getCourseDetail", () => {
 // ——— getCourseProgress — zod contract + ไม่มี enrollment ———
 describe("getCourseProgress", () => {
   it("200 ผ่าน zod contract (CourseProgressView)", async () => {
-    stubFetch(okAlways(PROGRESS_BODY));
+    stubFetch(okAlways({ data: PROGRESS_BODY }));
     const progress = await getCourseProgress(COURSE, { origin: ORIGIN });
     expect(progress.courseId).toBe(COURSE);
     expect(progress.lessonTotal).toBe(3);
@@ -336,8 +356,15 @@ describe("getCourseProgress", () => {
   });
 
   it("progressPct เกิน 100 → contract violation ERR-SYS-001", async () => {
-    const broken = { ...PROGRESS_BODY, progressPct: 150 };
+    const broken = { data: { ...PROGRESS_BODY, progressPct: 150 } };
     stubFetch(okAlways(broken));
+    const error = await getCourseProgress(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-SYS-001");
+  });
+
+  it("200 ไม่มี envelope {data} → ERR-SYS-001 (gate r7 M3)", async () => {
+    stubFetch(okAlways(PROGRESS_BODY));
     const error = await getCourseProgress(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe("ERR-SYS-001");
@@ -345,28 +372,49 @@ describe("getCourseProgress", () => {
 });
 
 // ——— getLessonQuiz — โจทย์เท่านั้น ไม่มีเฉลย (DCR-5) ———
+// fixture = wire จริงของ route (ดู QUIZ_WIRE_BODY) → ชุดนี้คือ contract test
+// producer–consumer คู่กับ route.test.ts ของ GET /lessons/{id}/quiz (gate r7 M4)
 describe("getLessonQuiz", () => {
-  it("แปลงโจทย์ + ตัวเลือกมีเฉพาะ id/label", async () => {
-    stubFetch(okAlways(QUIZ_BODY));
+  it("wire ของ route (text/options) → view prompt/choices/label ครบทุกข้อ ทุกตัวเลือก", async () => {
+    stubFetch(okAlways({ data: QUIZ_WIRE_BODY }));
     const quiz = await getLessonQuiz(LESSON_Q, { origin: ORIGIN });
     expect(quiz.lessonId).toBe(LESSON_Q);
     expect(quiz.passPct).toBe(70);
     expect(quiz.maxAttempts).toBe(3);
     expect(quiz.questions).toHaveLength(2);
-    const choice = quiz.questions[0]?.choices[0];
-    expect(choice).toEqual({ id: CHOICE_A, label: "รับโอนสินจ้างเกินอัตราที่ตกลงกันไว้" });
+    expect(quiz.questions.map((q) => q.prompt)).toEqual([
+      "ข้อใดเป็นพฤติกรรมที่ต้องห้ามตามจรรยาบรรณ",
+      "การรับโอนสินจ้างเกินอัตราที่ตกลงกันไว้ มีโทษอย่างไร",
+    ]);
+    expect(quiz.questions[0]?.choices.map((c) => c.label)).toEqual([
+      "รับโอนสินจ้างเกินอัตราที่ตกลงกันไว้",
+      "แจ้งความประพฤติของตนเองให้ลูกความทราบ",
+    ]);
+    // id ผ่านตรง ๆ ทั้งข้อและตัวเลือก — submit ตัดสินด้วย id คู่กันเจอ
+    expect(quiz.questions.map((q) => q.id)).toEqual([QUESTION_1, QUESTION_2]);
+    expect(quiz.questions[0]?.choices.map((c) => c.id)).toEqual([CHOICE_A, CHOICE_B]);
+    // ไม่มีเฉลยหลุดมากับ view (DCR-5)
+    expect(JSON.stringify(quiz)).not.toContain("is_correct");
+    expect(JSON.stringify(quiz)).not.toContain("explanation");
   });
 
   it("maxAttempts ไม่ส่งมา → null", async () => {
-    const noMax = { ...QUIZ_BODY, maxAttempts: undefined };
+    const noMax = { data: { ...QUIZ_WIRE_BODY, maxAttempts: undefined } };
     stubFetch(okAlways(noMax));
     const quiz = await getLessonQuiz(LESSON_Q, { origin: ORIGIN });
     expect(quiz.maxAttempts).toBeNull();
   });
 
   it("passPct หายไป → contract violation ERR-SYS-001", async () => {
-    const broken = { ...QUIZ_BODY, passPct: undefined };
+    const broken = { data: { ...QUIZ_WIRE_BODY, passPct: undefined } };
     stubFetch(okAlways(broken));
+    const error = await getLessonQuiz(LESSON_Q, { origin: ORIGIN }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-SYS-001");
+  });
+
+  it("200 ไม่มี envelope {data} → ERR-SYS-001 (gate r7 M3)", async () => {
+    stubFetch(okAlways(QUIZ_WIRE_BODY));
     const error = await getLessonQuiz(LESSON_Q, { origin: ORIGIN }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe("ERR-SYS-001");
@@ -381,7 +429,7 @@ describe("submitLessonQuiz", () => {
   ];
 
   it("POST เฉพาะ answers + แปลงผลคะแนน/ผ่านเกณฑ์จาก server", async () => {
-    stubFetch(okAlways(QUIZ_RESULT_BODY));
+    stubFetch(okAlways({ data: QUIZ_RESULT_BODY }));
     const result = await submitLessonQuiz(LESSON_Q, { answers }, { origin: ORIGIN });
     expect(result).toEqual(QUIZ_RESULT_BODY);
     expect(callAt(0).method).toBe("POST");
@@ -390,6 +438,15 @@ describe("submitLessonQuiz", () => {
     expect(Object.keys(parsed)).toEqual(["answers"]);
     const first = (parsed["answers"] as unknown[])[0] as Record<string, unknown>;
     expect(Object.keys(first)).toEqual(["questionId", "choiceIds"]);
+  });
+
+  it("200 ไม่มี envelope {data} → ERR-SYS-001 (gate r7 M3)", async () => {
+    stubFetch(okAlways(QUIZ_RESULT_BODY));
+    const error = await submitLessonQuiz(LESSON_Q, { answers }, { origin: ORIGIN }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-SYS-001");
   });
 
   it("422 → ApiError ERR-LRN-002", async () => {
@@ -408,7 +465,7 @@ describe("submitLessonQuiz", () => {
 // ——— saveLessonProgress — XOR payload + keepalive ———
 describe("saveLessonProgress", () => {
   it("heartbeat วิดีโอ: POST { positionSeconds } แบบ keepalive", async () => {
-    stubFetch(okAlways(PROGRESS_RESULT_BODY));
+    stubFetch(okAlways({ data: PROGRESS_RESULT_BODY }));
     const view = await saveLessonProgress(LESSON_V, { positionSeconds: 120 }, { origin: ORIGIN });
     expect(view.status).toBe("in_progress");
     expect(view.watchPct).toBe(20);
@@ -421,11 +478,20 @@ describe("saveLessonProgress", () => {
   });
 
   it("อ่านจบเอกสาร: POST { documentRead: true }", async () => {
-    stubFetch(okAlways(PROGRESS_RESULT_BODY));
+    stubFetch(okAlways({ data: PROGRESS_RESULT_BODY }));
     const view = await saveLessonProgress(LESSON_D, { documentRead: true }, { origin: ORIGIN });
     expect(view.status).toBe("in_progress");
     const parsed = JSON.parse(callAt(0).body ?? "{}") as Record<string, unknown>;
     expect(parsed).toEqual({ documentRead: true });
+  });
+
+  it("200 ไม่มี envelope {data} → ERR-SYS-001 (gate r7 M3)", async () => {
+    stubFetch(okAlways(PROGRESS_RESULT_BODY));
+    const error = await saveLessonProgress(LESSON_V, { positionSeconds: 60 }, { origin: ORIGIN }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-SYS-001");
   });
 
   it("429 → ApiError ERR-RATE-001", async () => {
@@ -460,7 +526,7 @@ describe("logout", () => {
 // ——— cookie forwarding (RSC → BFF) ———
 describe("cookieHeader forwarding", () => {
   it("เรียกจาก server ส่ง origin + cookieHeader ถึง BFF", async () => {
-    stubFetch(okAlways(PROGRESS_BODY));
+    stubFetch(okAlways({ data: PROGRESS_BODY }));
     await getCourseProgress(COURSE, { origin: ORIGIN, cookieHeader: "sb-session=abc123" });
     expect(callAt(0).url).toBe(`${ORIGIN}/api/v1/courses/${COURSE}/progress`);
     expect(callAt(0).headers["cookie"]).toBe("sb-session=abc123");

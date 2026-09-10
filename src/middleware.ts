@@ -61,38 +61,47 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // session refresh (SDS §5.1) — token หมุนแล้วเดินต่อทั้งสองทิศทาง:
   // request cookie (handler เห็น token ใหม่) + response cookie (browser เก็บลงถาวร)
   let response = NextResponse.next({ request: { headers: requestHeaders } });
-  try {
-    const { supabaseUrl, supabaseAnonKey } = getConfig();
-    const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
-      cookies: {
-        getAll: () => request.cookies.getAll(),
-        setAll: (cookiesToSet) => {
-          // cookie ที่สะสมไว้จากรอบก่อน (ชื่อซ้ำ = ใช้ค่ารอบใหม่)
-          const carried = new Map(response.cookies.getAll().map((c) => [c.name, c] as const));
-          for (const { name, value } of cookiesToSet) {
-            request.cookies.set(name, value);
-            carried.delete(name);
-          }
-          // cookie ใหม่ต้องเดินต่อถึง handler ด้วย — sync เข้า header ของ request
-          // ที่จะถูก forward (ไม่ใช่แค่ response กลับ browser)
-          requestHeaders.set("cookie", request.cookies.toString());
-          // Next จับค่า headers ณ จุดสร้าง response — แก้ cookie header แล้วต้องสร้าง
-          // response ใหม่ (แบบเดียวกับ pattern ทางการของ @supabase/ssr) แล้วจึงเขียน
-          // cookie ที่สะสมไว้ทั้งหมด (เก่า + ใหม่) ลง response ล่าสุด
-          response = NextResponse.next({ request: { headers: requestHeaders } });
-          for (const { name, value, options } of cookiesToSet) {
-            response.cookies.set(name, value, hardenedCookieOptions(options));
-          }
-          for (const cookie of carried.values()) {
-            response.cookies.set(cookie);
-          }
+  // gate r7 M1: ข้าม refresh สำหรับ POST /api/v1/auth/logout — getUser ของ SDK อาจ
+  // เจอ 429 ระหว่าง refresh ภายในแล้วเขียนการลบ session cookie ตรงลง response กลับ
+  // browser ก่อน handler จะเริ่มทำงาน (SDK _removeSession เมื่อ token หมดอายุจริง +
+  // refresh โดนปฏิเสธแบบ non-retryable) — logout route ตัดสินเองแบบ buffered และเขียน
+  // การลบเฉพาะเมื่อ revoke สำเร็จ/ยืนยันตายจริงเท่านั้น · CSRF ข้างบนยังบังคับอยู่
+  const isLogoutPath =
+    request.method === "POST" && request.nextUrl.pathname === "/api/v1/auth/logout";
+  if (!isLogoutPath) {
+    try {
+      const { supabaseUrl, supabaseAnonKey } = getConfig();
+      const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
+        cookies: {
+          getAll: () => request.cookies.getAll(),
+          setAll: (cookiesToSet) => {
+            // cookie ที่สะสมไว้จากรอบก่อน (ชื่อซ้ำ = ใช้ค่ารอบใหม่)
+            const carried = new Map(response.cookies.getAll().map((c) => [c.name, c] as const));
+            for (const { name, value } of cookiesToSet) {
+              request.cookies.set(name, value);
+              carried.delete(name);
+            }
+            // cookie ใหม่ต้องเดินต่อถึง handler ด้วย — sync เข้า header ของ request
+            // ที่จะถูก forward (ไม่ใช่แค่ response กลับ browser)
+            requestHeaders.set("cookie", request.cookies.toString());
+            // Next จับค่า headers ณ จุดสร้าง response — แก้ cookie header แล้วต้องสร้าง
+            // response ใหม่ (แบบเดียวกับ pattern ทางการของ @supabase/ssr) แล้วจึงเขียน
+            // cookie ที่สะสมไว้ทั้งหมด (เก่า + ใหม่) ลง response ล่าสุด
+            response = NextResponse.next({ request: { headers: requestHeaders } });
+            for (const { name, value, options } of cookiesToSet) {
+              response.cookies.set(name, value, hardenedCookieOptions(options));
+            }
+            for (const cookie of carried.values()) {
+              response.cookies.set(cookie);
+            }
+          },
         },
-      },
-    });
-    // ตรวจ + หมุน token ถ้าใกล้หมดอายุ (ไม่ใช้ผลลัพธ์ — authorization เป็นของ handler/rbac)
-    await supabase.auth.getUser();
-  } catch {
-    // Auth server ล้มชั่วคราว — ไม่ block ที่นี่ (handler/rbac ตัดสิน fail-closed ต่อ)
+      });
+      // ตรวจ + หมุน token ถ้าใกล้หมดอายุ (ไม่ใช้ผลลัพธ์ — authorization เป็นของ handler/rbac)
+      await supabase.auth.getUser();
+    } catch {
+      // Auth server ล้มชั่วคราว — ไม่ block ที่นี่ (handler/rbac ตัดสิน fail-closed ต่อ)
+    }
   }
 
   response.headers.set("x-request-id", requestId);

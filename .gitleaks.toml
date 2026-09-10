@@ -20,9 +20,12 @@ useDefault = true
 
 # -----------------------------------------------------------------------------
 # Allowlist — ข้ามเฉพาะไฟล์ที่ "ไม่ใช่โค้ดที่ deploy จริง" (เอกสาร/ตัวอย่าง/artifact)
-# หมายเหตุ: [allowlist] = รูปแบบ gitleaks v8 (v8.19+ เรียก [[allowlists]] — ยังรองรับ)
+# รูปแบบ [[allowlists]] (gitleaks v8.19+) — หลายบล็อกเป็น OR ต่อกัน (ใด ๆ ตรง = ข้าม)
+# เดิมใช้ [allowlist] รูปแบบเก่าปนกับ [[allowlists]] ทำให้ gitleaks รุ่นใหม่ (ที่ CI
+# ใช้) ปฏิเสธทั้งไฟล์ ("[allowlist] is deprecated, cannot be used alongside
+# [[allowlists]]") — gate r7 แก้ให้เป็นรูปแบบใหม่ล้วน
 # -----------------------------------------------------------------------------
-[allowlist]
+[[allowlists]]
 description = "เอกสาร/ตัวอย่าง/artifact build — ไม่ใช่โค้ดที่ deploy"
 paths = [
   '''(^|/)\.gitleaks\.toml$''',   # ไฟล์ config นี้เอง (มี regex/คำว่า KEY แต่ไม่มีค่าลับ)
