@@ -29,64 +29,13 @@
  */
 import { NextResponse } from "next/server";
 import { createSupabaseSsrClientBuffered } from "@/lib/supabase/ssr";
+import { isDefinitiveAuthError } from "@/lib/supabase/auth-errors";
 import { AppError, fromUnknown, toErrorBody } from "@/lib/errors";
 import { getConfig } from "@/lib/config";
 
 /** 400/401/403 จาก GoTrue = ปฏิเสธชัด ๆ (invalid_grant / bad_jwt) — ต่างจาก 429/5xx ที่ลองใหม่ได้ */
 function isRejected(status: number): boolean {
   return status === 400 || status === 401 || status === 403;
-}
-
-interface AuthApiErrorLike extends Error {
-  readonly status?: number;
-  readonly code?: string;
-}
-
-/**
- * error ของ SDK ที่ "ยืนยันว่า refresh token/session สิ้นสภาพจริง" เท่านั้น —
- * ตัดสินจาก**รหัส error** ไม่ใช่ status (gate r9 M1): 401 จากชั้น key-auth ของ
- * gateway (Kong ตอบ `{"message":"Invalid authentication credentials"}` ไม่มี code
- * — ทดสอบกับ cluster จริง) ไม่ได้แตะ session ฝั่ง server เลย แต่เข้ามาในรูป
- * AuthApiError 401 เหมือนกัน — ถ้ายึด status จะล้าง cookie + 204 ทิ้ง session
- * ที่ยังมีชีวิต:
- * - AuthSessionMissingError — ไม่มี session ในเครื่อง หรือ GoTrue ตอบ
- *   `session_not_found` (SDK แปลงเป็นชื่อนี้ให้ใน handleError ของ fetch.js)
- * - AuthApiError ที่ code เป็น `refresh_token_not_found` (GoTrue จริงที่ cluster
- *   ใช้: token ตายทุกแบบ — ถูก revoke/หมดอายุ/ใช้ซ้ำ — ตอบ error_code นี้,
- *   live probe: 400 `{"code":400,"error_code":"refresh_token_not_found"}`) หรือ
- *   `invalid_grant` (รูป OAuth เดิม)
- * - เพิ่มใน gate r10 M1 ตาม source จริงของ GoTrue v2.164.0 (internal/api/
- *   token_refresh.go + errorcodes.go — รุ่นเดียวกับ docker-compose):
- *   `session_expired` (หมดอายุตามเวลา/inactivity/ถูกเพิกถอนโดย login ใหม่)
- *   และ `refresh_token_already_used` (ใช้ refresh token เก่าซ้ำหลังหมุนไปแล้ว —
- *   live probe กับ cluster จริง: reuse ตัว grandparent → 400
- *   `{"code":400,"error_code":"refresh_token_already_used","msg":"Invalid
- *   Refresh Token: Already Used"}`) — ทั้งคู่พิสูจน์ session สิ้นสภาพเท่ากัน
- *   ถ้าไม่อยู่ใน allowlist session ที่ตายแล้วจะติด 503 ตลอดไป (retry เท่าไหร่
- *   ก็เส้นเดิม)
- * ที่เหลือทุกอย่าง — รวม 400/401/403 ที่ไม่มี code ที่รู้จัก เช่น `user_banned`
- * (บัญชีถูกระงับ ≠ session สิ้นสภาพทันที — revoke ยังลองใหม่ได้ภายหลัง) — ถือว่า
- * ไม่รู้ความหมาย: upstream/gateway ผิดปกติ → 503 เก็บ credential ล่าสุดไว้ ไม่
- * commit การลบที่ SDK queue ไว้ (ใช้ name แทน instanceof — คลาสของ auth-js ไม่
- * พร้อม type ให้ import โดยตรง)
- */
-function isDefinitiveAuthError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  if (error.name === "AuthSessionMissingError") {
-    return true;
-  }
-  if (error.name !== "AuthApiError") {
-    return false;
-  }
-  const code = (error as AuthApiErrorLike).code;
-  return (
-    code === "refresh_token_not_found" ||
-    code === "refresh_token_already_used" ||
-    code === "session_expired" ||
-    code === "invalid_grant"
-  );
 }
 
 /** เรียก GoTrue /auth/v1/logout เอง (scope=local) — network ล้ม/ค้าง = upstream ล้ม (503) */

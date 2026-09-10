@@ -23,9 +23,10 @@
  *    browser ได้รับ cookie ใหม่จริง (รูปแบบทางการของ Supabase SSR/Next.js)
  */
 import { NextResponse, type NextRequest } from "next/server";
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { jsonError } from "./lib/api/response";
 import { hardenedCookieOptions } from "./lib/supabase/cookies";
+import { isDefinitiveAuthError } from "./lib/supabase/auth-errors";
 import { getConfig } from "./lib/config";
 
 /** safe methods ตาม RFC 9110 §9.2.1 — ทุกอย่างอื่นเป็น mutation และต้องผ่าน CSRF check */
@@ -73,46 +74,75 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   }
 
   // session refresh (SDS §5.1) — token หมุนแล้วเดินต่อทั้งสองทิศทาง:
-  // request cookie (handler เห็น token ใหม่) + response cookie (browser เก็บลงถาวร)
+  // request cookie (handler/render เห็น token ใหม่) + response cookie (browser เก็บถาวร)
   let response = NextResponse.next({ request: { headers: requestHeaders } });
-  // gate r7 M1: ข้าม refresh สำหรับ POST /api/v1/auth/logout — getUser ของ SDK อาจ
-  // เจอ 429 ระหว่าง refresh ภายในแล้วเขียนการลบ session cookie ตรงลง response กลับ
-  // browser ก่อน handler จะเริ่มทำงาน (SDK _removeSession เมื่อ token หมดอายุจริง +
-  // refresh โดนปฏิเสธแบบ non-retryable) — logout route ตัดสินเองแบบ buffered และเขียน
-  // การลบเฉพาะเมื่อ revoke สำเร็จ/ยืนยันตายจริงเท่านั้น · CSRF ข้างบนยังบังคับอยู่
+  // gate r7 M1: ข้าม refresh สำหรับ POST /api/v1/auth/logout — logout route ตัดสิน
+  // เองแบบ buffered และเขียนการลบเฉพาะเมื่อ revoke สำเร็จ/ยืนยันตายจริงเท่านั้น ·
+  // gate r11 M1: ทุกเส้นอื่น (API + หน้าเว็บ) ก็ต้องระวังการลบแบบเดียวกัน — getUser
+  // ของ SDK เจอ refresh โดนปฏิเสธแบบ non-retryable (รวม 401 จากชั้น key-auth ของ
+  // gateway ที่ไม่มี code — ไม่ได้แตะ session ฝั่ง server) จะ _removeSession ทันที
+  // ถ้า propagate การลบตรง ๆ หน้าเว็บ/API เส้นหนึ่งก็ล้าง credential ที่ยังมีชีวิต
+  // แล้ว logout ถัดมาตอบ 204 โดยไม่เคย revoke — จึง buffer ไว้ก่อนแล้วตัดสินจากผล
+  // auth: "การลบ" เผยแพร่เฉพาะเมื่อยืนยันตายจริง (allowlist เดียวกับ logout route),
+  // "การเขียน" (rotation) เผยแพร่เสมอ
   const isLogoutPath =
     request.method === "POST" && request.nextUrl.pathname === "/api/v1/auth/logout";
   if (!isLogoutPath) {
     try {
       const { supabaseUrl, supabaseAnonKey } = getConfig();
+      const pending = new Map<string, { value: string; options?: CookieOptions }>();
+      const isDeletion = (value: string, options?: CookieOptions): boolean =>
+        value === "" || options?.maxAge === 0;
       const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
         cookies: {
-          getAll: () => request.cookies.getAll(),
+          // มุมมองของ SDK = cookie ของ request + การเขียนล่าสุดใน buffer (merged view
+          // แบบเดียวกับ buffered client ของ ssr.ts) — ไม่แตะ request.cookies จริง
+          // จนกว่าจะตัดสินว่าจะเผยแพร่อะไร
+          getAll: () => {
+            const view = new Map(request.cookies.getAll().map((c) => [c.name, c.value] as const));
+            for (const [name, { value }] of pending) {
+              if (value === "") {
+                view.delete(name);
+              } else {
+                view.set(name, value);
+              }
+            }
+            return [...view].map(([name, value]) => ({ name, value }));
+          },
           setAll: (cookiesToSet) => {
-            // cookie ที่สะสมไว้จากรอบก่อน (ชื่อซ้ำ = ใช้ค่ารอบใหม่)
-            const carried = new Map(response.cookies.getAll().map((c) => [c.name, c] as const));
-            for (const { name, value } of cookiesToSet) {
-              request.cookies.set(name, value);
-              carried.delete(name);
-            }
-            // cookie ใหม่ต้องเดินต่อถึง handler ด้วย — sync เข้า header ของ request
-            // ที่จะถูก forward (ไม่ใช่แค่ response กลับ browser)
-            requestHeaders.set("cookie", request.cookies.toString());
-            // Next จับค่า headers ณ จุดสร้าง response — แก้ cookie header แล้วต้องสร้าง
-            // response ใหม่ (แบบเดียวกับ pattern ทางการของ @supabase/ssr) แล้วจึงเขียน
-            // cookie ที่สะสมไว้ทั้งหมด (เก่า + ใหม่) ลง response ล่าสุด
-            response = NextResponse.next({ request: { headers: requestHeaders } });
             for (const { name, value, options } of cookiesToSet) {
-              response.cookies.set(name, value, hardenedCookieOptions(options));
-            }
-            for (const cookie of carried.values()) {
-              response.cookies.set(cookie);
+              pending.set(name, options === undefined ? { value } : { value, options });
             }
           },
         },
       });
-      // ตรวจ + หมุน token ถ้าใกล้หมดอายุ (ไม่ใช้ผลลัพธ์ — authorization เป็นของ handler/rbac)
-      await supabase.auth.getUser();
+      // ตรวจ + หมุน token ถ้าใกล้หมดอายุ — ผล error ใช้ตัดสินว่าจะเผยแพร่การลบได้ไหม
+      // (authorization เองเป็นของ handler/rbac ต่อไป)
+      const { error: authError } = await supabase.auth.getUser();
+      const deathConfirmed = authError !== null && isDefinitiveAuthError(authError);
+      const published: Array<{ name: string; value: string; options?: CookieOptions }> = [];
+      for (const [name, entry] of pending) {
+        if (isDeletion(entry.value, entry.options) && !deathConfirmed) {
+          continue; // ไม่ยืนยันว่าตายจริง — ทิ้งการลบ รักษา credential ล่าสุดทั้งสองฝั่ง
+        }
+        published.push({ name, ...entry });
+      }
+      if (published.length > 0) {
+        for (const { name, value, options } of published) {
+          if (isDeletion(value, options)) {
+            request.cookies.delete(name);
+          } else {
+            request.cookies.set(name, value);
+          }
+        }
+        // cookie ใหม่ต้องเดินต่อถึง handler/render ด้วย — sync เข้า header ของ request
+        // ที่จะถูก forward แล้วสร้าง response ใหม่ (Next จับค่า headers ณ จุดสร้าง)
+        requestHeaders.set("cookie", request.cookies.toString());
+        response = NextResponse.next({ request: { headers: requestHeaders } });
+        for (const { name, value, options } of published) {
+          response.cookies.set(name, value, hardenedCookieOptions(options));
+        }
+      }
     } catch {
       // Auth server ล้มชั่วคราว — ไม่ block ที่นี่ (handler/rbac ตัดสิน fail-closed ต่อ)
     }
