@@ -14,6 +14,7 @@ import {
   toErrorBody,
   type ErrorCode,
 } from "../errors";
+import type { PageEnvelope } from "./pagination";
 
 /** ตัวเลือกกลางของทุก response — requestId มาจาก middleware, headers เสริมสำหรับ handler */
 export interface JsonResponseOptions {
@@ -40,9 +41,23 @@ export function jsonOk(data: unknown, options: JsonResponseOptions = {}): NextRe
 }
 
 /** 201 — { data } สร้างทรัพยากรใหม่ (API-SPEC §1.1) */
-/** 201 — { data } สร้างทรัพยากรใหม่ (API-SPEC §1.1) */
 export function jsonCreated(data: unknown, options: JsonResponseOptions = {}): NextResponse {
   return new NextResponse(JSON.stringify({ data }), { status: 201, headers: buildHeaders(options) });
+}
+
+/**
+ * 200 — { data, page: { nextCursor, hasMore } } ของ list endpoint (API-SPECIFICATION §1.2)
+ * รับ envelope ที่ lib/api/pagination.buildPage สร้างไว้ตรง ๆ — เดิมแต่ละ route ประกอบ
+ * { data, page } + header เอง (ธง Phase 1 ของ C-3) — helper นี้ทำให้เหลือจุดเดียว
+ */
+export function jsonPageOk<T>(
+  envelope: PageEnvelope<T>,
+  options: JsonResponseOptions = {},
+): NextResponse {
+  return new NextResponse(JSON.stringify({ data: envelope.data, page: envelope.page }), {
+    status: 200,
+    headers: buildHeaders(options),
+  });
 }
 
 /** 204 — สำเร็จแบบไม่มี body (API-SPEC §1.1 — ใช้เฉพาะ mark-read) */

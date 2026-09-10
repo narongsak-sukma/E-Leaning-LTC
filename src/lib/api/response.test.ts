@@ -7,6 +7,7 @@ import { AppError, errorDefinition } from "../errors";
 import {
   jsonOk,
   jsonCreated,
+  jsonPageOk,
   jsonNoContent,
   jsonError,
   jsonErrorResponse,
@@ -34,6 +35,28 @@ describe("jsonOk / jsonCreated / jsonNoContent", () => {
     const res = jsonNoContent({ requestId: "req-2" });
     expect(res.status).toBe(204);
     expect(res.headers.get("x-request-id")).toBe("req-2");
+  });
+});
+
+describe("jsonPageOk — { data, page } list envelope (§1.2)", () => {
+  it("200 { data, page } ตรงรูป + content-type charset + x-request-id สะท้อนกลับ", async () => {
+    const res = jsonPageOk(
+      { data: [{ id: "a" }], page: { nextCursor: "cur-1", hasMore: true } },
+      { requestId: "req-page" },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("x-request-id")).toBe("req-page");
+    expect(await bodyOf(res)).toEqual({
+      data: [{ id: "a" }],
+      page: { nextCursor: "cur-1", hasMore: true },
+    });
+  });
+
+  it("hasMore=false / nextCursor=null → page ตรงรูป §1.2 (หน้าสุดท้าย)", async () => {
+    const res = jsonPageOk({ data: [], page: { nextCursor: null, hasMore: false } });
+    expect(res.status).toBe(200);
+    expect(await bodyOf(res)).toEqual({ data: [], page: { nextCursor: null, hasMore: false } });
   });
 });
 

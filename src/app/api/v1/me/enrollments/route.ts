@@ -9,7 +9,7 @@
  */
 import { NextResponse } from "next/server";
 import { AppError } from "@/lib/errors";
-import { jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
+import { jsonErrorResponse, jsonPageOk, type JsonResponseOptions } from "@/lib/api/response";
 import { decodeCursor, buildPage } from "@/lib/api/pagination";
 import { parsePageQuery } from "@/lib/schemas/v1/common";
 import { requireMfaForRoles } from "@/lib/auth/session";
@@ -71,15 +71,8 @@ export async function GET(request: Request): Promise<NextResponse> {
       sortKeyOf: (row) => row.enrolledAt,
       idOf: (row) => row.id,
     });
-    // list endpoint ตอบ { data, page } ตรง §1.2 — jsonOk ทำ { data } อย่างเดียว
-    const headers: Record<string, string> = { "content-type": "application/json; charset=utf-8" };
-    if (options.requestId !== undefined) {
-      headers["x-request-id"] = options.requestId;
-    }
-    return new NextResponse(JSON.stringify({ data: page.data, page: page.page }), {
-      status: 200,
-      headers,
-    });
+    // list endpoint ตอบ { data, page } ตรง §1.2 — helper กลางของ lib/api/response (C-11)
+    return jsonPageOk(page, options);
   } catch (err: unknown) {
     return jsonErrorResponse(err, options);
   }
