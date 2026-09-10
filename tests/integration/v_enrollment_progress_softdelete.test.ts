@@ -156,6 +156,13 @@ describe.skipIf(!DB_URL)("PB-11 v_enrollment_progress + soft-delete (migration 0
       do update set status = 'completed', completed_at = now();
     commit;`);
 
+    // ย้ายบทเรียนแรกข้ามหลักสูตรผ่าน claims path จริงของ staff:content —
+    // lessons_update (0010:355) อนุญาต: WITH CHECK ตรวจเฉพาะหลักสูตรปลายทาง ·
+    // sort_order ต้องย้ายพ้นช่องของ module ปลายทางด้วย (uq_lessons_sort:
+    // unique (module_id, sort_order) where deleted_at is null)
+    const moved = lessons[0]!;
+    const claims = JSON.stringify({ sub: staff!.id, role: "authenticated" });
+    let restoreError: unknown = null;
     try {
       // ก่อนย้าย: เสร็จครบ — completed = total · pct = 100
       const before = (await progressRows(staff!.accessToken)).find(
@@ -165,12 +172,6 @@ describe.skipIf(!DB_URL)("PB-11 v_enrollment_progress + soft-delete (migration 0
       expect(Number(before?.["lesson_completed"])).toBe(lessons.length);
       expect(Number(before?.["progress_pct"])).toBe(100);
 
-      // ย้ายบทเรียนแรกข้ามหลักสูตรผ่าน claims path จริงของ staff:content —
-      // lessons_update (0010:355) อนุญาต: WITH CHECK ตรวจเฉพาะหลักสูตรปลายทาง ·
-      // sort_order ต้องย้ายพ้นช่องของ module ปลายทางด้วย (uq_lessons_sort:
-      // unique (module_id, sort_order) where deleted_at is null)
-      const moved = lessons[0]!;
-      const claims = JSON.stringify({ sub: staff!.id, role: "authenticated" });
       await psql(`begin;
         set local role authenticated;
         select set_config('request.jwt.claims', '${claims}', true);
@@ -192,7 +193,6 @@ describe.skipIf(!DB_URL)("PB-11 v_enrollment_progress + soft-delete (migration 0
       expect(Number(after?.["lesson_completed"])).toBeLessThanOrEqual(
         Number(after?.["lesson_total"]),
       );
-
       // คืนที่เดิม (seed) — ผ่าน claims path เดียวกัน (sort_order ช่องเดิมว่างอยู่
       // เพราะเจ้าของช่องคือบทเรียนนี้เองที่เพิ่งย้ายออก)
       await psql(`begin;
@@ -202,17 +202,53 @@ describe.skipIf(!DB_URL)("PB-11 v_enrollment_progress + soft-delete (migration 0
           sort_order = ${moved.sort_order}
         where id = '${moved.id}';
       commit;`);
+      // หลังคืนค่า: ตัวนับกลับมาเต็ม — progress ยังอยู่ (ลบใน finally ท้ายสุด)
       const restored = (await progressRows(staff!.accessToken)).find(
         (r) => r["user_id"] === learner!.id,
       );
       expect(Number(restored?.["lesson_total"])).toBe(lessons.length);
       expect(Number(restored?.["lesson_completed"])).toBe(lessons.length);
+    } catch (err) {
+      restoreError = err;
     } finally {
-      // เก็บกวาดผลการเรียนที่ seed เอง (deleteTestUser จะเก็บตาม enrollment อยู่แล้ว
-      // แต่ทำที่นี่เพื่อให้ state สะอาดแม้ beforeAll ของ suite ถัดไปชนจังหวะเดียวกัน)
+      // gate r3 MINOR: คืนบทเรียนที่ seed "เสมอ" — แม้ assertion กลางทางพัง ไม่งั้น
+      // บทเรียนค้างอยู่ LTC-101 โดย afterAll (ตรวจแค่ course status) ไม่เห็น ·
+      // UPDATE นี้ idempotent: ถ้า try คืนค่าสำเร็จแล้ว = เขียนค่าเดิมซ้ำ (no-op) ·
+      // ถ้า psql ย้ายต้นทางล้ม = TX กลิ้งกลับ = ก็เป็น no-op เช่นกัน
+      try {
+        await psql(`begin;
+          set local role authenticated;
+          select set_config('request.jwt.claims', '${claims}', true);
+          update public.lessons set module_id = '${moved.module_id}',
+            sort_order = ${moved.sort_order}
+          where id = '${moved.id}';
+        commit;`);
+        // คืนค่าแบบ "ตรวจแล้ว" ตามแบบแผน afterAll — ไม่ตรง = seed รั่ว ต้อง fail ดัง
+        const back = await psqlRows<{ module_id: string; sort_order: number }>(
+          `select module_id::text, sort_order from public.lessons where id = '${moved.id}';`,
+        );
+        if (
+          back.length !== 1 ||
+          back[0]!.module_id !== moved.module_id ||
+          Number(back[0]!.sort_order) !== moved.sort_order
+        ) {
+          throw new Error(
+            `seed lesson ${moved.id} not restored: got ${JSON.stringify(back)}`,
+          );
+        }
+      } catch (err) {
+        restoreError = err;
+      }
+      // เก็บกวาดผลการเรียนที่ seed เอง — ต้องรันแม้การคืนบทเรียนล้ม (deleteTestUser
+      // จะเก็บตาม enrollment อยู่แล้ว แต่ทำที่นี่เพื่อให้ state สะอาดแม้ beforeAll
+      // ของ suite ถัดไปชนจังหวะเดียวกัน)
       await psql(
         `delete from public.lesson_progress where enrollment_id = '${enrollmentId}';`,
       );
+      // assertion ที่พังไว้ก่อนหน้า (หรือ error การคืนค่า) ต้องไม่หายไปเงียบ ๆ
+      if (restoreError !== null) {
+        throw restoreError;
+      }
     }
   });
 });
