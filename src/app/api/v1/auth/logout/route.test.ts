@@ -8,7 +8,10 @@
  * · r8 (ปฏิเสธซ้ำหลัง refresh สำเร็จ ≠ ตายจริง · rotation ภายใน getSession ถูกทิ้ง ·
  * base→chunks ล้างไม่ครบชื่อที่เกิดใหม่ใน buffer) · r9 (401 จากชั้น key-auth ของ
  * gateway ไม่มี error code ≠ session ตาย — ยึด code เฉพาะ refresh_token_not_found /
- * invalid_grant เท่านั้น รูป body ตาม live probe ของ cluster จริง)
+ * invalid_grant เท่านั้น รูป body ตาม live probe ของ cluster จริง) · r10 (allowlist
+ * ต้องครบทุก code ตายจริงของ GoTrue v2.164.0 — session_expired ·
+ * refresh_token_already_used (live probe จริง) — ไม่งั้น session ตายติด 503 ตลอดไป ·
+ * user_banned ≠ ตาย → คง 503)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -322,6 +325,90 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     const writes = sbCookieWrites();
     expect(writes.length).toBeGreaterThan(0);
     expect(writes.some(([, value]) => decodedWriteValue(value).includes("access-token-fresh-2"))).toBe(true);
+  });
+
+  // ---- gate r10 M1: สอง code ตายจริงที่ GoTrue v2.164.0 ตอบจาก /token แต่หลุด
+  // ---- allowlist: session_expired · refresh_token_already_used — ไม่เพิ่มแล้ว
+  // ---- session ตายจริงจะติด 503 ตลอดไป (retry ก็เส้นเดิมจนสถานะฝั่ง server เปลี่ยน)
+
+  it("access หมดอายุ + refresh ตอบ session_expired (GoTrue v2.164.0 — หมดอายุ/inactivity/ถูกเพิกถอนโดย login ใหม่) → 204 + commit ล้าง ไม่ติด 503 ตลอดไป", async () => {
+    jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ code: 400, error_code: "session_expired", msg: "Invalid Refresh Token: Session Expired" }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const res = await POST();
+    expect(res.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // refresh ภายในตายจริง — จบเลย
+    expect(cookieSet).toHaveBeenCalled();
+    expectOnlySbDeletions();
+  });
+
+  it("access หมดอายุ + refresh ตอบ refresh_token_already_used (reuse หลังหมุน — live probe จริง) → 204 + commit ล้าง", async () => {
+    jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          code: 400,
+          error_code: "refresh_token_already_used",
+          msg: "Invalid Refresh Token: Already Used",
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const res = await POST();
+    expect(res.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cookieSet).toHaveBeenCalled();
+    expectOnlySbDeletions();
+  });
+
+  it("revoke โดน 403 + refresh ตอบ refresh_token_already_used → session ตายจริง → 204 + กดซ้ำหลังล้าง cookie แล้ว = idempotent ไม่ยิง fetch (r10 M1)", async () => {
+    jar.push(SESSION_COOKIE);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 403, msg: "bad_jwt" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: 400,
+            error_code: "refresh_token_already_used",
+            msg: "Invalid Refresh Token: Already Used",
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      );
+    const first = await POST();
+    expect(first.status).toBe(204);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // revoke 403 → refresh ตายจริง
+    expectOnlySbDeletions();
+    // กดซ้ำในสภาพ browser จริงหลัง commit การลบ: jar ว่าง → 204 โดยไม่แตะ network
+    jar.length = 0;
+    fetchMock.mockClear();
+    const second = await POST();
+    expect(second.status).toBe(204);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refresh ตอบ user_banned (บัญชีถูกระงับ — ไม่ใช่หลักฐาน session สิ้นสภาพ) → 503 ไม่ใช่ 204 ล้าง cookie", async () => {
+    jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ code: 400, error_code: "user_banned", msg: "Invalid Refresh Token: User Banned" }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const res = await POST();
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(cookieSet).not.toHaveBeenCalled(); // ห้ามล้าง — revoke ยังลองใหม่ได้ภายหลัง
   });
 
   it("access หมดอายุ (session ใหญ่ chunk .0/.1) + refresh ได้ session ใหม่ + revoke สำเร็จ → 204, ไม่มี token หลงเหลือใน cookie ที่เขียนกลับ (จุดรั่ว r6 merged getAll)", async () => {

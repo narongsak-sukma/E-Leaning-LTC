@@ -4,12 +4,13 @@
  * หลัก (สะสมจาก gate r4→r8): **ไม่มีทางจบ "เหมือนสำเร็จ" (204 + ล้าง cookie) จนกว่า
  * refresh token จะถูก revoke จริง หรือ auth server ยืนยันเองว่า session ตายแล้ว**
  * - buffered client (r5): การเขียน/ลบ cookie ทั้งหมดอยู่ใน memory จนกว่า commit()
- * - อ่าน session พร้อม**ตรวจ error ของ getSession** (r7 M1 · r9 M1): token หมดอายุ →
- *   SDK refresh ภายในเอง; refresh ตอบ code ที่พิสูจน์ token ตายจริง
- *   (refresh_token_not_found / invalid_grant / AuthSessionMissingError) →
- *   SDK คืน {session:null, error} = ตายจริง · error อื่นทุกชนิด (รวม 401 จากชั้น
- *   key-auth ของ gateway ที่ไม่มี code — ไม่ได้แตะ session ฝั่ง server) และ
- *   429/5xx/network → 503 และ**ไม่ commit** (deletion ที่ SDK ทำไว้ใน buffer ถูกทิ้ง)
+ * - อ่าน session พร้อม**ตรวจ error ของ getSession** (r7 M1 · r9 M1 · r10 M1): token
+ *   หมดอายุ → SDK refresh ภายในเอง; refresh ตอบ code ที่พิสูจน์ token ตายจริง
+ *   (refresh_token_not_found / refresh_token_already_used / session_expired /
+ *   invalid_grant / AuthSessionMissingError) → SDK คืน {session:null, error} =
+ *   ตายจริง · error อื่นทุกชนิด (รวม 401 จากชั้น key-auth ของ gateway ที่ไม่มี
+ *   code — ไม่ได้แตะ session ฝั่ง server) และ 429/5xx/network → 503 และ**ไม่
+ *   commit** (deletion ที่ SDK ทำไว้ใน buffer ถูกทิ้ง)
  *   ไม่ใช่ 204 เหมือนสำเร็จ · middleware ก็ไม่ refresh เส้นนี้ให้แล้ว (r7 M1)
  * - **revoke ด้วย fetch ตรงเอง** (r7 M2): _signOut ของ SDK กลืน 401/403/404 เป็น
  *   error:null (bad_jwt) — ทางเดียวที่รู้ผล revoke จริงคืออ่าน status เอง
@@ -54,10 +55,20 @@ interface AuthApiErrorLike extends Error {
  *   ใช้: token ตายทุกแบบ — ถูก revoke/หมดอายุ/ใช้ซ้ำ — ตอบ error_code นี้,
  *   live probe: 400 `{"code":400,"error_code":"refresh_token_not_found"}`) หรือ
  *   `invalid_grant` (รูป OAuth เดิม)
- * ที่เหลือทุกอย่าง — รวม 400/401/403 ที่ไม่มี code ที่รู้จัก — ถือว่าไม่รู้
- * ความหมาย: upstream/gateway ผิดปกติ → 503 เก็บ credential ล่าสุดไว้ ไม่ commit
- * การลบที่ SDK queue ไว้ (ใช้ name แทน instanceof — คลาสของ auth-js ไม่พร้อม
- * type ให้ import โดยตรง)
+ * - เพิ่มใน gate r10 M1 ตาม source จริงของ GoTrue v2.164.0 (internal/api/
+ *   token_refresh.go + errorcodes.go — รุ่นเดียวกับ docker-compose):
+ *   `session_expired` (หมดอายุตามเวลา/inactivity/ถูกเพิกถอนโดย login ใหม่)
+ *   และ `refresh_token_already_used` (ใช้ refresh token เก่าซ้ำหลังหมุนไปแล้ว —
+ *   live probe กับ cluster จริง: reuse ตัว grandparent → 400
+ *   `{"code":400,"error_code":"refresh_token_already_used","msg":"Invalid
+ *   Refresh Token: Already Used"}`) — ทั้งคู่พิสูจน์ session สิ้นสภาพเท่ากัน
+ *   ถ้าไม่อยู่ใน allowlist session ที่ตายแล้วจะติด 503 ตลอดไป (retry เท่าไหร่
+ *   ก็เส้นเดิม)
+ * ที่เหลือทุกอย่าง — รวม 400/401/403 ที่ไม่มี code ที่รู้จัก เช่น `user_banned`
+ * (บัญชีถูกระงับ ≠ session สิ้นสภาพทันที — revoke ยังลองใหม่ได้ภายหลัง) — ถือว่า
+ * ไม่รู้ความหมาย: upstream/gateway ผิดปกติ → 503 เก็บ credential ล่าสุดไว้ ไม่
+ * commit การลบที่ SDK queue ไว้ (ใช้ name แทน instanceof — คลาสของ auth-js ไม่
+ * พร้อม type ให้ import โดยตรง)
  */
 function isDefinitiveAuthError(error: unknown): boolean {
   if (!(error instanceof Error)) {
@@ -70,7 +81,12 @@ function isDefinitiveAuthError(error: unknown): boolean {
     return false;
   }
   const code = (error as AuthApiErrorLike).code;
-  return code === "refresh_token_not_found" || code === "invalid_grant";
+  return (
+    code === "refresh_token_not_found" ||
+    code === "refresh_token_already_used" ||
+    code === "session_expired" ||
+    code === "invalid_grant"
+  );
 }
 
 /** เรียก GoTrue /auth/v1/logout เอง (scope=local) — network ล้ม/ค้าง = upstream ล้ม (503) */

@@ -4,13 +4,23 @@
  * ขอบเขต (Wave C — C-1 + codex-gate-c01 รอบแก้):
  * 1. request-id: สร้างใหม่ทุก request (crypto.randomUUID) — ใส่ request header x-request-id
  *    ให้ handler ใช้ต่อ (audit/log อ้างตัวเลขนี้) และสะท้อนกลับใน response header
- * 2. CSRF: ทุก method ที่ไม่ใช่ safe (GET/HEAD/OPTIONS) ต้องพิสูจน์ origin ได้ —
- *    Origin ตรง host / Sec-Fetch-Site เป็น same-origin|same-site|none ·
- *    ไม่มีทั้งคู่ → 403 (fail-closed — เครื่องมือ dev ต้องส่ง Origin เอง เช่น
- *    `curl -H "Origin: http://localhost:3000"`)
- * 3. session refresh (SDS §5.1): หมุน Supabase token ก่อนถึง handler — เขียน cookie
- *    ทั้งฝั่ง request (ต่อไปยัง handler) และ response (กลับ browser) ด้วย flags
- *    บังคับของ hardenedCookieOptions (httpOnly — library default เป็น false)
+ * 2. CSRF (เฉพาะ /api/v1 — SDS §5.4): ทุก method ที่ไม่ใช่ safe (GET/HEAD/
+ *    OPTIONS) ต้องพิสูจน์ origin ได้ — Origin ตรง host / Sec-Fetch-Site เป็น
+ *    same-origin|same-site|none · ไม่มีทั้งคู่ → 403 (fail-closed — เครื่องมือ dev
+ *    ต้องส่ง Origin เอง เช่น `curl -H "Origin: http://localhost:3000"`)
+ *    หน้าเว็บ (รวม server actions) ไม่อยู่ในขอบเขตนี้ — Next ตรวจ origin ของ
+ *    server action เองอยู่แล้ว
+ * 3. session refresh (SDS §5.1 + gate r10 M2): หมุน Supabase token **ก่อน render**
+ *    ทั้ง handler /api/v1 และหน้า RSC — เขียน cookie ทั้งฝั่ง request (ต่อไปยัง
+ *    handler/render) และ response (กลับ browser) ด้วย flags บังคับของ
+ *    hardenedCookieOptions (httpOnly — library default เป็น false)
+ *    เหตุผล r10 M2: loader ของหน้า RSC (admin.ts / learning.server.ts /
+ *    catalog.server.ts) เรียก BFF ภายในด้วย cookie ที่ forward ไป — token หมดอายุ
+ *    ตรงนั้น BFF หมุนแล้วตอบ Set-Cookie กลับ แต่ RSC ตั้ง cookie เองไม่ได้ (ข้อ
+ *    จำกัดของ Next) rotation จึงหายกลางทางทุกครั้ง — browser ถือ refresh token
+ *    เก่าไปเรื่อย ๆ จนโดนตรวจ reuse และ session ขาด · หมุนใน middleware ก่อน
+ *    render ทำให้ render (และ loader ใต้มัน) เห็น token ใหม่ตั้งแต่ต้น และ
+ *    browser ได้รับ cookie ใหม่จริง (รูปแบบทางการของ Supabase SSR/Next.js)
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
@@ -45,13 +55,17 @@ export function isCsrfAllowed(request: NextRequest): boolean {
   return false;
 }
 
-/** จุดเข้า middleware ของ Next — ใช้กับทุก request ใต้ /api/v1 เท่านั้น */
+/** จุดเข้า middleware ของ Next — ใช้กับทุก request ใต้ /api/v1 และทุกหน้าเว็บ (r10 M2) */
 export async function middleware(request: NextRequest): Promise<NextResponse> {
   const requestId = crypto.randomUUID();
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-request-id", requestId);
 
-  if (!SAFE_METHODS.has(request.method) && !isCsrfAllowed(request)) {
+  // CSRF คุมเฉพาะ API (SDS §5.4) — หน้าเว็บ/server action มีการตรวจ origin ของ
+  // Next เอง (การขยาย matcher ไปหน้าเว็บใน r10 M2 เป็นการเพิ่ม session refresh
+  // เท่านั้น ไม่ใช่ขยายขอบเขต CSRF)
+  const isApi = request.nextUrl.pathname.startsWith("/api/v1/");
+  if (isApi && !SAFE_METHODS.has(request.method) && !isCsrfAllowed(request)) {
     return jsonError("ERR-RBAC-001", {
       requestId,
       details: { reason: "csrf_origin_mismatch" },
@@ -108,4 +122,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   return response;
 }
 
-export const config = { matcher: ["/api/v1/:path*"] };
+/**
+ * matcher (gate r10 M2): ครอบทุกหน้าเว็บเพื่อ session refresh ก่อน render — ยกเว้น
+ * ของที่ refresh ไม่มีความหมายและเปลืองทุก request: static assets (_next/static,
+ * _next/image), favicon และไฟล์ภาพ (รูปแบบเดียวกับคู่มือทางการของ Supabase SSR
+ * สำหรับ Next.js) · /api/v1/:path* ระบุไว้ตรง ๆ เป็นหลักประกันว่า API ยังถูกคุม
+ * CSRF + request-id + refresh เหมือนเดิมแม้ catch-all จะถูกแก้ในอนาคต
+ */
+export const config = {
+  matcher: [
+    "/api/v1/:path*",
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+  ],
+};
