@@ -4,10 +4,16 @@
  * หลักการ RBAC §1.2-4: ตรวจที่ระดับ permission ไม่ใช่ชื่อบทบาท —
  * โค้ดเรียก requirePermission("certificate:issue") เท่านั้น ห้าม requireRole(...)
  *
- * **สถานะ: โครง (stub) — Wave C งานต่อ**: ยังไม่เชื่อม DB จริง (ต้องรอ migration/seed จาก worker-b2)
- * requirePermission อ่านบทบาทผ่าน `my_roles()` RPC (helper canonical ชุดเดียวกับ RLS policy — RBAC §3.1)
- * และตรวจกับ permission matrix ของ RBAC-DESIGN §2 ที่ประกาศไว้ในไฟล์นี้
+ * **สถานะ: ใช้งานจริง (Wave C — C-1)** — requirePermission ตรวจ session ผ่าน Supabase Auth
+ * (ไม่มี session → ERR-AUTH-001) แล้วโหลดบทบาทจาก RPC `my_roles()` ผ่าน user-JWT Supabase client
+ * (helper canonical ชุดเดียวกับ RLS policy — RBAC §3.1) และตรวจกับ permission matrix
+ * ของ RBAC-DESIGN §2 ที่ประกาศไว้ในไฟล์นี้ (ยืนยันตรง doc ด้วย unit test — D25/O-5)
+ *
+ * ข้อจำกัดที่ยอมรับ: module นี้ import Supabase แบบ lazy (dynamic import ในฟังก์ชัน)
+ * เพื่อให้ส่วน pure (PERMISSIONS/ROLE_PERMISSIONS/hasPermission) ไม่ดึง server-only module
+ * — การเชื่อม DB เกิดเฉพาะเมื่อเรียก loadMyRolesFromDb()/loadSessionFromSupabase() ฝั่ง server เท่านั้น
  */
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { AppError } from "./errors";
 
 export const PERMISSIONS = [
@@ -246,34 +252,53 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
 
 export type MyRolesFetcher = () => Promise<readonly string[]>;
 
+/** ผู้ใช้ที่ผ่านการตรวจ session แล้ว (ข้อมูลเท่าที่ RBAC ต้องใช้ — ไม่มี PII) */
+export interface SessionUser {
+  readonly userId: string;
+}
+
+export type SessionFetcher = () => Promise<SessionUser | null>;
+
 export interface RequirePermissionOptions {
   /**
    * inject บทบาทของผู้ใช้ (สำหรับ unit test) — default จะเรียก `my_roles()` RPC
-   * ผ่าน Supabase user client ซึ่งยังไม่เชื่อมจริงจนกว่า Wave C (ดู loadMyRolesFromDb)
+   * ผ่าน Supabase user client (ดู loadMyRolesFromDb)
    */
   loadMyRoles?: MyRolesFetcher;
+  /**
+   * inject การตรวจ session (สำหรับ unit test / ให้ชั้น session ของ C-0 แทน default ได้ภายหลัง)
+   * — default ตรวจกับ Supabase Auth ผ่าน user client (ดู loadSessionFromSupabase)
+   */
+  loadSession?: SessionFetcher;
 }
 
 export interface RequirePermissionResult {
   readonly allowed: true;
+  readonly userId: string;
   readonly roles: readonly string[];
 }
 
 /**
  * ตรวจสิทธิ์ระดับ permission (RBAC §1.2-4) — deny = throw AppError("ERR-RBAC-001") → 403
  *
- * **Wave C**: เชื่อม session → my_roles() จริง + บังคับขอบเขต owner (ทำใน handler/RLS คู่กัน)
+ * ลำดับ: ไม่มี session → ERR-AUTH-001 (401) · มี session แต่ไม่มี permission → ERR-RBAC-001 (403)
+ * ขอบเขตเชิงทรัพยากร (owner) บังคับซ้ำที่ handler/RLS (RBAC §1.2-5) — ไม่ใช่หน้าที่ของฟังก์ชันนี้
  */
 export async function requirePermission(
   permission: Permission,
   options: RequirePermissionOptions = {},
 ): Promise<RequirePermissionResult> {
+  const loadSession = options.loadSession ?? loadSessionFromSupabase;
+  const session = await loadSession();
+  if (!session) {
+    throw new AppError("ERR-AUTH-001");
+  }
   const loadMyRoles = options.loadMyRoles ?? loadMyRolesFromDb;
   const roles = await loadMyRoles();
-  if (hasPermission(roles, permission)) {
-    return { allowed: true, roles };
+  if (!hasPermission(roles, permission)) {
+    throw new AppError("ERR-RBAC-001", { details: { permission } });
   }
-  throw new AppError("ERR-RBAC-001", { details: { permission } });
+  return { allowed: true, userId: session.userId, roles };
 }
 
 /** ตรวจว่าชุดบทบาทครอบ permission (union ของทุกบทบาท — RBAC §1.1-3) */
@@ -286,12 +311,37 @@ function roleHasPermission(role: string, permission: Permission): boolean {
   return granted?.includes(permission) ?? false;
 }
 
+/** สร้าง user-JWT Supabase client — import แบบ lazy เพื่อไม่ให้ส่วน pure ของ module ดึง server-only module */
+async function createAuthedClient(): Promise<SupabaseClient> {
+  const { createSupabaseSsrClient } = await import("./supabase/ssr");
+  return createSupabaseSsrClient();
+}
+
 /**
- * โครงการเชื่อมฐานข้อมูล (Wave C): เรียก `my_roles()` RPC ผ่าน Supabase user client
- * ตอนนี้ปฏิเสธการทำงานแบบชัดเจน — ยังไม่มี migration/session wiring ให้ใช้
+ * ตรวจ session จริงกับ Supabase Auth (SDS §5.5 — server-checked ทุก request)
+ * ไม่มี session / token หมดอายุ/ใช้ไม่ได้ → คืน null (ผู้เรียก throw ERR-AUTH-001)
  */
-async function loadMyRolesFromDb(): Promise<readonly string[]> {
-  throw new AppError("ERR-SYS-002", {
-    message: "ระบบตรวจสิทธิ์ยังไม่เชื่อมฐานข้อมูล — งานต่อใน Wave C (my_roles() RPC)",
-  });
+export async function loadSessionFromSupabase(): Promise<SessionUser | null> {
+  const supabase = await createAuthedClient();
+  const { data } = await supabase.auth.getUser();
+  return data.user ? { userId: data.user.id } : null;
+}
+
+/**
+ * เรียก RPC `my_roles()` ผ่าน user-JWT Supabase client (RBAC §3.1 — helper canonical ชุดเดียวกับ RLS)
+ * RPC error / ข้อมูลผิด contract → ERR-SYS-002 (503 — ข้อความจากทะเบียน, ไม่ leak รายละเอียด DB)
+ */
+export async function loadMyRolesFromDb(): Promise<readonly string[]> {
+  const supabase = await createAuthedClient();
+  const { data, error } = await supabase.rpc("my_roles");
+  if (error) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "rpc_my_roles_failed" } });
+  }
+  if (
+    !Array.isArray(data) ||
+    !data.every((role): role is string => typeof role === "string")
+  ) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "rpc_my_roles_bad_contract" } });
+  }
+  return data;
 }
