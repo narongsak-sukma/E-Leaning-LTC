@@ -3,7 +3,7 @@
  *
  * ค่า limit ทุกเคสอ้าง getConfig() (canonical จาก config — SRS Appendix A) ไม่ hardcode
  */
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
 import { AppError } from "./errors";
 import { getConfig } from "./config";
 import {
