@@ -67,18 +67,31 @@ describe.skipIf(!DB_URL)("M2+M3 my_active_enrollments (migration 0017)", () => {
   });
 
   afterAll(async () => {
-    // คืน state ของ seed เสมอ (mutation บนข้อมูล seed จริง)
-    if (courseId !== "" && staff !== null) {
-      await mutateCourse("status = 'published', deleted_at = null").catch(() => {});
-    }
-    if (learnerA !== null) {
-      await deleteTestUser(learnerA.id);
-    }
-    if (learnerB !== null) {
-      await deleteTestUser(learnerB.id);
-    }
-    if (staff !== null) {
-      await deleteTestUser(staff.id);
+    // คืน state ของ seed เสมอ (mutation บนข้อมูล seed จริง) — gate r2: คืนค่าแบบ
+    // "ตรวจแล้ว" (re-select แล้ว throw ถ้าไม่ตรง) — .catch(()=>{}) เงียบทำให้ seed
+    // ค้าง archived/deleted ได้โดย suite ถัดไปไม่รู้ · ลบผู้ใช้ทดสอบใน finally เสมอ
+    try {
+      if (courseId !== "" && staff !== null) {
+        await mutateCourse("status = 'published', deleted_at = null");
+        const state = (
+          await psql(
+            `select status || '/' || coalesce(deleted_at::text, 'null') from public.courses where id = '${courseId}';`,
+          )
+        ).trim();
+        if (state !== "published/null") {
+          throw new Error(`seed course LTC-102 not restored: got "${state}"`);
+        }
+      }
+    } finally {
+      if (learnerA !== null) {
+        await deleteTestUser(learnerA.id);
+      }
+      if (learnerB !== null) {
+        await deleteTestUser(learnerB.id);
+      }
+      if (staff !== null) {
+        await deleteTestUser(staff.id);
+      }
     }
   });
 
@@ -90,6 +103,28 @@ describe.skipIf(!DB_URL)("M2+M3 my_active_enrollments (migration 0017)", () => {
 
     const rowsB = await rpcRows(learnerB!.accessToken);
     expect(rowsB.filter((r) => r["course_id"] === courseId)).toEqual([]);
+
+    // gate r2: repeated-or ของ cursor จริงของ route (route.ts:66-68) บน RPC —
+    // keyset (enrolled_at.lt.TS),and(enrolled_at.eq.TS,id.lt.ID) · ข้อค้นพบจาก probe
+    // จริง: PostgREST prune คอลัมน์ของ SQL function ที่ inline ตาม select= — คอลัมน์
+    // ที่ or=/order= อ้างต้องอยู่ใน select= ด้วย (route จริงใส่ครบอยู่แล้ว)
+    const enrolledAt = String(mine[0]?.["enrolled_at"]);
+    // encodeURIComponent จำเป็น: timestamp มี "+00:00" — ใน query string เครื่องหมาย
+    // + ถูก decode เป็นช่องว่าง (supabase-js ทำให้ route จริงอยู่แล้ว)
+    const enrolledAtEnc = encodeURIComponent(enrolledAt);
+    const lastId = String(mine[0]?.["id"]);
+    const selectFull =
+      "select=id,user_id,course_id,status,enrolled_at,expires_at,completed_at";
+    const keepsRow = await rpcRows(
+      learnerA!.accessToken,
+      `${selectFull}&or=(enrolled_at.lt.2999-01-01T00:00:00Z,and(enrolled_at.eq.${enrolledAtEnc},id.lt.${lastId}))&order=enrolled_at.desc&order=id.desc&limit=50`,
+    );
+    expect(keepsRow.filter((r) => r["course_id"] === courseId).length).toBe(1);
+    const nextEmpty = await rpcRows(
+      learnerA!.accessToken,
+      `${selectFull}&or=(enrolled_at.lt.${enrolledAtEnc},and(enrolled_at.eq.${enrolledAtEnc},id.lt.${lastId}))&order=enrolled_at.desc&order=id.desc&limit=50`,
+    );
+    expect(nextEmpty).toEqual([]);
   });
 
   it("M3: หลักสูตรถูก archive (status='archived') → ประวัติการเรียนของ A ยังอยู่ (embed courses!inner แบบ PB-7 เดิมจะหายเพราะ RLS published-only)", async () => {

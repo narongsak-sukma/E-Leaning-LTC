@@ -19,6 +19,63 @@ import { hardenedCookieOptions } from "./cookies";
 import { authCookieBaseName, selectPublishableAuthCookies } from "./auth-errors";
 
 /**
+ * gate r2 M1 — ขาในของ server (RSC loader → BFF) ห้ามหมุน token ที่ชั้น SDK ของ handler
+ *
+ * middleware ข้าม refresh เมื่อเห็น header `x-ltc-bff-internal: 1` แล้ว (cb68382) แต่
+ * handler เองยังรัน SDK: getUser → _useSession และ .from()/.rpc() → getSession ภายใน
+ * ล้วนเรียก _callRefreshToken เมื่อ token เหลือ < EXPIRY_MARGIN_MS (90 วิ —
+ * GoTrueClient ~L3068/L3113) ไม่ขึ้นกับ autoRefreshToken → rotation สำเร็จกลางขาใน
+ * แต่ Set-Cookie โดน RSC loader ทิ้งเสมอ = browser คา parent token เก่า (race PB-1
+ * ย้ายที่อยู่ ไม่หายไป) · บล็อกที่ชั้น fetch: POST /auth/v1/token → 400 non-retryable
+ * · auth-js เห็น token ยังไม่หมดอายุจริงจะ **preserve session** (GoTrueClient
+ * ~L3115 "Proactive-preserve mirror") → handler ทำงานต่อด้วย token เดิมได้ —
+ * ไม่มี rotation · ไม่มีการลบ (error_code นอก allowlist ตายจริงของ auth-errors)
+ */
+async function isInternalBffLeg(): Promise<boolean> {
+  try {
+    // dynamic import: test mocks ของ next/headers มัก export แค่ cookies — binding
+    // แบบ static ทำให้ทุก suite เดิมพังหมด; แบบ lazy จะโดน catch ที่นี่เอง (→ ขาปกติ)
+    const { headers } = await import("next/headers");
+    return (await headers()).get("x-ltc-bff-internal") === "1";
+  } catch {
+    // นอก request scope (unit test / worker ไม่ผ่าน Next) — ถือว่าเป็นขาปกติ
+    return false;
+  }
+}
+
+/** fetch ตัวหนึ่งของขาใน — กันทุกการหมุน token ออกนอกเครื่อง (ผ่านตัวอื่นปกติ) */
+function noRotationFetch(): typeof fetch {
+  return (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    // ตัด query ออกก่อนเทียบ — refresh จริงคือ POST /auth/v1/token?grant_type=refresh_token
+    const path = `${url.split(/[?#]/, 1)[0]}/`;
+    const method = (
+      init?.method ??
+      (typeof input === "object" && input !== null && "method" in input ? input.method : "GET")
+    ).toUpperCase();
+    if (method === "POST" && /\/auth\/v1\/token\/?$/.test(path)) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            code: 400,
+            error_code: "bff_internal_leg",
+            msg: "token rotation is reserved for browser legs (x-ltc-bff-internal)",
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }
+    return fetch(input, init);
+  };
+}
+
+/** options ของ createServerClient สำหรับขาปัจจุบัน — ขาในได้ global.fetch ที่บล็อก rotation */
+async function clientOptionsForLeg(): Promise<{ global?: { fetch: typeof fetch } }> {
+  return (await isInternalBffLeg()) ? { global: { fetch: noRotationFetch() } } : {};
+}
+
+/**
  * สร้าง Supabase user-JWT client ผูกกับ cookie ของ request ปัจจุบัน
  * ใช้ได้ใน Server Component / Server Action / Route Handler —
  * `setAll` เขียน cookie กลับได้จริงใน Server Action / Route Handler
@@ -34,6 +91,8 @@ export async function createSupabaseSsrClient() {
   const isAuthCookieName = (name: string): boolean =>
     name === base || name.startsWith(`${base}.`);
   return createServerClient(supabaseUrl, supabaseAnonKey, {
+    // ขาใน (x-ltc-bff-internal) ได้ fetch ที่บล็อก POST /auth/v1/token — gate r2 M1
+    ...(await clientOptionsForLeg()),
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll: (cookiesToSet) => {
@@ -117,6 +176,8 @@ export async function createSupabaseSsrClientBuffered(): Promise<BufferedSsrClie
     entry.value === "" || entry.options?.maxAge === 0;
 
   const client = createServerClient(supabaseUrl, supabaseAnonKey, {
+    // ขาใน (x-ltc-bff-internal) ได้ fetch ที่บล็อก POST /auth/v1/token — gate r2 M1
+    ...(await clientOptionsForLeg()),
     cookies: {
       // gate r6: อ่านแบบ "merge" — cookie เดิม + pending writes/deletions ซ้อนกัน
       // ไม่งั้นหลัง refresh ที่เปลี่ยนจำนวน chunks อ่านได้เฉพาะ chunk set เก่า ทำให้

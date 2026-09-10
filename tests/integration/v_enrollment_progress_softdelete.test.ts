@@ -14,6 +14,8 @@ import {
   createTestUser,
   deleteTestUser,
   psql,
+  psqlRows,
+  psqlScalar,
   restCall,
   type TestUser,
 } from "./helpers";
@@ -68,15 +70,28 @@ describe.skipIf(!DB_URL)("PB-11 v_enrollment_progress + soft-delete (migration 0
 
   afterAll(async () => {
     // คืน state ของ seed เสมอ (soft-delete เป็น mutation บนข้อมูล seed) — คืนค่าก่อนลบ
-    // ผู้ใช้ staff เพราะการคืนค่าต้องใช้ claims ของ staff เอง
-    if (courseId !== "" && staff !== null) {
-      await setCourseDeleted(false).catch(() => {});
-    }
-    if (learner !== null) {
-      await deleteTestUser(learner.id);
-    }
-    if (staff !== null) {
-      await deleteTestUser(staff.id);
+    // ผู้ใช้ staff เพราะการคืนค่าต้องใช้ claims ของ staff เอง · gate r2: คืนค่าแบบ
+    // "ตรวจแล้ว" (re-select แล้ว throw ถ้าไม่ตรง) — .catch(()=>{}) เงียบทำให้ seed
+    // ค้าง archived ได้โดย suite ถัดไปไม่รู้ · ลบผู้ใช้ทดสอบใน finally เสมอ
+    try {
+      if (courseId !== "" && staff !== null) {
+        await setCourseDeleted(false);
+        const state = (
+          await psql(
+            `select status || '/' || coalesce(deleted_at::text, 'null') from public.courses where id = '${courseId}';`,
+          )
+        ).trim();
+        if (state !== "published/null") {
+          throw new Error(`seed course LTC-102 not restored: got "${state}"`);
+        }
+      }
+    } finally {
+      if (learner !== null) {
+        await deleteTestUser(learner.id);
+      }
+      if (staff !== null) {
+        await deleteTestUser(staff.id);
+      }
     }
   });
 
@@ -97,5 +112,107 @@ describe.skipIf(!DB_URL)("PB-11 v_enrollment_progress + soft-delete (migration 0
     await setCourseDeleted(false);
     const rows = await progressRows(staff!.accessToken);
     expect(rows.filter((r) => r["user_id"] === learner!.id).length).toBe(1);
+  });
+
+  it("gate r2 MINOR: บทเรียนถูกย้ายข้ามหลักสูตร (lessons_update อนุญาต staff:content) → completed ต้องไม่นับบทเรียนที่ย้ายออก — completed ≤ total · pct ≤ 100 เสมอ (0018)", async () => {
+    // enrollment จริงของ learner บน LTC-102 + บทเรียนทั้งหมดของหลักสูตร (seed = 2)
+    const enrollments = await psqlRows<{ id: string }>(
+      `select e.id from public.enrollments e
+       where e.user_id = '${learner!.id}' and e.course_id = '${courseId}'`,
+    );
+    expect(enrollments.length).toBe(1);
+    const enrollmentId = enrollments[0]!.id;
+
+    const lessons = await psqlRows<{ id: string; module_id: string; sort_order: number }>(
+      `select l.id::text, l.module_id::text, l.sort_order from public.lessons l
+       join public.course_modules m on m.id = l.module_id
+       where m.course_id = '${courseId}' and m.deleted_at is null and l.deleted_at is null
+       order by l.id`,
+    );
+    expect(lessons.length).toBeGreaterThanOrEqual(2);
+
+    // module ปลายทางต่างหลักสูตร (LTC-101 — seed คนละ course_id)
+    const otherModule = await psqlScalar(
+      `select m.id::text from public.course_modules m
+       join public.courses c on c.id = m.course_id
+       where c.code = 'LTC-101' and m.deleted_at is null
+       order by m.id limit 1`,
+    );
+    expect(otherModule).not.toBe(lessons[0]!.module_id);
+
+    // seed ผลการเรียน "เสร็จครบทุกบทเรียน" ผ่าน app_owner (เจ้าของตาราง 0010:402 —
+    // เส้นทางเดียวกับที่ SECDEFINER record_lesson_progress เขียนจริง)
+    const values = lessons
+      .map(
+        (l) =>
+          `('${enrollmentId}', '${l.id}', 'completed', now())`,
+      )
+      .join(", ");
+    await psql(`begin;
+      set local role app_owner;
+      insert into public.lesson_progress (enrollment_id, lesson_id, status, completed_at)
+      values ${values}
+      on conflict (enrollment_id, lesson_id)
+      do update set status = 'completed', completed_at = now();
+    commit;`);
+
+    try {
+      // ก่อนย้าย: เสร็จครบ — completed = total · pct = 100
+      const before = (await progressRows(staff!.accessToken)).find(
+        (r) => r["user_id"] === learner!.id,
+      );
+      expect(Number(before?.["lesson_total"])).toBe(lessons.length);
+      expect(Number(before?.["lesson_completed"])).toBe(lessons.length);
+      expect(Number(before?.["progress_pct"])).toBe(100);
+
+      // ย้ายบทเรียนแรกข้ามหลักสูตรผ่าน claims path จริงของ staff:content —
+      // lessons_update (0010:355) อนุญาต: WITH CHECK ตรวจเฉพาะหลักสูตรปลายทาง ·
+      // sort_order ต้องย้ายพ้นช่องของ module ปลายทางด้วย (uq_lessons_sort:
+      // unique (module_id, sort_order) where deleted_at is null)
+      const moved = lessons[0]!;
+      const claims = JSON.stringify({ sub: staff!.id, role: "authenticated" });
+      await psql(`begin;
+        set local role authenticated;
+        select set_config('request.jwt.claims', '${claims}', true);
+        update public.lessons set module_id = '${otherModule}',
+          sort_order = (select coalesce(max(l.sort_order), 0) + 100
+                        from public.lessons l
+                        where l.module_id = '${otherModule}' and l.deleted_at is null)
+        where id = '${moved.id}';
+      commit;`);
+
+      // หลังย้าย + 0018: completed นับเฉพาะบทเรียนที่ยังอยู่ในหลักสูตรของ enrollment —
+      // ตัวนับ 0016 เดิมจะได้ completed=2 > total=1 → pct=200 (จุดที่ codex จับ)
+      const after = (await progressRows(staff!.accessToken)).find(
+        (r) => r["user_id"] === learner!.id,
+      );
+      expect(Number(after?.["lesson_total"])).toBe(lessons.length - 1);
+      expect(Number(after?.["lesson_completed"])).toBe(lessons.length - 1);
+      expect(Number(after?.["progress_pct"])).toBe(100);
+      expect(Number(after?.["lesson_completed"])).toBeLessThanOrEqual(
+        Number(after?.["lesson_total"]),
+      );
+
+      // คืนที่เดิม (seed) — ผ่าน claims path เดียวกัน (sort_order ช่องเดิมว่างอยู่
+      // เพราะเจ้าของช่องคือบทเรียนนี้เองที่เพิ่งย้ายออก)
+      await psql(`begin;
+        set local role authenticated;
+        select set_config('request.jwt.claims', '${claims}', true);
+        update public.lessons set module_id = '${moved.module_id}',
+          sort_order = ${moved.sort_order}
+        where id = '${moved.id}';
+      commit;`);
+      const restored = (await progressRows(staff!.accessToken)).find(
+        (r) => r["user_id"] === learner!.id,
+      );
+      expect(Number(restored?.["lesson_total"])).toBe(lessons.length);
+      expect(Number(restored?.["lesson_completed"])).toBe(lessons.length);
+    } finally {
+      // เก็บกวาดผลการเรียนที่ seed เอง (deleteTestUser จะเก็บตาม enrollment อยู่แล้ว
+      // แต่ทำที่นี่เพื่อให้ state สะอาดแม้ beforeAll ของ suite ถัดไปชนจังหวะเดียวกัน)
+      await psql(
+        `delete from public.lesson_progress where enrollment_id = '${enrollmentId}';`,
+      );
+    }
   });
 });
