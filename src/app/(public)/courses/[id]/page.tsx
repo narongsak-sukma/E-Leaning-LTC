@@ -23,7 +23,6 @@ import {
 import { SkeletonBlock } from "@/components/course/Skeleton";
 import {
   courseLevelLabel,
-  findPublishedCourse,
   formatDuration,
   formatHours,
   formatLearnerCount,
@@ -31,6 +30,7 @@ import {
   type CourseDetail,
   type CourseLesson,
 } from "@/lib/fixtures/catalog";
+import { findPublishedCourse } from "@/lib/fixtures/catalog.server";
 
 type CoursePageProps = {
   params: Promise<{ id: string }>;

@@ -6,12 +6,11 @@
  * API-SPECIFICATION 1.0.2 §3.3 + DCR-4) — ลายเซ็น (signatures) คงเดิม component ไม่ต้องรื้อโครง
  *
  * - ข้อมูลจำลอง (fixture) ถูกถอดออกจาก production path ทั้งหมด — เหลือเฉพาะ type + ผู้ช่วยแสดงผล
- * - Server Component ที่ fetch API route ตัวเองต้องใช้ absolute URL — สร้างจาก
- *   x-forwarded-proto + host (fallback http://localhost:3000) แล้ว fetch cache: "no-store"
+ * - ไฟล์นี้ client-safe: ห้าม import next/headers/server-only (CourseCard ฝั่ง client
+ *   import ผู้ช่วยแสดงผลจากที่นี่) — Server Component ใช้ catalog.server.ts ซึ่งผูก origin
+ *   จาก config + forward cookie ให้ (แบบเดียวกับ learning.ts ↔ learning.server.ts)
  * - ทุกการอ่านข้อมูลผ่าน BFF เท่านั้น — RLS บังคับการมองเห็นฝั่ง DB (guest เห็นเฉพาะ published)
  */
-
-import { headers } from "next/headers";
 
 export type CourseStatus = "draft" | "pending_review" | "published" | "archived";
 export type LessonType = "video" | "document" | "quiz";
@@ -98,24 +97,28 @@ export interface CourseListResponse {
   page: { nextCursor: string | null; hasMore: boolean };
 }
 
-/** ───────────────────────── การเรียก BFF (absolute URL จาก headers ของ request) ───────────────────────── */
+/** ───────────────────────── การเรียก BFF (absolute-origin helper) ───────────────────────── */
 
-/** origin เริ่มต้นเมื่ออยู่นอก request scope (เช่น unit test) หรือ header ไม่บอก host */
-const DEFAULT_ORIGIN = "http://localhost:3000";
+/**
+ * ตัวเลือกของการเรียก API — browser ไม่ต้องส่ง (same-origin เอง);
+ * server/RSC ต้องส่ง origin (+ cookieHeader ถ้าต้องการ session) ผ่าน catalog.server.ts
+ */
+export interface CatalogFetchOptions {
+  /** origin สัมบูรณ์ — บังคับเมื่อเรียกจากฝั่ง server (RSC) */
+  origin?: string;
+  /** ค่า header Cookie ที่ forward จาก request ปัจจุบัน (server เท่านั้น) */
+  cookieHeader?: string;
+}
 
-/** Server Component fetch API route ตัวเองต้องใช้ absolute URL — สร้าง origin จาก header ของ request */
-async function catalogOrigin(): Promise<string> {
-  try {
-    const requestHeaders = await headers();
-    const proto = requestHeaders.get("x-forwarded-proto")?.split(",")[0]?.trim();
-    const host = requestHeaders.get("host")?.trim();
-    if (host !== undefined && host.length > 0) {
-      return `${proto ?? "http"}://${host}`;
-    }
-  } catch {
-    // เรียกนอก request scope ของ Next (เช่น unit test) — ใช้ origin เริ่มต้น
+/** หา origin ของการเรียก — บังคับ fail-loud ฝั่ง server ที่ไม่ส่ง (กันหลุดไป localhost โดยไม่ตั้งใจ) */
+function resolveOrigin(options?: CatalogFetchOptions): string {
+  if (options?.origin !== undefined && options.origin.length > 0) {
+    return options.origin;
   }
-  return DEFAULT_ORIGIN;
+  if (typeof window !== "undefined") {
+    return window.location.origin;
+  }
+  throw new Error("ต้องระบุ origin ใน CatalogFetchOptions เมื่อเรียก API แคตตาล็อกจากฝั่ง server (RSC) — ใช้ catalog.server.ts");
 }
 
 /** รูปที่ BFF ตอบ (camelCase) — status/level เป็น string ของ enum ใน DD §3.2 ที่ UI ต้องการแคบลง */
@@ -152,20 +155,30 @@ function toCourseDetail(item: CourseDetailWire): CourseDetail {
 }
 
 /** fetch BFF — no-store (ข้อมูลแคตตาล็อกต้องสด) + คืน Response ให้ผู้เรียกตรวจ status เอง */
-async function fetchCatalog(path: string): Promise<Response> {
-  const origin = await catalogOrigin();
+async function fetchCatalog(path: string, options?: CatalogFetchOptions): Promise<Response> {
+  const origin = resolveOrigin(options);
+  const headersInit: Record<string, string> = {};
+  if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
+    headersInit.cookie = options.cookieHeader;
+  }
   try {
-    return await fetch(`${origin}${path}`, { cache: "no-store" });
+    return await fetch(`${origin}${path}`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      ...(Object.keys(headersInit).length > 0 ? { headers: headersInit } : {}),
+    });
   } catch (cause: unknown) {
     throw new Error(`เรียก API แคตตาล็อกไม่สำเร็จ (${path})`, { cause });
   }
 }
 
-/** ───────────────────────── ตัวอ่านข้อมูลหลัก (ลายเซ็นคงเดิมจากยุค fixture) ───────────────────────── */
+/** ───────────────────────── ตัวอ่านข้อมูลหลัก (options สำหรับฝั่ง server — ดู catalog.server.ts) ───────────────────────── */
 
 /** GET /api/v1/courses → { data, page } — คืนเฉพาะ published (RLS) เรียง published_at ล่าสุดก่อน */
-export async function getPublishedCourses(): Promise<CourseListResponse> {
-  const response = await fetchCatalog("/api/v1/courses");
+export async function getPublishedCourses(
+  options?: CatalogFetchOptions,
+): Promise<CourseListResponse> {
+  const response = await fetchCatalog("/api/v1/courses", options);
   if (!response.ok) {
     throw new Error(`API แคตตาล็อกตอบ ${response.status} (GET /api/v1/courses)`);
   }
@@ -177,8 +190,8 @@ export async function getPublishedCourses(): Promise<CourseListResponse> {
 }
 
 /** GET /api/v1/categories → { data } — เฉพาะหมวดที่ is_active (RLS) พร้อม courseCount */
-export async function getCategories(): Promise<CatalogCategory[]> {
-  const response = await fetchCatalog("/api/v1/categories");
+export async function getCategories(options?: CatalogFetchOptions): Promise<CatalogCategory[]> {
+  const response = await fetchCatalog("/api/v1/categories", options);
   if (!response.ok) {
     throw new Error(`API แคตตาล็อกตอบ ${response.status} (GET /api/v1/categories)`);
   }
@@ -190,8 +203,11 @@ export async function getCategories(): Promise<CatalogCategory[]> {
  * GET /api/v1/courses/{id} → { data } — ไม่เจอ (404 ERR-CRS-001: draft/ไม่มีจริง) = undefined
  * → หน้าเว็บ notFound(); error อื่น (เช่น 5xx) throw เป็นภาษาไทยให้ error boundary จัดการ
  */
-export async function findPublishedCourse(id: string): Promise<CourseDetail | undefined> {
-  const response = await fetchCatalog(`/api/v1/courses/${encodeURIComponent(id)}`);
+export async function findPublishedCourse(
+  id: string,
+  options?: CatalogFetchOptions,
+): Promise<CourseDetail | undefined> {
+  const response = await fetchCatalog(`/api/v1/courses/${encodeURIComponent(id)}`, options);
   if (response.status === 404) {
     return undefined;
   }

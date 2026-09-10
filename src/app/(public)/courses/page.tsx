@@ -9,7 +9,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 
 import { CourseCardGridSkeleton, SkeletonBlock } from "@/components/course/Skeleton";
-import { getCategories, getPublishedCourses } from "@/lib/fixtures/catalog";
+import { getCategories, getPublishedCourses } from "@/lib/fixtures/catalog.server";
 
 import { CourseCatalogView } from "@/components/course/CourseCatalogView";
 

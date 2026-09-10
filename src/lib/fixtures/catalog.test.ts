@@ -4,8 +4,12 @@
  * mock global fetch เพื่อทดสอบ:
  * - mapping response camelCase ของ BFF → type ของ UI (status/level แคบเป็น union, null → [] / null)
  * - error path: BFF ตอบ 5xx/4xx → throw ภาษาไทยให้ error boundary จัดการ, 404 → undefined (→ notFound())
- * - absolute URL จาก headers (x-forwarded-proto + host) และ cache: "no-store"
+ * - absolute URL จาก options.origin (ฝั่ง server ต้องส่ง — catalog.server.ts ผูกให้) + cache: "no-store"
+ * - client-safety guard: catalog.ts ห้าม import next/headers/server-only (CourseCard ฝั่ง client
+ *   import ผู้ช่วยแสดงผลจากไฟล์นี้ — ลาก server API เข้า client graph = next build ล้ม)
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -96,12 +100,12 @@ const DETAIL_BODY = {
 };
 
 describe("getPublishedCourses — fetch BFF GET /api/v1/courses", () => {
-  it("absolute URL จาก origin fallback + cache no-store + mapping เป็น type ของ UI", async () => {
+  it("absolute URL จาก options.origin + cache no-store + mapping เป็น type ของ UI", async () => {
     const fetchMock = stubFetch((url) =>
       url === `${ORIGIN}/api/v1/courses` ? { status: 200, body: LIST_BODY } : { status: 404 },
     );
 
-    const list = await getPublishedCourses();
+    const list = await getPublishedCourses({ origin: ORIGIN });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
@@ -114,11 +118,27 @@ describe("getPublishedCourses — fetch BFF GET /api/v1/courses", () => {
     expect(list.page).toEqual({ nextCursor: null, hasMore: false });
   });
 
+  it("cookieHeader ถูก forward เป็น header cookie (session ของผู้ใช้ผ่าน RSC)", async () => {
+    const fetchMock = stubFetch(() => ({ status: 200, body: LIST_BODY }));
+
+    await getPublishedCourses({ origin: ORIGIN, cookieHeader: "sb-token=abc; other=1" });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get("cookie")).toBe("sb-token=abc; other=1");
+  });
+
+  it("ฝั่ง server (ไม่มี window) ไม่ส่ง origin → throw fail-loud (กัน fallback localhost โดยไม่ตั้งใจ)", async () => {
+    stubFetch(() => ({ status: 200, body: LIST_BODY }));
+
+    await expect(getPublishedCourses()).rejects.toThrow("ต้องระบุ origin");
+  });
+
   it("BFF ตอบ 5xx → throw Error ภาษาไทย (page/error boundary จัดการต่อ)", async () => {
     stubFetch(() => ({ status: 503, body: { error: { code: "ERR-SYS-002" } } }));
 
-    await expect(getPublishedCourses()).rejects.toThrow("503");
-    await expect(getPublishedCourses()).rejects.toThrow("GET /api/v1/courses");
+    await expect(getPublishedCourses({ origin: ORIGIN })).rejects.toThrow("503");
+    await expect(getPublishedCourses({ origin: ORIGIN })).rejects.toThrow("GET /api/v1/courses");
   });
 
   it("เรียกไม่ถึง BFF (network fail) → throw ภาษาไทยระบุ path", async () => {
@@ -129,7 +149,7 @@ describe("getPublishedCourses — fetch BFF GET /api/v1/courses", () => {
       }),
     );
 
-    await expect(getPublishedCourses()).rejects.toThrow("เรียก API แคตตาล็อกไม่สำเร็จ");
+    await expect(getPublishedCourses({ origin: ORIGIN })).rejects.toThrow("เรียก API แคตตาล็อกไม่สำเร็จ");
   });
 });
 
@@ -140,13 +160,13 @@ describe("getCategories — fetch BFF GET /api/v1/categories", () => {
     ];
     stubFetch(() => ({ status: 200, body: { data: categories } }));
 
-    await expect(getCategories()).resolves.toEqual(categories);
+    await expect(getCategories({ origin: ORIGIN })).resolves.toEqual(categories);
   });
 
   it("BFF ตอบ 5xx → throw", async () => {
     stubFetch(() => ({ status: 500 }));
 
-    await expect(getCategories()).rejects.toThrow("GET /api/v1/categories");
+    await expect(getCategories({ origin: ORIGIN })).rejects.toThrow("GET /api/v1/categories");
   });
 });
 
@@ -158,7 +178,7 @@ describe("findPublishedCourse — fetch BFF GET /api/v1/courses/{id}", () => {
         : { status: 404 },
     );
 
-    const course = await findPublishedCourse(LIST_BODY.data[0]?.id ?? "");
+    const course = await findPublishedCourse(LIST_BODY.data[0]?.id ?? "", { origin: ORIGIN });
     expect(course).toBeDefined();
     expect(course?.id).toBe(LIST_BODY.data[0]?.id);
     expect(course?.outcomes).toEqual([]);
@@ -173,13 +193,17 @@ describe("findPublishedCourse — fetch BFF GET /api/v1/courses/{id}", () => {
   it("404 (draft/ไม่มีจริง — ERR-CRS-001) → undefined (page notFound())", async () => {
     stubFetch(() => ({ status: 404, body: { error: { code: "ERR-CRS-001" } } }));
 
-    await expect(findPublishedCourse("22222222-2222-4222-8222-222222222299")).resolves.toBeUndefined();
+    await expect(
+      findPublishedCourse("22222222-2222-4222-8222-222222222299", { origin: ORIGIN }),
+    ).resolves.toBeUndefined();
   });
 
   it("5xx → throw Error ภาษาไทย", async () => {
     stubFetch(() => ({ status: 500 }));
 
-    await expect(findPublishedCourse(LIST_BODY.data[0]?.id ?? "")).rejects.toThrow("500");
+    await expect(
+      findPublishedCourse(LIST_BODY.data[0]?.id ?? "", { origin: ORIGIN }),
+    ).rejects.toThrow("500");
   });
 });
 
@@ -191,5 +215,16 @@ describe("ผู้ช่วยแสดงผลภาษาไทย (คง�
     expect(formatLearnerCount(3412)).toBe("3,412");
     expect(formatThaiDate("2026-08-12T03:00:00Z")).toContain("2569");
     expect(courseLevelLabel("beginner")).toBe("ระดับเริ่มต้น");
+  });
+});
+
+describe("client-safety guard — catalog.ts ต้อง import ได้จาก Client Component", () => {
+  it("ห้ามพบ import next/headers หรือ server-only ใน catalog.ts (ลากเข้า client graph = build ล้ม)", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("./catalog.ts", import.meta.url)),
+      "utf-8",
+    );
+    expect(source).not.toMatch(/from\s+"next\/headers"/);
+    expect(source).not.toMatch(/import\s+"server-only"/);
   });
 });

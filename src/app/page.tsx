@@ -8,7 +8,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { CourseCard } from "@/components/course/CourseCard";
-import { getPublishedCourses } from "@/lib/fixtures/catalog";
+import { getPublishedCourses } from "@/lib/fixtures/catalog.server";
 
 export const metadata: Metadata = {
   title: "ระบบฝึกอบรมออนไลน์ สภาทนายความแห่งประเทศไทย",
