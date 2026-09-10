@@ -2,7 +2,7 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 1.0.1 — DCR-3 (D25): duplicate enroll = 200 idempotent ตาม SRS LRN-001 · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.0.2 — DCR-4/DCR-5 (D28): catalog fields (level/credits/learnerCount/outcomes/instructors/exam) + GET /lessons/{id}/quiz ไม่มีเฉลย · 1.0.1 DCR-3 (D25): duplicate enroll = 200 idempotent ตาม SRS LRN-001 · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                         |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md (canonical schema) · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
@@ -147,8 +147,8 @@ PDPA endpoints (สิทธิของเจ้าของข้อมูล 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
 | GET | /categories | รายการหมวดหลักสูตร (tree) | guest | 200 | RATE-001 |
-| GET | /courses | ค้นหา/กรองหลักสูตร (หน้า catalog) — guest เห็นเฉพาะ `published` | guest | 200 + pagination | RATE-001 |
-| GET | /courses/{id} | รายละเอียดหลักสูตร + โครงสร้างโมดูล (สถานะ draft มองเห็นเฉพาะเจ้าของ/staff:content) | guest, citizen, lawyer, instructor, staff:content | 200 | CRS-001 |
+| GET | /courses | ค้นหา/กรองหลักสูตร (หน้า catalog) — guest เห็นเฉพาะ `published` · ฟิลด์รายการ: `level` + `credits` + `learnerCount` (จาก view `course_public_stats` — DCR-4) | guest | 200 + pagination | RATE-001 |
+| GET | /courses/{id} | รายละเอียดหลักสูตร + โครงสร้างโมดูล (สถานะ draft มองเห็นเฉพาะเจ้าของ/staff:content) · เพิ่ม `level`, `outcomes` (จาก `outcome_highlights`), `credits`, `learnerCount`, `instructors` (view `course_instructors_public`), `exam` (view `course_exam_summary` — CAT-004 AC) — DCR-4 | guest, citizen, lawyer, instructor, staff:content | 200 | CRS-001 |
 | POST | /courses/{id}/enroll | ลงทะเบียนเรียน (ซ้ำ = 200 idempotent คืน enrollment เดิม — DCR-3/D25) | citizen, lawyer | 201 (ใหม่) / 200 (ซ้ำ) | ENR-002, RATE-001 |
 | GET | /me/enrollments | รายการที่เรียน/ลงทะเบียนไว้ | citizen, lawyer | 200 + pagination | AUTH-001 |
 
@@ -157,6 +157,7 @@ PDPA endpoints (สิทธิของเจ้าของข้อมูล 
 | Method | Path | คำอธิบาย | บทบาท | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
 | GET | /courses/{id}/progress | สรุปความคืบหน้าของตัวเองในหลักสูตร (% ต่อโมดูล) | เจ้าของ enrollment | 200 | LRN-001 |
+| GET | /lessons/{id}/quiz | อ่านข้อสอบย่อยก่อนทำ — **โจทย์+ตัวเลือกเท่านั้น ไม่มี `is_correct`/`explanation` ตลอดการทำ** (BFF อ่าน quiz_questions/quiz_options ผ่าน service path ตาม RLS ของ DD §3.3 — DCR-5 กันเฉลยใน client bundle) + กติกา quiz (pass_pct/max_attempts จาก lesson_quizzes) | เจ้าของ enrollment | 200 | LRN-001, CRS-001 |
 | POST | /lessons/{id}/progress | บันทึกความคืบหน้าบทเรียน (วิดีโอตำแหน่ง, อ่านจบ) | เจ้าของ enrollment | 200 | LRN-001/002 |
 | POST | /lessons/{id}/quiz/submit | ส่งแบบทดสอบย่อย (ได้เฉลยทันที — ไม่นับ credit) | เจ้าของ enrollment | 200 (คะแนน+เฉลย) | LRN-001/002 |
 

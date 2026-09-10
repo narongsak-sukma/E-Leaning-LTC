@@ -2,7 +2,7 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-3 (Wave A — deliverable 7)                 |
 | สถานะ    | ผ่าน CTO gate (codex รอบ 5: PASS — D17)           |
@@ -30,6 +30,7 @@
 | `role_key` | citizen, lawyer, instructor, staff:viewer, staff:content, staff:exam, staff:registrar, super_admin (colon ตาม brief §4 — Postgres enum label ใส่ ':' ได้) |
 | `license_status` | pending, verified, rejected, expired |
 | `course_status` | draft, pending_review, published, archived |
+| `course_level` | beginner, intermediate, advanced (DCR-4) |
 | `lesson_type` | video, document, quiz |
 | `enrollment_status` | active, completed, expired, cancelled |
 | `media_provider` | supabase_storage, r2, stream |
@@ -191,6 +192,8 @@ Retention: ถาวร (ข้อมูลอ้างอิง)
 | cover_media_id | uuid | NULL FK→media_assets |
 | language | text | NOT NULL DEFAULT 'th' |
 | is_public | boolean | NOT NULL DEFAULT true (false = สำหรับทนายเท่านั้น) |
+| level | course_level | NOT NULL DEFAULT 'beginner' (DCR-4 — ระดับชั้นหลักสูตร แสดงบน catalog) |
+| outcome_highlights | text[] | NULL (DCR-4 — จุดเด่น "สิ่งที่จะได้เรียนรู้" แสดงบนรายละเอียด) |
 | credit_type | text | NOT NULL DEFAULT 'general' (ค่า config จาก credit_rules) |
 | status | course_status | NOT NULL DEFAULT 'draft' |
 | version | int | NOT NULL DEFAULT 1 (บัมพ์เมื่อเนื้อหาเปลี่ยนสำคัญ) |
@@ -199,6 +202,12 @@ Retention: ถาวร (ข้อมูลอ้างอิง)
 คีย์/Index: UNIQUE(code); INDEX(category_id, status); INDEX(status) WHERE deleted_at IS NULL
 RLS: **SELECT** ทุกคนเห็นเฉพาะ status='published' (และ is_public หรือผู้ใช้มี role lawyer); instructor เจ้าของ + `has_any_role('staff:viewer','staff:content','super_admin')` เห็นทุกสถานะ (course:view draft — RBAC §2); **INSERT/UPDATE** instructor (เจ้าของ)/staff:content/super_admin; การเปลี่ยนสถานะเป็น published ต้องเป็น staff:content เท่านั้น (workflow อนุมัติ); **DELETE** ไม่อนุญาต
 Retention: ถาวร (ประวัติหลักสูตร/ประกาศนียบัตรอ้างถึง)
+
+**Views สาธารณะของ catalog (DCR-4 — เติมฟิลด์แสดงผลที่ SRS CAT-002/CAT-004 กำหนดแต่ตารางฐานถูก RLS กั้น):** ทั้งสามเป็น `security_invoker = off` (definer-owned โดย postgres) + `GRANT SELECT` ให้ `anon, authenticated` — เปิดเฉพาะคอลัมน์ระบุ ไม่เปิดตารางฐาน:
+
+- `course_public_stats` — ต่อหลักสูตร published: `learner_count` (count enrollments สถานะไม่ใช่ cancelled — ค่ารวม ไม่ใช่ PII) + `credits` (จาก `credit_rules` ที่ `course_id` ตรง + `status='active'` + effective window ครอบ `now()` + `priority` ต่ำสุด — NULL ถ้าไม่มีกฎ) — ทำให้ catalog แสดงยอดผู้เรียน/credit ได้โดยไม่เปิด SELECT บน enrollments/credit_rules (RLS ของตารางฐานคงเดิมทั้งหมด)
+- `course_instructors_public` — `course_id` + display ของผู้สอนหลัก (join `profiles` ผ่าน `courses.created_by`): เปิดเฉพาะ `display_name`, `title` (ถ้ามีคอลัมน์/fallback NULL), `bio` — **ห้ามเปิด email/phone/ชื่อจริง** (ปรับปรุงเป็นตาราง course_instructors หลายคนตอน authoring wave — D25-O3)
+- `course_exam_summary` — `course_id`, `question_count`, `time_limit_minutes`, `pass_score_pct`, `max_attempts` จาก assessments ปลายหลักสูตรที่ active (CAT-004 AC — เงื่อนไขสอบแสดงก่อนลงทะเบียน)
 
 #### `course_modules` — โมดูลของหลักสูตร
 
@@ -807,6 +816,7 @@ Retention: 24 เดือน
 | certificates.holder_name_snapshot | ชื่อตามใบประกาศ | แสดงเฉพาะบน PDF ที่เจ้าของ/registrar ดาวน์โหลด — ห้ามออกทาง public verify (D8) |
 | email_outbox.to_email | ข้อมูลติดต่อ | SELECT ได้เฉพาะ service_role; purge 90 วัน |
 | audit_logs.before/after | อาจมี PII ปน | audit service mask ก่อนเขียน (allowlist field) |
+| profiles.display_name, title, bio (ผ่าน `course_instructors_public` — DCR-4) | ข้อมูลผู้สอนที่เปิดเผยโดยตั้งใจ | เปิดทาง view เฉพาะ 3 คอลัมน์ display นี้เท่านั้น (ห้าม email/phone/ชื่อจริง) — ผู้สอนยินยอมเปิดเผยโดยการเป็นผู้สอนของหลักสูตร published |
 
 ### 4.6 สรุป retention (canonical เดียวของโปรเจกต์ — D11-19)
 
