@@ -4,7 +4,8 @@
  * - request: ?limit=20&cursor=<opaque> (PageQuery — lib/schemas/v1/common)
  * - response: { data, page: { nextCursor, hasMore } } ตาม doc §1.2
  * - cursor = base64url(JSON { sortKey, id }) + "." + HMAC-SHA256 → ปลอมไม่ได้ (signed ตาม §1.2)
- *   คีย์ HMAC อ้างจาก config (SUPABASE_SERVICE_ROLE_KEY — มีอยู่แล้วใน env schema, คงทุก instance)
+ *   คีย์ HMAC จาก config.cursorHmacSecret (CURSOR_HMAC_SECRET — หมุนได้อิสระจาก service key)
+ *   ไม่ตั้ง → fallback supabaseServiceRoleKey (dev-grade ตามสัญญา config.ts)
  *   HMAC ไม่เปิดเผยคีย์ต้นฉบับ (PRF) — ไม่ใช่การเปิดเผย service-role key
  * - cursor ผิดรูปแบบ/ถูกแก้/หมด field → ERR-VAL-001 (400)
  */
@@ -34,7 +35,10 @@ function sign(payload: string, secret: string): string {
 }
 
 function cursorSecret(options?: CursorOptions): string {
-  return options?.secret !== undefined ? options.secret : getConfig().supabaseServiceRoleKey;
+  if (options?.secret !== undefined) return options.secret;
+  const config = getConfig();
+  // CURSOR_HMAC_SECRET หมุนแยกจาก service key ได้ (gate r1: ค่า config ต้องมีผลจริง)
+  return config.cursorHmacSecret ?? config.supabaseServiceRoleKey;
 }
 
 /**

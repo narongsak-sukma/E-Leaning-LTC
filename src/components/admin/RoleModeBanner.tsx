@@ -1,16 +1,34 @@
 import type { Role } from "@/lib/rbac";
+import { ADMIN_STAFF_ROLES } from "@/lib/fixtures/admin";
 
 /**
- * แบนเนอร์แสดงบทบาท/โหมดของหน้าจอ — ควบคุมจาก props (Phase 1 จะส่งบทบาทจริงจาก session)
- * - staff:viewer → แสดง "โหมดดูอย่างเดียว (staff:viewer)" ชัดเจนทุกหน้า (RBAC §1.1: ห้ามแก้ข้อมูล)
- * - staff:content → แจ้งว่าข้อมูลเป็น fixture และปุ่มจัดการยังไม่เชื่อมต่อ API
+ * แบนเนอร์บทบาทของหน้าจอหลังบ้าน — รับบทบาทจริงจาก session (C-8 Phase 1)
+ * - staff:viewer → "โหมดดูอย่างเดียว" ทุกหน้า (RBAC §1.1: ห้ามแก้ข้อมูล)
+ * - บทบาทอื่น → แจ้งชื่อบทบาทภาษาไทย (ไม่มีข้อความ "fixture" อีกต่อไป)
  */
 
-const ROLE_LABEL: Partial<Record<Role, string>> = {
+/** ชื่อบทบาทภาษาไทย — ครอบทุกบทบาทในทะเบียน RBAC (src/lib/rbac.ts) */
+export const ADMIN_ROLE_LABEL_TH: Record<Role, string> = {
+  citizen: "สมาชิกทั่วไป",
+  lawyer: "ทนายความ",
+  instructor: "ผู้สอน",
   "staff:viewer": "เจ้าหน้าที่ฝ่ายรายงาน",
   "staff:content": "เจ้าหน้าที่ดูแลเนื้อหา",
+  "staff:exam": "เจ้าหน้าที่สอบและประเมิน",
+  "staff:registrar": "เจ้าหน้าที่ทะเบียนและใบอนุญาต",
   super_admin: "ผู้ดูแลระบบสูงสุด",
 };
+
+/** บทบาทหลักที่ใช้แสดงผล — เลือกบทบาทหลังบ้านตัวแรกตามลำดับ ADMIN_STAFF_ROLES */
+export function adminPrimaryRole(roles: readonly Role[]): Role {
+  const staffRole = roles.find((role) => ADMIN_STAFF_ROLES.includes(role));
+  return staffRole ?? roles[0] ?? "citizen";
+}
+
+/** บทบาทที่มีสิทธิ์เขียน (เผยแพร่/จัดการหมวด) — RBAC §2.1 + API-SPECIFICATION §3.8 */
+export function adminCanWrite(role: Role): boolean {
+  return role === "staff:content" || role === "super_admin";
+}
 
 export function RoleModeBanner({ role }: { role: Role }) {
   if (role === "staff:viewer") {
@@ -31,10 +49,9 @@ export function RoleModeBanner({ role }: { role: Role }) {
       className="mb-4 rounded-[14px] border border-brand-600/30 bg-brand-50 px-4 py-3 text-sm leading-relaxed text-brand-700"
     >
       <strong className="font-heading font-semibold">
-        บทบาท: {ROLE_LABEL[role] ?? role} ({role})
+        บทบาท: {ADMIN_ROLE_LABEL_TH[role] ?? role} ({role})
       </strong>
-      {" — "}ข้อมูลทั้งหมดบนหน้าจอนี้เป็นข้อมูลจำลอง (fixture) ยังไม่เชื่อมต่อ API จริง
-      ปุ่มเผยแพร่/จัดการหมวดจะเชื่อมต่อในเฟสถัดไป
+      {" — "}การแก้ไขเนื้อหา (authoring CRUD) ยังไม่เปิดใน Wave C — ปุ่มจัดการจะเปิดในเฟสถัดไป
     </div>
   );
 }

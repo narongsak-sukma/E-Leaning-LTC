@@ -1,10 +1,12 @@
 /**
  * Learner Shell — layout ของ route group (learner) (DESIGN-SYSTEM §6.2)
  * topbar องค์กร (brand-900) · header ขาว + เมนูผู้เรียน · skip link · footer
- * ออกจากระบบชี้ไป /login (รอ C-0) — ไม่มี Supabase ฝั่ง browser (D26/SDS §5.1)
+ * ออกจากระบบ → POST /api/v1/auth/logout แล้วไป /login (C-0) — ไม่มี Supabase ฝั่ง browser (D26/SDS §5.1)
  */
 import type { Metadata } from "next";
 import Link from "next/link";
+
+import { LogoutButton } from "@/components/learner/logout-button";
 
 export const metadata: Metadata = {
   title: "ระบบฝึกอบรมออนไลน์ — สภาทนายความแห่งประเทศไทย",
@@ -39,15 +41,7 @@ export default function LearnerLayout({ children }: { children: React.ReactNode 
             >
               หลักสูตรของฉัน
             </Link>
-            <Link
-              href="/login"
-              className="rounded-[8px] px-3 py-2 text-sm font-semibold text-brand-700 hover:bg-brand-50"
-            >
-              ออกจากระบบ
-            </Link>
-            <span className="sr-only">
-              การออกจากระบบยังไม่พร้อมใช้งานในขั้นตอนนี้ — จะเชื่อมต่อระบบสมาชิกในภายหลัง
-            </span>
+            <LogoutButton className="rounded-[8px] px-3 py-2 text-sm font-semibold text-brand-700 hover:bg-brand-50" />
           </nav>
   </div>
       </header>

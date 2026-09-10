@@ -3,8 +3,10 @@
  *
  * - request-id: สร้างใหม่ทุก request + สะท้อนกลับ response
  * - CSRF fail-closed: ทุก non-safe method (ไม่ใช่ GET/HEAD/OPTIONS) ต้องพิสูจน์ origin ได้ —
- *   ไม่มีทั้ง Origin และ Sec-Fetch-Site → 403
+ *   ไม่มีทั้ง Origin และ Sec-Fetch-Site → 403 (คุมเฉพาะ /api/v1 — SDS §5.4)
  * - session refresh: เขียน cookie หมุน token ทั้ง request + response ด้วย flags บังคับ
+ *   — ครอบทั้ง API และหน้า RSC (gate r10 M2: rotation ที่หายกลางทางใน loader
+ *   ทำ browser ถือ refresh token เก่าจนโดนตรวจ reuse)
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
@@ -176,6 +178,25 @@ describe("session refresh (SDS §5.1) — cookie หมุน token เขีย
     expect(res.status).toBe(200);
     expect(res.headers.get("x-request-id")).toBeTruthy();
   });
+
+  // ---- gate r7 M1: logout path ต้องไม่มีการ refresh ใน middleware ----
+  // getUser ของ SDK อาจเจอ 429 ระหว่าง refresh แล้วเขียนการลบ session cookie ลง
+  // response กลับ browser ก่อน handler ทำงาน — logout route เป็นผู้ตัดสินเอง (buffered)
+
+  it("POST /api/v1/auth/logout ผ่าน CSRF แต่**ไม่**สร้าง Supabase client (ไม่ refresh ใน middleware)", async () => {
+    const res = await middleware(makeRequest("POST", "/api/v1/auth/logout", { origin: "http://localhost:3000" }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-request-id")).toBeTruthy();
+    expect(createServerClientMock).not.toHaveBeenCalled(); // ไม่มี getUser = ไม่มีการลบ cookie หลุดออกก่อน handler
+    expect(res.cookies.getAll()).toEqual([]); // middleware ไม่เขียน cookie ใด ๆ บนเส้นนี้
+  });
+
+  it("POST /api/v1/auth/logout คนละ origin → ยังโดน CSRF 403 (การข้าม refresh ไม่แตะการป้องกัน)", async () => {
+    const res = await middleware(makeRequest("POST", "/api/v1/auth/logout", { origin: "https://evil.example" }));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-RBAC-001");
+  });
 });
 
 describe("isCsrfAllowed + config", () => {
@@ -186,7 +207,69 @@ describe("isCsrfAllowed + config", () => {
     expect(isCsrfAllowed(makeRequest("POST", "/api/v1/x"))).toBe(false);
   });
 
-  it("config.matcher ครอบคลุม /api/v1/* เท่านั้น", () => {
-    expect(config.matcher).toEqual(["/api/v1/:path*"]);
+  it("config.matcher ครอบ /api/v1 + ทุกหน้าเว็บ แต่ไม่ครอบ static (gate r10 M2)", () => {
+    expect(config.matcher).toContain("/api/v1/:path*"); // API ยังถูกคุมเหมือนเดิม
+    const catchAll = config.matcher.find((m) => m !== "/api/v1/:path*");
+    expect(catchAll).toBeTruthy();
+    // จำลอง path-to-regexp ของ Next: จับคู่ "/"+กลุ่ม lookahead → ทดสอบกับ pathname เต็ม
+    const pattern = new RegExp(`^${catchAll}$`);
+    expect(pattern.test("/api/v1/courses")).toBe(true);
+    expect(pattern.test("/courses")).toBe(true); // หน้า RSC สาธารณะ
+    expect(pattern.test("/learn/lesson-0000")).toBe(true); // หน้าผู้เรียน
+    expect(pattern.test("/_next/static/chunks/app.js")).toBe(false); // static asset
+    expect(pattern.test("/_next/image?url=%2Flogo.png")).toBe(false);
+    expect(pattern.test("/favicon.ico")).toBe(false);
+    expect(pattern.test("/hero-banner.webp")).toBe(false); // ไฟล์ภาพ
+  });
+});
+
+// ---- gate r10 M2: หน้า RSC ต้องถูกหมุน token ก่อน render เหมือน API ----
+// loader ของหน้า (admin.ts / learning.server.ts / catalog.server.ts) เรียก BFF
+// ภายในด้วย cookie ที่ forward — ถ้าไม่หมุนก่อน BFF จะหมุนเองแล้ว Set-Cookie ของ
+// internal response หายกลางทาง (RSC ตั้ง cookie เองไม่ได้) browser จึงถือ refresh
+// token เก่าจนโดนตรวจ reuse → session ขาด
+
+describe("session refresh บนหน้าเว็บ (gate r10 M2)", () => {
+  it("GET /courses (RSC) token หมดอายุ → middleware หมุนก่อน render — cookie ใหม่กลับ browser + ไปถึง render", async () => {
+    stubRefreshClient([[{ name: "sb-page-auth-token", value: "rotated-page", options: { httpOnly: false } }]]);
+    const res = await middleware(makeRequest("GET", "/courses"));
+    expect(res.status).toBe(200);
+    const written = res.cookies.getAll().find((c) => c.name === "sb-page-auth-token");
+    expect(written?.value).toBe("rotated-page");
+    expect(written).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
+    // ทิศทางเข้า render: header ที่ forward ต่อต้องมี token ใหม่ (RSC/loader เห็นด้วย)
+    expect(res.headers.get("x-middleware-request-cookie")).toContain("sb-page-auth-token=rotated-page");
+  });
+
+  it("ข้ามการหมดอายุ: รอบแรกหมุนแล้ว browser เก็บ cookie ใหม่ → รอบสอง SDK อ่าน cookie ใหม่จาก request (ไม่ต้องหมุนซ้ำ)", async () => {
+    // รอบแรก: หมุน — browser ที่ทำตาม Set-Cookie จะถือ token ใหม่ไปใช้รอบถัดไป
+    stubRefreshClient([[{ name: "sb-cycle-auth-token", value: "fresh-token", options: { httpOnly: false } }]]);
+    const first = await middleware(makeRequest("GET", "/learn"));
+    const setCookie = first.cookies.getAll().find((c) => c.name === "sb-cycle-auth-token");
+    expect(setCookie?.value).toBe("fresh-token");
+    // รอบสอง: ส่ง cookie ใหม่กลับมาตามที่ browser จริงทำ — SDK ใน middleware ต้อง
+    // เห็น cookie นี้ผ่าน getAll (เชื่อมกับ request.cookies) ไม่ใช่ค่าเก่า
+    let seenFromGetAll: Array<{ name: string; value: string }> = [];
+    createServerClientMock.mockImplementation(((_url: string, _key: string, opts: unknown) => {
+      seenFromGetAll = (opts as { cookies: { getAll: () => Array<{ name: string; value: string }> } })
+        .cookies.getAll();
+      return {
+        auth: { getUser: vi.fn(async () => ({ data: { user: null }, error: null })) },
+      };
+    }) as never);
+    const second = await middleware(
+      new NextRequest("http://localhost:3000/learn", {
+        method: "GET",
+        headers: { cookie: `sb-cycle-auth-token=${setCookie?.value}; other=1` },
+      }),
+    );
+    expect(second.status).toBe(200);
+    expect(seenFromGetAll).toContainEqual({ name: "sb-cycle-auth-token", value: "fresh-token" });
+  });
+
+  it("POST หน้าเว็บ (server action) ไม่มี Origin → ไม่โดน CSRF (§5.4 คุมเฉพาะ /api/v1 — Next ตรวจ action เอง)", async () => {
+    const res = await middleware(makeRequest("POST", "/login"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-request-id")).toBeTruthy(); // request-id ยังให้ทุกที่
   });
 });

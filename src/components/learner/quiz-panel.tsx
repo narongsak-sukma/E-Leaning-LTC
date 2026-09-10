@@ -1,19 +1,19 @@
 /**
- * QuizPanel — ฟอร์มแบบทดสอบ (API §3.4 POST /lessons/{id}/quiz/submit body { answers })
- * Phase 0: มี quizId → ตรวจด้วย fixtureSubmitQuiz (ผล/คะแนนจาก fixture)
- * quizId null → POST ตามสัญญา (ยัง 404 จนถึง Phase 1) · Phase 1 สลับด้วย prop submitQuiz · ห้ามส่ง `completed` (D12-1)
+ * QuizPanel — ฟอร์มแบบทดสอบย่อย (API §3.4)
+ *
+ * - โจทย์+ตัวเลือกรับเป็น props จาก server (GET /lessons/{id}/quiz — DCR-5) — ไม่มีเฉลยใน props
+ * - ผู้เรียนเลือกคำตอบ → submitLessonQuiz (POST /lessons/{id}/quiz/submit) → ได้คะแนน+ผ่าน/ไม่ผ่าน
+ *   กลับจาก server หลังส่งเท่านั้น (BFF ตรวจผ่าน RPC record_quiz_attempt — grading server ล้วน)
+ * - ห้ามส่ง flag `completed` จาก client (D12-1)
  */
 "use client";
 
 import { useMemo, useState } from "react";
 
 import {
-  fixtureSubmitQuiz,
-  lessonQuizSubmitUrl,
+  submitLessonQuiz,
   type QuizQuestionView,
-  type QuizSubmitRequest,
-  type QuizSubmitResponse,
-  type SubmitQuizFn,
+  type QuizSubmitResult,
 } from "@/lib/fixtures/learning";
 
 import { QuizResult } from "./quiz-result";
@@ -23,23 +23,20 @@ type QuizStatus = "editing" | "sending" | "result";
 export function QuizPanel({
   lessonId,
   title,
-  questions,
   passPct,
-  bestScorePct,
-  quizId,
-  submitQuiz,
+  maxAttempts,
+  questions,
 }: {
   lessonId: string;
   title: string;
-  questions: readonly QuizQuestionView[];
   passPct: number;
-  bestScorePct: number | null;
-  quizId: string | null;
-  submitQuiz?: SubmitQuizFn;
+  /** จำนวนครั้งสูงสุด (lesson_quizzes.max_attempts) — null = ไม่ระบุ */
+  maxAttempts: number | null;
+  questions: readonly QuizQuestionView[];
 }) {
   const [answers, setAnswers] = useState<Record<string, string[]>>({});
   const [status, setStatus] = useState<QuizStatus>("editing");
-  const [result, setResult] = useState<QuizSubmitResponse | null>(null);
+  const [result, setResult] = useState<QuizSubmitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const incomplete = useMemo(
@@ -52,29 +49,15 @@ export function QuizPanel({
       setError("กรุณาเลือกคำตอบให้ครบทุกข้อ");
       return;
     }
-    const body: QuizSubmitRequest = {
-      answers: questions.map((question) => ({
-        questionId: question.id,
-        choiceIds: answers[question.id] ?? [],
-      })),
-    };
     setStatus("sending");
     setError(null);
     try {
-      const payload = submitQuiz
-        ? await submitQuiz(body)
-        : quizId !== null
-          ? await Promise.resolve(fixtureSubmitQuiz(quizId, body))
-          : await fetch(lessonQuizSubmitUrl(lessonId), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            }).then((response) => {
-              if (!response.ok) {
-                throw new Error(`quiz ${response.status}`);
-              }
-              return response.json() as Promise<QuizSubmitResponse>;
-            });
+      const payload = await submitLessonQuiz(lessonId, {
+        answers: questions.map((question) => ({
+          questionId: question.id,
+          choiceIds: answers[question.id] ?? [],
+        })),
+      });
       setResult(payload);
       setStatus("result");
     } catch {
@@ -87,15 +70,14 @@ export function QuizPanel({
     <div>
       <h3 className="font-heading text-lg font-bold text-ink-900">{title}</h3>
       <p className="mt-1 text-sm text-ink-600">
-        ผ่านเกณฑ์ {passPct}% · ใช้คะแนนสูงสุดตลอดช่วง
-        {bestScorePct !== null ? ` · คะแนนสูงสุดที่เคยได้ ${bestScorePct}%` : ""}
+        ผ่านเกณฑ์ {passPct}%
+        {maxAttempts !== null ? ` · ทำได้สูงสุด ${maxAttempts} ครั้ง` : ""}
       </p>
-      {status === "result" && result ? (
+      {status === "result" && result !== null ? (
         <div className="mt-4">
           <QuizResult
             result={result}
-            questions={questions}
-            answers={answers}
+            passPct={passPct}
             onRetry={() => {
               setStatus("editing");
             }}
@@ -109,7 +91,7 @@ export function QuizPanel({
             void handleSubmit();
           }}
         >
-          {error ? (
+          {error !== null ? (
             <p
               role="alert"
               className="rounded-[10px] bg-danger-50 px-4 py-3 text-sm font-semibold text-danger-600"
@@ -117,7 +99,7 @@ export function QuizPanel({
               {error}
             </p>
           ) : null}
-          {!error && incomplete.length > 0 && incomplete.length < questions.length ? (
+          {error === null && incomplete.length > 0 && incomplete.length < questions.length ? (
             <p className="text-sm text-ink-500">ยังเลือกคำตอบไม่ครบ (เหลือ {incomplete.length} ข้อ)</p>
           ) : null}
           {questions.map((question) => {

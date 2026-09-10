@@ -136,6 +136,21 @@ describe("loadConfig — เงื่อนไขข้ามฟิลด์ (SD
   });
 });
 
+describe("CURSOR_HMAC_SECRET — signed cursor (API-SPECIFICATION §1.2)", () => {
+  it("ไม่ตั้ง → cursorHmacSecret = null (fallback ใช้ service key เป็น PRF ฝั่ง pagination)", () => {
+    expect(loadConfig(baseEnv()).cursorHmacSecret).toBeNull();
+  });
+
+  it("ตั้งค่า → เก็บค่าตาม env (trim แล้ว)", () => {
+    const cfg = loadConfig(baseEnv({ CURSOR_HMAC_SECRET: "  cursor-hmac-secret-dev  " }));
+    expect(cfg.cursorHmacSecret).toBe("cursor-hmac-secret-dev");
+  });
+
+  it("ค่าว่าง → ConfigError (ห้าม secret ว่าง)", () => {
+    expect(() => loadConfig(baseEnv({ CURSOR_HMAC_SECRET: "   " }))).toThrow(ConfigError);
+  });
+});
+
 describe("กติกาความปลอดภัย env (SDS §5.1)", () => {
   it("ห้าม env ที่ขึ้นต้น NEXT_PUBLIC_ และมี SERVICE_ROLE ในชื่อ", () => {
     const key = ["NEXT_PUBLIC_", "SUPABASE_SERVICE_ROLE_KEY"].join("");

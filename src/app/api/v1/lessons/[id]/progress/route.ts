@@ -17,10 +17,11 @@
  * - rate: LEARN_WRITE (§5) เรียกเองใน handler — key user_id + ip (D12-11)
  */
 import { NextResponse } from "next/server";
-import { AppError, ERROR_REGISTRY, type ErrorCode } from "@/lib/errors";
+import { AppError } from "@/lib/errors";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import { parseRpcErrorCode } from "@/lib/api/rpc-errors";
 import { jsonErrorResponse, jsonOk, type JsonResponseOptions } from "@/lib/api/response";
 import {
   LessonProgressView,
@@ -37,26 +38,6 @@ function jsonOptions(requestId: string | null): JsonResponseOptions {
 
 /** แถวดิบจาก Supabase (untyped client — ตรวจชนิดเองก่อนใช้) */
 type Row = Record<string, unknown>;
-
-/** code อยู่ในทะเบียนจริงหรือไม่ (ERROR_REGISTRY อาจไม่มี key ที่ RPC แนบมา) */
-function isErrorCode(code: string): code is ErrorCode {
-  return Object.prototype.hasOwnProperty.call(ERROR_REGISTRY, code);
-}
-
-/**
- * RPC SECURITY DEFINER โยน exception ที่แนบ code ทะเบียนท้ายข้อความ "(ERR-XXX-NNN)"
- * (0011_functions.sql) — map เป็น AppError: status + ข้อความไทยมาจากทะเบียน lib/errors เท่านั้น;
- * ไม่พบรูปแบบ/ไม่รู้จัก code → ERR-SYS-001 แบบ opaque (ห้าม leak ข้อความ SQL — SDS §6.1)
- */
-function rpcErrorToAppError(error: { message?: string | null } | null): AppError {
-  const message = typeof error?.message === "string" ? error.message : "";
-  const match = /\((ERR-[A-Z]+-\d{3})\)$/.exec(message.trim());
-  const code = match?.[1];
-  if (code === undefined || !isErrorCode(code)) {
-    return new AppError("ERR-SYS-001");
-  }
-  return new AppError(code);
-}
 
 /** dwell delta จากเวลาจริงนับแต่ heartbeat ก่อน (updated_at ของแถวเดิม) — ตัดที่เพดาน RPC */
 function dwellDeltaSec(priorUpdatedAt: unknown): number {
@@ -97,6 +78,7 @@ export async function POST(
       .from("lessons")
       .select("id, type, course_modules(course_id)")
       .eq("id", lessonId)
+      .is("deleted_at", null) // gate r2: lessons_read ไม่กรอง soft-delete — บทเรียนที่ลบแล้วเหมือนไม่มีจริง
       .maybeSingle();
     if (lessonError) {
       throw new AppError("ERR-SYS-002", { details: { reason: "lessons_read_failed" } });
@@ -189,7 +171,9 @@ export async function POST(
     }
     const { error: rpcError } = await supabase.rpc("record_lesson_progress", rpcArgs);
     if (rpcError) {
-      throw rpcErrorToAppError(rpcError);
+      // code ทะเบียนท้ายข้อความ RPC (parser กลาง) — ไม่รู้จัก → ERR-SYS-001 opaque (ไม่ leak SQL)
+      const code = parseRpcErrorCode(rpcError);
+      throw code === undefined ? new AppError("ERR-SYS-001") : new AppError(code);
     }
 
     // 6) อ่านสถานะจริงหลัง RPC เพื่อตอบ (สถานะจบบท = ตัดสินใน RPC เท่านั้น — D12-12)

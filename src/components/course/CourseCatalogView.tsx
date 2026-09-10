@@ -2,7 +2,7 @@
 
 /**
  * ส่วนตัวของหน้าแคตตาล็อก (client) — ช่องค้นหา + กรองหมวด/กลุ่มเป้าหมาย + กริดการ์ด + EmptyState
- * ตัวกรองทำงานกับข้อมูลที่รับมาจาก props (fixture ตอนนี้ · BFF จริง Phase 1 — รูป props ตาม API-SPEC §3.3)
+ * ตัวกรองทำงานกับข้อมูลที่รับมาจาก props (BFF จริงผ่าน src/lib/fixtures/catalog.ts — รูป props ตาม API-SPEC §3.3)
  * เงื่อนไขรวมแบบ AND ตาม CAT-003 AC
  */
 

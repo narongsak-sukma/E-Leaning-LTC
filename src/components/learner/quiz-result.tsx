@@ -1,28 +1,24 @@
 /**
- * QuizResult — มุมมองผลหลังส่งแบบทดสอบ (200 คะแนน + เฉลย ตาม API §3.4)
- * ข้อที่ตอบผิดขึ้นก่อนเพื่อทบทวน · รูปแบบ ID-join ตามสัญญาจริง (label จาก questions)
+ * QuizResult — ผลหลังส่งแบบทดสอบ (POST /lessons/{id}/quiz/submit 200)
+ *
+ * - contract จริงของ BFF (QuizSubmitView — src/lib/schemas/v1/progress): { attemptId, scorePct,
+ *   passed } — server ตรวจผ่าน RPC record_quiz_attempt (grading server ล้วน) และไม่ส่งเฉลยรายข้อ
+ *   กลับมา จึงแสดงได้เฉพาะคะแนน + ผ่าน/ไม่ผ่าน (เฉลยไม่เคยอยู่ฝั่ง client แม้หลังส่ง — DCR-5/D28)
+ * - "ทำซ้ำอีกครั้ง" = กลับไปแก้คำตอบ (สถานะผ่านใช้คะแนนสูงสุดตลอดช่วง — progress_pass_score_policy)
  */
 "use client";
 
-import {
-  type QuizQuestionView,
-  type QuizSubmitResponse,
-} from "@/lib/fixtures/learning";
+import { type QuizSubmitResult } from "@/lib/fixtures/learning";
 
 export function QuizResult({
   result,
-  questions,
-  answers,
+  passPct,
   onRetry,
 }: {
-  result: QuizSubmitResponse;
-  questions: readonly QuizQuestionView[];
-  answers: Record<string, string[]>;
+  result: QuizSubmitResult;
+  passPct: number;
   onRetry: () => void;
 }) {
-  const orderedResults = [...result.results].sort(
-    (a, b) => Number(a.isCorrect) - Number(b.isCorrect),
-  );
   return (
     <div className="space-y-4">
       <div className="rounded-[14px] border border-mist-200 bg-white p-5 shadow-card">
@@ -33,50 +29,9 @@ export function QuizResult({
           </span>
         </p>
         <p className="mt-1 text-sm text-ink-600">
-          ตอบถูก {result.results.filter((item) => item.isCorrect).length} จาก {result.results.length} ข้อ
+          เกณฑ์ผ่าน {passPct}% · ระบบตรวจคำตอบจากเซิร์ฟเวอร์ และบันทึกคะแนนสูงสุดตลอดช่วงให้อัตโนมัติ
         </p>
       </div>
-      <ol className="space-y-4">
-        {orderedResults.map((item) => {
-          const question = questions.find((q) => q.id === item.questionId);
-          const picked = answers[item.questionId] ?? [];
-          return (
-            <li key={item.questionId} className="rounded-[14px] border border-mist-200 bg-white p-4 shadow-card">
-              <h4 className="font-heading text-base font-semibold text-ink-900">
-                {question ? question.prompt : item.questionId}
-                {!item.isCorrect ? (
-                  <span className="ml-2 text-sm font-semibold text-danger-600">(ตอบผิด)</span>
-                ) : null}
-              </h4>
-              <ul className="mt-2 space-y-1 text-sm">
-                {(question?.choices ?? []).map((choice) => {
-                  const isCorrect = item.correctChoiceIds.includes(choice.id);
-                  const wasPicked = picked.includes(choice.id);
-                  if (isCorrect) {
-                    return (
-                      <li key={choice.id} className="font-semibold text-success-600">
-                        ✓ {choice.label} — คำตอบที่ถูกต้อง
-                        {wasPicked ? " (คุณเลือกข้อนี้)" : ""}
-                      </li>
-                    );
-                  }
-                  if (wasPicked) {
-                    return (
-                      <li key={choice.id} className="text-danger-600">
-                        ✗ {choice.label} — คำตอบที่คุณเลือก
-                      </li>
-                    );
-                  }
-                  return null;
-                })}
-              </ul>
-              <p className="mt-2 text-sm text-ink-600">
-                คำอธิบาย: {item.explanation ?? "—"}
-              </p>
-            </li>
-          );
-        })}
-      </ol>
       <button
         type="button"
         onClick={onRetry}

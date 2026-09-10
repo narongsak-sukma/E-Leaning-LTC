@@ -21,7 +21,19 @@ vi.hoisted(() => {
 });
 
 vi.mock("server-only", () => ({}));
-vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
+vi.mock("@/lib/supabase/ssr", () => {
+  const createSupabaseSsrClient = vi.fn();
+  // gate r12: getUser ของ session.ts ใช้ buffered client — wrapper อ่าน stub จาก
+  // createSupabaseSsrClient ณ เวลาถูกเรียก (mockResolvedValue ตั้งทีหลังได้)
+  const createSupabaseSsrClientBuffered = vi.fn(async () => ({
+    client: await createSupabaseSsrClient(),
+    commitAuthWrites: () => {},
+    commit: () => {},
+    clearAuthCookies: () => {},
+    hasPendingAuthWrite: () => false,
+  }));
+  return { createSupabaseSsrClient, createSupabaseSsrClientBuffered };
+});
 
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { resetRateLimitStore } from "@/lib/rate-limit";

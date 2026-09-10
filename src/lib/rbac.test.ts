@@ -25,9 +25,19 @@ import { AppError, errorDefinition } from "./errors";
 import { createSupabaseSsrClient } from "./supabase/ssr";
 
 // mock supabase/ssr ทั้ง module (rbac.ts เรียกแบบ lazy dynamic import ตาม D26)
-vi.mock("./supabase/ssr", () => ({
-  createSupabaseSsrClient: vi.fn(),
-}));
+vi.mock("./supabase/ssr", () => {
+  const createSupabaseSsrClient = vi.fn();
+  // gate r12: getUser ของ session.ts ใช้ buffered client — wrapper อ่าน stub จาก
+  // createSupabaseSsrClient ณ เวลาถูกเรียก (mockResolvedValue ตั้งทีหลังได้)
+  const createSupabaseSsrClientBuffered = vi.fn(async () => ({
+    client: await createSupabaseSsrClient(),
+    commitAuthWrites: () => {},
+    commit: () => {},
+    clearAuthCookies: () => {},
+    hasPendingAuthWrite: () => false,
+  }));
+  return { createSupabaseSsrClient, createSupabaseSsrClientBuffered };
+});
 
 /**
  * matrix จาก RBAC-DESIGN §2.1–§2.4 (baseline 1.0.0) — doc เป็น master

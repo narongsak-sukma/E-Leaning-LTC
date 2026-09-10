@@ -17,7 +17,19 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
 
 // session.ts (โหลดผ่าน rbac.loadSessionFromSupabase) import "server-only" — stub ใน vitest
 vi.mock("server-only", () => ({}));
-vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
+vi.mock("@/lib/supabase/ssr", () => {
+  const createSupabaseSsrClient = vi.fn();
+  // gate r12: getUser ของ session.ts ใช้ buffered client — wrapper อ่าน stub จาก
+  // createSupabaseSsrClient ณ เวลาถูกเรียก (mockResolvedValue ตั้งทีหลังได้)
+  const createSupabaseSsrClientBuffered = vi.fn(async () => ({
+    client: await createSupabaseSsrClient(),
+    commitAuthWrites: () => {},
+    commit: () => {},
+    clearAuthCookies: () => {},
+    hasPendingAuthWrite: () => false,
+  }));
+  return { createSupabaseSsrClient, createSupabaseSsrClientBuffered };
+});
 vi.mock("@/lib/rate-limit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rate-limit")>();
   return { ...actual, enforceRateLimit: vi.fn(actual.enforceRateLimit) };
@@ -43,6 +55,7 @@ function makeStubClient(options: StubOptions = {}) {
   const rpcCalls: Array<{ fn: string; args: Row }> = [];
   const readTables: string[] = [];
   const queues: Record<string, Array<Row | null>> = {};
+  const builders: Record<string, Record<string, unknown>> = {};
   const client = {
     auth: {
       getUser: vi.fn(async () => ({
@@ -85,6 +98,7 @@ function makeStubClient(options: StubOptions = {}) {
       });
       builder.then = (resolve: (v: { data: Row[]; error: null }) => unknown) =>
         Promise.resolve({ data: options.list?.[table] ?? [], error: null }).then(resolve);
+      builders[table] = builder;
       return builder;
     }),
   };
@@ -92,6 +106,7 @@ function makeStubClient(options: StubOptions = {}) {
     client: client as unknown as Awaited<ReturnType<typeof createSupabaseSsrClient>>,
     rpcCalls,
     readTables,
+    builders,
   };
 }
 
@@ -329,6 +344,12 @@ describe("POST /lessons/{id}/progress — validation + auth", () => {
     expect(response.status).toBe(403);
     const body = (await response.json()) as { error: Record<string, unknown> };
     expect(body.error["code"]).toBe("ERR-LRN-001");
+  });
+
+  it("soft-delete filter (gate r2): อ่าน lessons ต้องส่ง .is(deleted_at, null) เสมอ", async () => {
+    const { builders } = await callRoute({ single: { lessons: VIDEO_LESSON } }, { positionSeconds: 10 });
+    const isCalls = (builders["lessons"]?.is as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(isCalls).toContainEqual(["deleted_at", null]);
   });
 
   it("บทเรียนชนิดไม่ตรง (video แต่ส่ง documentRead) → 400 ERR-VAL-001", async () => {

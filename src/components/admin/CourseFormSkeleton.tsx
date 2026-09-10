@@ -59,7 +59,7 @@ export function CourseFormSkeleton({
         ฟอร์มข้อมูลหลักสูตร (อ่านอย่างเดียว)
       </h2>
       <p className="mt-1 text-sm text-ink-500">
-        ข้อมูลจาก DATA-DICTIONARY §3.2 (ตาราง courses) — ยังไม่เชื่อมต่อ API
+        ข้อมูลจาก DATA-DICTIONARY §3.2 (ตาราง courses) — ดึงจริงจาก GET /api/v1/admin/courses แล้ว (Phase 1)
       </p>
 
       <p className="mt-4 rounded-[10px] bg-warning-50 px-3 py-2 text-sm leading-relaxed text-warning-600">

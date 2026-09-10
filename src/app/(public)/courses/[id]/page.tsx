@@ -23,7 +23,6 @@ import {
 import { SkeletonBlock } from "@/components/course/Skeleton";
 import {
   courseLevelLabel,
-  findPublishedCourse,
   formatDuration,
   formatHours,
   formatLearnerCount,
@@ -31,6 +30,7 @@ import {
   type CourseDetail,
   type CourseLesson,
 } from "@/lib/fixtures/catalog";
+import { findPublishedCourse } from "@/lib/fixtures/catalog.server";
 
 type CoursePageProps = {
   params: Promise<{ id: string }>;
@@ -205,7 +205,9 @@ async function CourseDetailContent({ params }: CoursePageProps) {
                     </span>
                     <div>
                       <p className="font-heading font-semibold text-ink-900">{instructor.nameTh}</p>
-                      <p className="text-sm text-ink-500">{instructor.titleTh}</p>
+                      {instructor.titleTh !== null ? (
+                        <p className="text-sm text-ink-500">{instructor.titleTh}</p>
+                      ) : null}
                     </div>
                   </div>
                   {instructor.bio !== null ? (
