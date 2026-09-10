@@ -64,6 +64,35 @@ function makeBuilder(result: { data?: unknown; error?: { message: string } | nul
 const createClientMock = vi.mocked(createSupabaseSsrClient);
 const enforceRateLimitMock = vi.mocked(enforceRateLimit);
 
+/**
+ * client จำลองที่ dispatch ตามตาราง/view — courses กับ views สาธารณะ (DCR-4)
+ * ได้ builder คนละตัว (route query views แยก แล้ว map ใน JS)
+ */
+function makeClient(tables: Record<string, { data?: unknown; error?: { message: string } | null }>) {
+  const byTable = new Map<string, ReturnType<typeof makeBuilder>>();
+  const from = vi.fn((table: string) => {
+    const cached = byTable.get(table);
+    if (cached !== undefined) {
+      return cached.self;
+    }
+    const created = makeBuilder(tables[table]);
+    byTable.set(table, created);
+    return created.self;
+  });
+  createClientMock.mockResolvedValue({ from } as never);
+  return {
+    from,
+    /** spy ของ builder ที่ route เรียกไปแล้ว (หรือ builder ใหม่ถ้ายังไม่ถูกใช้ — ไว้ assert args) */
+    spyOf: (table: string): QuerySpy => {
+      const cached = byTable.get(table);
+      if (cached !== undefined) {
+        return cached.spy;
+      }
+      return makeBuilder(tables[table]).spy;
+    },
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -89,6 +118,11 @@ function publishedRow() {
     description_md: "รายละเอียดแบบ markdown",
     status: "published",
     is_public: true,
+    level: "beginner",
+    outcome_highlights: [
+      "เข้าใจโครงสร้างระบบกฎหมายไทยและลำดับชั้นของกฎหมาย",
+      "อ่านและทำความเข้าใจสัญญาทั่วไปก่อนลงนามได้",
+    ],
     published_at: "2026-08-01T00:00:00+00:00",
     category: { id: "cat-1", slug: "public-law", name_th: "กฎหมายสำหรับประชาชน" },
     course_modules: [
@@ -114,9 +148,24 @@ function publishedRow() {
 }
 
 describe("GET /api/v1/courses/{id}", () => {
-  it("200 — รายละเอียด + โมดูล/บทเรียนเรียง sort_order + camelCase ตาม fixture", async () => {
-    const builder = makeBuilder({ data: publishedRow() });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+  it("200 — รายละเอียด + โมดูล/บทเรียนเรียง sort_order + camelCase + ฟิลด์ DCR-4", async () => {
+    makeClient({
+      courses: { data: publishedRow() },
+      course_public_stats: { data: { course_id: COURSE_ID, learner_count: 3412, credits: 3 } },
+      course_instructors_public: {
+        data: [
+          {
+            display_name: "ผศ.ดร.สมชาย วัฒนศิริ",
+            title: "ภาคีสมาชิกสภาทนายความแห่งประเทศไทย",
+            bio: "ผู้เชี่ยวชาญกฎหมายแพ่ง",
+          },
+          { display_name: "ทนายพิมพ์ชนก ศรีสุวรรณ", title: null, bio: null },
+        ],
+      },
+      course_exam_summary: {
+        data: { question_count: 30, time_limit_minutes: 60, pass_score_pct: 70, max_attempts: 3 },
+      },
+    });
 
     const response = await callRoute(COURSE_ID);
     const body = (await response.json()) as {
@@ -137,23 +186,58 @@ describe("GET /api/v1/courses/{id}", () => {
     expect(body.data.modules[0]?.lessons.map((l) => l.id)).toEqual(["l3"]);
     expect(body.data.lessonCount).toBe(3);
     expect(body.data.durationHours).toBe(0.5);
+    expect(body.data.level).toBe("beginner");
+    expect(body.data.credits).toBe(3);
+    expect(body.data.learnerCount).toBe(3412);
+    expect(body.data.outcomes).toEqual([
+      "เข้าใจโครงสร้างระบบกฎหมายไทยและลำดับชั้นของกฎหมาย",
+      "อ่านและทำความเข้าใจสัญญาทั่วไปก่อนลงนามได้",
+    ]);
+    expect(body.data.instructors).toEqual([
+      {
+        nameTh: "ผศ.ดร.สมชาย วัฒนศิริ",
+        titleTh: "ภาคีสมาชิกสภาทนายความแห่งประเทศไทย",
+        bio: "ผู้เชี่ยวชาญกฎหมายแพ่ง",
+      },
+      { nameTh: "ทนายพิมพ์ชนก ศรีสุวรรณ", titleTh: null, bio: null },
+    ]);
+    expect(body.data.exam).toEqual({
+      questionCount: 30,
+      timeLimitMinutes: 60,
+      passScorePct: 70,
+      maxAttempts: 3,
+    });
     expect(enforceRateLimitMock).toHaveBeenCalledWith(expect.anything(), { group: "PUBLIC_READ" });
   });
 
-  it("select เฉพาะคอลัมน์ที่ต้องใช้ + query ด้วย id ที่ parse แล้ว", async () => {
-    const builder = makeBuilder({ data: publishedRow() });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+  it("select เฉพาะคอลัมน์ที่ต้องใช้ + query ด้วย id ที่ parse แล้ว + ใช้ view ครบ 3 ตัว (DCR-4)", async () => {
+    const client = makeClient({
+      courses: { data: publishedRow() },
+      course_public_stats: { data: null },
+      course_instructors_public: { data: [] },
+      course_exam_summary: { data: null },
+    });
 
     await callRoute(COURSE_ID);
 
-    expect(builder.spy.select).toHaveBeenCalledWith(expect.stringContaining("description_md"));
-    expect(builder.spy.eq).toHaveBeenCalledWith("id", COURSE_ID);
-    expect(builder.spy.maybeSingle).toHaveBeenCalledTimes(1);
+    expect(client.spyOf("courses").select).toHaveBeenCalledWith(expect.stringContaining("description_md"));
+    expect(client.spyOf("courses").eq).toHaveBeenCalledWith("id", COURSE_ID);
+    expect(client.spyOf("courses").maybeSingle).toHaveBeenCalledTimes(1);
+    expect(client.spyOf("course_public_stats").select).toHaveBeenCalledWith(
+      expect.stringContaining("learner_count"),
+    );
+    expect(client.spyOf("course_public_stats").eq).toHaveBeenCalledWith("course_id", COURSE_ID);
+    expect(client.spyOf("course_instructors_public").select).toHaveBeenCalledWith(
+      expect.stringContaining("display_name"),
+    );
+    expect(client.spyOf("course_exam_summary").select).toHaveBeenCalledWith(
+      expect.stringContaining("max_attempts"),
+    );
+    expect(client.spyOf("course_exam_summary").maybeSingle).toHaveBeenCalledTimes(1);
   });
 
-  it("draft/ไม่พบ (RLS คืน null สำหรับ guest — TC-005) → 404 ERR-CRS-001 ไม่เปิดเผยการมีอยู่", async () => {
-    const builder = makeBuilder({ data: null });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+  it("draft/ไม่พบ (RLS คืน null สำหรับ guest — TC-005) → 404 ERR-CRS-001 ไม่เปิดเผยการมีอยู่ + ไม่ query views", async () => {
+    const client = makeClient({ courses: { data: null } });
 
     const response = await callRoute(COURSE_ID);
     const body = (await response.json()) as { error: { code: string; message: string } };
@@ -161,6 +245,7 @@ describe("GET /api/v1/courses/{id}", () => {
     expect(response.status).toBe(404);
     expect(body.error.code).toBe("ERR-CRS-001");
     expect(body.error.message).toBe(errorDefinition("ERR-CRS-001").message);
+    expect(client.from).not.toHaveBeenCalledWith("course_public_stats");
   });
 
   it("id ไม่ใช่ UUID → 400 ERR-VAL-001 field id (ไม่ query DB)", async () => {
@@ -177,8 +262,7 @@ describe("GET /api/v1/courses/{id}", () => {
   });
 
   it("error ฝั่ง DB → 503 ERR-SYS-002 แบบ opaque (ไม่ leak SQL)", async () => {
-    const builder = makeBuilder({ error: { message: "SQLSTATE XX000" } });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    makeClient({ courses: { error: { message: "SQLSTATE XX000" } } });
 
     const response = await callRoute(COURSE_ID);
     const body = (await response.json()) as { error: { code: string; message: string } };
@@ -188,9 +272,49 @@ describe("GET /api/v1/courses/{id}", () => {
     expect(body.error.message).toBe(errorDefinition("ERR-SYS-002").message);
   });
 
+  it("error ฝั่ง view (course_instructors_public) → 503 ERR-SYS-002 (DCR-4)", async () => {
+    makeClient({
+      courses: { data: publishedRow() },
+      course_instructors_public: { error: { message: "SQLSTATE XX000" } },
+    });
+
+    const response = await callRoute(COURSE_ID);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("ERR-SYS-002");
+  });
+
+  it("null-path: ไม่มีกฎ credit / ไม่มี exam / ไม่มี outcome_highlights / วิทยากร title NULL", async () => {
+    makeClient({
+      courses: {
+        data: { ...publishedRow(), outcome_highlights: null },
+      },
+      course_public_stats: { data: { course_id: COURSE_ID, learner_count: 0, credits: null } },
+      course_instructors_public: { data: [] },
+      course_exam_summary: { data: null },
+    });
+
+    const response = await callRoute(COURSE_ID);
+    const body = (await response.json()) as {
+      data: { credits: number; learnerCount: number; outcomes: unknown[]; instructors: unknown[]; exam: unknown };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.data.credits).toBe(0);
+    expect(body.data.learnerCount).toBe(0);
+    expect(body.data.outcomes).toEqual([]);
+    expect(body.data.instructors).toEqual([]);
+    expect(body.data.exam).toBeNull();
+  });
+
   it("สะท้อน x-request-id กลับทุก response (SDS §5.4)", async () => {
-    const builder = makeBuilder({ data: publishedRow() });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    makeClient({
+      courses: { data: publishedRow() },
+      course_public_stats: { data: null },
+      course_instructors_public: { data: [] },
+      course_exam_summary: { data: null },
+    });
     const request = new Request(`http://localhost:3000/api/v1/courses/${COURSE_ID}`, {
       headers: { "x-request-id": "req-c2-detail" },
     });

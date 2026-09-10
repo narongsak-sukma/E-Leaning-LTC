@@ -205,7 +205,9 @@ async function CourseDetailContent({ params }: CoursePageProps) {
                     </span>
                     <div>
                       <p className="font-heading font-semibold text-ink-900">{instructor.nameTh}</p>
-                      <p className="text-sm text-ink-500">{instructor.titleTh}</p>
+                      {instructor.titleTh !== null ? (
+                        <p className="text-sm text-ink-500">{instructor.titleTh}</p>
+                      ) : null}
                     </div>
                   </div>
                   {instructor.bio !== null ? (

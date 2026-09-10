@@ -25,6 +25,7 @@ vi.mock("@/lib/rate-limit", () => ({
 interface QuerySpy {
   readonly select: Mock;
   readonly eq: Mock;
+  readonly in: Mock;
   readonly order: Mock;
   readonly limit: Mock;
   readonly not: Mock;
@@ -42,6 +43,7 @@ function makeBuilder(result: { data?: unknown; error?: { message: string } | nul
   const spy: QuerySpy = {
     select: vi.fn(),
     eq: vi.fn(),
+    in: vi.fn(),
     order: vi.fn(),
     limit: vi.fn(),
     not: vi.fn(),
@@ -49,7 +51,7 @@ function makeBuilder(result: { data?: unknown; error?: { message: string } | nul
     filter: vi.fn(),
   };
   const self = spy as unknown as Record<string, unknown>;
-  const chain = ["select", "eq", "order", "limit", "not", "or", "filter"] as const;
+  const chain = ["select", "eq", "in", "order", "limit", "not", "or", "filter"] as const;
   for (const method of chain) {
     spy[method].mockImplementation(() => self);
   }
@@ -60,6 +62,35 @@ function makeBuilder(result: { data?: unknown; error?: { message: string } | nul
 }
 
 const createClientMock = vi.mocked(createSupabaseSsrClient);
+
+/**
+ * client จำลองที่ dispatch ตามตาราง/view — `from("courses")` กับ `from("course_public_stats")`
+ * ได้ builder คนละตัว (route ของ DCR-4 query view แยกแล้ว merge ใน JS)
+ */
+function makeClient(tables: Record<string, { data?: unknown; error?: { message: string } | null }>) {
+  const byTable = new Map<string, ReturnType<typeof makeBuilder>>();
+  const from = vi.fn((table: string) => {
+    const cached = byTable.get(table);
+    if (cached !== undefined) {
+      return cached.self;
+    }
+    const created = makeBuilder(tables[table]);
+    byTable.set(table, created);
+    return created.self;
+  });
+  createClientMock.mockResolvedValue({ from } as never);
+  return {
+    from,
+    /** spy ของ builder ที่ route เรียกไปแล้ว (หรือสร้างใหม่ถ้ายังไม่ถูกใช้ — ไว้ assert args) */
+    spyOf: (table: string): QuerySpy => {
+      const cached = byTable.get(table);
+      if (cached !== undefined) {
+        return cached.spy;
+      }
+      return makeBuilder(tables[table]).spy;
+    },
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -79,6 +110,7 @@ const ROWS = [
     summary: "สรุป 1",
     status: "published",
     is_public: true,
+    level: "beginner",
     published_at: "2026-08-01T00:00:00+00:00",
     category: { id: "cat-1", slug: "public-law", name_th: "กฎหมายสำหรับประชาชน" },
     course_modules: [
@@ -94,6 +126,7 @@ const ROWS = [
     summary: null,
     status: "published",
     is_public: false,
+    level: "intermediate",
     published_at: "2026-07-01T00:00:00+00:00",
     category: { id: "cat-1", slug: "public-law", name_th: "กฎหมายสำหรับประชาชน" },
     course_modules: [{ lessons: [{ duration_sec: 3600 }] }],
@@ -101,9 +134,16 @@ const ROWS = [
 ] as const;
 
 describe("GET /api/v1/courses — envelope §1.2", () => {
-  it("200 — { data, page } ตรงรูป §1.2 + mapped camelCase + metrics", async () => {
-    const builder = makeBuilder({ data: ROWS });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+  it("200 — { data, page } ตรงรูป §1.2 + mapped camelCase + metrics + ฟิลด์ DCR-4", async () => {
+    const client = makeClient({
+      courses: { data: ROWS },
+      course_public_stats: {
+        data: [
+          { course_id: "11111111-1111-4111-8111-111111111101", learner_count: 3412, credits: 3 },
+          { course_id: "11111111-1111-4111-8111-111111111102", learner_count: 2108, credits: null },
+        ],
+      },
+    });
 
     const response = await GET(makeRequest(""));
     const body = (await response.json()) as {
@@ -124,8 +164,11 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
         category: { id: "cat-1", slug: "public-law", nameTh: "กฎหมายสำหรับประชาชน" },
         status: "published",
         isPublic: true,
+        level: "beginner",
         lessonCount: 3,
         durationHours: Math.round((2400 / 3600) * 10) / 10,
+        credits: 3,
+        learnerCount: 3412,
         publishedAt: "2026-08-01T00:00:00+00:00",
       },
       {
@@ -137,12 +180,19 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
         category: { id: "cat-1", slug: "public-law", nameTh: "กฎหมายสำหรับประชาชน" },
         status: "published",
         isPublic: false,
+        level: "intermediate",
         lessonCount: 1,
         durationHours: 1,
+        credits: 0,
+        learnerCount: 2108,
         publishedAt: "2026-07-01T00:00:00+00:00",
       },
     ]);
-    expect(builder.spy.select).toHaveBeenCalledWith(expect.stringContaining("course_modules"));
+    expect(client.spyOf("courses").select).toHaveBeenCalledWith(expect.stringContaining("course_modules"));
+    expect(client.spyOf("course_public_stats").in).toHaveBeenCalledWith("course_id", [
+      "11111111-1111-4111-8111-111111111101",
+      "11111111-1111-4111-8111-111111111102",
+    ]);
   });
 
   it("cursor pagination: limit+1 แถว → hasMore + nextCursor ชี้ (published_at, id) ของแถวสุดท้าย", async () => {
@@ -151,8 +201,7 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
       { ...ROWS[1], published_at: "2026-08-01T00:00:00+00:00" },
       { ...ROWS[0], id: "11111111-1111-4111-8111-111111111109", published_at: "2026-07-01T00:00:00+00:00" },
     ];
-    const builder = makeBuilder({ data: rows });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    const client = makeClient({ courses: { data: rows }, course_public_stats: { data: [] } });
 
     const response = await GET(makeRequest("?limit=2"));
     const body = (await response.json()) as {
@@ -163,8 +212,8 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
     expect(response.status).toBe(200);
     expect(body.data).toHaveLength(2);
     expect(body.page.hasMore).toBe(true);
-    expect(builder.spy.limit).toHaveBeenCalledWith(3);
-    expect(builder.spy.order).toHaveBeenCalledWith("published_at", { ascending: false });
+    expect(client.spyOf("courses").limit).toHaveBeenCalledWith(3);
+    expect(client.spyOf("courses").order).toHaveBeenCalledWith("published_at", { ascending: false });
     expect(body.page.nextCursor).not.toBeNull();
     expect(decodeCursor(body.page.nextCursor as string)).toEqual({
       sortKey: "2026-08-01T00:00:00+00:00",
@@ -173,22 +222,20 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
   });
 
   it("cursor มาพร้อม request → decode แล้วใส่ or-filter เลื่อนตำแหน่ง (row-wise DESC)", async () => {
-    const builder = makeBuilder({ data: [] });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    const client = makeClient({ courses: { data: [] }, course_public_stats: { data: [] } });
     const cursor = encodeCursor({ sortKey: "2026-08-01T00:00:00+00:00", id: "11111111-1111-4111-8111-111111111102" });
 
     const response = await GET(makeRequest(`?cursor=${encodeURIComponent(cursor)}`));
 
     expect(response.status).toBe(200);
-    expect(builder.spy.or).toHaveBeenCalledWith(
+    expect(client.spyOf("courses").or).toHaveBeenCalledWith(
       "published_at.lt.2026-08-01T00:00:00+00:00,and(published_at.eq.2026-08-01T00:00:00+00:00,id.lt.11111111-1111-4111-8111-111111111102)",
     );
     expect(vi.mocked(enforceRateLimit)).toHaveBeenCalledWith(expect.anything(), { group: "PUBLIC_READ" });
   });
 
   it("cursor ปลอม/ถูกแก้ → ERR-VAL-001 400 (§1.2 — signed)", async () => {
-    const builder = makeBuilder({ data: [] });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    makeClient({});
 
     const response = await GET(makeRequest("?cursor=tampered.abc"));
 
@@ -198,23 +245,21 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
   });
 
   it("ฟิลเตอร์: category → eq(course_categories.slug), q → or(ilike 3 คอลัมน์)", async () => {
-    const builder = makeBuilder({ data: [] });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    const client = makeClient({ courses: { data: [] }, course_public_stats: { data: [] } });
 
     const response = await GET(makeRequest("?category=contract-law&q=%E0%B8%AA%E0%B8%B1%E0%B8%8D%E0%B8%8D%E0%B8%B2,()"));
 
     expect(response.status).toBe(200);
-    expect(builder.spy.eq).toHaveBeenCalledWith("course_categories.slug", "contract-law");
-    expect(builder.spy.or).toHaveBeenCalledWith(
+    expect(client.spyOf("courses").eq).toHaveBeenCalledWith("course_categories.slug", "contract-law");
+    expect(client.spyOf("courses").or).toHaveBeenCalledWith(
       "title_th.ilike.%สัญญา%,title_en.ilike.%สัญญา%,summary.ilike.%สัญญา%",
     );
     // guest/RLS บังคับ published — handler ไม่เช็คสถานะใน JS (D26)
-    expect(builder.spy.eq).not.toHaveBeenCalledWith("status", expect.anything());
+    expect(client.spyOf("courses").eq).not.toHaveBeenCalledWith("status", expect.anything());
   });
 
-  it("RLS คืนแถวว่าง (guest เห็นเฉพาะ published) → data: [] + hasMore false", async () => {
-    const builder = makeBuilder({ data: [] });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+  it("RLS คืนแถวว่าง (guest เห็นเฉพาะ published) → data: [] + hasMore false + ไม่ query stats", async () => {
+    const client = makeClient({ courses: { data: [] } });
 
     const response = await GET(makeRequest(""));
     const body = (await response.json()) as { data: unknown[]; page: { hasMore: boolean } };
@@ -222,11 +267,11 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
     expect(response.status).toBe(200);
     expect(body.data).toEqual([]);
     expect(body.page).toEqual({ nextCursor: null, hasMore: false });
+    expect(client.from).not.toHaveBeenCalledWith("course_public_stats");
   });
 
   it("limit ผิดรูป → ERR-VAL-001 400 พร้อม fields (zod boundary)", async () => {
-    const builder = makeBuilder({ data: [] });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    makeClient({});
 
     const response = await GET(makeRequest("?limit=abc"));
     const body = (await response.json()) as {
@@ -244,8 +289,22 @@ describe("GET /api/v1/courses — envelope §1.2", () => {
   });
 
   it("error ฝั่ง DB → 503 ERR-SYS-002 แบบ opaque", async () => {
-    const builder = makeBuilder({ error: { message: "SQLSTATE XX000" } });
-    createClientMock.mockResolvedValue({ from: () => builder.self } as never);
+    const client = makeClient({ courses: { error: { message: "SQLSTATE XX000" } } });
+
+    const response = await GET(makeRequest(""));
+    const body = (await response.json()) as { error: { code: string; message: string } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.message).toBe(errorDefinition("ERR-SYS-002").message);
+    expect(client.from).not.toHaveBeenCalledWith("course_public_stats");
+  });
+
+  it("error ฝั่ง view course_public_stats → 503 ERR-SYS-002 (DCR-4 — ไม่ leak SQL)", async () => {
+    makeClient({
+      courses: { data: ROWS },
+      course_public_stats: { error: { message: "SQLSTATE XX000" } },
+    });
 
     const response = await GET(makeRequest(""));
     const body = (await response.json()) as { error: { code: string; message: string } };

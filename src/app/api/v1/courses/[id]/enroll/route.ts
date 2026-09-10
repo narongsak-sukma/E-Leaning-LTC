@@ -14,7 +14,7 @@
  * MFA ไม่บังคับ (citizen/lawyer ไม่อยู่ MFA_REQUIRED_ROLES) · ห้าม log PII — อ้าง user_id
  */
 import { NextResponse } from "next/server";
-import { AppError, ERROR_REGISTRY, type ErrorCode } from "@/lib/errors";
+import { AppError } from "@/lib/errors";
 import {
   jsonCreated,
   jsonError,
@@ -22,6 +22,7 @@ import {
   jsonOk,
   type JsonResponseOptions,
 } from "@/lib/api/response";
+import { parseRpcErrorCode } from "@/lib/api/rpc-errors";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
@@ -36,19 +37,9 @@ function responseOptions(request: Request): JsonResponseOptions {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * แกะ error code ที่ RPC `enroll()` ฝังท้ายข้อความ exception (raise exception '... (ERR-XXX-NNN)')
- * ใช้ token สุดท้าย และต้องอยู่ในทะเบียนเท่านั้น — ไม่เข้าเงื่อนไข = ความล้มเหลวระบบ (ไม่ leak SQL)
+ * แกะ error code ที่ RPC `enroll()` โยนท้ายข้อความ exception ด้วย parser กลาง (lib/api/rpc-errors)
+ * — ไม่พบรูปแบบ / code ไม่อยู่ในทะเบียน = ความล้มเหลวระบบ (opaque — ไม่ leak SQL)
  */
-function errorCodeFromMessage(message: string): ErrorCode | null {
-  const matches = message.match(/ERR-[A-Z]{3}-\d{3}/g);
-  const last = matches === null ? undefined : matches.at(-1);
-  if (last === undefined) {
-    return null;
-  }
-  return (Object.keys(ERROR_REGISTRY) as readonly string[]).includes(last)
-    ? (last as ErrorCode)
-    : null;
-}
 
 /** อ่านแถว enrollment ของตัวเองจาก course_id (RLS เจ้าของ — DD §3.2; อ่านผ่าน SELECT ปกติ) */
 async function selectOwnEnrollment(
@@ -89,8 +80,8 @@ export async function POST(
     const supabase = await createSupabaseSsrClient();
     const { data, error } = await supabase.rpc("enroll", { p_course_id: parsed.data.courseId });
     if (error !== null) {
-      const code = errorCodeFromMessage(error.message);
-      if (code === null) {
+      const code = parseRpcErrorCode(error);
+      if (code === undefined) {
         throw new AppError("ERR-SYS-002"); // RPC ล้มเหลวอื่น — opaque ตามแบบ rbac.ts (ไม่ leak SQL)
       }
       if (code === "ERR-ENR-001") {

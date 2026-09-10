@@ -1,6 +1,6 @@
 /**
  * หน้าแคตตาล็อกหลักสูตร — CAT-002 (รายการ published แก่ guest) + CAT-003 (ค้นหา/กรอง AND)
- * ข้อมูล: fixture (src/lib/fixtures/catalog.ts) — Phase 1 สลับเป็น BFF GET /courses, /categories
+ * ข้อมูล: BFF จริงผ่าน src/lib/fixtures/catalog.ts (GET /api/v1/courses · GET /api/v1/categories)
  * โครงหน้า: Public Shell (DS §6.1) · Skeleton loading state (DS §5.13) ผ่าน Suspense streaming
  */
 

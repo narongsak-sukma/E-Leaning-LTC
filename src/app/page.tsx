@@ -1,6 +1,6 @@
 /**
- * หน้าแรก — hero + หลักสูตรแนะนำ (fixture) + ลิงก์ไป /courses
- * หลักสูตรแนะนำดึงจาก fixture แคตตาล็อก (เฉพาะ published) — Phase 1 สลับเป็น BFF GET /courses
+ * หน้าแรก — hero + หลักสูตรแนะนำ (BFF GET /api/v1/courses — เฉพาะ published ตาม RLS) + ลิงก์ไป /courses
+ * หลักสูตรแนะนำดึงผ่าน getPublishedCourses() (src/lib/fixtures/catalog.ts — fetch BFF จริง Phase 1)
  * หมายเหตุ: หน้านี้อยู่นอก route group (public) (สืบทอดจาก B-01) จึงมีโครง header/footer ของตัวเอง
  */
 
@@ -128,7 +128,7 @@ export default async function HomePage() {
             <p className="text-sm leading-relaxed text-ink-600">
               <strong className="font-semibold text-ink-700">หมายเหตุ:</strong>{" "}
               ระบบอยู่ระหว่างการพัฒนา (Wave C — แคตตาล็อก/ลงทะเบียน/ความคืบหน้า)
-              ข้อมูลหลักสูตรในหน้านี้เป็นข้อมูลตัวอย่างเพื่อการแสดงโครงหน้า
+              ข้อมูลหลักสูตรดึงจากระบบโดยตรง — หากยังไม่มีหลักสูตรเผยแพร่ ส่วนนี้จะว่าง
               ติดต่อสอบถามได้ที่สำนักงานสภาทนายความแห่งประเทศไทย โทร 0 2351 1128
             </p>
           </div>
