@@ -7,8 +7,6 @@
 
 import { useCallback, useRef, useState } from "react";
 
-import { type SendProgressFn } from "@/lib/fixtures/learning";
-
 import { useVideoHeartbeat, type SyncStatus } from "./use-video-heartbeat";
 
 /** ฟอร์แมตเวลา mm:ss (tabular-nums ตาม DS §3.3) */
@@ -31,7 +29,6 @@ export function VideoPlayer({
   durationSeconds,
   initialPositionSeconds,
   heartbeatIntervalSec,
-  sendProgress,
 }: {
   lessonId: string;
   title: string;
@@ -39,7 +36,6 @@ export function VideoPlayer({
   durationSeconds: number;
   initialPositionSeconds: number;
   heartbeatIntervalSec: number;
-  sendProgress?: SendProgressFn;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [positionSeconds, setPositionSeconds] = useState(initialPositionSeconds);
@@ -58,7 +54,6 @@ export function VideoPlayer({
     intervalSec: heartbeatIntervalSec,
     enabled: isPlaying,
     getPositionSeconds,
-    sendProgress,
   });
 
   const handleLoadedMetadata = useCallback(() => {

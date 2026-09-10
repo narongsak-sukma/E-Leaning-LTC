@@ -1,20 +1,25 @@
 /**
- * fixtures/learning — ข้อมูลจำลอง (fixture) ฝั่งผู้เรียน — Wave C task C-7 (Phase 0)
+ * learning — data layer ฝั่งผู้เรียน (Phase 1 — เรียก BFF จริงผ่าน /api/v1)
  *
- * - UI ผู้เรียน (learner shell / my/courses / lesson player) ทำงานบน fixture ชุดนี้
- *   แล้วสลับไปเรียก BFF จริงใน Phase 1 (หลัง C-2/C-3/C-4 ผ่าน gates)
- * - รูป URL/body ยึด API-SPECIFICATION §3.4 เป๊ะตั้งแต่วันนี้:
- *   · heartbeat วิดีโอ → POST /api/v1/lessons/{id}/progress  body { positionSeconds }
- *   · เอกสาร (attestation) → POST /api/v1/lessons/{id}/progress  body { documentRead: true }
- *     (positionSeconds XOR documentRead — LessonProgressRequest ตาม D12-12)
- *   · quiz → POST /api/v1/lessons/{id}/quiz/submit  body { answers: [{ questionId, choiceIds }] }
+ * - ทุกฟังก์ชัน fetch จริง ผ่าน helper absolute-origin:
+ *   · browser → window.location.origin (same-origin fetch — Origin/Sec-Fetch-Site ผ่าน middleware CSRF เอง)
+ *   · server (RSC) → ต้องส่ง origin + cookieHeader ผ่าน FetchCallOptions (ดู learning.server.ts)
+ * - เฉลยแบบทดสอบไม่อยู่ในไฟล์นี้เด็ดขาด (D28/DCR-5): โจทย์มาจาก GET /lessons/{id}/quiz
+ *   (โจทย์+ตัวเลือกเท่านั้น) และผล+คะแนนกลับจาก server หลังส่งเท่านั้น (POST .../quiz/submit)
+ * - id ทุกตัวเป็น uuid จริงจาก BFF — ข้อมูลที่มี schema กลางตรวจด้วย zod (src/lib/schemas/v1)
  * - ห้ามส่ง flag `completed` จาก client — สถานะ "จบบท" ตัดสินโดย server (D12-1/D12-12)
- * - ค่ากฎ (VIDEO_HEARTBEAT_SEC ฯลฯ) ไม่ปรากฏในไฟล์นี้ — server อ่านจาก src/lib/config.ts แล้วส่งเป็น props
+ * - ค่ากฎ (VIDEO_HEARTBEAT_SEC ฯลฯ) server อ่านจาก src/lib/config.ts แล้วส่งเป็น props
  */
+import { z } from "zod";
+
+import { CourseProgressView, LessonProgressView, QuizSubmitView } from "@/lib/schemas/v1/progress";
+import { EnrollmentResource } from "@/lib/schemas/v1/enrollment";
+
+// ——— ชนิดข้อมูลมุมมองผู้เรียน (client view model) ———
 
 export type LessonType = "video" | "document" | "quiz";
 
-/** สถานะความคืบหน้ารายบทเรียน (server เป็นผู้ตัดสิน — fixture เก็บเพื่อ render เท่านั้น) */
+/** สถานะความคืบหน้ารายบทเรียน — server เป็นผู้ตัดสิน (lesson_progress.status) */
 export type LessonStatus = "not_started" | "in_progress" | "completed";
 
 export interface LessonSummary {
@@ -24,10 +29,15 @@ export interface LessonSummary {
   status: LessonStatus;
 }
 
+/** บทเรียนในโครงสร้างหลักสูตรที่ผูกสถานะความคืบหน้าแล้ว (GET /courses/{id} + progress) */
+export interface OutlineLesson extends LessonSummary {
+  watchPct: number;
+}
+
 export interface CourseModule {
   id: string;
   title: string;
-  lessons: LessonSummary[];
+  lessons: OutlineLesson[];
 }
 
 /** การ์ด "หลักสูตรของฉัน" — ความคืบหน้ารวม + บทที่ค้าง (LRN-002/009) */
@@ -37,18 +47,21 @@ export interface ContinueLessonInfo {
   type: LessonType;
   status: LessonStatus;
   label: string;
-  positionSeconds: number | null;
-  durationSeconds: number | null;
+  watchPct: number;
 }
 
 export interface EnrolledCourseCard {
   id: string;
   title: string;
   category: string;
+  /** สถานะการลงทะเบียนจาก GET /me/enrollments */
+  enrollmentStatus: z.infer<typeof EnrollmentResource>["status"];
   lessonCount: number;
   completedCount: number;
   progressPercent: number;
   continueLesson: ContinueLessonInfo | null;
+  /** false = โหลดโครงสร้าง/ความคืบหน้าของหลักสูตรนี้ไม่สำเร็จบางส่วน (UI แสดงหมายเหตุ) */
+  isLoaded: boolean;
 }
 
 export interface CourseOutline {
@@ -61,62 +74,31 @@ export interface CourseOutline {
   progressPercent: number;
 }
 
-/** บทเรียนวิดีโอ — heartbeat ตาม SDS §3.3(b) */
-export interface VideoLessonDetail {
-  kind: "video";
-  lessonId: string;
+/** โครงสร้างหลักสูตรจาก GET /courses/{id} (modules/lessons — ยังไม่ผูกสถานะ) */
+export interface CourseDetailSummary {
+  id: string;
   title: string;
-  src: string | null;
-  durationSeconds: number;
-  initialPositionSeconds: number;
+  category: string;
+  modules: {
+    id: string;
+    title: string;
+    lessons: {
+      id: string;
+      title: string;
+      type: LessonType;
+      durationSeconds: number | null;
+    }[];
+  }[];
+  lessonCount: number;
 }
 
-/** บทเรียนเอกสาร — ปิดท้ายด้วยคำยืนยัน "อ่านจบแล้ว" (client attestation — SDS §3.3(c)) */
-export interface DocumentLessonDetail {
-  kind: "document";
-  lessonId: string;
-  title: string;
-  documentTitle: string;
-  paragraphs: readonly string[];
-}
+/** ผลลัพธ์ GET /courses/{id}/progress — validate ด้วย zod (src/lib/schemas/v1/progress) */
+export type CourseProgress = z.infer<typeof CourseProgressView>;
 
-/** บทเรียน quiz — คำถามไม่มีเฉลยปนใน view (เฉลยคืนหลังส่งเท่านั้น ตาม API §3.4 200 คะแนน+เฉลย) */
-export interface QuizLessonDetail {
-  kind: "quiz";
-  lessonId: string;
-  title: string;
-  /** รหัสแบบทดสอบ (ไม่ใช่เฉลย) — Phase 0 ใช้ตรวจด้วย fixtureSubmitQuiz · null = ส่งตามสัญญาจริง */
-  quizId: string | null;
-  questions: QuizQuestionView[];
-  passPct: number;
-  bestScorePct: number | null;
-}
+/** การลงทะเบียนจาก GET /me/enrollments — validate ด้วย zod (src/lib/schemas/v1/enrollment) */
+export type EnrollmentSummary = z.infer<typeof EnrollmentResource>;
 
-export type LessonDetail = VideoLessonDetail | DocumentLessonDetail | QuizLessonDetail;
-
-// ——— รูป request/response ตาม API-SPECIFICATION §3.4 (ใช้เป็นชนิด props เพื่อสลับ fixture→fetch) ——
-
-export interface QuizSubmitRequest {
-  answers: readonly { questionId: string; choiceIds: readonly string[] }[];
-}
-
-export interface QuizQuestionResult {
-  questionId: string;
-  isCorrect: boolean;
-  correctChoiceIds: readonly string[];
-  explanation: string | null;
-}
-
-export interface QuizSubmitResponse {
-  scorePct: number;
-  passed: boolean;
-  passPct: number;
-  results: readonly QuizQuestionResult[];
-}
-
-export type SubmitQuizFn = (body: QuizSubmitRequest) => Promise<QuizSubmitResponse>;
-export type SendProgressFn = (positionSeconds: number) => Promise<void>;
-export type SendAttestationFn = () => Promise<void>;
+// ——— แบบทดสอบย่อย — โจทย์เท่านั้น ไม่มีเฉลยในชนิดข้อมูลใด ๆ (D28/DCR-5) ———
 
 export interface QuizChoiceView {
   id: string;
@@ -129,476 +111,49 @@ export interface QuizQuestionView {
   choices: readonly QuizChoiceView[];
 }
 
-// ——— ข้อมูล fixture (ภาษาไทย — หลักสูตรของสภาทนายความฯ) ——
-
-interface LessonSeed {
-  id: string;
-  title: string;
-  type: LessonType;
-  status: LessonStatus;
-  positionSeconds?: number;
-  durationSeconds?: number;
-  videoSrc?: string;
-  documentTitle?: string;
-  documentParagraphs?: string[];
-  quizId?: string;
-}
-
-interface ModuleSeed {
-  id: string;
-  title: string;
-  lessons: LessonSeed[];
-}
-
-interface CourseSeed {
-  id: string;
-  title: string;
-  category: string;
-  modules: ModuleSeed[];
-}
-
-const COURSE_SEEDS: readonly CourseSeed[] = [
-  {
-    id: "course-pdpa-101",
-    title: "กฎหมายคุ้มครองข้อมูลส่วนบุคคลสำหรับทนายความ",
-    category: "กฎหมายทั่วไป",
-    modules: [
-      {
-        id: "m1",
-        title: "โมดูล 1 · หลักการพื้นฐานของการคุ้มครองข้อมูลส่วนบุคคล",
-        lessons: [
-          {
-            id: "l-1-1",
-            title: "หลักการพื้นฐานและขอบเขตการบังคับใช้",
-            type: "video",
-            status: "completed",
-            durationSeconds: 300,
-            positionSeconds: 300,
-            videoSrc: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-          },
-          {
-            id: "l-1-2",
-            title: "สิทธิของเจ้าของข้อมูลส่วนบุคคล",
-            type: "document",
-            status: "completed",
-            documentTitle: "ใบความรู้ บทที่ 1.2 — สิทธิของเจ้าของข้อมูลส่วนบุคคล",
-            documentParagraphs: [
-              "เจ้าของข้อมูลส่วนบุคคลมีสิทธิหลายประการที่กฎหมายให้การคุ้มครอง เช่น สิทธิได้รับแจ้ง สิทธิเข้าถึงและขอรับสำเนาข้อมูล สิทธิให้แก้ไขให้ข้อมูลถูกต้อง สิทธิขอให้ลบหรือทำลายข้อมูล สิทธิให้ระงับการใช้ข้อมูล สิทธิคัดค้านการเก็บรวบรวม ใช้ หรือเปิดเผยข้อมูล และสิทธิให้โอนย้ายข้อมูล",
-              "ผู้ประกอบธุรกิจต้องจัดให้มีช่องทางที่เจ้าของข้อมูลใช้สิทธิได้สะดวก และต้องดำเนินการให้แล้วเสร็จภายในระยะเวลาที่กฎหมายกำหนด หากปฏิเสธคำขอต้องแจ้งเหตุผลพร้อมสิทธิในการร้องเรียนต่อคณะกรรมการการคุ้มครองข้อมูลส่วนบุคคล",
-              "ในทางปฏิบัติของผู้ประกอบวิชาชีพทนายความ ข้อมูลคดีและข้อมูลลูกความมักเป็นข้อมูลส่วนบุคคลที่มีความอ่อนไหวสูง การจัดการคำขอใช้สิทธิจึงต้องคำนึงถึงความลับทางวิชาชีพควบคู่กับหน้าที่ตามกฎหมายคุ้มครองข้อมูลส่วนบุคคลด้วย",
-            ],
-          },
-          {
-            id: "l-1-3",
-            title: "ทดสอบความเข้าใจ — โมดูล 1",
-            type: "quiz",
-            status: "completed",
-            quizId: "quiz-1",
-          },
-        ],
-      },
-      {
-        id: "m2",
-        title: "โมดูล 2 · หน้าที่ของผู้ควบคุมข้อมูลส่วนบุคคล",
-        lessons: [
-          {
-            id: "l-2-1",
-            title: "บันทึกกิจกรรมการประมวลผลข้อมูลส่วนบุคคล",
-            type: "video",
-            status: "in_progress",
-            durationSeconds: 240,
-            positionSeconds: 87,
-            videoSrc: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-          },
-          {
-            id: "l-2-2",
-            title: "มาตรการรักษาความมั่นคงปลอดภัย",
-            type: "document",
-            status: "not_started",
-            documentTitle: "ใบความรู้ บทที่ 2.2 — มาตรการรักษาความมั่นคงปลอดภัย",
-            documentParagraphs: [
-              "ผู้ควบคุมข้อมูลส่วนบุคคลต้องจัดให้มีมาตรการรักษาความมั่นคงปลอดภัยที่เหมาะสมทางเทคนิคและทางบริหารจัดการ เพื่อป้องกันการสูญหาย เข้าถึง ใช้ เปลี่ยนแปลง แก้ไข หรือเปิดเผยข้อมูลโดยมิชอบ",
-              "มาตรการทางเทคนิคที่ควรมี เช่น การควบคุมสิทธิการเข้าถึงตามหน้าที่ การเข้ารหัสลับข้อมูล การบันทึกเหตุการณ์การใช้งาน (audit log) และการสำรองข้อมูล ส่วนมาตรการทางบริหารจัดการ เช่น นโยบายความมั่นคงปลอดภัย การอบรมบุคลากร และการทำสัญญาคุ้มครองข้อมูลกับผู้ประมวลผลแทน",
-              "เมื่อเกิดเหตุละเมิดข้อมูลส่วนบุคคล ผู้ควบคุมข้อมูลต้องแจ้งเหตุต่อสำนักงานคณะกรรมการคุ้มครองข้อมูลส่วนบุคคลภายใน 72 ชั่วโมงนับแต่ทราบเหตุ และหากเหตุมีความเสี่ยงสูงต่อสิทธิเสรีภาพของเจ้าของข้อมูล ต้องแจ้งเจ้าของข้อมูลด้วย",
-            ],
-          },
-          {
-            id: "l-2-3",
-            title: "ทดสอบความเข้าใจ — โมดูล 2",
-            type: "quiz",
-            status: "not_started",
-            quizId: "quiz-2",
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: "course-contract-201",
-    title: "การทำสัญญาและการบังคับใช้สิทธิทางแพ่ง",
-    category: "กฎหมายเอกชน",
-    modules: [
-      {
-        id: "cm1",
-        title: "โมดูล 1 · หลักการทำสัญญา",
-        lessons: [
-          {
-            id: "cl-1-1",
-            title: "องค์ประกอบของสัญญาและการเสนอกับการยอมรับคำเสนอ",
-            type: "video",
-            status: "in_progress",
-            durationSeconds: 210,
-            positionSeconds: 45,
-            videoSrc: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
-          },
-          {
-            id: "cl-1-2",
-            title: "สัญญาที่เป็นโมฆะและสัญญาที่โมฆียะ",
-            type: "document",
-            status: "not_started",
-            documentTitle: "ใบความรู้ บทที่ 1.2 — โมฆะและโมฆียะ",
-            documentParagraphs: [
-              "นิติกรรมที่มีลักษณะต้องห้ามตามกฎหมายโดยแท้ หรือเป็นการละเมิดความสงบเรียบร้อยของประชาชน ย่อมเป็นโมฆะ ส่วนนิติกรรมที่บกพร่องเพราะขาดสมรรถนะหรือเพราะเจตนามีข้อบกพร่องบางประเภท ย่อมเป็นโมฆียะ",
-              "ความแตกต่างที่สำคัญคือ สัญญาที่เป็นโมฆะไม่มีผลสมบูรณ์แต่ต้นและหานิรันดร์ ศาลหรือคู่สัญญาไม่อาจทำให้กลับสู่สภาพสมบูรณ์ได้ ส่วนสัญญาที่เป็นโมฆียะมีผลบังคับแต่คู่สัญญาฝ่ายที่ได้เปรียบหรือผู้มีสิทธิอาจเรียกให้ยกเลิกได้ และการยกเลิกมีผลย้อนหลัง",
-              "ผู้ประกอบวิชาชีพทนายความต้องพิจารณาองค์ประกอบเหล่านี้ประกอบหลักฐานที่แสดงเจตนาของคู่สัญญา เพื่อเสนอทางเลือกในการแก้ไขข้อพิพาทหรือความเสียหายของลูกความได้ถูกต้อง",
-            ],
-          },
-          {
-            id: "cl-1-3",
-            title: "ทดสอบความเข้าใจ — หลักการทำสัญญา",
-            type: "quiz",
-            status: "not_started",
-            quizId: "quiz-3",
-          },
-        ],
-      },
-    ],
-  },
-];
-
-// ——— ธนาคารข้อสอบ quiz (fixture — เฉลยอยู่ฝั่งนี้เท่านั้น Phase 0; Phase 1 ย้ายไป POST /quiz/submit จริง) ——
-
-interface QuizBankEntry {
+/** ข้อมูลแบบทดสอบสำหรับทำ (GET /lessons/{id}/quiz — DCR-5): โจทย์+ตัวเลือก+กติกา ไม่มีเฉลย */
+export interface LessonQuizView {
+  lessonId: string;
   passPct: number;
-  bestScorePct: number | null;
-  questions: readonly (QuizQuestionView & {
-    correctChoiceIds: readonly string[];
-    explanation: string;
-  })[];
+  /** จำนวนครั้งสูงสุดที่ทำได้ (lesson_quizzes.max_attempts) — null = ไม่ระบุ */
+  maxAttempts: number | null;
+  questions: readonly QuizQuestionView[];
 }
 
-const QUIZ_BANK: Readonly<Record<string, QuizBankEntry>> = {
-  "quiz-1": {
-    passPct: 60,
-    bestScorePct: 100,
-    questions: [
-      {
-        id: "q-1-1",
-        prompt: "พระราชบัญญัติคุ้มครองข้อมูลส่วนบุคคลใช้กับการประมวลผลข้อมูลส่วนบุคคลรูปแบบใด",
-        choices: [
-          { id: "q1c1", label: "เฉพาะการประมวลผลที่ทำด้วยระบบอิเล็กทรอนิกส์เท่านั้น" },
-          { id: "q1c2", label: "การประมวลผลในระบบสารสนเทศ และการประมวลผลแบบผสมผสานกับสื่ออื่น" },
-          { id: "q1c3", label: "เฉพาะข้อมูลที่เก็บไว้ในต่างประเทศ" },
-          { id: "q1c4", label: "เฉพาะข้อมูลของนิติบุคคล" },
-        ],
-        correctChoiceIds: ["q1c2"],
-        explanation: "กฎหมายคุ้มครองข้อมูลส่วนบุคคลใช้กับการประมวลผลที่ทำในระบบสารสนเทศ และการประมวลผลแบบผสมผสานกับสื่ออื่น ไม่จำกัดเฉพาะรูปแบบอิเล็กทรอนิกส์",
-      },
-      {
-        id: "q-1-2",
-        prompt: "ข้อใดไม่ถูกต้องตามหลักการเก็บรักษาข้อมูลส่วนบุคคล",
-        choices: [
-          { id: "q2c1", label: "เก็บข้อมูลได้ไม่จำกัดระยะเวลา เพื่อความสะดวกในการตรวจสอบย้อนหลัง" },
-          { id: "q2c2", label: "จำกัดการเก็บให้มีเพียงเท่าที่จำเป็นตามความมุ่งหมาย" },
-          { id: "q2c3", label: "กำหนดระยะเวลาที่จะต้องทำลายหรือทำให้ข้อมูลไม่สามารถระบุตัวตนเจ้าของได้" },
-          { id: "q2c4", label: "ตรวจสอบให้ข้อมูลถูกต้องเป็นปัจจุบัน" },
-        ],
-        correctChoiceIds: ["q2c1"],
-        explanation: "หลักการจำกัดระยะเวลาในการเก็บรักษา ห้ามเก็บข้อมูลเกินระยะเวลาที่จำเป็นตามความมุ่งหมายที่แจ้งไว้",
-      },
-      {
-        id: "q-1-3",
-        prompt: "สิทธิของเจ้าของข้อมูลส่วนบุคคลตามกฎหมาย ได้แก่ ข้อใด",
-        choices: [
-          { id: "q3c1", label: "สิทธิในการเข้าถึงข้อมูลและขอรับสำเนาข้อมูล" },
-          { id: "q3c2", label: "สิทธิเปลี่ยนเลขที่ใบอนุญาตทนายความด้วยตนเอง" },
-          { id: "q3c3", label: "สิทธิตัดสินคดีแทนศาล" },
-          { id: "q3c4", label: "สิทธิยึดทรัพย์ของลูกหนี้" },
-        ],
-        correctChoiceIds: ["q3c1"],
-        explanation: "สิทธิเข้าถึงและขอรับสำเนาข้อมูลเป็นสิทธิตามกฎหมาย ส่วนข้ออื่นไม่ใช่สิทธิที่กฎหมายฉบับนี้ให้ไว้",
-      },
-    ],
-  },
-  "quiz-2": {
-    passPct: 60,
-    bestScorePct: null,
-    questions: [
-      {
-        id: "q2-1",
-        prompt: "มาตรการรักษาความมั่นคงปลอดภัยข้อใดเป็นมาตรการทางเทคนิค",
-        choices: [
-          { id: "a1c1", label: "การอบรมความรู้ให้บุคลากร" },
-          { id: "a1c2", label: "การควบคุมสิทธิการเข้าถึงข้อมูลตามหน้าที่ และการเข้ารหัสลับข้อมูล" },
-          { id: "a1c3", label: "การทำสัญญาคุ้มครองข้อมูลส่วนบุคคลกับผู้ประมวลผลแทน" },
-          { id: "a1c4", label: "การกำหนดนโยบายความมั่นคงปลอดภัย" },
-        ],
-        correctChoiceIds: ["a1c2"],
-        explanation: "การควบคุมสิทธิการเข้าถึงและการเข้ารหัสลับเป็นมาตรการทางเทคนิค ส่วนข้ออื่นเป็นมาตรการทางบริหารจัดการ",
-      },
-      {
-        id: "q2-2",
-        prompt: "เมื่อเกิดเหตุละเมิดข้อมูลส่วนบุคคล ผู้ควบคุมข้อมูลต้องดำเนินการอย่างไร",
-        choices: [
-          { id: "a2c1", label: "รอให้ผู้ได้รับผลกระทบร้องเรียนก่อนจึงดำเนินการ" },
-          { id: "a2c2", label: "แจ้งเหตุต่อสำนักงานคณะกรรมการคุ้มครองข้อมูลส่วนบุคคลภายใน 72 ชั่วโมงนับแต่ทราบเหตุ" },
-          { id: "a2c3", label: "ลบข้อมูลที่ถูกละเมิดทิ้งทั้งหมดเพื่อปิดเหตุการณ์" },
-          { id: "a2c4", label: "เปิดเผยข้อมูลเพื่อให้เจ้าของข้อมูลตรวจสอบได้เองทุกกรณี" },
-        ],
-        correctChoiceIds: ["a2c2"],
-        explanation: "ต้องแจ้งเหตุต่อสำนักงานคณะกรรมการคุ้มครองข้อมูลส่วนบุคคลภายใน 72 ชั่วโมง และหากมีความเสี่ยงสูงต้องแจ้งเจ้าของข้อมูลด้วย",
-      },
-      {
-        id: "q2-3",
-        prompt: "ขอบเขตของบันทึกกิจกรรมการประมวลผลข้อมูลส่วนบุคคลที่ถูกต้อง คือ ข้อใด",
-        choices: [
-          { id: "a3c1", label: "จัดทำเฉพาะเมื่อเกิดเหตุละเมิดข้อมูลแล้ว" },
-          { id: "a3c2", label: "จัดทำให้ครอบคลุมกิจกรรมการประมวลผลทั้งหมด ตั้งแต่เก็บรวบรวมจนถึงการทำลาย" },
-          { id: "a3c3", label: "จัดทำเฉพาะข้อมูลของลูกความ ไม่รวมข้อมูลบุคลากร" },
-          { id: "a3c4", label: "จัดทำเพื่อส่งต่อให้หน่วยงานต่างประเทศเท่านั้น" },
-        ],
-        correctChoiceIds: ["a3c2"],
-        explanation: "บันทึกกิจกรรมการประมวลผลต้องครอบคลุมกิจกรรมทั้งหมด เพื่อให้ตรวจสอบความสอดคล้องของการใช้ข้อมูลได้ทุกขั้นตอน",
-      },
-    ],
-  },
-  "quiz-3": {
-    passPct: 60,
-    bestScorePct: null,
-    questions: [
-      {
-        id: "q3-1",
-        prompt: "สัญญาที่เป็นโมฆะ มีผลอย่างไร",
-        choices: [
-          { id: "b1c1", label: "ไม่มีผลสมบูรณ์แต่ต้นและหานิรันดร์" },
-          { id: "b1c2", label: "มีผลบังคับจนกว่าจะมีการยกเลิก" },
-          { id: "b1c3", label: "มีผลเมื่อได้รับความยินยอมจากศาล" },
-          { id: "b1c4", label: "มีผลเฉพาะระหว่างคู่สัญญา" },
-        ],
-        correctChoiceIds: ["b1c1"],
-        explanation: "สัญญาที่เป็นโมฆะไม่มีผลสมบูรณ์แต่ต้นและหานิรันดร์ ต่างจากโมฆียะที่มีผลบังคับจนกว่าจะยกเลิก",
-      },
-      {
-        id: "q3-2",
-        prompt: "การเสนอและการยอมรับแถลงความประสงค์จะผูกพันตามสัญญา มีผลเมื่อใด",
-        choices: [
-          { id: "b2c1", label: "เมื่อคู่สัญญาฝ่ายหนึ่งจัดทำเอกสารเป็นหนังสือ" },
-          { id: "b2c2", label: "เมื่อคู่สัญญาทั้งสองฝ่ายตกลงกันได้ในเรื่องที่เป็นสาระสำคัญแห่งสัญญา" },
-          { id: "b2c3", label: "เมื่อมีพยานบุคคลที่เห็นการตกลง" },
-          { id: "b2c4", label: "เมื่อลงลายมือชื่อต่อหน้านายทะเบียน" },
-        ],
-        correctChoiceIds: ["b2c2"],
-        explanation: "สัญญาเกิดขึ้นเมื่อมีการเสนอและยอมรับที่ตรงกันในเรื่องสาระสำคัญ โดยไม่จำเป็นต้องมีหนังสือ เว้นแต่กฎหมายกำหนดรูปแบบพิเศษ",
-      },
-      {
-        id: "q3-3",
-        prompt: "สัญญาที่โมฆียะ คู่สัญญาสามารถยกเลิกได้ภายในเวลาเท่าใดนับแต่รู้เหตุที่ทำให้โมฆียะ",
-        choices: [
-          { id: "b3c1", label: "1 ปี" },
-          { id: "b3c2", label: "2 ปี" },
-          { id: "b3c3", label: "5 ปี" },
-          { id: "b3c4", label: "10 ปี" },
-        ],
-        correctChoiceIds: ["b3c4"],
-        explanation: "สิทธิยกเลิกนิติกรรมที่โมฆียะมีอายุ 10 ปีนับแต่วันที่นิติกรรมนั้นมีผลสมบูรณ์ เว้นแต่กฎหมายกำหนดระยะเวลาอื่น",
-      },
-    ],
-  },
+/** ผลหลังส่ง (POST /lessons/{id}/quiz/submit — คะแนน+ผ่าน/ไม่ผ่าน ตาม contract QuizSubmitView) */
+export type QuizSubmitResult = z.infer<typeof QuizSubmitView>;
+
+/** body ของ POST /lessons/{id}/progress — XOR ตาม §4 #5 (D12-12) · ห้ามส่ง `completed` */
+export type LessonProgressPayload =
+  | { readonly positionSeconds: number }
+  | { readonly documentRead: true };
+
+/** body ของ POST /lessons/{id}/quiz/submit — คำตอบเท่านั้น (§4 #6) ไม่มีเฉลย/คะแนนจาก client */
+export type QuizSubmitRequest = {
+  readonly answers: readonly {
+    readonly questionId: string;
+    readonly choiceIds: readonly string[];
+  }[];
 };
 
-// ——— ผู้ช่วยคำนวณ ——
+// ——— URL builders (BFF-relative path เท่านั้น — API-SPECIFICATION §3) ———
 
-const roundedPercent = (part: number, total: number): number =>
-  total <= 0 ? 0 : Math.round((part / total) * 100);
-
-function flattenLessons(course: CourseSeed): LessonSeed[] {
-  return course.modules.flatMap((module) => module.lessons);
+export function courseDetailUrl(courseId: string): string {
+  return `/api/v1/courses/${encodeURIComponent(courseId)}`;
 }
 
-function countLessons(course: CourseSeed): { total: number; completed: number } {
-  const lessons = flattenLessons(course);
-  return {
-    total: lessons.length,
-    completed: lessons.filter((lesson) => lesson.status === "completed").length,
-  };
+export function courseProgressUrl(courseId: string): string {
+  return `/api/v1/courses/${encodeURIComponent(courseId)}/progress`;
 }
 
-/** ป้ายตำแหน่งบทเรียน "บทเรียน {โมดูล}.{ลำดับ}" — ใช้บนการ์ดเรียนต่อและ breadcrumb */
-function lessonLabel(course: CourseSeed, lessonId: string): string | null {
-  for (const [moduleIndex, module] of course.modules.entries()) {
-    const lessonIndex = module.lessons.findIndex((lesson) => lesson.id === lessonId);
-    if (lessonIndex >= 0) {
-      return `บทเรียน ${moduleIndex + 1}.${lessonIndex + 1}`;
-    }
-  }
-  return null;
+/** list endpoint ตอบเป็นหน้า — ใช้ limit สูงสุดตาม PageQuery (§1.2 — max 100) */
+export function meEnrollmentsUrl(): string {
+  return "/api/v1/me/enrollments?limit=100";
 }
 
-function toContinueLesson(course: CourseSeed, lesson: LessonSeed): ContinueLessonInfo {
-  return {
-    id: lesson.id,
-    title: lesson.title,
-    type: lesson.type,
-    status: lesson.status,
-    label: lessonLabel(course, lesson.id) ?? lesson.title,
-    positionSeconds: lesson.positionSeconds ?? null,
-    durationSeconds: lesson.durationSeconds ?? null,
-  };
+export function lessonQuizUrl(lessonId: string): string {
+  return `/api/v1/lessons/${encodeURIComponent(lessonId)}/quiz`;
 }
-
-/** บทที่ค้าง = บทล่าสุดที่กำลังเรียน ถ้าไม่มีใช้บทแรกที่ยังไม่เริ่ม ถ้าเรียนครบแล้วเป็น null (LRN-009) */
-function pickContinueLesson(course: CourseSeed): LessonSeed | null {
-  const lessons = flattenLessons(course);
-  const inProgress = lessons.filter((lesson) => lesson.status === "in_progress");
-  const latest = inProgress.at(-1);
-  if (latest) {
-    return latest;
-  }
-  return lessons.find((lesson) => lesson.status === "not_started") ?? null;
-}
-
-function findCourse(courseId: string): CourseSeed | null {
-  return COURSE_SEEDS.find((course) => course.id === courseId) ?? null;
-}
-
-// ——— API ที่หน้า UI เรียกใช้ ——
-
-function buildOutline(course: CourseSeed): CourseOutline {
-  const { total, completed } = countLessons(course);
-  return {
-    id: course.id,
-    title: course.title,
-    category: course.category,
-    modules: course.modules.map((module) => ({
-      id: module.id,
-      title: module.title,
-      lessons: module.lessons.map(({ id, title, type, status }) => ({ id, title, type, status })),
-    })),
-    lessonCount: total,
-    completedCount: completed,
-    progressPercent: roundedPercent(completed, total),
-  };
-}
-
-export function getMyEnrolledCourses(): EnrolledCourseCard[] {
-  return COURSE_SEEDS.map((course) => {
-    const { total, completed } = countLessons(course);
-    const pending = pickContinueLesson(course);
-    return {
-      id: course.id,
-      title: course.title,
-      category: course.category,
-      lessonCount: total,
-      completedCount: completed,
-      progressPercent: roundedPercent(completed, total),
-      continueLesson: pending ? toContinueLesson(course, pending) : null,
-    };
-  });
-}
-
-export function getCourseOutline(courseId: string): CourseOutline | null {
-  const course = findCourse(courseId);
-  return course ? buildOutline(course) : null;
-}
-
-export interface ResolvedLesson {
-  outline: CourseOutline;
-  lesson: LessonDetail;
-}
-
-/** หาบทเรียนในหลักสูตร — ไม่ระบุ lessonId = ไปยังบทที่ค้าง (ใช้กับ resume 2 คลิก — LRN-009) */
-export function getLessonDetail(courseId: string, lessonId?: string): ResolvedLesson | null {
-  const course = findCourse(courseId);
-  if (!course) {
-    return null;
-  }
-  const lessons = flattenLessons(course);
-  const target = lessonId !== undefined ? lessons.find((lesson) => lesson.id === lessonId) : pickContinueLesson(course);
-  const lesson = target ?? lessons[0];
-  if (!lesson) {
-    return null;
-  }
-
-  let detail: LessonDetail;
-  if (lesson.type === "video") {
-    detail = {
-      kind: "video",
-      lessonId: lesson.id,
-      title: lesson.title,
-      src: lesson.videoSrc ?? null,
-      durationSeconds: lesson.durationSeconds ?? 0,
-      initialPositionSeconds: lesson.status === "completed" ? 0 : (lesson.positionSeconds ?? 0),
-    };
-  } else if (lesson.type === "document") {
-    detail = {
-      kind: "document",
-      lessonId: lesson.id,
-      title: lesson.title,
-      documentTitle: lesson.documentTitle ?? lesson.title,
-      paragraphs: lesson.documentParagraphs ?? [],
-    };
-  } else {
-    const entry = lesson.quizId !== undefined ? QUIZ_BANK[lesson.quizId] : undefined;
-    if (!entry) {
-      return null;
-    }
-    detail = {
-      kind: "quiz",
-      lessonId: lesson.id,
-      title: lesson.title,
-      quizId: lesson.quizId ?? null,
-      questions: entry.questions.map(({ id, prompt, choices }) => ({ id, prompt, choices })),
-      passPct: entry.passPct,
-      bestScorePct: entry.bestScorePct,
-    };
-  }
-
-  return { outline: buildOutline(course), lesson: detail };
-}
-
-export interface NeighborLessons {
-  index: number;
-  total: number;
-  prev: LessonSummary | null;
-  next: LessonSummary | null;
-}
-
-export function getNeighborLessons(courseId: string, lessonId: string): NeighborLessons | null {
-  const course = findCourse(courseId);
-  if (!course) {
-    return null;
-  }
-  const lessons = flattenLessons(course);
-  const index = lessons.findIndex((lesson) => lesson.id === lessonId);
-  if (index < 0) {
-    return null;
-  }
-  const toSummary = (lesson: LessonSeed | undefined): LessonSummary | null =>
-    lesson ? { id: lesson.id, title: lesson.title, type: lesson.type, status: lesson.status } : null;
-  return {
-    index,
-    total: lessons.length,
-    prev: toSummary(lessons[index - 1]),
-    next: toSummary(lessons[index + 1]),
-  };
-}
-
-export function getLessonLabel(courseId: string, lessonId: string): string | null {
-  const course = findCourse(courseId);
-  return course ? lessonLabel(course, lessonId) : null;
-}
-
-// ——— URL และ transport ตาม API-SPECIFICATION §3.4 (ผูกตั้งแต่วันนี้ — endpoint จริงมา Phase 1) ——
 
 export function lessonProgressUrl(lessonId: string): string {
   return `/api/v1/lessons/${encodeURIComponent(lessonId)}/progress`;
@@ -608,32 +163,448 @@ export function lessonQuizSubmitUrl(lessonId: string): string {
   return `/api/v1/lessons/${encodeURIComponent(lessonId)}/quiz/submit`;
 }
 
+export function authLogoutUrl(): string {
+  return "/api/v1/auth/logout";
+}
+
+// ——— transport กลาง — absolute-origin helper + error envelope (§1.3) ———
+
 /**
- * ตรวจ quiz บน fixture — รูป response เลียนแบบ 200 ของ POST /lessons/{id}/quiz/submit
- * (คะแนน + เฉลยทันที · สถานะผ่านใช้คะแนนสูงสุดตลอดช่วงตาม progress_pass_score_policy=highest)
+ * ตัวเลือกของการเรียก API — browser ไม่ต้องส่ง (same-origin เอง);
+ * server/RSC ต้องส่ง origin + cookieHeader (forward session cookie ให้ BFF เพราะ
+ * fetch จาก RSC ไม่แนบ cookie ของ request ให้เอง)
  */
-export function fixtureSubmitQuiz(quizId: string, body: QuizSubmitRequest): QuizSubmitResponse {
-  const entry = QUIZ_BANK[quizId];
-  if (!entry) {
-    throw new Error("ไม่พบแบบทดสอบในระบบ");
+export interface FetchCallOptions {
+  /** origin สัมบูรณ์ เช่น https://learn.lawcouncil.go.th — บังคับเมื่อเรียกจากฝั่ง server */
+  origin?: string;
+  /** ค่า header Cookie ที่ forward จาก request ปัจจุบัน (server เท่านั้น) */
+  cookieHeader?: string;
+}
+
+/** error ฝั่ง client — code อ้างทะเบียน src/lib/errors (§1.3) · ข้อความไทยจาก envelope ของ BFF */
+export class ApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(code: string, status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.status = status;
   }
-  const results = entry.questions.map((question) => {
-    const answer = body.answers.find((item) => item.questionId === question.id);
-    const picked = answer?.choiceIds ?? [];
-    const isCorrect =
-      picked.length === question.correctChoiceIds.length &&
-      question.correctChoiceIds.every((choiceId) => picked.includes(choiceId));
-    return {
-      questionId: question.id,
-      isCorrect,
-      correctChoiceIds: question.correctChoiceIds,
-      explanation: question.explanation,
-    } satisfies QuizQuestionResult;
-  });
-  const correctCount = results.filter((result) => result.isCorrect).length;
-  const scorePct = roundedPercent(correctCount, entry.questions.length);
-  if (entry.bestScorePct === null || scorePct > entry.bestScorePct) {
-    entry.bestScorePct = scorePct;
+}
+
+const TRANSPORT_FALLBACK_MESSAGE = "ไม่สามารถติดต่อระบบได้ กรุณาลองใหม่อีกครั้ง";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** ข้อมูลขาออกของ BFF ผิดรูปตามสัญญา — ตอบเหมือน internal error แบบ opaque (SDS §6.1) */
+function contractViolation(): ApiError {
+  return new ApiError("ERR-SYS-001", 500, "เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่");
+}
+
+function requiredString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw contractViolation();
   }
-  return { scorePct, passed: scorePct >= entry.passPct, passPct: entry.passPct, results };
+  return value;
+}
+
+function lessonTypeOf(value: unknown): LessonType {
+  if (value === "video" || value === "document" || value === "quiz") {
+    return value;
+  }
+  throw contractViolation();
+}
+
+function resolveOrigin(options?: FetchCallOptions): string {
+  if (options?.origin !== undefined && options.origin.length > 0) {
+    return options.origin;
+  }
+  if (typeof window !== "undefined") {
+    return window.location.origin;
+  }
+  throw new Error("ต้องระบุ origin ใน FetchCallOptions เมื่อเรียก API จากฝั่ง server (RSC)");
+}
+
+/**
+ * เรียก BFF แบบ JSON — คืน { status, body } ดิบ · ผิดพลาด (non-2xx / parse ไม่ได้ / network) → ApiError
+ * (204 = สำเร็จไม่มี body → body เป็น null — ใช้กับ POST /auth/logout)
+ */
+async function requestJson(
+  path: string,
+  init: { readonly method: "GET" | "POST"; readonly body?: unknown; readonly keepalive?: boolean },
+  options?: FetchCallOptions,
+): Promise<{ status: number; body: unknown }> {
+  const origin = resolveOrigin(options);
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (init.method === "POST") {
+    headers["content-type"] = "application/json; charset=utf-8";
+  }
+  if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
+    headers.cookie = options.cookieHeader;
+  }
+  const requestInit: RequestInit = {
+    method: init.method,
+    headers,
+    credentials: "same-origin",
+    cache: "no-store",
+  };
+  if (init.method === "POST" && init.body !== undefined) {
+    requestInit.body = JSON.stringify(init.body);
+  }
+  if (init.keepalive === true) {
+    requestInit.keepalive = true;
+  }
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, origin), requestInit);
+  } catch {
+    throw new ApiError("ERR-SYS-001", 0, TRANSPORT_FALLBACK_MESSAGE);
+  }
+  if (response.status === 204) {
+    return { status: 204, body: null };
+  }
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  if (!response.ok) {
+    const envelope = isRecord(body) && isRecord(body["error"]) ? body["error"] : null;
+    const code =
+      envelope !== null && typeof envelope["code"] === "string" && envelope["code"].length > 0
+        ? envelope["code"]
+        : `HTTP_${response.status}`;
+    const message =
+      envelope !== null &&
+      typeof envelope["message"] === "string" &&
+      envelope["message"].length > 0
+        ? envelope["message"]
+        : TRANSPORT_FALLBACK_MESSAGE;
+    throw new ApiError(code, response.status, message);
+  }
+  return { status: response.status, body };
+}
+
+/** validate ข้อมูลขาออกของ BFF ด้วย schema กลาง — ไม่ผ่าน = contract ผิดรูป → ERR-SYS-001 */
+function parseContract<T extends z.ZodType>(schema: T, value: unknown): z.output<T> {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw contractViolation();
+  }
+  return parsed.data;
+}
+
+// ——— data layer ผู้เรียน ———
+
+/** GET /me/enrollments — รายการหลักสูตรที่ลงทะเบียน (§3.3) */
+export async function getMyEnrollments(
+  options?: FetchCallOptions,
+): Promise<{ enrollments: readonly EnrollmentSummary[]; hasMore: boolean }> {
+  const { body } = await requestJson(meEnrollmentsUrl(), { method: "GET" }, options);
+  if (!isRecord(body) || !Array.isArray(body["data"])) {
+    throw contractViolation();
+  }
+  const enrollments = parseContract(z.array(EnrollmentResource), body["data"]);
+  const page = isRecord(body["page"]) ? body["page"] : null;
+  const hasMore = page !== null && typeof page["hasMore"] === "boolean" ? page["hasMore"] : false;
+  return { enrollments, hasMore };
+}
+
+/** GET /courses/{id} — โครงสร้างหลักสูตร (§3.3 — ชื่อ/หมวด/modules/lessons) */
+export async function getCourseDetail(
+  courseId: string,
+  options?: FetchCallOptions,
+): Promise<CourseDetailSummary> {
+  const { body } = await requestJson(courseDetailUrl(courseId), { method: "GET" }, options);
+  return mapCourseDetail(body);
+}
+
+function mapCourseDetail(body: unknown): CourseDetailSummary {
+  if (!isRecord(body)) {
+    throw contractViolation();
+  }
+  const rawModules = body["modules"];
+  if (!Array.isArray(rawModules)) {
+    throw contractViolation();
+  }
+  const rawCategory = body["category"];
+  return {
+    id: requiredString(body, "id"),
+    title: requiredString(body, "titleTh"),
+    category: isRecord(rawCategory) ? requiredString(rawCategory, "nameTh") : "",
+    modules: rawModules.map((rawModule) => {
+      if (!isRecord(rawModule)) {
+        throw contractViolation();
+      }
+      const rawLessons = rawModule["lessons"];
+      if (!Array.isArray(rawLessons)) {
+        throw contractViolation();
+      }
+      return {
+        id: requiredString(rawModule, "id"),
+        title: requiredString(rawModule, "titleTh"),
+        lessons: rawLessons.map((rawLesson) => {
+          if (!isRecord(rawLesson)) {
+            throw contractViolation();
+          }
+          const duration = rawLesson["durationSec"];
+          return {
+            id: requiredString(rawLesson, "id"),
+            title: requiredString(rawLesson, "titleTh"),
+            type: lessonTypeOf(rawLesson["type"]),
+            durationSeconds: typeof duration === "number" ? duration : null,
+          };
+        }),
+      };
+    }),
+    lessonCount: rawModules.reduce((sum, rawModule) => {
+      const lessons =
+        isRecord(rawModule) && Array.isArray(rawModule["lessons"]) ? rawModule["lessons"] : [];
+      return sum + lessons.length;
+    }, 0),
+  };
+}
+
+/** GET /courses/{id}/progress — ความคืบหน้าของตัวเองในหลักสูตร (§3.4 — ต่อโมดูล/บทเรียน) */
+export async function getCourseProgress(
+  courseId: string,
+  options?: FetchCallOptions,
+): Promise<CourseProgress> {
+  const { body } = await requestJson(courseProgressUrl(courseId), { method: "GET" }, options);
+  return parseContract(CourseProgressView, body);
+}
+
+/** GET /lessons/{id}/quiz — โจทย์+ตัวเลือก+กติกา ไม่มีเฉลย (§3.4 · DCR-5) */
+export async function getLessonQuiz(
+  lessonId: string,
+  options?: FetchCallOptions,
+): Promise<LessonQuizView> {
+  const { body } = await requestJson(lessonQuizUrl(lessonId), { method: "GET" }, options);
+  if (!isRecord(body)) {
+    throw contractViolation();
+  }
+  const rawQuestions = body["questions"];
+  if (!Array.isArray(rawQuestions)) {
+    throw contractViolation();
+  }
+  const passPct = body["passPct"];
+  if (typeof passPct !== "number") {
+    throw contractViolation();
+  }
+  const maxAttempts = body["maxAttempts"];
+  return {
+    lessonId,
+    passPct,
+    maxAttempts: typeof maxAttempts === "number" ? maxAttempts : null,
+    questions: rawQuestions.map((rawQuestion) => {
+      if (!isRecord(rawQuestion)) {
+        throw contractViolation();
+      }
+      const rawChoices = rawQuestion["choices"];
+      if (!Array.isArray(rawChoices)) {
+        throw contractViolation();
+      }
+      return {
+        id: requiredString(rawQuestion, "id"),
+        prompt: requiredString(rawQuestion, "prompt"),
+        choices: rawChoices.map((rawChoice) => {
+          if (!isRecord(rawChoice)) {
+            throw contractViolation();
+          }
+          return {
+            id: requiredString(rawChoice, "id"),
+            label: requiredString(rawChoice, "label"),
+          };
+        }),
+      };
+    }),
+  };
+}
+
+/** POST /lessons/{id}/quiz/submit — ส่งคำตอบ ได้คะแนน+ผ่าน/ไม่ผ่านกลับทันที (§3.4) */
+export async function submitLessonQuiz(
+  lessonId: string,
+  body: QuizSubmitRequest,
+  options?: FetchCallOptions,
+): Promise<QuizSubmitResult> {
+  const { body: payload } = await requestJson(
+    lessonQuizSubmitUrl(lessonId),
+    { method: "POST", body: { answers: body.answers } },
+    options,
+  );
+  return parseContract(QuizSubmitView, payload);
+}
+
+/** POST /lessons/{id}/progress — heartbeat วิดีโอ (positionSeconds) XOR อ่านจบเอกสาร (documentRead) */
+export async function saveLessonProgress(
+  lessonId: string,
+  payload: LessonProgressPayload,
+  options?: FetchCallOptions,
+): Promise<z.infer<typeof LessonProgressView>> {
+  const { body } = await requestJson(
+    lessonProgressUrl(lessonId),
+    { method: "POST", body: payload, keepalive: true },
+    options,
+  );
+  return parseContract(LessonProgressView, body);
+}
+
+/** POST /auth/logout — ออกจากระบบ (204 = สำเร็จ; 401 = ไม่มี session — ผู้เรียกจัดการเอง) */
+export async function logout(options?: FetchCallOptions): Promise<void> {
+  await requestJson(authLogoutUrl(), { method: "POST" }, options);
+}
+
+// ——— ผู้ช่วยประกอบข้อมูล (pure — ใช้ทั้ง server pages และ test) ———
+
+/** ปัดเปอร์เซ็นต์ 0-100 — สูตรเดียวกับ v_enrollment_progress (0009_views.sql) */
+function roundedPercent(part: number, total: number): number {
+  return total <= 0 ? 0 : Math.round((100 * part) / total);
+}
+
+/** ผูกโครงสร้างหลักสูตร (GET /courses/{id}) เข้ากับสถานะความคืบหน้า (GET /courses/{id}/progress) */
+export function buildCourseOutline(
+  detail: CourseDetailSummary,
+  progress: CourseProgress,
+): CourseOutline {
+  const stateByLesson = new Map<string, { status: LessonStatus; watchPct: number }>();
+  for (const moduleRow of progress.modules) {
+    for (const lesson of moduleRow.lessons) {
+      stateByLesson.set(lesson.lessonId, { status: lesson.status, watchPct: lesson.watchPct });
+    }
+  }
+  const modules: CourseModule[] = detail.modules.map((module) => ({
+    id: module.id,
+    title: module.title,
+    lessons: module.lessons.map((lesson) => {
+      const state = stateByLesson.get(lesson.id);
+      return {
+        id: lesson.id,
+        title: lesson.title,
+        type: lesson.type,
+        status: state?.status ?? "not_started",
+        watchPct: state?.watchPct ?? 0,
+      };
+    }),
+  }));
+  const lessons = modules.flatMap((module) => module.lessons);
+  const completed = lessons.filter((lesson) => lesson.status === "completed").length;
+  return {
+    id: detail.id,
+    title: detail.title,
+    category: detail.category,
+    modules,
+    lessonCount: lessons.length,
+    completedCount: completed,
+    progressPercent: roundedPercent(completed, lessons.length),
+  };
+}
+
+/** ป้าย "บทเรียน {โมดูล}.{ลำดับ}" ของบทเรียนใน outline — ไม่พบ = null */
+export function lessonLabelInOutline(outline: CourseOutline, lessonId: string): string | null {
+  for (const [moduleIndex, module] of outline.modules.entries()) {
+    const lessonIndex = module.lessons.findIndex((lesson) => lesson.id === lessonId);
+    if (lessonIndex >= 0) {
+      return `บทเรียน ${moduleIndex + 1}.${lessonIndex + 1}`;
+    }
+  }
+  return null;
+}
+
+export interface ContinuePicked {
+  lesson: OutlineLesson;
+  label: string;
+}
+
+/** บทที่ค้าง = บทล่าสุดที่กำลังเรียน ถ้าไม่มีใช้บทแรกที่ยังไม่เริ่ม ถ้าเรียนครบแล้วเป็น null (LRN-009) */
+export function pickContinueLesson(outline: CourseOutline): ContinuePicked | null {
+  const flat = outline.modules.flatMap((module, moduleIndex) =>
+    module.lessons.map((lesson, lessonIndex) => ({
+      lesson,
+      label: `บทเรียน ${moduleIndex + 1}.${lessonIndex + 1}`,
+    })),
+  );
+  const inProgress = flat.find((item) => item.lesson.status === "in_progress");
+  if (inProgress !== undefined) {
+    return inProgress;
+  }
+  return flat.find((item) => item.lesson.status === "not_started") ?? null;
+}
+
+/** บทเรียนปัจจุบัน — ระบุ id แล้วพบใน outline = บทนั้น; ไม่ระบุ/ไม่พบ = บทที่ค้าง (LRN-009) */
+export function resolveCurrentLesson(
+  outline: CourseOutline,
+  lessonIdParam: string | undefined,
+): ContinuePicked | null {
+  if (lessonIdParam !== undefined && lessonIdParam.length > 0) {
+    for (const [moduleIndex, module] of outline.modules.entries()) {
+      const lessonIndex = module.lessons.findIndex((lesson) => lesson.id === lessonIdParam);
+      if (lessonIndex >= 0) {
+        const lesson = module.lessons[lessonIndex];
+        if (lesson !== undefined) {
+          return { lesson, label: `บทเรียน ${moduleIndex + 1}.${lessonIndex + 1}` };
+        }
+      }
+    }
+  }
+  return pickContinueLesson(outline);
+}
+
+export interface NeighborLessons {
+  index: number;
+  total: number;
+  prev: LessonSummary | null;
+  next: LessonSummary | null;
+}
+
+/** บทเรียนก่อน/ถัดไปของบทปัจจุบัน (นับจาก outline เรียงตามโมดูล/ลำดับ) */
+export function findLessonNeighbors(outline: CourseOutline, lessonId: string): NeighborLessons | null {
+  const flat = outline.modules.flatMap((module) => module.lessons);
+  const index = flat.findIndex((lesson) => lesson.id === lessonId);
+  if (index < 0) {
+    return null;
+  }
+  return {
+    index,
+    total: flat.length,
+    prev: flat[index - 1] ?? null,
+    next: flat[index + 1] ?? null,
+  };
+}
+
+/** การ์ด "หลักสูตรของฉัน" — จาก enrollment + (detail/progress ที่โหลดได้บางส่วนก็ยังแสดงได้) */
+export function buildEnrolledCourseCard(
+  enrollment: EnrollmentSummary,
+  detail: CourseDetailSummary | null,
+  progress: CourseProgress | null,
+): EnrolledCourseCard {
+  const outline =
+    detail !== null && progress !== null ? buildCourseOutline(detail, progress) : null;
+  const picked = outline !== null ? pickContinueLesson(outline) : null;
+  return {
+    id: enrollment.courseId,
+    title: detail?.title ?? "หลักสูตรที่ลงทะเบียน",
+    category: detail?.category ?? "",
+    enrollmentStatus: enrollment.status,
+    lessonCount: progress?.lessonTotal ?? detail?.lessonCount ?? 0,
+    completedCount: progress?.lessonCompleted ?? 0,
+    progressPercent: progress?.progressPct ?? 0,
+    continueLesson:
+      picked === null
+        ? null
+        : {
+            id: picked.lesson.id,
+            title: picked.lesson.title,
+            type: picked.lesson.type,
+            status: picked.lesson.status,
+            label: picked.label,
+            watchPct: picked.lesson.watchPct,
+          },
+    isLoaded: detail !== null && progress !== null,
+  };
 }

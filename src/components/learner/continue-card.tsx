@@ -19,10 +19,7 @@ export function ContinueCard({
   courseTitle: string; // ชื่อหลักสูตร — แสดงเหนือป้ายบทเรียน
   lesson: ContinueLessonInfo;
 }) {
-  const positionPercent =
-    lesson.positionSeconds !== null && lesson.durationSeconds !== null && lesson.durationSeconds > 0
-      ? Math.round((lesson.positionSeconds / lesson.durationSeconds) * 100)
-      : null;
+  const positionPercent = lesson.watchPct;
   const href = `/courses/${encodeURIComponent(courseId)}/learn/${encodeURIComponent(lesson.id)}`;
   const isResuming = lesson.status === "in_progress";
   return (
@@ -37,7 +34,7 @@ export function ContinueCard({
         {courseTitle} · {lesson.label}
       </p>
       <p className="mt-3 font-heading text-base font-semibold text-ink-900">{lesson.title}</p>
-      {positionPercent !== null ? (
+      {positionPercent > 0 ? (
         <div className="mt-3 max-w-md">
           <ProgressBar percent={positionPercent} label="ดูวิดีโอไปแล้ว (ตำแหน่งล่าสุด)" />
         </div>
