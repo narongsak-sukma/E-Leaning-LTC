@@ -9,6 +9,7 @@
 import "server-only";
 
 import { cookies } from "next/headers";
+import { cache } from "react";
 
 import { getConfig } from "@/lib/config";
 
@@ -44,7 +45,13 @@ export async function getCategories(): Promise<CatalogCategory[]> {
   return fetchCategories(await catalogContext());
 }
 
-/** GET /api/v1/courses/{id} → { data } | undefined (404) — สำหรับหน้า RSC รายละเอียดหลักสูตร */
-export async function findPublishedCourse(id: string): Promise<CourseDetail | undefined> {
-  return fetchPublishedCourse(id, await catalogContext());
-}
+/**
+ * GET /api/v1/courses/{id} → { data } | undefined (404) — สำหรับหน้า RSC รายละเอียดหลักสูตร
+ * ครอบด้วย cache() (PB-3): หน้าเดียวเรียกซ้ำใน request เดียว — generateMetadata + ตัวหน้า
+ * (src/app/(public)/courses/[id]/page.tsx) → dedupe ให้ยิง BFF ครั้งเดียวต่อ request (pure read)
+ * ลายเซ็นจากมุมมองผู้เรียกเหมือนเดิม (cache() คืนฟังก์ชันที่เรียก/await ได้เหมือนเดิม)
+ */
+export const findPublishedCourse = cache(
+  async (id: string): Promise<CourseDetail | undefined> =>
+    fetchPublishedCourse(id, await catalogContext()),
+);

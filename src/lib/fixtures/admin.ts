@@ -20,6 +20,7 @@
  */
 import "server-only";
 import { headers } from "next/headers";
+import { cache } from "react";
 import { getConfig } from "@/lib/config";
 import { ROLES, type Role } from "@/lib/rbac";
 
@@ -404,8 +405,14 @@ export async function getAdminCategories(): Promise<AdminResult<AdminCategory[]>
  * - 401/403 (ไม่มี session / ไม่ใช่เจ้าหน้าที่ / MFA ยังไม่ผ่าน) → { ok: true, staff: null }
  *   (layout ใช้ตัวตัดสินนี้ redirect ไป /login)
  * - BFF ล่ม / 5xx / contract ผิดรูป → { ok: false } (layout แสดงแผง "ระบบขัดข้อง" — fail-closed)
+ *
+ * ครอบด้วย cache() (PB-3 ต่อ): layout ของ (admin) และหน้าใต้มันเรียกซ้ำใน request
+ * เดียว ((admin)/layout.tsx + admin/categories/page.tsx + admin/courses/[id]/page.tsx)
+ * → dedupe ให้ยิง BFF GET /api/v1/me ครั้งเดียวต่อ request (pure read — ผลลัพธ์
+ * เดียวกันทั้ง tree) ลายเซ็นจากมุมมองผู้เรียกเหมือนเดิม
  */
-export async function getAdminStaffSession(): Promise<AdminSessionResult> {
+export const getAdminStaffSession = cache(
+  async (): Promise<AdminSessionResult> => {
   const outcome = await bffGet("/api/v1/me");
   if (!outcome.ok) {
     return { ok: false };
@@ -441,7 +448,8 @@ export async function getAdminStaffSession(): Promise<AdminSessionResult> {
   const mfaRaw = payload["mfaVerified"];
   const mfaVerified = typeof mfaRaw === "boolean" ? mfaRaw : null;
   return { ok: true, staff: { name, roles, mfaVerified } };
-}
+  },
+);
 
 const THAI_DATE_FORMAT = new Intl.DateTimeFormat("th-TH-u-ca-buddhist", {
   year: "numeric",
