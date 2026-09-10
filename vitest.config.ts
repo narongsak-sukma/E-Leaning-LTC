@@ -7,11 +7,18 @@ import { defineConfig } from "vitest/config";
  *
  * alias `@` ให้ตรง tsconfig paths ("@/*": ["./src/*"]) — component test
  * ที่ import "@/components/..." จะได้ resolve เหมือน Next จริง (D26)
+ *
+ * PB-2: esbuild.jsx = "automatic" — .tsx ที่ถูก transform ใน vitest ใช้ jsx-runtime อัตโนมัติ
+ * (เดิม tsconfig jsx:"preserve" ทำให้ .tsx ต้องมี global React — ดู (admin)/layout.test.ts)
+ * PB-5: alias "server-only" → tests/stubs/server-only.ts — test ที่ import module ฝั่ง server
+ * ผ่านได้โดยไม่ต้อง vi.mock("server-only") ในทุกไฟล์ (mock เดิมคงอยู่ได้ ไม่ชนกัน)
  */
 export default defineConfig({
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "server-only": fileURLToPath(new URL("./tests/stubs/server-only.ts", import.meta.url)),
     },
   },
   test: {
