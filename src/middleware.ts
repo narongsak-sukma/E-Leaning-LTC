@@ -22,23 +22,25 @@ import { getConfig } from "./lib/config";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
- * ตรวจ CSRF เชิงโครงสร้าง (SDS §5.4) — ใช้ได้กับทุก mutating request
- * - มี Origin → host ต้องตรง host ของ request เท่านั้น (ผิดรูปแบบ = ปฏิเสธ)
- * - ไม่มี Origin → Sec-Fetch-Site ต้องเป็น same-origin / same-site / none
- * - ไม่มีทั้งคู่ → ปฏิเสธ (fail-closed — พิสูจน์ไม่ได้ว่ามาจาก host เดียวกัน)
+ * ตรวจ CSRF เชิงโครงสร้าง (SDS §5.4 — "ต่าง origin = ปฏิเสธ") — ทุก mutating request
+ * - มี Origin → เทียบ origin เต็ม (scheme+host+port) กับ origin ของ request —
+ *   เทียบเฉพาะ host ไม่พอ: Origin: http://x ต่อ request https://x เป็นคนละ origin
+ * - ไม่มี Origin → Sec-Fetch-Site ต้องเป็น same-origin / none เท่านั้น —
+ *   same-site คือ subdomain อื่นของ site เดียวกัน = ต่าง origin ตาม §5.4 → ปฏิเสธ
+ * - ไม่มีทั้งคู่ → ปฏิเสธ (fail-closed — พิสูจน์ไม่ได้ว่ามาจาก origin เดียวกัน)
  */
 export function isCsrfAllowed(request: NextRequest): boolean {
   const origin = request.headers.get("origin");
   if (origin !== null) {
     try {
-      return new URL(origin).host === request.nextUrl.host;
+      return new URL(origin).origin === request.nextUrl.origin;
     } catch {
       return false;
     }
   }
   const secFetchSite = request.headers.get("sec-fetch-site");
   if (secFetchSite !== null) {
-    return secFetchSite === "same-origin" || secFetchSite === "same-site" || secFetchSite === "none";
+    return secFetchSite === "same-origin" || secFetchSite === "none";
   }
   return false;
 }
@@ -71,6 +73,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
             request.cookies.set(name, value);
             carried.delete(name);
           }
+          // cookie ใหม่ต้องเดินต่อถึง handler ด้วย — sync เข้า header ของ request
+          // ที่จะถูก forward (ไม่ใช่แค่ response กลับ browser)
+          requestHeaders.set("cookie", request.cookies.toString());
           // Next จับค่า headers ณ จุดสร้าง response — แก้ cookie header แล้วต้องสร้าง
           // response ใหม่ (แบบเดียวกับ pattern ทางการของ @supabase/ssr) แล้วจึงเขียน
           // cookie ที่สะสมไว้ทั้งหมด (เก่า + ใหม่) ลง response ล่าสุด

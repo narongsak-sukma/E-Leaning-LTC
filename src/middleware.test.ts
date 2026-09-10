@@ -96,11 +96,22 @@ describe("CSRF — fail-closed ทุก non-safe method (SDS §5.4)", () => {
     expect(res.status).toBe(403);
   });
 
-  it("POST Sec-Fetch-Site same-origin / same-site / none → ผ่านทั้งหมด", async () => {
-    for (const site of ["same-origin", "same-site", "none"]) {
+  it("POST Sec-Fetch-Site same-origin / none → ผ่าน; same-site (subdomain อื่น = ต่าง origin) → 403", async () => {
+    for (const site of ["same-origin", "none"]) {
       const res = await middleware(makeRequest("POST", "/api/v1/courses", { "sec-fetch-site": site }));
-      expect(res.status).toBe(200);
+      expect(res.status, site).toBe(200);
     }
+    const sameSite = await middleware(makeRequest("POST", "/api/v1/courses", { "sec-fetch-site": "same-site" }));
+    expect(sameSite.status).toBe(403);
+  });
+
+  it("Origin ต่าง scheme แต่ host เดียวกัน (http → https request) → 403 (เทียบ origin เต็ม)", async () => {
+    const req = new NextRequest("https://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000" },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(403);
   });
 
   it("POST ไม่มีทั้ง Origin และ Sec-Fetch-Site → 403 (fail-closed — พิสูจน์ origin ไม่ได้)", async () => {
@@ -135,6 +146,9 @@ describe("session refresh (SDS §5.1) — cookie หมุน token เขีย
     const written = res.cookies.getAll().find((c) => c.name === "sb-auth-token");
     expect(written?.value).toBe("rotated");
     expect(written).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
+    // ทิศทางที่สอง: request ที่ถูก forward ต่อไปยัง handler ต้องเห็น token ใหม่ด้วย
+    // (Next สะท้อน header ที่ override ไว้เป็น x-middleware-request-<name> บน response)
+    expect(res.headers.get("x-middleware-request-cookie")).toContain("sb-auth-token=rotated");
     expect(res.headers.get("x-request-id")).toBeTruthy();
   });
 
@@ -168,6 +182,7 @@ describe("isCsrfAllowed + config", () => {
   it("isCsrfAllowed ตรงกับ middleware decision", () => {
     expect(isCsrfAllowed(makeRequest("POST", "/api/v1/x", { origin: "http://localhost:3000" }))).toBe(true);
     expect(isCsrfAllowed(makeRequest("POST", "/api/v1/x", { origin: "https://evil.example" }))).toBe(false);
+    expect(isCsrfAllowed(makeRequest("POST", "/api/v1/x", { "sec-fetch-site": "same-site" }))).toBe(false);
     expect(isCsrfAllowed(makeRequest("POST", "/api/v1/x"))).toBe(false);
   });
 
