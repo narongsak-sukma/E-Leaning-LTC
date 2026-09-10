@@ -12,13 +12,17 @@
 
 ## 1. หลักการกลาง
 
-1. **fail fast ตอน boot** — `src/lib/config.ts` ตรวจครบทุกค่าบังคับก่อนรับ request
-   (SDS §7.1); ค่าที่ผิดนโยบายของ prod จะทำให้แอปไม่ start (ไม่ใช่แค่เตือน)
+1. **fail fast ตั้งแต่ boot** — `src/lib/config.ts` ตรวจครบทุกค่าบังคับก่อนรับ
+   request (SDS §7.1); ค่าที่ผิดนโยบายของ prod ทำให้ bootstrap throw
+   (instrumentation) + `/api/health` 503 + call site พังทุกทาง (ไม่ใช่แค่เตือน)
 2. **ห้าม reuse** — หนึ่ง secret = หนึ่งวัตถุประสงค์; โดยเฉพาะ `CURSOR_HMAC_SECRET`
    ห้ามใช้ค่าเดียวกับ service key ในทุก environment จริง
 3. **หมุนเป็นชุด มีผลข้างเคียงที่รู้ทัน** — ดูคอลัมน์ "ผลข้างเคียงการหมุน" ก่อนหมุนทุกครั้ง
-4. dev placeholder (JWT `0000…`, `super-secret-jwt…`) อยู่ใน gitleaks allowlist
-   โดยเจาะจง signature — ค่าจริงที่หลุดเข้า repo จะถูกจับเป็น leak เสมอ
+4. **gitleaks มีขอบเขตที่ต้องรู้** — allowlist ข้าม "ทั้งไฟล์" ที่เป็นเอกสาร/ตัวอย่าง
+   (`docs/`, `.env.example`, `docker/kong/kong.yml`) และข้าม "เฉพาะบรรทัด" ที่มี
+   signature ของ JWT placeholder dev มาตรฐานของ Supabase สองค่า — ดังนั้นค่าจริง
+   ในโค้ด/ไฟล์อื่นถูกจับตามปกติ แต่การเอาค่าจริงใส่ไฟล์กลุ่มแรกจะไม่ถูกจับ
+   (เลี่ยงโดยวินัย: ห้ามใส่ค่าจริงในเอกสาร/`.env.example` เป็นอันขาด)
 
 ## 2. ตาราง secret ของ staging/prod
 
@@ -28,9 +32,9 @@
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase platform (Project Settings → API) | Vercel env + อ้างอิงโดย compose ไม่ได้ใน prod | หมุน service key ที่ Supabase → อัปเดต Vercel env ให้ตรงกันในรอบเดียว |
 | `SUPABASE_DB_POOLER_URL` | Supabase pooler (transaction mode — SDS §8) | Vercel env | เปลี่ยนตาม project/region เท่านั้น |
 | `R2_*` (เมื่อ `MEDIA_PROVIDER=r2`) | Cloudflare R2 | Vercel env | rotate = คู่ Access Key/Secret พร้อมกัน |
-| `STREAM_SIGNING_*` (เมื่อ `MEDIA_PROVIDER=stream`) | Cloudflare Stream | Vercel env | URL เซ็นก่อนหน้าตายตาม TTL เดิม |
+| `STREAM_ACCOUNT_ID` + `STREAM_CLIENT_SECRET` (เมื่อ `MEDIA_PROVIDER=stream`) | Cloudflare Stream — **ต้องครบทั้ง 2 ค่า** ตาม config schema | Vercel env | URL เซ็นก่อนหน้าตายตาม TTL เดิม |
 | `SMTP_USER` / `SMTP_PASSWORD` หรือ `RESEND_API_KEY` (เมื่อเปิดส่งอีเมลจริง) | ผู้ให้บริการอีเมล (Wave F) | Vercel env | อีเมลค้างส่งช่วงหมุน — ตรวจ outbox หลังหมุน |
-| `NEXT_PUBLIC_*` ทั้งหมด | — | — | **ไม่มี secret ชนิดนี้ในระบบ** — lint rule `ltc/no-public-service-role` + config ban บังคับ (SDS §5.1) |
+| `NEXT_PUBLIC_*` ที่มี `SERVICE_ROLE` ในชื่อ | — | — | **ห้ามใช้โดยกลไกจริง** — `loadConfig` ปฏิเสธทันที (`PUBLIC_SERVICE_ROLE_BAN`) + lint rule `ltc/no-public-service-role` (SDS §5.1) · หมายเหตุ: กลไกบังคับด้วยชื่อตรงเฉพาะกลุ่ม SERVICE_ROLE — secret ชนิดอื่นไม่ควรมีใน `NEXT_PUBLIC_*` เป็นวินัย (ฝั่ง client อ่าน env ไม่ได้อยู่แล้วเพราะทุก secret ถูกอ่านผ่าน server-only modules) |
 
 **ห้ามตั้งใน staging/prod เด็ดขาด:** `TEST_*` ทั้งชุด (ใช้เฉพาะ dev/test harness —
 รวม `TEST_USER_PASSWORD`) และ `APP_ENV` ต้องเป็น `prod` (staging ก็ใช้ `prod` —
@@ -48,22 +52,32 @@
 1. generate: `openssl rand -base64 32` (≥ 32 bytes entropy)
 2. ตั้งเป็น env ของ platform (Vercel → Project → Settings → Environment Variables)
    โดยไม่ผ่านไฟล์ใด ๆ ใน repo
-3. deploy — config ตรวจให้: `APP_ENV=prod` และไม่มี `CURSOR_HMAC_SECRET`
-   → **แอปไม่ start** พร้อม issue ระบุชื่อ key (superRefine ใน `src/lib/config.ts`)
-4. ตรวจผล: `/api/health` ตอบ 200 และ listing ที่มี cursor (เช่น `/api/v1/courses`)
-   ส่ง cursor ต่อได้ตามปกติ
+3. deploy ใหม่ — env ของ Vercel มีผลเฉพาะ deployment ที่สร้างหลังตั้งค่า
+   (deployment เดิมยังถือค่าเก่าตามที่ถูก inject ไว้ตอนสร้าง)
+4. ตรวจว่าบังคับจริง — ถ้า `APP_ENV=prod` และไม่มี `CURSOR_HMAC_SECRET`:
+   - `instrumentation.register` (src/instrumentation.ts) throw `ConfigError`
+     ตอน server bootstrap — Next.js รุ่นที่ใช้งานอาจกลืน error นี้ได้ จึงมีชั้นสำรอง:
+   - `/api/health` ตอบ **503** + `status:"error"` (getConfig พัง = readiness พัง —
+     uptime check จับได้ทันที)
+   - และทุก handler ที่ใช้ config ก็ fail-closed อยู่ดี (getConfig throw ที่ call site)
+5. ตรวจผลบน deployment ที่ตั้งค่าครบ: `/api/health` ตอบ 200 และ listing ที่มี
+   cursor (เช่น `/api/v1/courses`) ส่ง cursor ต่อได้ตามปกติ
 
-การหมุนภายหลัง: ทำข้อ 1–2 ซ้ำได้ทุกเมื่อ (ไม่มี downtime) — เฉพาะช่วงสอบ
-(assessment window) ให้เลี่ยงตามคอลัมน์ผลข้างเคียง
+การหมุนภายหลัง: ทำข้อ 1–3 ซ้ำ (generate → ตั้ง env → **deploy ใหม่ทุกครั้ง** —
+config ถูก cache ต่อ runtime แล้วแต่ละ deployment ถือ env ของตัวเอง ไม่มี hot
+reload) แล้วพิสูจน์ว่าคีย์เก่าตายแล้ว: cursor ที่ sign ด้วยคีย์เก่าต้องได้ 400
+`ERR-VAL-001` (`bad_signature`) บน deployment ใหม่ — ไม่มี downtime เพราะผู้ใช้
+เริ่มหน้าใหม่ได้ตามปกติ — เฉพาะช่วงสอบ (assessment window) ให้เลี่ยงตามคอลัมน์
+ผลข้างเคียง
 
 ## 4. สิ่งที่บังคับโดยกลไก (ไม่ใช่แค่เอกสาร)
 
 | กลไก | ที่ไหน |
 | --- | --- |
-| prod ไม่ตั้ง `CURSOR_HMAC_SECRET` → ไม่ start | `src/lib/config.ts` (superRefine PB-9) + `src/lib/config.test.ts` |
+| prod ไม่ตั้ง `CURSOR_HMAC_SECRET` → bootstrap throw + health 503 + call site พังหมด | `src/lib/config.ts` (superRefine PB-9) + `src/instrumentation.ts` (register) + `/api/health` (readiness) — tests: `config.test.ts` / `instrumentation.test.ts` / `health/route.test.ts` |
 | service key ขึ้นต้น `NEXT_PUBLIC_` → ไม่ start | `loadConfig` (`PUBLIC_SERVICE_ROLE_BAN`) + eslint rule `ltc/no-public-service-role` |
 | provider ไม่ครบค่าประกอบ → ไม่ start | `envSchemaWithRules` (R2/stream/smtp/resend) |
-| secret หลุดเข้า repo → CI ว่าจับ | gitleaks 5 ด่าน (ci.yml) + allowlist เฉพาะ dev placeholder signature |
+| secret หลุดเข้า repo → CI จับ (ยกเว้นไฟล์เอกสาร/ตัวอย่างที่ allowlist — ดู §1.4) | gitleaks 5 ด่าน (ci.yml) |
 
 ## 5. คำถามค้าง (ไม่บล็อกการใช้งาน)
 
