@@ -6,16 +6,18 @@
  *   + เหตุผลกำกับทุกจุด (SDS §5.2); route handler เรียกฟังก์ชันของ lib เท่านั้น ห้าม import
  *   service client ตรง
  * - cert_no `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` + verify_code 43 อักขระ — **CSPRNG (node:crypto randomInt)
- *   ห้าม Math.random** (SDS §3.4a — sequence/generator ที่เดาได้ใช้ไม่ได้)
- * - audit ผ่าน RPC `append_audit_event` เท่านั้น (0010_security.sql:102 revoke insert บน audit_logs
- *   จาก service_role) — 0019 ขยาย allowlist ให้เหตุการณ์ CERT และ PII_ACCESS เขียนใต้
- *   service_role ได้
+ *   ห้าม Math.random** (SDS §3.4a — sequence/generator ที่เดาได้ใช้ไม่ได้) · 0019-r1 มี
+ *   generator ฝั่ง DB อีกชุดใน cert_issue_core (mirror ชุดเดียวกัน — BFF เลิกใช้ตอนออกใบ)
+ * - audit: 0019-r1 ย้าย mutation events (CERT_ISSUE/CERT_REVOKE/CERT_REISSUE) ไปบันทึก
+ *   **ใน TX เดียวกับ mutation** ภายใน SECURITY DEFINER RPCs (admin_issue/revoke/reissue_
+ *   certificate + cert_issue_core — gate r1 B2/B7) — BFF เรียก `append_audit_event`
+ *   เหลือ **PII_ACCESS เท่านั้น** (allowlist service_role ของ wrapper = AUTH_* + PII_ACCESS)
  */
 import "server-only";
 import { randomInt } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getConfig } from "@/lib/config";
-import { AppError } from "@/lib/errors";
+import { AppError, type ErrorCode } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 
@@ -47,6 +49,58 @@ export const MAX_CODE_ATTEMPTS = 5;
 /** DB error → AppError แบบไม่ leak รายละเอียด SQL (SDS §6.1) — 503 เหมือน query อื่นของ repo */
 export function dbFailed(reason: string): AppError {
   return new AppError("ERR-SYS-002", { details: { reason } });
+}
+
+/**
+ * ป้าย error ท้าย message ของ RPC 0019-r1 — ข้อความไทย + `(ERR-XXX-NNN|reason)`
+ * (ต่อจากแบบแผน `(ERR-XXX-NNN)` ของ 0011 — เหตุผลเจาะจงเพิ่มของ 0019-r1) เช่น
+ * `ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|enrollment_not_found)`
+ */
+const CERT_RPC_ERROR_RE = /\((ERR-[A-Z]+-\d{3})(?:\|([a-z0-9_]+))?\)\s*$/;
+
+/** รหัสที่ทะเทียน error ของ repo รู้จัก — รหัสนอกชุด = drift ของ DB → ไม่ map (503) */
+const CERT_RPC_KNOWN_CODES = new Set([
+  "ERR-VAL-001",
+  "ERR-NF-001",
+  "ERR-AUTH-001",
+  "ERR-RBAC-001",
+  "ERR-SYS-001",
+  "ERR-SYS-002",
+]);
+
+/** แยกรหัส+เหตุผลจาก message ของ RPC — null = ไม่มีป้าย (เป็น error อื่น ไม่ใช่ธุรกิจ) */
+export function parseCertRpcErrorCode(
+  message: string,
+): { code: string; reason: string | null } | null {
+  const matched = CERT_RPC_ERROR_RE.exec(message);
+  if (matched === null) {
+    return null;
+  }
+  return {
+    code: matched[1] as string,
+    reason: typeof matched[2] === "string" ? matched[2] : null,
+  };
+}
+
+/**
+ * error ของ RPC 0019-r1 → AppError: มีป้ายรหัสที่รู้จัก = map ตรง (สถานะตามทะเทียน) +
+ * details.reason; ไม่มีป้าย/รหัสไม่รู้จัก = ERR-SYS-002 opaque (ไม่ leak SQL ออกไป)
+ */
+export function certRpcError(error: unknown, fallbackReason: string): AppError {
+  const message =
+    typeof error === "object" && error !== null
+      ? (error as { message?: unknown }).message
+      : undefined;
+  const parsed = typeof message === "string" ? parseCertRpcErrorCode(message) : null;
+  if (parsed !== null && CERT_RPC_KNOWN_CODES.has(parsed.code)) {
+    const details: Record<string, string> = {};
+    if (parsed.reason !== null) {
+      details.reason = parsed.reason;
+    }
+    // cast ปลอดภัย: has() ผ่านชุด 6 รหัสข้างบน ซึ่งเป็นสับเซตของ ERROR_REGISTRY ทั้งหมด
+    return new AppError(parsed.code as ErrorCode, { details });
+  }
+  return dbFailed(fallbackReason);
 }
 
 /** อ่านค่า string จากแถว — ชนิดไม่ตรง = สัญญา DB เพี้ยน (fail-closed ไม่เดาค่า) */
@@ -124,8 +178,12 @@ export function holderNameOf(profile: Row): string {
   return full.length > 0 ? full : rowString(profile, "display_name");
 }
 
-/** event audit ของโดเมนนี้ — เฉพาะชื่อที่ doc ระบุ (AUDIT §2 / API-SPECIFICATION endpoint 79-83) */
-export type CertificateAuditAction = "CERT_ISSUE" | "CERT_REVOKE" | "CERT_REISSUE" | "PII_ACCESS";
+/**
+ * event audit ที่ BFF เขียนเองได้ — 0019-r1 เหลือ **PII_ACCESS เท่านั้น** (คิว eligible
+ * อ่านชื่อผู้ผ่านเกณฑ์ D12-23); CERT_ISSUE/CERT_REVOKE/CERT_REISSUE บันทึกใน TX ของ
+ * RPC ฝั่ง DB (append_audit_event_internal + p_actor_override) — gate r1 B2/B7
+ */
+export type CertificateAuditAction = "PII_ACCESS";
 
 export interface AuditEventInput {
   readonly action: CertificateAuditAction;
@@ -146,16 +204,17 @@ export interface AuditEventResult {
  * เขียน audit event ผ่าน RPC `append_audit_event` — **เส้นทางเดียวที่ DB เปิดให้ service_role**
  * (0010_security.sql:102 revoke insert บน audit_logs จากทุก role รวม service_role)
  *
- * **สัญญา DB ปัจจุบัน (0019_wave_d_batch.sql ขยาย allowlist ของ 0008_audit.sql):**
- * - ใต้ role `service_role` RPC รับ AUTH_* 12 event **+ CERT_ISSUE/CERT_REVOKE/CERT_REISSUE/
- *   PII_ACCESS** (AUDIT §4 L241 รับรองทางเดิน BFF service_role ตาม D36-O3) — strict keys
- *   + PII scan ยังตรวจทุก event เหมือนเดิม
+ * **สัญญา DB ปัจจุบัน (0019-r1 ปรับ allowlist ของ 0008_audit.sql):**
+ * - ใต้ role `service_role` RPC รับ **AUTH_* 12 + PII_ACCESS เท่านั้น** — CERT_ISSUE/
+ *   CERT_REVOKE/CERT_REISSUE ถูกถอนออกจาก allowlist เพราะต้องบันทึก atomic กับ
+ *   mutation ใน TX เดียว (D12-8) ซึ่งทำไม่ได้ผ่านสอง PostgREST call แยก → ย้ายไป RPCs
+ *   ของ 0019-r1 (mutation+audit ในตัว)
  * - actor ยกจาก context.user_id (BFF trusted ใส่มา) แล้ว strip ออกก่อนเก็บจริง (0019)
  * - RPC ปฏิเสธ before/after ที่ไม่ใช่ null → ฟังก์ชันนี้ส่ง null เสมอ
  *
- * ยังเรียก "แบบมีเงื่อนไข": เมื่อ DB ปฏิเสธ → **ไม่ล้ม write ธุรกิจ** + WARN log ที่ไม่มี PII
- * (ทางเดิน denial นี้เหลือไว้เป็น tripwire ตรวจจับการถูกถอน allowlist/เปลี่ยนสัญญา DB)
- * — ห้ามเดาว่าเขียนสำเร็จ จึงคืนผลลัพธ์ให้ผู้เรียกตรวจได้
+ * เรียก "แบบมีเงื่อนไข" ได้เฉพาะ PII_ACCESS (access event ไม่ใช่ mutation — เสียไปไม่ทำ
+ * audit ขัดแย้งกับสถานะจริง): DB ปฏิเสธ → ไม่ล้ม read ธุรกิจ + WARN ไม่มี PII (tripwire
+ * ตรวจการถอน allowlist/เปลี่ยนสัญญา DB) — ห้ามเดาว่าเขียนสำเร็จ จึงคืนผลให้ผู้เรียกตรวจ
  */
 export async function appendAuditEvent(
   client: SupabaseClient,

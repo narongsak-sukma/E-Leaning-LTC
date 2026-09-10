@@ -256,4 +256,14 @@ describe("GET /assessments/{id} — denial ทุก error code ของเส�
     expect(body.error.details.group).toBe("READ");
     expect(third.res.headers.get("retry-after")).not.toBeNull();
   });
+
+  it("B4: กติกา drift (pass_pct null จาก DB) → 503 ERR-SYS-002 fail-closed ไม่รั่ง 200 เพี้ยน", async () => {
+    const { res } = await get(ASSESSMENT_ID, {
+      rules: { data: { ...RULES_ROW, pass_pct: null }, error: null },
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("assessment_detail_contract_drift");
+  });
 });

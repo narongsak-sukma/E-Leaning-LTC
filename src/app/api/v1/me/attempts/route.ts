@@ -9,13 +9,18 @@
  */
 import { NextResponse } from "next/server";
 import { AppError } from "@/lib/errors";
-import { jsonErrorResponse, jsonPageOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonPageOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { buildPage, decodeCursor } from "@/lib/api/pagination";
 import { parsePageQuery } from "@/lib/schemas/v1/common";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
-import { toMyAttemptResource, type AttemptHistoryRow } from "@/lib/schemas/v1/exam";
+import { MyAttemptView, toMyAttemptResource, type AttemptHistoryRow } from "@/lib/schemas/v1/exam";
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -63,7 +68,10 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
     const rows = (data ?? []) as unknown as AttemptHistoryRow[];
     const page = buildPage({
-      rows: rows.map(toMyAttemptResource),
+      // zod-ตรวจทุกแถวขาออก (B4) — แถวไหน drift → 503 ERR-SYS-002 fail-closed ทั้งหน้า
+      rows: rows.map((row) =>
+        parseOutgoingView(MyAttemptView, toMyAttemptResource(row), "attempt_history_contract_drift"),
+      ),
       limit,
       sortKeyOf: (row) => row.startedAt,
       idOf: (row) => row.id,

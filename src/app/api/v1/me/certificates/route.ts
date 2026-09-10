@@ -16,10 +16,19 @@
 import { NextResponse } from "next/server";
 import { requirePermission } from "@/lib/rbac";
 import { AppError } from "@/lib/errors";
-import { jsonErrorResponse, jsonPageOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonPageOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { decodeCursor, buildPage } from "@/lib/api/pagination";
 import { parsePageQuery } from "@/lib/schemas/v1/common";
-import { toMyCertificateResource, type MyCertificateRow } from "@/lib/schemas/v1/certificate";
+import {
+  MyCertificateResource,
+  toMyCertificateResource,
+  type MyCertificateRow,
+} from "@/lib/schemas/v1/certificate";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
@@ -73,7 +82,10 @@ export async function GET(request: Request): Promise<NextResponse> {
       throw new AppError("ERR-SYS-002"); // opaque — ไม่ leak SQL (SDS §6.1)
     }
     const rows = (data ?? []) as unknown as readonly MyCertificateRow[];
-    const resources = rows.map(toMyCertificateResource);
+    // zod-ตรวจทุกแถวขาออก (B4) — แถวไหน drift → 503 ERR-SYS-002 fail-closed ทั้งหน้า
+    const resources = rows.map((row) =>
+      parseOutgoingView(MyCertificateResource, toMyCertificateResource(row), "my_certificate_contract_drift"),
+    );
     const page = buildPage({
       rows: resources,
       limit,

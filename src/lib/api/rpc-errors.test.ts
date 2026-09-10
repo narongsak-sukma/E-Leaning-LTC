@@ -5,7 +5,7 @@
  * 0005_assessment.sql — code ทะเบียนอยู่ปิดท้าย message รูปแบบ "(ERR-XXX-NNN)"
  */
 import { describe, expect, it } from "vitest";
-import { parseRpcErrorCode } from "./rpc-errors";
+import { parseRpcErrorCode, parseRpcErrorCodeDetailed } from "./rpc-errors";
 
 describe("parseRpcErrorCode — แกะ code ทะเบียนท้ายข้อความ RPC", () => {
   it("ข้อความไทย + (ERR-ENR-001) ปิดท้าย → ERR-ENR-001", () => {
@@ -82,5 +82,61 @@ describe("parseRpcErrorCode — แกะ code ทะเบียนท้าย
     expect(parseRpcErrorCode(undefined)).toBeUndefined();
     expect(parseRpcErrorCode({})).toBeUndefined();
     expect(parseRpcErrorCode({ message: 42 as never })).toBeUndefined();
+  });
+
+  it("รูป 0019-r1 (ERR-XXX-NNN|reason) — parseRpcErrorCode ยังได้ code เหมือนเดิม", () => {
+    expect(parseRpcErrorCode({ message: "ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)" })).toBe(
+      "ERR-NF-001",
+    );
+    expect(parseRpcErrorCode({ message: "สถานะไม่ถูกต้อง (ERR-VAL-001|not_valid)" })).toBe("ERR-VAL-001");
+  });
+});
+
+describe("parseRpcErrorCodeDetailed — แกะ code + เหตุผลรูป 0019-r1 (ERR-XXX-NNN|reason)", () => {
+  it("มีเหตุผล → {code, reason} — ข้อความไทยจริงของ RPC D-3/D-4", () => {
+    expect(
+      parseRpcErrorCodeDetailed({ message: "ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)" }),
+    ).toEqual({ code: "ERR-NF-001", reason: "certificate_not_found" });
+    expect(
+      parseRpcErrorCodeDetailed({ message: "ข้อมูลไม่ถูกต้อง: ใบนี้ไม่ได้อยู่ในสถานะออกใบแล้ว (ERR-VAL-001|not_valid)" }),
+    ).toEqual({ code: "ERR-VAL-001", reason: "not_valid" });
+    expect(
+      parseRpcErrorCodeDetailed({ message: "ต้องระบุผู้ดำเนินการ (ERR-AUTH-001|actor_required)" }),
+    ).toEqual({ code: "ERR-AUTH-001", reason: "actor_required" });
+  });
+
+  it("รูปเดิมไม่มีเหตุผล → reason เป็น null (ไม่ใช่ undefined)", () => {
+    expect(parseRpcErrorCodeDetailed({ message: "ต้องลงทะเบียนหลักสูตรก่อนเรียน (ERR-LRN-001)" })).toEqual({
+      code: "ERR-LRN-001",
+      reason: null,
+    });
+  });
+
+  it("มี code คู่กัน — เอาปิดท้ายพร้อมเหตุผลของตัวนั้น (anchored)", () => {
+    expect(
+      parseRpcErrorCodeDetailed({ message: "อ้าง (ERR-VAL-001|bad) แล้วล้ม (ERR-LRN-001|not_enrolled)" }),
+    ).toEqual({ code: "ERR-LRN-001", reason: "not_enrolled" });
+  });
+
+  it("เหตุผลอนุญาตเฉพาะ [a-z0-9_] — มีช่องว่าง/ขีดกลาง → ทั้ง message ไม่ match → undefined", () => {
+    expect(parseRpcErrorCodeDetailed({ message: "บริบท (ERR-VAL-001|not valid)" })).toBeUndefined();
+    expect(parseRpcErrorCodeDetailed({ message: "บริบท (ERR-VAL-001|not-valid)" })).toBeUndefined();
+  });
+
+  it("code ไม่อยู่ในทะเบียน (มีเหตุผลแนบ) → undefined", () => {
+    expect(parseRpcErrorCodeDetailed({ message: "บริบท (ERR-ZZZ-999|whatever)" })).toBeUndefined();
+  });
+
+  it("ไม่พบรูปแบบ / message ไม่ใช่ string → undefined (เสมือน parseRpcErrorCode)", () => {
+    expect(parseRpcErrorCodeDetailed({ message: "SQLSTATE 23505: duplicate key" })).toBeUndefined();
+    expect(parseRpcErrorCodeDetailed(null)).toBeUndefined();
+    expect(parseRpcErrorCodeDetailed({ message: 42 as never })).toBeUndefined();
+  });
+
+  it("trim ท้าย message ก่อนตรวจ (เหมือนรูปเดิม)", () => {
+    expect(parseRpcErrorCodeDetailed({ message: "สถานะไม่ถูกต้อง (ERR-VAL-001|not_valid) \n" })).toEqual({
+      code: "ERR-VAL-001",
+      reason: "not_valid",
+    });
   });
 });

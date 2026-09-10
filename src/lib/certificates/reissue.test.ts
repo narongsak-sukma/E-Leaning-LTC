@@ -1,8 +1,10 @@
 /**
- * Unit tests: src/lib/certificates/reissue.ts — ออกใบใหม่แทนใบเดิม (Wave D, lane D-4)
+ * Unit tests: src/lib/certificates/reissue.ts — ออกใบใหม่แทนใบเดิม (Wave D · 0019-r1)
  *
- * จุดหลัก: lineage สองทิศ (ใบใหม่ supersedes_cert_id · ใบเดิม superseded_by) — mock TX ตามใบงาน,
- * compensating revert เมื่อออกใบใหม่ล้ม, และใบเดิมต้อง valid เท่านั้น
+ * 0019-r1 (gate r1 B7): supersede + issue + lineage + CERT_ISSUE/CERT_REISSUE audit
+ * ทั้งหมดอยู่ใน RPC `admin_reissue_certificate` TX เดียว — BFF เรียก RPC ครั้งเดียว
+ * แล้ว render PDF ใบใหม่ (พัง = คงใบ pdf_media_id null ตาม D36-O6) · ไม่มี
+ * lineage UPDATE หรือ compensating revert ฝั่ง BFF อีกต่อไป
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,52 +25,60 @@ import { reissueCertificate } from "./reissue";
 import { certLogger } from "./shared";
 
 type Row = Record<string, unknown>;
+type Resolve = { data: unknown; error: null } | { data: null; error: Record<string, unknown> };
+type RpcResult = { data: unknown; error: Record<string, unknown> | null };
 
 const STAFF_ID = "a0000000-0000-4000-8000-000000000001";
-const CERT_ID = "c0000000-0000-4000-8000-000000000001";
+const OLD_CERT_ID = "c0000000-0000-4000-8000-000000000001";
 const NEW_CERT_ID = "c0000000-0000-4000-8000-000000000009";
 const ENROLL_ID = "e0000000-0000-4000-8000-000000000001";
 const USER_ID = "f0000000-0000-4000-8000-000000000001";
 const COURSE_ID = "b0000000-0000-4000-8000-000000000001";
-const T1 = "2026-09-01T00:00:00+00:00";
-
-interface BuilderState {
-  table: string;
-  select?: string;
-  eq: Array<[string, unknown]>;
-  updated?: unknown;
-  inserted?: unknown;
-}
-
-type Resolve = { data: unknown; error: null } | { data: null; error: Record<string, unknown> };
-
-interface Spec {
-  /** resolve ของ from("certificates") — (state, log) · คืน undefined เพื่อใช้ default */
-  cert?: (st: BuilderState, log: BuilderState[]) => Resolve | undefined;
-  read?: (table: string, st: BuilderState) => Resolve;
-}
+const MEDIA_ID = "90000000-0000-4000-8000-000000000001";
+const T1 = "2026-09-08T04:00:00+00:00";
 
 const OK: Resolve = { data: null, error: null };
 
+interface BuilderState {
+  table: string;
+  inserted?: unknown;
+  updated?: unknown;
+}
+
+interface Spec {
+  rpc?: () => RpcResult;
+  onInsert?: (table: string, payload: Row) => Resolve;
+  upload?: () => Resolve;
+  read?: (table: string) => Resolve;
+}
+
+/** jsonb ที่ admin_reissue_certificate คืน — core ของใบใหม่ + superseded_cert_id (ใบเดิม) */
+function reissueRow(): Row {
+  return {
+    id: NEW_CERT_ID,
+    cert_no: "LTC-2026-000999",
+    verify_code: "kRE7eSampleVerifyCode43CharsLongXXXXXXXXXXX",
+    enrollment_id: ENROLL_ID,
+    user_id: USER_ID,
+    course_id: COURSE_ID,
+    holder_name: "สมชาย ใจดี",
+    course_title: "หลักสูตรทดสอบ",
+    issued_at: T1,
+    superseded_cert_id: OLD_CERT_ID,
+  };
+}
+
 function reissueClient(spec: Spec) {
+  const rpc = vi.fn(async () => spec.rpc?.() ?? { data: null, error: null });
+  const uploads: Array<{ bucket: string; path: string }> = [];
   const builderLog: BuilderState[] = [];
   const client = {
     from: vi.fn((table: string) => {
-      void table;
-      const st: BuilderState = { table, eq: [] };
+      const st: BuilderState = { table };
       builderLog.push(st);
       const builder: Record<string, unknown> = {
-        select: vi.fn((s: string) => {
-          st.select = s;
-          return builder;
-        }),
-        eq: vi.fn((column: string, value: unknown) => {
-          st.eq.push([column, value]);
-          return builder;
-        }),
-        not: vi.fn(() => builder),
-        order: vi.fn(() => builder),
-        limit: vi.fn(() => builder),
+        select: vi.fn(() => builder),
+        eq: vi.fn(() => builder),
         update: vi.fn((payload: unknown) => {
           st.updated = payload;
           return builder;
@@ -77,101 +87,43 @@ function reissueClient(spec: Spec) {
           st.inserted = payload;
           return builder;
         }),
-        maybeSingle: vi.fn(async () => resolveCert(table, st, spec, builderLog)),
-        single: vi.fn(async () => resolveCert(table, st, spec, builderLog)),
-        then: (res: (v: Resolve) => unknown) => res(resolveCert(table, st, spec, builderLog)),
+        maybeSingle: vi.fn(async () => resolveFor(table, st, spec)),
+        single: vi.fn(async () => resolveFor(table, st, spec)),
+        then: (res: (v: Resolve) => unknown) => res(resolveFor(table, st, spec)),
       };
       return builder;
     }),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
-    _builderLog: builderLog,
+    rpc,
+    storage: {
+      from: (bucket: string) => ({
+        upload: vi.fn(async (path: string) => {
+          uploads.push({ bucket, path });
+          return spec.upload?.() ?? OK;
+        }),
+      }),
+    },
   };
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
-  return client as typeof client & { _builderLog: BuilderState[] };
+  return { rpc, uploads, builderLog };
 }
 
-/** default ของ lookup — หลัง supersede ใบเดิมไม่ valid แล้ว จึงมองไม่เห็นเป็น "ใบ valid" */
-function lookupResolve(log: BuilderState[]): Resolve {
-  const superseded = log.some((entry) => (entry.updated as Row | undefined)?.["status"] === "superseded");
-  return superseded ? { data: null, error: null } : { data: validOldCert(), error: null };
-}
-
-/** resolve สำหรับ from("certificates") — insert → ใบใหม่ · update → สำเร็จ (default) · lookup ตามสถานะ */
-function resolveCert(table: string, st: BuilderState, spec: Spec, log: BuilderState[]): Resolve {
-  if (table !== "certificates") {
-    return spec.read?.(table, st) ?? OK;
-  }
-  const overridden = spec.cert?.(st, log);
-  if (overridden !== undefined) {
-    return overridden;
-  }
+function resolveFor(table: string, st: BuilderState, spec: Spec): Resolve {
   if (st.inserted !== undefined) {
-    return {
-      data: {
-        id: NEW_CERT_ID,
-        cert_no: "LTC-2026-000999",
-        verify_code: "kRE7eSampleVerifyCode43CharsLongXXXXXXXXXXX",
-        issued_at: T1,
-      },
-      error: null,
-    };
+    return spec.onInsert?.(table, st.inserted as Row) ?? OK;
   }
-  if (st.updated !== undefined) {
-    const payload = st.updated as Row;
-    if (payload["status"] === "superseded") {
-      return { data: { id: CERT_ID, status: "superseded" }, error: null };
-    }
-    return { data: { id: CERT_ID }, error: null };
-  }
-  return lookupResolve(log);
+  return spec.read?.(table) ?? OK;
 }
 
-/** ใบเดิม valid จำลอง */
-function validOldCert(): Row {
+/** spec มาตรฐาน: RPC สำเร็จ + PDF pipeline สำเร็จตลอด */
+function happySpec(): Spec {
   return {
-    id: CERT_ID,
-    cert_no: "LTC-2025-000001",
-    enrollment_id: ENROLL_ID,
-    status: "valid",
+    rpc: () => ({ data: reissueRow(), error: null }),
+    onInsert: (table) => (table === "media_assets" ? { data: { id: MEDIA_ID }, error: null } : OK),
+    upload: () => OK,
   };
 }
 
-/** fixtures ฝั่ง issue (enrollment/attempt/profile/course) ที่ reissue อ่านผ่าน issueCertificate */
-function issueFixtures(): Record<string, Row> {
-  return {
-    enrollments: {
-      id: ENROLL_ID,
-      user_id: USER_ID,
-      course_id: COURSE_ID,
-      status: "completed",
-      completed_at: T1,
-      deleted_at: null,
-    },
-    assessment_attempts: { id: "d0000000-0000-4000-8000-000000000001", score_pct: 80, attempt_no: 1 },
-    profiles: { display_name: "นายสมชาย", first_name: "สมชาย", last_name: "ใจดี" },
-    courses: { title_th: "หลักสูตรทดสอบ" },
-    media_assets: { id: "90000000-0000-4000-8000-000000000001" },
-  };
-}
-
-/** read handler มาตรฐานฝั่ง issue — คืนแถวตารางเดียว (assessment_attempts ต้องเป็น array) */
-function issueRead(fix: Record<string, Row>, overrides: Record<string, Resolve> = {}) {
-  return (table: string): Resolve => {
-    const hit = overrides[table];
-    if (hit !== undefined) {
-      return hit;
-    }
-    if (table === "assessment_attempts") {
-      return { data: [fix["assessment_attempts"]], error: null };
-    }
-    if (table in fix) {
-      return { data: fix[table], error: null };
-    }
-    return OK;
-  };
-}
-
-describe("reissueCertificate — lineage (mock TX ตามใบงาน)", () => {
+describe("reissueCertificate — RPC TX เดียว (B7)", () => {
   let warns: Array<{ message: string; fields: Record<string, unknown> }> = [];
 
   beforeEach(() => {
@@ -183,93 +135,95 @@ describe("reissueCertificate — lineage (mock TX ตามใบงาน)", ()
     });
   });
 
-  it("happy path: ใบเดิม superseded + lineage สองทิศ + audit CERT_REISSUE", async () => {
-    const client = reissueClient({ read: issueRead(issueFixtures()) });
-    const result = await reissueCertificate({ actorId: STAFF_ID, certificateId: CERT_ID });
+  it("happy path: ใบใหม่ครบฟิลด์ + lineage จาก RPC + PDF ผูกสำเร็จ · เรียก RPC ครั้งเดียว", async () => {
+    const ctx = reissueClient(happySpec());
+    const result = await reissueCertificate({
+      actorId: STAFF_ID,
+      certificateId: OLD_CERT_ID,
+      requestId: "req-3",
+    });
 
     expect(result.oldStatus).toBe("superseded");
-    expect(result.oldCertificateId).toBe(CERT_ID);
+    expect(result.oldCertificateId).toBe(OLD_CERT_ID);
     expect(result.oldSupersededBy).toBe(NEW_CERT_ID);
+    expect(result.newCertificate).toMatchObject({
+      id: NEW_CERT_ID,
+      certNo: "LTC-2026-000999",
+      verifyCode: "kRE7eSampleVerifyCode43CharsLongXXXXXXXXXXX",
+      enrollmentId: ENROLL_ID,
+      userId: USER_ID,
+      courseId: COURSE_ID,
+      holderNameSnapshot: "สมชาย ใจดี",
+      courseTitleSnapshot: "หลักสูตรทดสอบ",
+      creditSnapshot: null,
+      status: "valid",
+      issuedAt: T1,
+      pdfMediaId: MEDIA_ID,
+    });
+
+    // B7: mutation+audit+lineage ทั้งหมดใน RPC เดียว — BFF ไม่เขียน lineage เอง
+    expect(ctx.rpc).toHaveBeenCalledTimes(1);
+    expect(ctx.rpc).toHaveBeenCalledWith("admin_reissue_certificate", {
+      p_actor_user_id: STAFF_ID,
+      p_certificate_id: OLD_CERT_ID,
+      p_request_id: "req-3",
+    });
+    const updates = ctx.builderLog.filter((st) => st.updated !== undefined).map((st) => st.updated);
+    expect(updates).toEqual([{ pdf_media_id: MEDIA_ID }]); // มีแค่การผูก PDF — ไม่มี supersede/supersedes/superseded_by
+    const upload = ctx.uploads[0];
+    expect(upload?.bucket).toBe("certificates");
+    expect(upload?.path).toBe("certificates-pdf/LTC-2026-000999.pdf");
+  });
+
+  it("PostgREST wrap jsonb เป็น array หลักเดียว → แกะแถวได้", async () => {
+    reissueClient({ ...happySpec(), rpc: () => ({ data: [reissueRow()], error: null }) });
+    const result = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID });
     expect(result.newCertificate.id).toBe(NEW_CERT_ID);
-
-    const updates = client._builderLog.filter((st) => st.updated !== undefined);
-    // ลำดับ: supersede → lineage ใบใหม่ → lineage ใบเดิม
-    expect(updates[0]?.updated).toEqual({ status: "superseded" });
-    expect(updates[1]?.updated).toEqual({ supersedes_cert_id: CERT_ID });
-    expect(updates[2]?.updated).toEqual({ superseded_by: NEW_CERT_ID });
-    expect(updates[0]?.eq).toEqual(
-      expect.arrayContaining([
-        ["id", CERT_ID],
-        ["status", "valid"],
-      ]),
-    );
-    expect(updates[1]?.eq).toEqual([["id", NEW_CERT_ID]]);
-    expect(updates[2]?.eq).toEqual([["id", CERT_ID]]);
-
-    expect(client.rpc).toHaveBeenCalledWith(
-      "append_audit_event",
-      expect.objectContaining({ p_action: "CERT_REISSUE" }),
-    );
+    expect(result.oldCertificateId).toBe(OLD_CERT_ID);
   });
 
-  it("ไม่พบใบเดิม → ERR-NF-001", async () => {
-    reissueClient({
-      cert: () => ({ data: null, error: null }),
-      read: issueRead(issueFixtures()),
-    });
-    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: CERT_ID }).catch(
+  it.each([
+    ["ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)", "ERR-NF-001", "certificate_not_found"],
+    ["ข้อมูลไม่ถูกต้อง: ใบนี้ไม่ได้อยู่ในสถานะออกใบแล้ว (ERR-VAL-001|not_valid)", "ERR-VAL-001", "not_valid"],
+  ])("RPC error มีป้าย → map ตรง: %s", async (message, code, reason) => {
+    reissueClient({ rpc: () => ({ data: null, error: { message } }) });
+    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
       (e: unknown) => e,
     );
-    expect((error as AppError).code).toBe("ERR-NF-001");
+    expect(error, message).toBeInstanceOf(AppError);
+    expect((error as AppError).code, message).toBe(code);
+    expect((error as AppError).details, message).toEqual({ reason });
   });
 
-  it("ใบเดิมไม่ valid (revoked) → ERR-VAL-001 not_valid และไม่ supersede", async () => {
-    const client = reissueClient({
-      cert: () => ({ data: { ...validOldCert(), status: "revoked" }, error: null }),
-      read: issueRead(issueFixtures()),
-    });
-    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: CERT_ID }).catch(
-      (e: unknown) => e,
-    );
-    expect((error as AppError).details).toMatchObject({ reason: "not_valid" });
-    expect(client._builderLog.some((st) => st.updated !== undefined)).toBe(false);
-  });
-
-  it("ออกใบใหม่ล้ม → compensating revert ใบเดิมกลับเป็น valid + throw ตัวเดิม", async () => {
-    const client = reissueClient({
-      read: issueRead(issueFixtures(), {
-        // ไม่มี attempt ที่ผ่าน → issueCertificate throw ERR-VAL-001
-        assessment_attempts: { data: [], error: null },
-      }),
-    });
-    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: CERT_ID }).catch(
-      (e: unknown) => e,
-    );
-    expect((error as AppError).details).toMatchObject({ reason: "no_passed_attempt" });
-    const revert = client._builderLog.filter((st) => st.updated !== undefined).at(-1);
-    expect(revert?.updated).toEqual({ status: "valid" });
-    expect(revert?.eq).toEqual(
-      expect.arrayContaining([
-        ["id", CERT_ID],
-        ["status", "superseded"],
-      ]),
-    );
-    expect(warns.map((w) => w.message)).not.toContain("certificate_audit_rpc_denied");
-  });
-
-  it("lineage update ล้มเหลว → ERR-SYS-002 cert_reissue_lineage_failed", async () => {
-    const client = reissueClient({
-      cert: (st) =>
-        st.updated !== undefined && (st.updated as Row)["supersedes_cert_id"] !== undefined
-          ? { data: null, error: { code: "XX000", message: "boom" } }
-          : undefined,
-      read: issueRead(issueFixtures()),
-    });
-    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: CERT_ID }).catch(
+  it("RPC error ไม่มีป้าย → ERR-SYS-002 opaque", async () => {
+    reissueClient({ rpc: () => ({ data: null, error: { code: "XX000", message: "boom" } }) });
+    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
       (e: unknown) => e,
     );
     expect((error as AppError).code).toBe("ERR-SYS-002");
-    expect((error as AppError).details).toMatchObject({ reason: "cert_reissue_lineage_failed" });
-    expect(client.from).toHaveBeenCalled();
+    expect((error as AppError).details).toEqual({ reason: "cert_reissue_rpc_failed" });
+  });
+
+  it("RPC สำเร็จแต่ data null → ERR-SYS-002 (contract mismatch)", async () => {
+    reissueClient({ rpc: () => ({ data: null, error: null }) });
+    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+  });
+
+  it("PDF upload ล้ม → ใบใหม่ยังครบ (pdfMediaId null) + WARN — ไม่ย้อนกลับใบเดิม (D36-O6)", async () => {
+    const ctx = reissueClient({
+      ...happySpec(),
+      upload: () => ({ data: null, error: { message: "bucket not found" } }),
+    });
+    const result = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID });
+    expect(result.newCertificate.id).toBe(NEW_CERT_ID);
+    expect(result.newCertificate.pdfMediaId).toBeNull();
+    expect(result.oldStatus).toBe("superseded"); // RPC สำเร็จแล้ว — PDF ไม่พากลับไปแก้สถานะ
+    expect(warns.map((w) => w.message)).toContain("certificate_pdf_upload_failed");
+    // BFF ไม่มี update ใดๆ เมื่อ PDF พัง (ไม่มีการ revert lineage ฝั่ง TS)
+    expect(ctx.builderLog.filter((st) => st.updated !== undefined)).toHaveLength(0);
+    expect(ctx.rpc).toHaveBeenCalledTimes(1);
   });
 });

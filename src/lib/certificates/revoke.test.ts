@@ -1,5 +1,10 @@
 /**
- * Unit tests: src/lib/certificates/revoke.ts — เพิกถอน (Wave D, lane D-4)
+ * Unit tests: src/lib/certificates/revoke.ts — เพิกถอน (Wave D, lane D-4 · 0019-r1)
+ *
+ * 0019-r1 (gate r1 B2): lookup + conditional UPDATE + CERT_REVOKE audit อยู่ใน RPC
+ * `admin_revoke_certificate` TX เดียว — BFF ตรวจ reason แล้วเรียก RPC ครั้งเดียว
+ * (ไม่มี append_audit_event แยกอีกต่อไป) · error แบบป้าย (ERR-XXX-NNN|reason) map
+ * ตรง, ไม่มีป้าย = ERR-SYS-002 opaque
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,167 +21,135 @@ vi.mock("@/lib/supabase/server", () => ({ createSupabaseServiceRoleClient: vi.fn
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { AppError } from "@/lib/errors";
 import { MIN_REASON_LENGTH, revokeCertificate } from "./revoke";
-import { certLogger } from "./shared";
 
 type Row = Record<string, unknown>;
+type RpcResult = { data: unknown; error: Record<string, unknown> | null };
 
 const STAFF_ID = "a0000000-0000-4000-8000-000000000001";
 const CERT_ID = "c0000000-0000-4000-8000-000000000001";
 const CERT_NO = "LTC-2026-000777";
-
-interface BuilderState {
-  table: string;
-  select?: string;
-  eq: Array<[string, unknown]>;
-  updated?: unknown;
-}
-
-type Resolve = { data: unknown; error: null } | { data: null; error: Record<string, unknown> };
-
-interface Spec {
-  lookup?: Resolve;
-  update?: Resolve;
-}
-
-const OK: Resolve = { data: null, error: null };
-
-function revokeClient(spec: Spec) {
-  const builderLog: BuilderState[] = [];
-  const client = {
-    from: vi.fn((table: string) => {
-      const st: BuilderState = { table, eq: [] };
-      builderLog.push(st);
-      const builder: Record<string, unknown> = {
-        select: vi.fn((s: string) => {
-          st.select = s;
-          return builder;
-        }),
-        eq: vi.fn((column: string, value: unknown) => {
-          st.eq.push([column, value]);
-          return builder;
-        }),
-        update: vi.fn((payload: unknown) => {
-          st.updated = payload;
-          return builder;
-        }),
-        maybeSingle: vi.fn(async () => spec.lookup ?? OK),
-        single: vi.fn(async () => spec.update ?? OK),
-        then: (res: (v: Resolve) => unknown) => res(spec.update ?? OK),
-      };
-      return builder;
-    }),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
-    _builderLog: builderLog,
-  };
-  vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
-  return client as typeof client & { _builderLog: BuilderState[] };
-}
-
-/** ใบ valid จำลอง */
-function validCert(): Row {
-  return { id: CERT_ID, cert_no: CERT_NO, status: "valid", revoked_at: null };
-}
-
-/** ผล update จำลอง (conditional UPDATE ... .eq("status","valid") ได้แถวเดียว) */
-function revokedRow(): Row {
-  return { id: CERT_ID, cert_no: CERT_NO, status: "revoked", revoked_at: "2026-09-08T05:00:00+00:00" };
-}
-
+const REVOKED_AT = "2026-09-08T05:00:00+00:00";
 const REASON = "ตรวจพบการทุจริตในการสอบ";
 
-describe("revokeCertificate", () => {
-  let warnCalls: Array<{ message: string; fields: Record<string, unknown> }> = [];
+/** แถวที่ RPC คืน (id/cert_no/revoked_at จาก TX เดียวกัน) */
+function revokedRow(): Row {
+  return { id: CERT_ID, cert_no: CERT_NO, revoked_at: REVOKED_AT };
+}
 
+function revokeClient(result: RpcResult) {
+  const rpc = vi.fn(async () => result);
+  const client = { rpc };
+  vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
+  return rpc;
+}
+
+describe("revokeCertificate", () => {
   beforeEach(() => {
     vi.mocked(createSupabaseServiceRoleClient).mockReset();
-    warnCalls = [];
-    vi.spyOn(certLogger, "warn").mockImplementation((message, fields) => {
-      warnCalls.push({ message, fields: fields ?? {} });
-      return certLogger;
-    });
   });
 
   it("MIN_REASON_LENGTH = 10 ตามใบงาน", () => {
     expect(MIN_REASON_LENGTH).toBe(10);
   });
 
-  it("reason สั้นกว่า 10 → ERR-VAL-001 (length_10_500) โดยไม่แตะ DB", async () => {
-    const client = revokeClient({ lookup: OK });
+  it("reason สั้นกว่า 10 → ERR-VAL-001 (length_10_500) โดยไม่แตะ RPC", async () => {
+    const rpc = revokeClient({ data: null, error: null });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: "สั้น" }).catch(
       (e: unknown) => e,
     );
     expect((error as AppError).code).toBe("ERR-VAL-001");
     expect((error as AppError).details).toMatchObject({ field: "reason", reason: "length_10_500" });
-    expect(client.from).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("reason ยาวเกิน 500 → ERR-VAL-001", async () => {
-    revokeClient({});
-    const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: "x".repeat(501) }).catch(
-      (e: unknown) => e,
-    );
+  it("reason ยาวเกิน 500 → ERR-VAL-001 โดยไม่แตะ RPC", async () => {
+    const rpc = revokeClient({ data: null, error: null });
+    const error = await revokeCertificate({
+      actorId: STAFF_ID,
+      certificateId: CERT_ID,
+      reason: "x".repeat(501),
+    }).catch((e: unknown) => e);
     expect((error as AppError).details).toMatchObject({ reason: "length_10_500" });
+    expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("happy path: conditional UPDATE มี guard status='valid' + คืนสถานะ revoked + audit CERT_REVOKE", async () => {
-    const client = revokeClient({
-      lookup: { data: validCert(), error: null },
-      update: { data: revokedRow(), error: null },
+  it("reason trim ก่อนตรวจ — ความยาวนับหลังตัดช่องว่าง + ส่งค่าที่ trim แล้วให้ RPC", async () => {
+    const rpc = revokeClient({ data: revokedRow(), error: null });
+    const result = await revokeCertificate({
+      actorId: STAFF_ID,
+      certificateId: CERT_ID,
+      reason: `  ${REASON}  `,
     });
-    const result = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON });
-    expect(result).toMatchObject({
+    expect(result.status).toBe("revoked");
+    expect(rpc).toHaveBeenCalledWith("admin_revoke_certificate", {
+      p_actor_user_id: STAFF_ID,
+      p_certificate_id: CERT_ID,
+      p_reason: REASON,
+      p_request_id: null,
+    });
+  });
+
+  it("happy path: คืน id/certNo/revokedAt จากแถว RPC · เรียก RPC ครั้งเดียว (audit ใน TX — B2)", async () => {
+    const rpc = revokeClient({ data: revokedRow(), error: null });
+    const result = await revokeCertificate({
+      actorId: STAFF_ID,
+      certificateId: CERT_ID,
+      reason: REASON,
+      requestId: "req-7",
+    });
+    expect(result).toEqual({
       id: CERT_ID,
       certNo: CERT_NO,
       status: "revoked",
+      revokedAt: REVOKED_AT,
       revokedReason: REASON,
     });
-    const updates = client._builderLog.filter((st) => st.updated !== undefined);
-    expect(updates).toHaveLength(1);
-    const upd = updates[0];
-    expect(upd?.updated).toMatchObject({
-      status: "revoked",
-      revoked_reason: REASON,
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith("admin_revoke_certificate", {
+      p_actor_user_id: STAFF_ID,
+      p_certificate_id: CERT_ID,
+      p_reason: REASON,
+      p_request_id: "req-7",
     });
-    expect(upd?.eq).toEqual(
-      expect.arrayContaining([
-        ["id", CERT_ID],
-        ["status", "valid"],
-      ]),
-    );
-    expect(client.rpc).toHaveBeenCalledWith(
-      "append_audit_event",
-      expect.objectContaining({ p_action: "CERT_REVOKE" }),
-    );
   });
 
-  it("ไม่พบใบ → ERR-NF-001", async () => {
-    revokeClient({ lookup: { data: null, error: null } });
+  it("PostgREST wrap jsonb เป็น array หลักเดียว → แกะแถวได้", async () => {
+    revokeClient({ data: [revokedRow()], error: null });
+    const result = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON });
+    expect(result.certNo).toBe(CERT_NO);
+    expect(result.revokedAt).toBe(REVOKED_AT);
+  });
+
+  it.each([
+    ["ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)", "ERR-NF-001", "certificate_not_found"],
+    ["ข้อมูลไม่ถูกต้อง: ใบนี้ไม่ได้อยู่ในสถานะออกใบแล้ว (ERR-VAL-001|not_valid)", "ERR-VAL-001", "not_valid"],
+    ["ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 ตัวอักษร (ERR-VAL-001|reason_length)", "ERR-VAL-001", "reason_length"],
+    ["ต้องระบุผู้ดำเนินการ (ERR-AUTH-001|actor_required)", "ERR-AUTH-001", "actor_required"],
+  ])("RPC error มีป้าย → map ตรง: %s", async (message, code, reason) => {
+    revokeClient({ data: null, error: { message } });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
       (e: unknown) => e,
     );
-    expect((error as AppError).code).toBe("ERR-NF-001");
+    expect(error, message).toBeInstanceOf(AppError);
+    expect((error as AppError).code, message).toBe(code);
+    expect((error as AppError).details, message).toEqual({ reason });
   });
 
-  it("ใบถูกเพิกถอนไปแล้ว (status revoked) → ERR-VAL-001 not_valid โดยไม่ UPDATE", async () => {
-    const client = revokeClient({
-      lookup: { data: { ...validCert(), status: "revoked" }, error: null },
-      update: { data: revokedRow(), error: null },
-    });
+  it("RPC error ไม่มีป้าย → ERR-SYS-002 opaque (ไม่ leak SQL)", async () => {
+    revokeClient({ data: null, error: { code: "XX000", message: "boom" } });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
       (e: unknown) => e,
     );
-    expect((error as AppError).details).toMatchObject({ reason: "not_valid" });
-    expect(client._builderLog.some((st) => st.updated !== undefined)).toBe(false);
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_revoke_rpc_failed" });
   });
 
-  it("แข่งกันเพิกถอน (guard ตัด 0 แถว) → ERR-VAL-001 not_valid", async () => {
-    revokeClient({
-      lookup: { data: validCert(), error: null },
-      update: { data: null, error: null },
-    });
+  it("RPC สำเร็จแต่ data null → ERR-SYS-002 (contract mismatch)", async () => {
+    revokeClient({ data: null, error: null });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
       (e: unknown) => e,
     );
-    expect((error as AppError).details).toMatchObject({ reason: "not_valid" });
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_revoke_rpc_failed" });
   });
 });

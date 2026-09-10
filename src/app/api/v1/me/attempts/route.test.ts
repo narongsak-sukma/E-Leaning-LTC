@@ -287,4 +287,15 @@ describe("GET /me/attempts — denial ตามทะเบียน error", () 
     expect(body.error.details?.group).toBe("READ");
     expect(third.res.headers.get("retry-after")).not.toBeNull();
   });
+
+  it("B4: แถว drift แถวเดียว (score_pct เป็น string) → 503 ERR-SYS-002 ทั้งหน้า ไม่รั่ง payload เพี้ยน", async () => {
+    const drifted = { ...row(1, T3), score_pct: "80" };
+    const { res } = await get("", { rows: [row(2, T2), drifted] });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect((body.error.details as { reason?: string } | undefined)?.reason).toBe(
+      "attempt_history_contract_drift",
+    );
+  });
 });

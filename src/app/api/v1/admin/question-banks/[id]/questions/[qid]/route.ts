@@ -10,14 +10,24 @@
  * (2) 0010/0011 ไม่มี trigger จัดการ versioning ข้อสอบให้
  * (3) 0011 start_attempt (L562-L655) snapshot ข้อสอบลง attempt_answers.question_snapshot
  *     ณ วินาทีเริ่มสอบ ประวัติจึงไม่เปลี่ยนแม้แก้ในแถวเดิม
+ *
+ * 0019-r1 (gate r1 B6): เดิม route แก้ questions แล้ววนเขียน question_options
+ * ทีละแถวใน TX แยกของแต่ละ option — เลื่อน sort_order ทับกันระหว่างสลับตำแหน่งชน
+ * uq_question_options_sort, และ trigger "ต้องมีคำตอบถูกเพียงหนึ่งเดียว" แบบ
+ * DEFERRABLE INITIALLY DEFERRED ตรวจตอน commit ทั้ง TX — แต่ TX แยกต่อ option
+ * ทำให้ state กลางคันถูกตรวจแทน state ปลายทาง ตอนนี้ยุบเป็น RPC
+ * `admin_update_question` TX เดียว (0019): ตรวจสิทธิ์เจ้าของ/active-readonly +
+ * patch keys + version bump + เลื่อน sort_order แบบสองเฟส (−1000000 กันชน)
+ * + update-or-insert ต่อ option ทั้งหมดในมุมเดียว — BFF ส่ง patch/options เป็น
+ * jsonb แล้ว reload อ่านผลจริงตอบกลับ
  */
 import { NextResponse } from "next/server";
 import { jsonErrorResponse, jsonOk, type JsonResponseOptions } from "@/lib/api/response";
+import { parseRpcErrorCodeDetailed, type RpcErrorLike } from "@/lib/api/rpc-errors";
 import { AppError } from "@/lib/errors";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requirePermission } from "@/lib/rbac";
 import {
-  mapAdminExamDbError,
   parseAdminExam,
   QuestionPatchBody,
   type QuestionPatchBodyParsed,
@@ -39,11 +49,11 @@ const QUESTION_SELECT =
   "id,bank_id,type,difficulty,question_text,explanation,points,status,tags,version,created_at," +
   "question_options(id,option_text,sort_order)";
 
-/** select ของแถวปัจจุบันก่อนแก้ — คอลัมน์ที่ต้องรู้เพื่อกติกา version + SoD */
-const PATCH_COLUMNS =
-  "id,bank_id,version,status,type,difficulty,question_text,explanation,points,tags";
-
-/** payload ของ UPDATE questions — version เพิ่มเสมอ (bump ตาม DD §3.4 — ดูหัวไฟล์) */
+/**
+ * payload ของ p_patch (jsonb) — เฉพาะฟิลด์ที่ส่งมาเท่านั้น (undefined = คงเดิม) ·
+ * explanation เป็น null ได้ (มีคีย์ = เซ็ตค่า รวม null — RPC ใช้ ? operator แยก
+ * "เคลียร์ค่า" ออกจาก "ไม่แตะ") · version ห้ามอยู่ที่นี่ — RPC เป็นคน bump (DD §3.4)
+ */
 function questionPatchPayloadOf(body: QuestionPatchBodyParsed): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
   if (body.type !== undefined) payload["type"] = body.type;
@@ -55,16 +65,49 @@ function questionPatchPayloadOf(body: QuestionPatchBodyParsed): Record<string, u
   return payload;
 }
 
-/** อ่านแถวข้อสอบปัจจุบัน (RLS กรองขอบเขตให้ — ไม่เจอ = 404 ERR-NF-001) */
+/**
+ * p_options (jsonb) — แถวต่อตัวเลือกที่ระบุ: มี id = update แถวเดิม / ไม่มี = insert ·
+ * null เมื่อ body ไม่แนบ options (ไม่แตะตัวเลือกเลย) · ไม่มี DELETE (ตาม grant 0010)
+ */
+function optionChangesOf(
+  options: QuestionPatchBodyParsed["options"],
+): Array<Record<string, unknown>> | null {
+  if (options === undefined) {
+    return null;
+  }
+  return options.map((option) => {
+    const row: Record<string, unknown> = {
+      option_text: option.optionText,
+      is_correct: option.isCorrect,
+      sort_order: option.sortOrder,
+    };
+    if (option.id !== undefined) {
+      row["id"] = option.id;
+    }
+    return row;
+  });
+}
+
+/** RPC error มีป้าย "(ERR-XXX-NNN|reason)" → AppError ตามทะเบียน + เหตุผล · ไม่มีป้าย = ERR-SYS-002 opaque */
+function mapQuestionRpcError(error: RpcErrorLike): AppError {
+  const parsed = parseRpcErrorCodeDetailed(error);
+  if (parsed !== undefined) {
+    return parsed.reason !== null
+      ? new AppError(parsed.code, { details: { reason: parsed.reason } })
+      : new AppError(parsed.code);
+  }
+  return new AppError("ERR-SYS-002", { details: { reason: "admin_question_rpc_failed" } });
+}
+
+/** อ่านแถวข้อสอบหลังแก้ (RLS กรองขอบเขตให้ — ไม่เจอ = ผลแปลก ปฏิเสธ fail-closed) */
 async function selectQuestion(
   supabase: Awaited<ReturnType<typeof createSupabaseSsrClient>>,
   bankId: string,
   questionId: string,
-  select: string,
 ): Promise<Record<string, unknown> | null> {
   const { data, error } = await supabase
     .from("questions")
-    .select(select)
+    .select(QUESTION_SELECT)
     .eq("id", questionId)
     .eq("bank_id", bankId)
     .maybeSingle();
@@ -74,46 +117,7 @@ async function selectQuestion(
   return (data ?? null) as Record<string, unknown> | null;
 }
 
-/** options: id มี = UPDATE แถวเดิม / ไม่มี = INSERT (question_options ไม่มี grant DELETE — 0010 L638-L640) */
-async function applyOptionChanges(
-  supabase: Awaited<ReturnType<typeof createSupabaseSsrClient>>,
-  questionId: string,
-  options: QuestionPatchBodyParsed["options"],
-): Promise<void> {
-  if (options === undefined) {
-    return;
-  }
-  for (const option of options) {
-    if (option.id !== undefined) {
-      const { error } = await supabase
-        .from("question_options")
-        .update({
-          option_text: option.optionText,
-          is_correct: option.isCorrect,
-          sort_order: option.sortOrder,
-        })
-        .eq("id", option.id)
-        .eq("question_id", questionId);
-      if (error !== null) {
-        throw mapAdminExamDbError(error);
-      }
-    } else {
-      const { error } = await supabase
-        .from("question_options")
-        .insert({
-          question_id: questionId,
-          option_text: option.optionText,
-          is_correct: option.isCorrect,
-          sort_order: option.sortOrder,
-        });
-      if (error !== null) {
-        throw mapAdminExamDbError(error);
-      }
-    }
-  }
-}
-
-/** PATCH — แก้ข้อสอบ → 200 (version เพิ่มเสมอ · response ไม่มี is_correct) */
+/** PATCH — แก้ข้อสอบ → 200 (version ใหม่เสมอ · response ไม่มี is_correct) */
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ id: string; qid: string }> },
@@ -130,40 +134,22 @@ export async function PATCH(
     const session = await requirePermission("question_bank:update");
     // 3) rate STAFF_WRITE
     enforceRateLimit(request, { group: "STAFF_WRITE", secondaryKey: session.userId });
-    // 4) body strict — ไม่มี status (การเปิด/ปิดใช้เป็นสิทธิ์ staff:exam ที่ DB guard บังคับ)
+    // 4) body strict — ไม่มี status (การเปิด/ปิดใช้เป็นสิทธิ์ staff:exam ที่ RPC บังคับเช่นเดียวกัน)
     const body = parseAdminExam(QuestionPatchBody, await request.json());
     const supabase = await createSupabaseSsrClient();
-    // 5) อ่านแถวปัจจุบัน — ไม่เจอ = 404 ERR-NF-001
-    const existing = await selectQuestion(supabase, bankId, questionId, PATCH_COLUMNS);
-    if (existing === null) {
-      throw new AppError("ERR-NF-001", { details: { reason: "question_not_found" } });
+    // 5) RPC TX เดียว (B6): ตรวจเจ้าของ/active-readonly + patch keys + version bump +
+    //    เลื่อน sort_order สองเฟส + update-or-insert ต่อ option — error มีป้ายทะเบียน
+    const rpc = await supabase.rpc("admin_update_question", {
+      p_question_id: questionId,
+      p_bank_id: bankId,
+      p_patch: questionPatchPayloadOf(body),
+      p_options: optionChangesOf(body.options),
+    });
+    if (rpc.error !== null) {
+      throw mapQuestionRpcError(rpc.error);
     }
-    // 6) ข้อ "ใช้แล้ว" (active) — instructor แก้ไม่ได้ (RBAC) · staff:exam/sa แก้ได้ (version ใหม่)
-    //    ตรวจก่อนเขียนเพื่อให้ error code ถูกเรื่อง — DB guard_question_activation บังคับเช่นเดียวกัน
-    const isExamStaff = session.roles.some(
-      (role) => role === "staff:exam" || role === "super_admin",
-    );
-    if (existing["status"] === "active" && !isExamStaff) {
-      throw new AppError("ERR-RBAC-001", {
-        details: { reason: "question_active_readonly_for_instructor" },
-      });
-    }
-    // 7) UPDATE ในแถวเดิม + version ใหม่เสมอ (bump ตาม DD §3.4 — ดูหัวไฟล์)
-    const patch = questionPatchPayloadOf(body);
-    patch["version"] = Number(existing["version"]) + 1;
-    const { error: updateError } = await supabase
-      .from("questions")
-      .update(patch)
-      .eq("id", questionId)
-      .eq("bank_id", bankId);
-    if (updateError !== null) {
-      // instructor แก้นอก bank ตัวเอง → RLS q_update 42501 → ERR-RBAC-001 403
-      throw mapAdminExamDbError(updateError);
-    }
-    // 8) options (ถ้าแนบมา) — UPDATE/INSERT เฉพาะตัวเลือกที่ระบุ (ไม่มี DELETE grant)
-    await applyOptionChanges(supabase, questionId, body.options);
-    // 9) reload แล้วตอบ 200 — select ไม่รวม is_correct (ตัดตั้งแต่ query)
-    const reloaded = await selectQuestion(supabase, bankId, questionId, QUESTION_SELECT);
+    // 6) reload แล้วตอบ 200 — select ไม่รวม is_correct (ตัดตั้งแต่ query)
+    const reloaded = await selectQuestion(supabase, bankId, questionId);
     if (reloaded === null) {
       throw new AppError("ERR-SYS-001", { details: { reason: "question_reload_failed" } });
     }

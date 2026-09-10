@@ -13,11 +13,17 @@
  */
 import { NextResponse } from "next/server";
 import { AppError } from "@/lib/errors";
-import { jsonErrorResponse, jsonOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import {
+  AssessmentDetailView,
   parseAssessmentIdParams,
   toAssessmentDetail,
   type AssessmentRow,
@@ -86,7 +92,15 @@ export async function GET(
     if (rules === null) {
       throw new AppError("ERR-NF-001", { details: { fields: ["rules"] } });
     }
-    return jsonOk(toAssessmentDetail(row, rules as unknown as AssessmentRulesRow), options);
+    // zod-ตรวจ view ขาออก (B4) — แถว/กติกา drift จาก DB → 503 ERR-SYS-002 fail-closed
+    return jsonOk(
+      parseOutgoingView(
+        AssessmentDetailView,
+        toAssessmentDetail(row, rules as unknown as AssessmentRulesRow),
+        "assessment_detail_contract_drift",
+      ),
+      options,
+    );
   } catch (err: unknown) {
     return jsonErrorResponse(err, options);
   }

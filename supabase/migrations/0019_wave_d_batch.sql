@@ -1,5 +1,11 @@
 -- 0019_wave_d_batch.sql — Wave D lead migration batch (2026-09-11)
 -- PB-14 / PB-15 / PB-16 + pass_pct grant + audit service_role allowlist ขยาย
+-- r1 (codex gate round 1 — 2026-09-11): B1 กักสาขา blanket ของ media_read ตาม bucket +
+--   เงื่อนไข inline ใน storage policy · B2/B7 admin_issue/revoke/reissue_certificate
+--   (mutation + audit atomic ใน TX เดียว — D12-8) · B5 record_certificate_verification
+--   (anon+authenticated · verification log + audit atomic) · B6 admin_update_question
+--   (โจทย์+ตัวเลือก TX เดียว — สลับเฉลยได้) · ตัด CERT_ISSUE/REVOKE/REISSUE ออกจาก
+--   allowlist service_role ของ wrapper (เหลือ AUTH_* + PII_ACCESS — RPC path ใหม่ท้ายไฟล์)
 --
 -- ที่มา (ทุกข้อพิสูจน์จาก source แล้วในรอบ close-out ของ D-1..D-4):
 --   (e) D-4 flag#4: append_audit_event service_role branch (0008:453-461) ยอมรับ AUTH_* 12
@@ -78,15 +84,17 @@ begin
     p_request_id := null;
   elsif v_role = 'service_role' then
     -- R5-m1: AUTH_* ทั้งชุด (12 event ของ §2.1) = BFF (service key ไม่ออกจาก server) เท่านั้น
-    -- 0019: + class ก mutation events ของ certificates (CERT_ISSUE/REVOKE/REISSUE — AUDIT §4
-    -- L241 รับรองทางเดิน BFF service_role ตาม D36-O3) + PII_ACCESS (คิว eligible ของ D-4
-    -- อ่านชื่อผู้ผ่านเกณฑ์ D12-23) — ทุก event ยังผ่าน strict keys + PII scan เหมือนเดิม
+    -- 0019-r1: CERT_ISSUE/CERT_REVOKE/CERT_REISSUE ถูกถอนออกจาก allowlist นี้ — mutation events
+    -- ของ certificates ต้องบันทึกใน TX เดียวกับ mutation (D12-8) ซึ่งทำไม่ได้ผ่านสอง
+    -- PostgREST call → ย้ายไป SECURITY DEFINER RPCs (admin_issue/revoke/reissue_certificate
+    -- ท้ายไฟล์) เรียก append_audit_event_internal เอง (AUDIT §4 class ก) — wrapper คง
+    -- PII_ACCESS (คิว eligible ของ D-4 อ่านชื่อผู้ผ่านเกณฑ์ D12-23) เหมือนเดิม
     if p_action not in ('AUTH_REGISTER','AUTH_LOGIN_OK','AUTH_LOGIN_FAIL','AUTH_LOGOUT',
                         'AUTH_MFA_ENROLLED','AUTH_MFA_DISABLED','AUTH_MFA_BACKUPS_REGENERATED',
                         'AUTH_PASSWORD_RESET_REQUEST','AUTH_PASSWORD_RESET_DONE',
                         'AUTH_PASSWORD_CHANGE','AUTH_LOCKOUT','AUTH_SESSION_REVOKE',
-                        'CERT_ISSUE','CERT_REVOKE','CERT_REISSUE','PII_ACCESS') then
-      raise exception 'append_audit_event: service_role บันทึกได้เฉพาะ AUTH_*/CERT_*/PII_ACCESS (R5-m1 + 0019 — AUDIT §4): %', p_action
+                        'PII_ACCESS') then
+      raise exception 'append_audit_event: service_role บันทึกได้เฉพาะ AUTH_*/PII_ACCESS (R5-m1 + 0019-r1 — AUDIT §4): %', p_action
         using errcode = '42501';
     end if;
     v_keys := case p_action
@@ -102,11 +110,8 @@ begin
       when 'AUTH_PASSWORD_CHANGE'           then array['method','session_id']
       when 'AUTH_LOCKOUT'                   then array['fail_count','ip_hash']
       when 'AUTH_SESSION_REVOKE'            then array['session_id','reason']
-      -- 0019 — AUDIT §2.1 L85-87 (certificate_id คือ entity_id ของ event; คีย์เหล่านี้คือ
-      -- context เสริม) · user_id ไม่อยู่ใน v_keys เพราะถูกยกเป็น actor แล้ว strip ก่อน strict-keys
-      when 'CERT_ISSUE'                     then array['certificate_id','code','attempt_id','enrollment_id']
-      when 'CERT_REVOKE'                    then array['certificate_id','reason']
-      when 'CERT_REISSUE'                   then array['certificate_id','superseded_cert_id','reason','enrollment_id']
+      -- 0019-r1 — CERT_* ย้ายไป RPC path (คอมเมนต์ branch ข้างบน); context keys ของ
+      -- event เหล่านั้นฝังอยู่ในตัว RPCs ตามชุด AUDIT §2.1 L85-87
       when 'PII_ACCESS'                     then array['endpoint','target_user_id','purpose']
     end;
     -- actor = auth.uid() (null ใต้ service key) — ยกจาก context.user_id ที่ BFF (trusted) ใส่มา
@@ -374,8 +379,11 @@ $fn$;
 drop policy if exists media_read on public.media_assets;
 create policy media_read on public.media_assets for select to authenticated
   using (
-    public.has_any_role(array['instructor'])
-    or public.is_staff()
+    -- 0019-r1 (B1): instructor/is_staff อ่านได้เฉพาะสื่อ bucket 'media' (วิดีโอ/เอกสารบทเรียน)
+    -- — ห้ามแผ่ครอบ bucket 'certificates' (PDF ใบประกาศนียบัตรมีชื่อเจ้าของใบ = PII:
+    -- เจ้าของใบเท่านั้นที่อ่านได้ผ่านสาขาด้านล่าง ไม่ใช่ instructor/staff ทุกคนผ่าน storage)
+    (media_assets.bucket = 'media'
+     and (public.has_any_role(array['instructor']) or public.is_staff()))
     -- PB-14a: เจ้าของประกาศนียบัตรอ่าน media ของใบตัวเอง (D-2 pdf route step 5;
     -- certs_owner_read 0010:781 ให้เจ้าของเห็นแถวใบอยู่แล้ว)
     or exists (select 1 from public.certificates c
@@ -412,11 +420,492 @@ begin
   values ('media','media',false), ('certificates','certificates',false)
   on conflict (id) do nothing;
   execute 'drop policy if exists objects_via_media_assets on storage.objects';
+  -- 0019-r1 (B1): เงื่อนไข eligibility แบบ inline (mirror สาขาทั้งสามของ media_read)
+  -- — defense in depth: แม้ media_assets policy เปลี่ยนในอนาคต storage ก็ไม่เปิดกว้าง
+  -- กว่าชุดเงื่อนไขนี้ (subquery ฝั่ง public.* วิ่งใต้ role ผู้เรียก — RLS ของตารางนั้น ๆ
+  -- บังคับเหมือนที่ media_read เรียกเอง — probes พิสูจน์แล้วในรอบ 0019)
   execute $p$create policy objects_via_media_assets on storage.objects
     for select to authenticated
     using (exists (
       select 1 from public.media_assets ma
       where ma.bucket = storage.objects.bucket_id
-        and ma.storage_path = storage.objects.name))$p$;
+        and ma.storage_path = storage.objects.name
+        and (
+          (ma.bucket = 'media'
+           and (public.has_any_role(array['instructor']) or public.is_staff()))
+          or exists (select 1 from public.certificates c
+                     where c.pdf_media_id = ma.id
+                       and c.user_id = auth.uid())
+          or exists (select 1
+                     from public.lessons l
+                     join public.course_modules m on m.id = l.module_id
+                     join public.enrollments e on e.course_id = m.course_id
+                     where l.media_id = ma.id
+                       and l.deleted_at is null
+                       and m.deleted_at is null
+                       and e.deleted_at is null
+                       and e.user_id = auth.uid()
+                       and e.status in ('active','completed'))
+        )))$p$;
 end
 $storage$;
+
+-- ═══ (f) 0019-r1 — certificate business functions (B2/B7) + verify atomic (B5) ═══
+-- ═══         + admin_update_question TX เดียว (B6)                              ═══
+-- เหตุผลของโครงนี้ (gate r1 B2/B7): การทำ mutation กับ audit เป็นสอง PostgREST call
+-- ทำให้ audit พังได้โดยที่ mutation ฝั่ง BFF "สำเร็จ" (และตายระหว่างกลาง) — D12-8
+-- บังคับ TX เดียว → SECURITY DEFINER RPCs เป็นเจ้าของ mutation+audit (AUDIT §4 class ก)
+-- · EXECUTE เฉพาะ service_role (BFF ของ D-4 — service key ไม่ออกจาก server)
+-- · audit ผ่าน append_audit_event_internal พร้อม p_actor_override (ทางเดียวของ
+--   server path — EXECUTE app_owner เท่านั้น) + context keys ตามชุด AUDIT §2.1 L85-87
+-- · รูป error = ข้อความไทย + ป้าย "(ERR-XXX-NNN|reason)" ท้าย message ให้ BFF map
+--   (แบบแผน 0011 — parseRpcErrorCode)
+
+-- ── core ส่วน issue ใช้ร่วม issue/reissue — EXECUTE app_owner เท่านั้น ──
+-- gen_random_bytes (CSPRNG ของ verify_code — D10) อยู่ที่ schema extensions
+-- (pgcrypto; 0001 ไม่เคยลง) — สร้างสกีมา+extension ถ้ายังไม่มี (vanilla ไม่มีมาเอง
+-- ส่วน supabase image ลงอยู่แล้ว → IF NOT EXISTS เป็น no-op) และเพิ่ม extensions
+-- เข้า search_path เฉพาะฟังก์ชันนี้ (schema นี้เจ้าของโดย admin ไม่ใช่ public-writable)
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
+-- supabase image ให้ USAGE ของ extensions แก่ anon/authenticated/service_role แต่ไม่ให้ app_owner
+-- (vanilla ไม่มี ACL เลย) — DEFINER RPC รันใต้ app_owner จึงมองไม่เห็น gen_random_bytes
+grant usage on schema extensions to app_owner;
+create or replace function public.cert_issue_core(
+  p_actor_user_id uuid,
+  p_enrollment_id uuid,
+  p_supersedes_cert_id uuid,
+  p_request_id text
+) returns jsonb
+language plpgsql security definer
+set search_path = public, extensions
+as $fn$
+declare
+  v_user uuid;
+  v_course uuid;
+  v_status text;
+  v_deleted timestamptz;
+  v_attempt uuid;
+  v_holder text;
+  v_title text;
+  v_year text;
+  v_digits text;
+  v_cert_no text;
+  v_verify text;
+  v_bytes bytea;
+  v_i int;
+  v_j int;
+  v_ok boolean := false;
+  v_cert_id uuid;
+  v_issued_at timestamptz;
+begin
+  -- ตรวจ enrollment: completed + ไม่ถูกลบล้าง (mirror issue.ts ของ D-4)
+  select user_id, course_id, status, deleted_at
+    into v_user, v_course, v_status, v_deleted
+  from public.enrollments where id = p_enrollment_id;
+  if not found then
+    raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|enrollment_not_found)';
+  end if;
+  if v_status <> 'completed' or v_deleted is not null then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ผู้เรียนยังไม่จบหลักสูตรนี้ (ERR-VAL-001|enrollment_not_completed)';
+  end if;
+  -- มีใบ valid อยู่แล้ว (partial unique uq_certificates_enrollment_valid คุมเหมือนกัน)
+  if exists (select 1 from public.certificates
+             where enrollment_id = p_enrollment_id and status = 'valid') then
+    raise exception 'ข้อมูลไม่ถูกต้อง: มีใบประกาศนียบัตรที่ยังไม่ถูกยกเลิกอยู่แล้ว (ERR-VAL-001|valid_certificate_exists)';
+  end if;
+  -- ต้องมี attempt ผ่านเกณฑ์ (ครั้งล่าสุดก่อน)
+  select id into v_attempt from public.assessment_attempts
+  where enrollment_id = p_enrollment_id
+    and passed = true and submitted_at is not null
+  order by attempt_no desc limit 1;
+  if not found then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ไม่พบผลสอบที่ผ่านเกณฑ์ของหลักสูตรนี้ (ERR-VAL-001|no_passed_attempt)';
+  end if;
+  -- snapshot ชื่อผู้ถือใบ + ชื่อหลักสูตร (holderNameOf: ชื่อ-นามสกุล ไม่มีคือ display_name)
+  select coalesce(nullif(btrim(concat_ws(' ',
+           nullif(btrim(pr.first_name), ''), nullif(btrim(pr.last_name), ''))), ''),
+         pr.display_name, '')
+    into v_holder
+  from public.profiles pr where pr.id = v_user;
+  if not found then
+    raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cert_profile_lookup_failed)';
+  end if;
+  select title_th into v_title from public.courses where id = v_course;
+  if not found then
+    raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cert_course_lookup_failed)';
+  end if;
+  -- สุ่มรหัส CSPRNG (mirror shared.ts ของ D-4): cert_no = LTC-<ปี ค.ศ. Asia/Bangkok>-<6 หลัก>
+  -- verify_code = 43 อักขระจาก alphabet เดียวกับ BFF (63 อักขระ — ตรวจนับจริงจาก literal
+  -- ของ shared.ts L39 · get_byte % 63) · ชน UNIQUE (23505) → สุ่มใหม่ ไม่เกิน 5 ครั้ง
+  v_year := to_char(now() at time zone 'Asia/Bangkok', 'YYYY');
+  v_i := 0;
+  loop
+    v_i := v_i + 1;
+    exit when v_i > 5;
+    v_digits := lpad(abs(hashtextextended(gen_random_uuid()::text, 0) % 1000000)::text, 6, '0');
+    v_cert_no := 'LTC-' || v_year || '-' || v_digits;
+    v_bytes := gen_random_bytes(43);
+    v_verify := '';
+    for v_j in 0..42 loop
+      v_verify := v_verify || substr('useandom-26T198340PX75pxJACKVERYMINDBUSHWOLFGQZbfghjklqvwyzrict',
+                                     1 + (get_byte(v_bytes, v_j) % 63), 1);
+    end loop;
+    begin
+      insert into public.certificates (
+        cert_no, verify_code, enrollment_id, user_id, course_id,
+        holder_name_snapshot, course_title_snapshot, issued_by, supersedes_cert_id)
+      values (v_cert_no, v_verify, p_enrollment_id, v_user, v_course,
+              v_holder, v_title, p_actor_user_id, p_supersedes_cert_id)
+      returning id, issued_at into v_cert_id, v_issued_at;
+      v_ok := true;
+      exit;
+    exception when unique_violation then
+      v_ok := false; -- สุ่มชน → วนสุ่มใหม่
+    end;
+  end loop;
+  if not v_ok then
+    raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-001|cert_code_retry_exhausted)';
+  end if;
+  perform public.append_audit_event_internal(
+    'CERT_ISSUE', 'certificate', v_cert_id::text, null, null,
+    jsonb_build_object('certificate_id', v_cert_id, 'code', v_cert_no,
+                       'attempt_id', v_attempt, 'enrollment_id', p_enrollment_id),
+    null, null, p_request_id, p_actor_user_id);
+  return jsonb_build_object(
+    'id', v_cert_id, 'cert_no', v_cert_no, 'verify_code', v_verify,
+    'enrollment_id', p_enrollment_id, 'user_id', v_user, 'course_id', v_course,
+    'holder_name', v_holder, 'course_title', v_title, 'issued_at', v_issued_at);
+end;
+$fn$;
+alter function public.cert_issue_core(uuid, uuid, uuid, text) owner to app_owner;
+revoke execute on function public.cert_issue_core(uuid, uuid, uuid, text)
+  from public, anon, authenticated, service_role;
+
+-- ── BFF issue: actor + enrollment → ใบใหม่ (mutation+audit TX เดียว) ──
+create or replace function public.admin_issue_certificate(
+  p_actor_user_id uuid,
+  p_enrollment_id uuid,
+  p_request_id text
+) returns jsonb
+language plpgsql security definer
+set search_path = public
+as $fn$
+begin
+  if p_actor_user_id is null then
+    raise exception 'ต้องระบุผู้ดำเนินการ (ERR-AUTH-001|actor_required)';
+  end if;
+  return public.cert_issue_core(p_actor_user_id, p_enrollment_id, null, p_request_id);
+end;
+$fn$;
+alter function public.admin_issue_certificate(uuid, uuid, text) owner to app_owner;
+revoke execute on function public.admin_issue_certificate(uuid, uuid, text)
+  from public, anon, authenticated;
+grant execute on function public.admin_issue_certificate(uuid, uuid, text)
+  to service_role;
+
+-- ── BFF revoke: conditional UPDATE + audit TX เดียว (B2 — audit ล้ม = rollback ทั้ง) ──
+create or replace function public.admin_revoke_certificate(
+  p_actor_user_id uuid,
+  p_certificate_id uuid,
+  p_reason text,
+  p_request_id text
+) returns jsonb
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_cert_no text;
+  v_revoked_at timestamptz;
+begin
+  if p_actor_user_id is null then
+    raise exception 'ต้องระบุผู้ดำเนินการ (ERR-AUTH-001|actor_required)';
+  end if;
+  if p_reason is null or length(btrim(p_reason)) < 10 or length(p_reason) > 500 then
+    raise exception 'ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 ตัวอักษร (ERR-VAL-001|reason_length)'
+      using errcode = '22023';
+  end if;
+  -- อ่าน cert_no คืนให้ BFF (response ของ route ต้องมี certNo) ใน TX เดียวกัน
+  select cert_no into v_cert_no from public.certificates where id = p_certificate_id;
+  if not found then
+    raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)';
+  end if;
+  update public.certificates
+  set status = 'revoked', revoked_at = now(), revoked_reason = p_reason
+  where id = p_certificate_id and status = 'valid'
+  returning revoked_at into v_revoked_at;
+  if not found then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ใบประกาศนียบัตรนี้ไม่ได้อยู่ในสถานะออกใบแล้ว (ERR-VAL-001|not_valid)'
+      using errcode = '22023';
+  end if;
+  -- reason อยู่ในคอลัมน์ revoked_reason เท่านั้น (ฟรีเท็กซ์ — ห้ามลง audit context ตาม
+  -- แบบแผน PII scan ของ AUDIT §3.2; context เก็บเฉพาะ id ที่ validate แล้ว)
+  perform public.append_audit_event_internal(
+    'CERT_REVOKE', 'certificate', p_certificate_id::text, null, null,
+    jsonb_build_object('certificate_id', p_certificate_id),
+    null, null, p_request_id, p_actor_user_id);
+  return jsonb_build_object('id', p_certificate_id, 'cert_no', v_cert_no,
+                            'revoked_at', v_revoked_at);
+end;
+$fn$;
+alter function public.admin_revoke_certificate(uuid, uuid, text, text) owner to app_owner;
+revoke execute on function public.admin_revoke_certificate(uuid, uuid, text, text)
+  from public, anon, authenticated;
+grant execute on function public.admin_revoke_certificate(uuid, uuid, text, text)
+  to service_role;
+
+-- ── BFF reissue: supersede + issue + lineage ทั้งหมด TX เดียว (B7 — ล้มช่วงไหน
+--    = rollback ทั้ง TX ไม่มีสถานะกึ่งๆ "เดิม superseded + lineage ไม่ครบ") ──
+create or replace function public.admin_reissue_certificate(
+  p_actor_user_id uuid,
+  p_certificate_id uuid,
+  p_request_id text
+) returns jsonb
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_enrollment uuid;
+  v_new jsonb;
+  v_new_id uuid;
+begin
+  if p_actor_user_id is null then
+    raise exception 'ต้องระบุผู้ดำเนินการ (ERR-AUTH-001|actor_required)';
+  end if;
+  select enrollment_id into v_enrollment from public.certificates
+  where id = p_certificate_id;
+  if not found then
+    raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)';
+  end if;
+  update public.certificates set status = 'superseded'
+  where id = p_certificate_id and status = 'valid';
+  if not found then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ใบประกาศนียบัตรนี้ไม่ได้อยู่ในสถานะออกใบแล้ว (ERR-VAL-001|not_valid)'
+      using errcode = '22023';
+  end if;
+  -- ออกใบใหม่ใน TX เดียว (cert_issue_core บันทึก CERT_ISSUE ให้ใบใหม่เอง —
+  -- คงลายเซ็น audit สอง event CERT_ISSUE + CERT_REISSUE เหมือน reissue.ts เดิม)
+  v_new := public.cert_issue_core(p_actor_user_id, v_enrollment, p_certificate_id, p_request_id);
+  v_new_id := (v_new ->> 'id')::uuid;
+  update public.certificates set superseded_by = v_new_id
+  where id = p_certificate_id;
+  perform public.append_audit_event_internal(
+    'CERT_REISSUE', 'certificate', v_new_id::text, null, null,
+    jsonb_build_object('certificate_id', v_new_id,
+                       'superseded_cert_id', p_certificate_id,
+                       'enrollment_id', v_enrollment),
+    null, null, p_request_id, p_actor_user_id);
+  return v_new || jsonb_build_object('superseded_cert_id', p_certificate_id);
+end;
+$fn$;
+alter function public.admin_reissue_certificate(uuid, uuid, text) owner to app_owner;
+revoke execute on function public.admin_reissue_certificate(uuid, uuid, text)
+  from public, anon, authenticated;
+grant execute on function public.admin_reissue_certificate(uuid, uuid, text)
+  to service_role;
+
+-- ── public verify (B3/B5): SELECT 4 ฟิลด์ + verification log + audit TX เดียว ──
+-- EXECUTE anon+authenticated (route ของ D-2 เรียกผ่าน SSR user client — ไม่มี
+-- service_role อีกต่อไป); verify_code คอลัมน์ UNIQUE (0006) จับทั้ง QR และ manual
+create or replace function public.record_certificate_verification(
+  p_code text,
+  p_source text,
+  p_ip_hash text,
+  p_user_agent text,
+  p_request_id text
+) returns jsonb
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_code text;
+  v_cert_no text;
+  v_title text;
+  v_issued_at timestamptz;
+  v_status text;
+begin
+  v_code := btrim(coalesce(p_code, ''));
+  if v_code = '' or length(v_code) > 128 then
+    raise exception 'ข้อมูลไม่ถูกต้อง: รหัสที่ตรวจสอบไม่ถูกรูปแบบ (ERR-VAL-001|code_invalid)'
+      using errcode = '22023';
+  end if;
+  if p_source is null or p_source not in ('qr','manual') then
+    raise exception 'ข้อมูลไม่ถูกต้อง: แหล่งการตรวจสอบไม่ถูกต้อง (ERR-VAL-001|source_invalid)'
+      using errcode = '22023';
+  end if;
+  -- ค้น cert_no หรือ verify_code · ตอบเฉพาะ 4 ฟิลด์สาธารณะ — ไม่มี holder_name
+  -- และไม่มี verify_code ในทางกลับเด็ดขาด (D8/D11-12)
+  select cert_no, course_title_snapshot, issued_at, status::text
+    into v_cert_no, v_title, v_issued_at, v_status
+  from public.certificates
+  where cert_no = v_code or verify_code = v_code
+  limit 1;
+  -- เก็บ log ทุกครั้ง (DD §3.4): verify_code ที่ลงคือ "รหัสที่ผู้ใช้พิมพ์/สแกน" (input)
+  -- ไม่ใช่ verify_code จริงของแถว — กัน secret หลุดไปตารางอื่นเมื่อค้นด้วย cert_no
+  if not found then
+    insert into public.certificate_verifications (verify_code, result, ip_hash, user_agent, source)
+    values (v_code, 'not_found', p_ip_hash, left(p_user_agent, 256), p_source);
+    perform public.append_audit_event_internal(
+      'CERT_VERIFY_PUBLIC', 'certificate', null, null, null,
+      jsonb_build_object('code', v_code, 'result', 'not_found'),
+      null, null, p_request_id);
+    return jsonb_build_object('code', v_code, 'course_title', null,
+                              'issued_at', null, 'status', 'not_found');
+  end if;
+  insert into public.certificate_verifications (verify_code, result, ip_hash, user_agent, source)
+  values (v_code, v_status::public.verification_result, p_ip_hash, left(p_user_agent, 256), p_source);
+  perform public.append_audit_event_internal(
+    'CERT_VERIFY_PUBLIC', 'certificate', null, null, null,
+    jsonb_build_object('code', v_code, 'result', v_status),
+    null, null, p_request_id);
+  return jsonb_build_object('code', v_cert_no, 'course_title', v_title,
+                            'issued_at', v_issued_at, 'status', v_status);
+end;
+$fn$;
+alter function public.record_certificate_verification(text, text, text, text, text) owner to app_owner;
+revoke execute on function public.record_certificate_verification(text, text, text, text, text)
+  from public, service_role;
+grant execute on function public.record_certificate_verification(text, text, text, text, text)
+  to anon, authenticated;
+
+-- ── BFF question PATCH (B6): โจทย์ + ตัวเลือกทั้งชุด TX เดียว — สลับเฉลยได้จริง ──
+-- constraint trigger validate_option_correctness เป็น DEFERRABLE INITIALLY
+-- DEFERRED (0005:174-177) จึงตรวจ "คำตอบถูกเป็น 1 เท่านั้น" ที่ COMMIT; route เดิม
+-- อัปเดตทีละ option ผ่าน PostgREST = คนละ TX → ค้าง 0/2 เฉลยชั่วขณะ → trigger ยิง
+-- (uq_question_options_sort ไม่ deferrable → เลื่อน sort_order ชั่วคราวกันชนก่อน)
+create or replace function public.admin_update_question(
+  p_question_id uuid,
+  p_bank_id uuid,
+  p_patch jsonb,
+  p_options jsonb
+) returns jsonb
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_status public.question_status;
+  v_version int;
+  v_owner uuid;
+  v_exam_staff boolean;
+  v_patch jsonb := coalesce(p_patch, '{}'::jsonb);
+  o jsonb;
+  v_ids uuid[];
+begin
+  if auth.uid() is null then
+    raise exception 'ต้องเข้าสู่ระบบก่อนใช้บริการนี้ (ERR-AUTH-001|auth_required)';
+  end if;
+  select q.status, q.version, qb.created_by
+    into v_status, v_version, v_owner
+  from public.questions q
+  join public.question_banks qb on qb.id = q.bank_id
+  where q.id = p_question_id and q.bank_id = p_bank_id;
+  if not found then
+    raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|question_not_found)';
+  end if;
+  -- สิทธิ์ (mirror RLS q_update/qopts_update ของ 0010 + guard_question_activation):
+  -- has_any_role อ่าน role_assignments ของ auth.uid() จึงปลอดภัยใต้ SECURITY DEFINER
+  v_exam_staff := public.has_any_role(array['staff:exam','super_admin']);
+  if not v_exam_staff then
+    if not public.has_any_role(array['instructor']) or v_owner <> auth.uid() then
+      raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้ (ERR-RBAC-001|not_question_owner)'
+        using errcode = '42501';
+    end if;
+    if v_status = 'active' then
+      raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้: ข้อที่เปิดใช้แล้วแก้ไม่ได้ (ERR-RBAC-001|question_active_readonly_for_instructor)'
+        using errcode = '42501';
+    end if;
+  end if;
+  -- patch keys ต้องอยู่ในชุดที่อนุญาตเท่านั้น (BFF strict-parse แล้ว — ชั้นนี้คุมซ้ำ)
+  if exists (select 1 from jsonb_object_keys(v_patch) k
+             where k not in ('type','difficulty','question_text','explanation','points','tags')) then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ฟิลด์ที่แก้ได้ไม่ถูกต้อง (ERR-VAL-001|patch_keys)'
+      using errcode = '22023';
+  end if;
+  if p_options is not null and jsonb_typeof(p_options) <> 'array' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: options ต้องเป็น array (ERR-VAL-001|options_not_array)'
+      using errcode = '22023';
+  end if;
+  -- โจทย์ + version bump (DD §3.4 L391 — bump ในแถวเดิม; explanation null-clearing
+  -- ด้วย ? operator: มีคีย์ = เซ็ตค่า (รวม null) / ไม่มีคีย์ = คงเดิม)
+  update public.questions q
+  set type          = coalesce((v_patch->>'type')::public.question_type, q.type),
+      difficulty    = coalesce((v_patch->>'difficulty')::public.question_difficulty, q.difficulty),
+      question_text = coalesce(v_patch->>'question_text', q.question_text),
+      explanation   = case when v_patch ? 'explanation' then v_patch->>'explanation' else q.explanation end,
+      points        = coalesce((v_patch->>'points')::smallint, q.points),
+      tags          = coalesce((select array_agg(t.value::text)
+                                from jsonb_array_elements(v_patch->'tags') t), q.tags),
+      version       = q.version + 1
+  where q.id = p_question_id;
+  -- ตัวเลือก (ถ้าแนบมา): เลื่อน sort_order ของ option ที่จะแก้ออกจากช่วงจริงก่อน
+  -- (- 1000000 กันชน uq_question_options_sort ระหว่างสลับ) แล้วตั้งค่าจริงทีละตัว
+  if p_options is not null then
+    v_ids := array(select (o2->>'id')::uuid
+                   from jsonb_array_elements(p_options) o2
+                   where o2->>'id' is not null);
+    if coalesce(array_length(v_ids, 1), 0) > 0 then
+      update public.question_options qo
+      set sort_order = qo.sort_order - 1000000
+      where qo.question_id = p_question_id and qo.id = any (v_ids);
+    end if;
+    -- o = scalar jsonb (declare ด้านบน) — อ้างเป็น o ตรง ๆ ห้ามเขียน o.value
+    -- (record-style access ถูก parser ตีเป็นตาราง o → missing FROM-clause entry)
+    for o in select o2.value from jsonb_array_elements(p_options) o2 loop
+      if exists (select 1 from jsonb_object_keys(o) k
+                 where k not in ('id','option_text','is_correct','sort_order')) then
+        raise exception 'ข้อมูลไม่ถูกต้อง: ฟิลด์ตัวเลือกไม่ได้รับอนุญาต (ERR-VAL-001|option_keys)'
+          using errcode = '22023';
+      end if;
+      if o ? 'id' and o->>'id' is not null then
+        update public.question_options
+        set option_text = o->>'option_text',
+            is_correct  = (o->>'is_correct')::boolean,
+            sort_order  = (o->>'sort_order')::int
+        where id = (o->>'id')::uuid
+          and question_id = p_question_id;
+        if not found then
+          raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|option_not_found)';
+        end if;
+      else
+        insert into public.question_options (question_id, option_text, is_correct, sort_order)
+        values (p_question_id, o->>'option_text',
+                (o->>'is_correct')::boolean, (o->>'sort_order')::int);
+      end if;
+    end loop;
+  end if;
+  return jsonb_build_object('question_id', p_question_id, 'version', v_version + 1);
+end;
+$fn$;
+alter function public.admin_update_question(uuid, uuid, jsonb, jsonb) owner to app_owner;
+revoke execute on function public.admin_update_question(uuid, uuid, jsonb, jsonb)
+  from public, anon, service_role;
+grant execute on function public.admin_update_question(uuid, uuid, jsonb, jsonb)
+  to authenticated;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- B9 (probe r1 R4-R8): สิทธิ์ของเจ้าของ RPC — DEFINER RPCs รันใต้ app_owner
+-- ตารางข้างบนมี policy INSERT/SELECT ของ app_owner ครบ แต่ขาด BOTH (1) ACL
+-- grant ของ app_owner (มีแค่ SELECT — policy ไม่ใช่สิทธิ์) และ (2) policy UPDATE
+-- สำหรับเส้นทาง mutation ของ RPC — ผลคือ revoke/reissue/issue/update พังด้วย
+-- "permission denied" ทั้ง dev/prod (unit test mock RPC จึงไม่เห็น)
+-- แบบเดียวกับที่ 0011 ทำให้ submit_attempt ใช้ assessment_attempts ได้
+-- app_owner = NOLOGIN ภายใน เข้าถึงได้ทางเดียวผ่าน RPCs เหล่านี้ที่ grant EXECUTE
+-- แคบ ๆ จึงให้สิทธิ์ระดับตารางตามการใช้จริงของ RPC เท่านั้น
+-- ─────────────────────────────────────────────────────────────────────────────
+-- (1) ACL: cert_issue_core INSERT · admin_revoke/reissue UPDATE ·
+--         record_certificate_verification INSERT · admin_update_question UPDATE
+grant insert, update on public.certificates to app_owner;
+grant insert on public.certificate_verifications to app_owner;
+grant update on public.questions to app_owner;
+grant insert, update on public.question_options to app_owner;
+
+-- (2) RLS UPDATE policies ของ app_owner (คู่ policy INSERT/SELECT ที่มีอยู่แล้ว)
+create policy app_owner_update_certificates
+  on public.certificates for update to app_owner
+  using (true) with check (true);
+create policy app_owner_update_questions
+  on public.questions for update to app_owner
+  using (true) with check (true);
+create policy app_owner_update_question_options
+  on public.question_options for update to app_owner
+  using (true) with check (true);

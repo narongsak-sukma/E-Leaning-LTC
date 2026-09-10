@@ -266,3 +266,14 @@ describe("GET /me/certificates — rate READ (§5)", () => {
     expect(body.error.details.group).toBe("READ");
   });
 });
+
+describe("GET /me/certificates — B4 fail-closed view", () => {
+  it("แถว drift (status นอกทะเบียน) → 503 ERR-SYS-002 ไม่รั่ง payload เพี้ยน", async () => {
+    mockClient([{ ...row(9, T2), status: "drift" }]);
+    const res = await GET(meUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("my_certificate_contract_drift");
+  });
+});

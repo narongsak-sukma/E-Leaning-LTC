@@ -8,6 +8,7 @@
  * - Retry-After อัตโนมัติเมื่อ error details มี retry_after_sec (ERR-RATE-001 — API-SPEC §5)
  */
 import { NextResponse } from "next/server";
+import { type z } from "zod";
 import {
   AppError,
   fromUnknown,
@@ -58,6 +59,23 @@ export function jsonPageOk<T>(
     status: 200,
     headers: buildHeaders(options),
   });
+}
+
+/**
+ * zod-ตรวจ view ขาออกก่อนตอบ client (gate r1 B4) — mapper to*Resource รับแถว DB
+ * ผ่าน cast จึงเชื่อ type ไม่ได้: แถวเพี้ยนหนึ่งแถว (คอลัมน์ drift/null ผิดสัญญา) ต้อง
+ * fail-closed เป็น ERR-SYS-002 503 ห้ามรั่วออกไปเป็น 200 ที่ payload เพี้ยน
+ */
+export function parseOutgoingView<S extends z.ZodType>(
+  schema: S,
+  data: unknown,
+  reason: string,
+): z.output<S> {
+  const result = schema.safeParse(data);
+  if (!result.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason } });
+  }
+  return result.data;
 }
 
 /** 204 — สำเร็จแบบไม่มี body (API-SPEC §1.1 — ใช้เฉพาะ mark-read) */

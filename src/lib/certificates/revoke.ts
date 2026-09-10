@@ -1,20 +1,19 @@
 /**
- * revoke — เพิกถอนประกาศนียบัตร (Wave D — D-4 · SDS §3.4d)
+ * revoke — เพิกถอนประกาศนียบัตร (Wave D — D-4 · SDS §3.4d · 0019-r1)
  *
- * - บังคับ reason ≥10 ตัวอักษร (trim แล้ว) — ไม่ครบ → ERR-VAL-001
- * - เพิกถอนได้เฉพาะใบที่สถานะ valid (revoked/superseded เพิกถอนซ้ำไม่ได้)
- * - UPDATE มี guard `.eq("status","valid")` ในตัว UPDATE เอง (กันแข่งกันเพิกถอน —
- *   PostgREST ไม่มี TX ระดับ row lock แบบ RPC จึงใช้ conditional update)
- * - audit CERT_REVOKE (เหตุผลเก็บใน certificates.revoked_reason ของตาราง ไม่ใส่ audit context
- *   เพราะเป็น free-text ที่ต้องผ่าน PII scan ของ DB — AUDIT §3.2)
- * - service_role รวมศูนย์ที่ src/lib/certificates/** (D36-O3) — เหตุผลการใช้ service_role:
- *   RLS กัน authenticated จากการ UPDATE certificates (0010:784-787) แต่ BFF ต้องเขียน
- *   ตามอำนาจ registrar ที่ตรวจสิทธิ์แล้ว (requirePermission ที่ route)
+ * - บังคับ reason 10-500 ตัวอักษร (trim แล้ว) — ไม่ครบ → ERR-VAL-001 (RPC ตรวจซ้ำอีกชั้น)
+ * - ทั้งหมดผ่าน RPC `admin_revoke_certificate` เดียว (0019-r1): SELECT cert_no + conditional
+ *   UPDATE (status='valid') + audit CERT_REVOKE ใน **TX เดียว** — audit ล้ม = rollback ทั้ง
+ *   (gate r1 B2: ทางเดิม commit ก่อนแล้ว audit พังได้เงียบๆ → mutation ไร้ audit ถาวร)
+ * - reason เก็บที่ certificates.revoked_reason เท่านั้น (free-text ห้ามลง audit context —
+ *   AUDIT §3.2) · response คืน cert_no/revoked_at จาก TX เดียวกัน
+ * - service_role รวมศูนย์ที่ src/lib/certificates/** (D36-O3) — EXECUTE ของ RPC ให้
+ *   service_role เท่านั้น (0019) และ route ตรวจ requirePermission ก่อนเรียกแล้ว
  */
 import "server-only";
 import { AppError } from "@/lib/errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
-import { appendAuditEvent, dbFailed, rowString, type Row } from "./shared";
+import { certRpcError, dbFailed, rowString, type Row } from "./shared";
 
 /** เพดานความยาวเหตุผล (API-SPECIFICATION §3.8 — บังคับ reason) */
 export const MIN_REASON_LENGTH = 10;
@@ -35,68 +34,34 @@ export interface RevokedCertificate {
   readonly revokedReason: string;
 }
 
-/**
- * เพิกถอนใบที่สถานะ valid — คืนสถานะใหม่ + เวลาที่เพิกถอน
- */
+/** เพิกถอนใบที่สถานะ valid — mutation + audit TX เดียวใน RPC (คืน id/cert_no/revoked_at) */
 export async function revokeCertificate(input: RevokeCertificateInput): Promise<RevokedCertificate> {
   const reason = input.reason.trim();
   if (reason.length < MIN_REASON_LENGTH || reason.length > MAX_REASON_LENGTH) {
     throw new AppError("ERR-VAL-001", { details: { field: "reason", reason: "length_10_500" } });
   }
 
-  // 1) อ่านใบเป้าหมาย (คอลัมน์แคบ — service_role)
+  // RPC เดียว: lookup + conditional UPDATE + CERT_REVOKE audit — atomic (0019-r1 B2)
   const client = createSupabaseServiceRoleClient();
-  const lookup = await client
-    .from("certificates")
-    .select("id,cert_no,status,revoked_at")
-    .eq("id", input.certificateId)
-    .maybeSingle();
-  if (lookup.error !== null) {
-    throw dbFailed("cert_revoke_lookup_failed");
-  }
-  const cert = lookup.data as Row | null;
-  if (cert === null) {
-    throw new AppError("ERR-NF-001", { details: { field: "certificateId" } });
-  }
-  if (rowString(cert, "status") !== "valid") {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "certificateId", reason: "not_valid" },
-    });
-  }
-
-  // 2) UPDATE แบบมี guard (status='valid') — 0 แถว = มีการเพิกถอนพร้อมกัน → VAL-001
-  const revokedAt = new Date().toISOString();
-  const updateRes = await client
-    .from("certificates")
-    .update({ status: "revoked", revoked_at: revokedAt, revoked_reason: reason })
-    .eq("id", input.certificateId)
-    .eq("status", "valid")
-    .select("id,cert_no,status,revoked_at")
-    .single();
-  if (updateRes.error !== null || updateRes.data === null) {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "certificateId", reason: "not_valid" },
-    });
-  }
-  const updated = updateRes.data as Row;
-
-  // 3) audit CERT_REVOKE — certificate_id อยู่ที่ entity_id · `user_id` = actor ผู้เพิกถอน
-  //    (0008:476-486) · reason เก็บใน certificates.revoked_reason แล้ว (free-text ไม่ลง
-  //    audit context — กัน PII scan ฝั่ง DB ปฏิเสธทั้ง event)
-  await appendAuditEvent(client, {
-    action: "CERT_REVOKE",
-    entityType: "certificate",
-    entityId: rowString(updated, "id"),
-    context: { user_id: input.actorId },
-    actorId: input.actorId,
-    requestId: input.requestId ?? null,
+  const rpc = await client.rpc("admin_revoke_certificate", {
+    p_actor_user_id: input.actorId,
+    p_certificate_id: input.certificateId,
+    p_reason: reason,
+    p_request_id: input.requestId ?? null,
   });
-
+  if (rpc.error !== null) {
+    // ป้าย (ERR-XXX-NNN|reason) ของ RPC → map ตรง; ไม่มีป้าย = ERR-SYS-002 opaque
+    throw certRpcError(rpc.error, "cert_revoke_rpc_failed");
+  }
+  const row = (Array.isArray(rpc.data) ? rpc.data[0] : rpc.data) as Row | null;
+  if (row === null) {
+    throw dbFailed("cert_revoke_rpc_failed");
+  }
   return {
-    id: rowString(updated, "id"),
-    certNo: rowString(updated, "cert_no"),
+    id: rowString(row, "id"),
+    certNo: rowString(row, "cert_no"),
     status: "revoked",
-    revokedAt: rowString(updated, "revoked_at"),
+    revokedAt: rowString(row, "revoked_at"),
     revokedReason: reason,
   };
 }

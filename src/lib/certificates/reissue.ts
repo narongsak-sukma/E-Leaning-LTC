@@ -1,21 +1,24 @@
 /**
- * reissue — ออกใบใหม่แทนใบเดิม (Wave D — D-4 · SDS §3.4d · CRT-007)
+ * reissue — ออกใบใหม่แทนใบเดิม (Wave D — D-4 · SDS §3.4d · CRT-007 · 0019-r1)
  *
- * - ใบเดิม valid → status='superseded' แล้วออกใบใหม่ผ่าน issueCertificate (snapshot ใหม่ ณ วันออก)
- * - lineage: ใบใหม่ `supersedes_cert_id` ชี้ใบเดิม · ใบเดิม `superseded_by` ชี้ใบใหม่
+ * ทั้งหมดผ่าน RPC `admin_reissue_certificate` เดียว (TX เดียว): ใบเดิม valid →
+ * superseded → cert_issue_core ออกใบใหม่ (supersedes_cert_id ชี้ใบเดิม + CERT_ISSUE
+ * audit ใน TX) → ใบเดิม superseded_by ชี้ใบใหม่ → CERT_REISSUE audit — ล้มช่วงไหน
+ * = rollback ทั้ง TX (gate r1 B7: ทางเดิมเขียน lineage หลัง commit โดยไม่มี compensation
+ * เมื่อล้ม = สถานะกึ่งๆ ถาวร + retry ติด not_valid) · PDF ของใบใหม่เรนเดอร์ฝั่ง TS
+ * หลัง RPC (พัง = คงใบ pdf_media_id null ตามทางเลือก D36-O6 — ใช้ attachCertificatePdf
+ * ร่วมกับ issue)
  * - **ไม่กระทบ credit** (ไม่แตะ credit_ledger_entries — D12-14/15)
- * - PostgREST ไม่มี interactive TX — ทำเป็นลำดับแบบมี compensating write:
- *   ถ้าการออกใบใหม่ล้มเหลว → คืนสถานะใบเดิมเป็น valid ก่อน throw ตัวเดิม
- *   (ธง: atomicity ระดับนี้คือข้อจำกัดของ "ไม่มี RPC cert โดยเจตนา — D36-O3")
  */
 import "server-only";
-import { AppError } from "@/lib/errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
-import { issueCertificate, type IssuedCertificate } from "./issue";
-import { appendAuditEvent, dbFailed, rowString, type Row } from "./shared";
-
-/** สถานะของใบเดิมที่ reissue ได้ */
-const REISSUABLE_STATUS = "valid";
+import {
+  attachCertificatePdf,
+  parseCertCore,
+  toIssuedCertificate,
+  type IssuedCertificate,
+} from "./issue";
+import { certRpcError, dbFailed, rowString, type Row } from "./shared";
 
 export interface ReissueCertificateInput {
   readonly actorId: string;
@@ -30,103 +33,32 @@ export interface ReissuedCertificate {
   readonly oldSupersededBy: string;
 }
 
-/** ออกใหม่แทนใบเดิม — ใบเดิม superseded + lineage ทั้งสองทิศ */
+/** ออกใหม่แทนใบเดิม — supersede + issue + lineage + audit TX เดียวใน RPC */
 export async function reissueCertificate(
   input: ReissueCertificateInput,
 ): Promise<ReissuedCertificate> {
   const client = createSupabaseServiceRoleClient();
-
-  // 1) อ่านใบเดิม (คอลัมน์แคบ) — ต้อง valid
-  const lookup = await client
-    .from("certificates")
-    .select("id,cert_no,enrollment_id,status")
-    .eq("id", input.certificateId)
-    .maybeSingle();
-  if (lookup.error !== null) {
-    throw dbFailed("cert_reissue_lookup_failed");
-  }
-  const oldCert = lookup.data as Row | null;
-  if (oldCert === null) {
-    throw new AppError("ERR-NF-001", { details: { field: "certificateId" } });
-  }
-  if (rowString(oldCert, "status") !== REISSUABLE_STATUS) {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "certificateId", reason: "not_valid" },
-    });
-  }
-  const oldCertId = rowString(oldCert, "id");
-
-  // 2) ใบเดิม → superseded (guard ด้วย status='valid' ใน UPDATE เดียวกัน)
-  const supersedeRes = await client
-    .from("certificates")
-    .update({ status: "superseded" })
-    .eq("id", input.certificateId)
-    .eq("status", REISSUABLE_STATUS)
-    .select("id,status")
-    .single();
-  if (supersedeRes.error !== null || supersedeRes.data === null) {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "certificateId", reason: "not_valid" },
-    });
-  }
-
-  // 3) ออกใบใหม่ — snapshot ใหม่ณวันออก (issueCertificate ตรวจ enrollment/attempt ซ้ำเอง)
-  let newCertificate: IssuedCertificate;
-  try {
-    newCertificate = await issueCertificate({
-      actorId: input.actorId,
-      enrollmentId: rowString(oldCert, "enrollment_id"),
-      requestId: input.requestId ?? null,
-    });
-  } catch (error: unknown) {
-    // 4) compensating write — ออกใบใหม่ไม่สำเร็จ → คืนใบเดิมเป็น valid แล้ว throw ตัวเดิม
-    await client
-      .from("certificates")
-      .update({ status: REISSUABLE_STATUS })
-      .eq("id", input.certificateId)
-      .eq("status", "superseded");
-    throw error;
-  }
-
-  // 5) lineage — ใบใหม่ supersedes_cert_id ชี้ใบเดิม · ใบเดิม superseded_by ชี้ใบใหม่
-  const lineageRes = await client
-    .from("certificates")
-    .update({ supersedes_cert_id: oldCertId })
-    .eq("id", newCertificate.id)
-    .select("id")
-    .single();
-  if (lineageRes.error !== null) {
-    throw dbFailed("cert_reissue_lineage_failed");
-  }
-  const oldByRes = await client
-    .from("certificates")
-    .update({ superseded_by: newCertificate.id })
-    .eq("id", oldCertId)
-    .select("id")
-    .single();
-  if (oldByRes.error !== null) {
-    throw dbFailed("cert_reissue_lineage_failed");
-  }
-
-  // 6) audit CERT_REISSUE — entityId = ใบใหม่ · `superseded_cert_id` = ใบเดิมที่ถูกแทน
-  //    (AUDIT §2.1 "certificate_id เดิม → ใหม่") · `user_id` = actor ผู้สั่งออกใหม่ (0008:476-486)
-  await appendAuditEvent(client, {
-    action: "CERT_REISSUE",
-    entityType: "certificate",
-    entityId: newCertificate.id,
-    context: {
-      enrollment_id: rowString(oldCert, "enrollment_id"),
-      superseded_cert_id: oldCertId,
-      user_id: input.actorId,
-    },
-    actorId: input.actorId,
-    requestId: input.requestId ?? null,
+  const rpc = await client.rpc("admin_reissue_certificate", {
+    p_actor_user_id: input.actorId,
+    p_certificate_id: input.certificateId,
+    p_request_id: input.requestId ?? null,
   });
-
+  if (rpc.error !== null) {
+    throw certRpcError(rpc.error, "cert_reissue_rpc_failed");
+  }
+  // คืน core ของใบใหม่ + superseded_cert_id (ใบเดิม) ใน jsonb เดียว
+  const row = (Array.isArray(rpc.data) ? rpc.data[0] : rpc.data) as Row | null;
+  if (row === null) {
+    throw dbFailed("cert_reissue_rpc_failed");
+  }
+  const oldCertificateId = rowString(row, "superseded_cert_id");
+  const core = parseCertCore(row);
+  // PDF ของใบใหม่ — พัง = คงใบ (pdf_media_id null) ตาม D36-O6 เหมือน issue
+  const pdfMediaId = await attachCertificatePdf(client, core, input.actorId);
   return {
-    newCertificate,
-    oldCertificateId: oldCertId,
+    newCertificate: { ...toIssuedCertificate(core), pdfMediaId },
+    oldCertificateId,
     oldStatus: "superseded",
-    oldSupersededBy: newCertificate.id,
+    oldSupersededBy: core.id,
   };
 }

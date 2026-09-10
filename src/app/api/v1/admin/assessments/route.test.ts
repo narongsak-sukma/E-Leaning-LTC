@@ -177,6 +177,12 @@ function postRequest(body: unknown): Request {
 
 const VALID_RULES = { passPct: 70, timeLimitMinutes: 90, maxAttempts: 2 };
 
+/** กติกา embed ที่ drift (pass_pct null) — จำลองคอลัมน์เพี้ยนจาก DB สำหรับ B4 */
+function driftedRules(): Array<Record<string, unknown>> {
+  const base = assessmentRow()["assessment_rules"] as Array<Record<string, unknown>>;
+  return [{ ...base[0]!, pass_pct: null }];
+}
+
 const VALID_BODY = {
   courseId: COURSE_ID,
   code: "FIN-01",
@@ -236,6 +242,16 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: unknown[] };
     expect(body.data).toEqual([]);
+  });
+
+  it("B4: แถว drift (กติกา embed pass_pct null) → 503 ERR-SYS-002 fail-closed ไม่รั่ง 200 เพี้ยน", async () => {
+    const drifted = assessmentRow({ assessment_rules: driftedRules() });
+    mockClient({ assessments: [{ data: [drifted] }] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessment_contract_drift");
   });
 });
 
@@ -308,5 +324,18 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-VAL-001");
     expect(calls.some((call) => call.table === "assessments")).toBe(false);
+  });
+
+  it("B4: สร้างสำเร็จแต่ reload drift (กติกาเพี้ยน) → 503 ERR-SYS-002 ไม่ตอบ 201 ที่ payload เพี้ยน", async () => {
+    const drifted = assessmentRow({ assessment_rules: driftedRules() });
+    mockClient({
+      assessments: [{ data: assessmentRow() }, { data: drifted }],
+      assessment_rules: [{ data: null }],
+    });
+    const res = await POST(postRequest(VALID_BODY));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessment_contract_drift");
   });
 });

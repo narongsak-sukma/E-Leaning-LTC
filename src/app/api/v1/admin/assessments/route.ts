@@ -26,12 +26,14 @@ import {
   jsonCreated,
   jsonErrorResponse,
   jsonPageOk,
+  parseOutgoingView,
   type JsonResponseOptions,
 } from "@/lib/api/response";
 import { AppError } from "@/lib/errors";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requirePermission, type RequirePermissionResult } from "@/lib/rbac";
 import {
+  AdminAssessmentResource,
   AssessmentCreateBody,
   type AssessmentCreateBodyParsed,
   type AssessmentRuleInputParsed,
@@ -159,8 +161,18 @@ export async function GET(request: Request): Promise<NextResponse> {
       sortKeyOf: (row) => row.created_at,
       idOf: (row) => row.id,
     });
+    // zod-ตรวจทุกแถวขาออก (B4) — แถวไหน drift (เช่น กติกา embed เพี้ยน) → 503 ERR-SYS-002
     return jsonPageOk(
-      { data: page.data.map(toAdminAssessmentResource), page: page.page },
+      {
+        data: page.data.map((row) =>
+          parseOutgoingView(
+            AdminAssessmentResource,
+            toAdminAssessmentResource(row),
+            "admin_assessment_contract_drift",
+          ),
+        ),
+        page: page.page,
+      },
       options,
     );
   } catch (error: unknown) {
@@ -229,8 +241,13 @@ export async function POST(
         details: { reason: "assessment_reload_failed" },
       });
     }
+    // zod-ตรวจ view ขาออก (B4) — drift → 503 ERR-SYS-002 (สร้างสำเร็จแต่ตอบกลับเพี้ยน = ระบบล้ม)
     return jsonCreated(
-      toAdminAssessmentResource(reloaded as unknown as AdminAssessmentRow),
+      parseOutgoingView(
+        AdminAssessmentResource,
+        toAdminAssessmentResource(reloaded as unknown as AdminAssessmentRow),
+        "admin_assessment_contract_drift",
+      ),
       options,
     );
   } catch (error: unknown) {

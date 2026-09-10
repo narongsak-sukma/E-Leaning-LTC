@@ -1,44 +1,38 @@
 /**
- * issue — ออกประกาศนียบัตร (Wave D — D-4 · SDS §3.4a)
+ * issue — ออกประกาศนียบัตร (Wave D — D-4 · SDS §3.4a · 0019-r1)
  *
- * **service_role รวมศูนย์ที่ src/lib/certificates/** (D36-O3)** — ทุก query ใช้
- * createSupabaseServiceRoleClient แบบ SELECT คอลัมน์แคบ + เหตุผลกำกับทุกจุด (SDS §5.2);
- * route เรียกฟังก์ชันของ lib เท่านั้น (ห้าม import service client ตรง)
+ * **service_role รวมศูนย์ที่ src/lib/certificates/** (D36-O3)** — route เรียกฟังก์ชัน
+ * ของ lib เท่านั้น (ห้าม import service client ตรง)
  *
- * ลำดับงาน (ไม่มี RPC cert โดยเจตนา — D36-O3):
- * 1) หา enrollment ต้อง completed + ไม่ soft-delete · 2) กันซ้ำด้วยการอ่านใบ valid ที่มีอยู่
- * (DB กันซ้ำจริงด้วย partial UNIQUE(enrollment_id) WHERE status='valid' — 0006) ·
- * 3) หา attempt ที่ผ่าน (passed=true + status='passed' — enum จริงของ 0001:118; grading ทันที
- * ตาม DCR-4 ทำให้ 'passed' คือสถานะจบจริงที่ผ่าน) · 4) snapshot ชื่อ/ชื่อหลักสูตรณวันออก ·
- * 5) INSERT ใบ (cert_no/verify_code สุ่ม CSPRNG + retry ≤5 เมื่อชน UNIQUE 23505) ·
- * 6) เรนเดอร์ PDF + upload Storage + ผูก pdf_media_id (พัง = คงใบ pdf_media_id null + WARN —
- * ทางเลือกที่เลือกตามใบงาน: reissue ได้ภายหลัง) · 7) audit CERT_ISSUE
+ * 0019-r1 (gate r1 B2/B7/B8):
+ * - การออกใบย้ายไป RPC `admin_issue_certificate` เดียว (cert_issue_core ภายใน):
+ *   ตรวจ enrollment completed + ใบ valid ซ้ำ + attempt ผ่าน + snapshot ชื่อ + สุ่ม
+ *   cert_no/verify_code (CSPRNG ฝั่ง DB · retry ≤5 เมื่อชน UNIQUE) + INSERT +
+ *   **audit CERT_ISSUE ใน TX เดียว** (audit ล้ม = rollback ไม่มีใบที่ไร้ audit — D12-8)
+ *   BFF เหลือ PDF pipeline หลัง RPC (render + upload + media_assets + pdf_media_id) —
+ *   พัง = คงใบ pdf_media_id null + WARN ตามทางเลือก D36-O6 (reissue ได้ภายหลัง)
+ * - คิว eligible (endpoint 82): สแกนแบบ chunk — ดึงทีละก้อนเรียง (submitted_at,id) desc
+ *   แล้ว **ตัด "ออกใบแล้ว" ก่อนตัดหน้า** (B8: แบบเดิม limit ก่อน filter ทำให้หน้าแรก
+ *   ว่างเปล่าทั้งที่ยังมีผู้มีสิทธิ์เก่ากว่า) สะสมจนได้เกิน limit หรือคิวหมด
  *
- * ธง: credit_snapshot เป็น null เสมอ — service_role มี INSERT เท่านั้นบน credit_ledger_entries
- * (0010:821-826 ไม่มี SELECT) และไม่มี RPC อ่าน credit ราย attempt จึงอ่านยอดไม่ได้ (ห้ามเดา)
+ * ธง: credit_snapshot เป็น null เสมอ — service_role มี INSERT เท่านั้นบน
+ * credit_ledger_entries (0010:821-826 ไม่มี SELECT) จึงอ่านยอดไม่ได้ (ห้ามเดา)
  */
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { AppError } from "@/lib/errors";
 import { buildPage, decodeCursor, type CursorPayload } from "@/lib/api/pagination";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { renderCertificatePdf } from "./pdf";
 import {
-  appendAuditEvent,
   CERTIFICATE_BUCKET,
   certLogger,
+  certRpcError,
   dbFailed,
-  generateCertNo,
-  generateVerifyCode,
   holderNameOf,
-  isUniqueViolation,
-  MAX_CODE_ATTEMPTS,
   rowNumberOrNull,
   rowString,
   type Row,
 } from "./shared";
-
-/** จำนวนรอบสุ่มรหัสสูงสุด — เกิน = สถานการณ์ผิดปกติของระบบ (ERR-SYS-001) */
 
 /** ข้อมูลที่ต้องระบุเพื่อออกใบ — actorId มาจาก requirePermission ที่ route ตรวจแล้ว */
 export interface IssueCertificateInput {
@@ -63,6 +57,155 @@ export interface IssuedCertificate {
   readonly pdfMediaId: string | null;
 }
 
+/**
+ * jsonb ที่ cert_issue_core คืน (ผ่าน admin_issue/admin_reissue_certificate) —
+ * ตรวจชนิดก่อนใช้ fail-closed เหมือนแถวตารางอื่น (ชนิดไม่ตรง = สัญญา DB เพี้ยน)
+ */
+export interface CertCoreRow {
+  readonly id: string;
+  readonly certNo: string;
+  readonly verifyCode: string;
+  readonly enrollmentId: string;
+  readonly userId: string;
+  readonly courseId: string;
+  readonly holderName: string;
+  readonly courseTitle: string;
+  readonly issuedAt: string;
+}
+
+/** RPC jsonb → CertCoreRow (PostgREST อาจ wrap scalar เป็น array — รองรับทั้งสองรูป) */
+export function parseCertCore(data: unknown): CertCoreRow {
+  const row = (Array.isArray(data) ? data[0] : data) as Row | null;
+  if (row === null) {
+    throw dbFailed("cert_rpc_contract_mismatch");
+  }
+  return {
+    id: rowString(row, "id"),
+    certNo: rowString(row, "cert_no"),
+    verifyCode: rowString(row, "verify_code"),
+    enrollmentId: rowString(row, "enrollment_id"),
+    userId: rowString(row, "user_id"),
+    courseId: rowString(row, "course_id"),
+    holderName: rowString(row, "holder_name"),
+    courseTitle: rowString(row, "course_title"),
+    issuedAt: rowString(row, "issued_at"),
+  };
+}
+
+/** ใบที่ RPC ออกแล้ว → resource ของ BFF (creditSnapshot ยัง null — 0010:825 INSERT-only) */
+export function toIssuedCertificate(core: CertCoreRow): IssuedCertificate {
+  return {
+    id: core.id,
+    certNo: core.certNo,
+    verifyCode: core.verifyCode,
+    enrollmentId: core.enrollmentId,
+    userId: core.userId,
+    courseId: core.courseId,
+    holderNameSnapshot: core.holderName,
+    courseTitleSnapshot: core.courseTitle,
+    creditSnapshot: null,
+    status: "valid",
+    issuedAt: core.issuedAt,
+    pdfMediaId: null,
+  };
+}
+
+/**
+ * PDF + Storage + media_assets + ผูก pdf_media_id — ใช้ร่วม issue/reissue (0019-r1 แยก
+ * ออกจาก issueCertificate เดิม) — **พังทุกกระแง = คงใบ + คืน null + WARN** ไม่ throw
+ * (ทางเลือก D36-O6: ใบยัง verify ได้ แก้ไขได้ด้วย reissue ภายหลัง)
+ */
+export async function attachCertificatePdf(
+  client: SupabaseClient,
+  core: CertCoreRow,
+  actorId: string,
+): Promise<string | null> {
+  let pdfMediaId: string | null = null;
+  try {
+    const pdfBytes = await renderCertificatePdf({
+      certNo: core.certNo,
+      verifyCode: core.verifyCode,
+      holderName: core.holderName,
+      courseTitle: core.courseTitle,
+      issuedAt: new Date(core.issuedAt),
+    });
+    const storagePath = `${CERTIFICATE_BUCKET}-pdf/${core.certNo}.pdf`;
+    const uploadRes = await client.storage
+      .from(CERTIFICATE_BUCKET)
+      .upload(storagePath, pdfBytes, { contentType: "application/pdf", upsert: false });
+    if (uploadRes.error !== null) {
+      certLogger.warn("certificate_pdf_upload_failed", {
+        route: "certificates:issue",
+        user_id: actorId,
+      });
+      return null;
+    }
+    const mediaRes = await client
+      .from("media_assets")
+      .insert({
+        provider: "supabase_storage",
+        media_type: "document",
+        bucket: CERTIFICATE_BUCKET,
+        storage_path: storagePath,
+        mime_type: "application/pdf",
+        size_bytes: pdfBytes.byteLength,
+        status: "ready",
+        uploaded_by: actorId,
+      })
+      .select("id")
+      .single();
+    if (mediaRes.error !== null) {
+      certLogger.warn("certificate_media_insert_failed", {
+        route: "certificates:issue",
+        user_id: actorId,
+      });
+      return null;
+    }
+    pdfMediaId = rowString(mediaRes.data as Row, "id");
+    const updateRes = await client
+      .from("certificates")
+      .update({ pdf_media_id: pdfMediaId })
+      .eq("id", core.id);
+    if (updateRes.error !== null) {
+      certLogger.warn("certificate_pdf_link_update_failed", {
+        route: "certificates:issue",
+        user_id: actorId,
+      });
+      return null;
+    }
+    return pdfMediaId;
+  } catch {
+    // เรนเดอร์/อัปโหลดล้มเหลว — คงใบไว้แบบไม่มี PDF (ทางเลือก D36-O6)
+    certLogger.warn("certificate_pdf_render_failed", {
+      route: "certificates:issue",
+      user_id: actorId,
+    });
+    return null;
+  }
+}
+
+/**
+ * ออกประกาศนียบัตรจาก enrollment — สิทธิ์ actor อยู่ที่ route (requirePermission)
+ * แล้ว ที่นี่คือ RPC mutation+audit + PDF pipeline ล้วน
+ */
+export async function issueCertificate(input: IssueCertificateInput): Promise<IssuedCertificate> {
+  const client = createSupabaseServiceRoleClient();
+  // 1) mutation + audit atomic ใน RPC เดียว (0019-r1): ตรวจ enrollment/attempt/ซ้ำ +
+  //    snapshot + สุ่มรหัส + INSERT + CERT_ISSUE — error มีป้าย (ERR-XXX-NNN|reason)
+  const rpc = await client.rpc("admin_issue_certificate", {
+    p_actor_user_id: input.actorId,
+    p_enrollment_id: input.enrollmentId,
+    p_request_id: input.requestId ?? null,
+  });
+  if (rpc.error !== null) {
+    throw certRpcError(rpc.error, "cert_issue_rpc_failed");
+  }
+  const core = parseCertCore(rpc.data);
+  // 2) PDF pipeline ฝั่ง TS หลัง RPC — พัง = คงใบ (pdf_media_id null) ตาม D36-O6
+  const pdfMediaId = await attachCertificatePdf(client, core, input.actorId);
+  return { ...toIssuedCertificate(core), pdfMediaId };
+}
+
 /** select ของคิวงาน (eligible) — embed profiles/enrollments + คอลัมน์แคบ (SDS §5.2) */
 const ELIGIBLE_SELECT =
   "id,enrollment_id,user_id,score_pct,submitted_at,attempt_no," +
@@ -72,7 +215,7 @@ const ELIGIBLE_SELECT =
 /**
  * คิวงานออกประกาศนียบัตร (API-SPECIFICATION endpoint 82 · SDS §3.4a · D12-23) —
  * attempt ผ่านเกณฑ์ + enrollment completed + ยังไม่มีใบ valid ของ enrollment นั้น
- * (filter "ยังไม่มีใบ valid" ทำเป็น anti-join ใน JS เพราะ PostgREST ไม่มี NOT EXISTS)
+ * (filter "ยังไม่มีใบ valid" เป็น anti-join ใน JS เพราะ PostgREST ไม่มี NOT EXISTS)
  */
 export interface EligibleAttempt {
   readonly attemptId: string;
@@ -96,42 +239,75 @@ export interface EligiblePage {
   readonly page: { readonly nextCursor: string | null; readonly hasMore: boolean };
 }
 
+/** ขนาด chunk ของการสแกนคิว (ไม่ใช่ขนาดหน้า — หน้าคือ query.limit) */
+const ELIGIBLE_CHUNK_SIZE = 200;
+
+/** เพดาน chunk ต่อคำขอ — กันการไล่คิวไม่รู้จบ (200 × 50 = 10,000 แถวต่อคำขอ) */
+const MAX_ELIGIBLE_CHUNKS = 50;
+
+/**
+ * สแกนคิวเป็น chunk เรียง (submitted_at,id) desc: ตัด "ออกใบแล้ว" ของทุกแถวใน chunk
+ * ก่อนสะสม (gate r1 B8 — exclusion ต้องมาก่อนการตัดหน้า) หยุดเมื่อสะสมเกิน limit
+ * (ได้ extra row สำหรับ hasMore ของ buildPage) หรือคิวหมด · cursor เลื่อนไปหลัง
+ * แถวสุดท้ายของ chunk (รวมแถวที่ถูกตัด — ไม่มีทางวนซ้ำ)
+ */
 export async function listEligibleAttempts(query: EligibleQuery): Promise<EligiblePage> {
   const client = createSupabaseServiceRoleClient();
-  let builder = client
-    .from("assessment_attempts")
-    .select(ELIGIBLE_SELECT)
-    .eq("passed", true)
-    .eq("status", "passed")
-    .not("submitted_at", "is", null)
-    .eq("enrollments.status", "completed")
-    .filter("enrollments.deleted_at", "is", null)
-    .not("enrollments.completed_at", "is", null)
-    .order("submitted_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(query.limit + 1);
-  if (query.courseId !== undefined && query.courseId !== null) {
-    builder = builder.eq("enrollments.course_id", query.courseId);
+  const collected: Row[] = [];
+  let cursor: CursorPayload | null =
+    query.cursor === undefined || query.cursor === null ? null : decodeCursor(query.cursor);
+  for (
+    let chunk = 0;
+    chunk < MAX_ELIGIBLE_CHUNKS && collected.length <= query.limit;
+    chunk += 1
+  ) {
+    let builder = client
+      .from("assessment_attempts")
+      .select(ELIGIBLE_SELECT)
+      .eq("passed", true)
+      .eq("status", "passed")
+      .not("submitted_at", "is", null)
+      .eq("enrollments.status", "completed")
+      .filter("enrollments.deleted_at", "is", null)
+      .not("enrollments.completed_at", "is", null)
+      .order("submitted_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(ELIGIBLE_CHUNK_SIZE);
+    if (query.courseId !== undefined && query.courseId !== null) {
+      builder = builder.eq("enrollments.course_id", query.courseId);
+    }
+    if (cursor !== null) {
+      builder = builder.or(cursorFilter(cursor));
+    }
+    const res = await builder;
+    if (res.error !== null) {
+      throw dbFailed("cert_eligible_query_failed");
+    }
+    const rows = (res.data ?? []) as unknown as Row[];
+    if (rows.length === 0) {
+      break; // คิวหมด
+    }
+    // anti-join ใบ valid ที่มีอยู่ (คอลัมน์เดียว) — ตัดรายการที่ออกใบแล้วก่อนสะสม
+    const issuedEnrollmentIds = await fetchValidCertEnrollmentIds(
+      client,
+      rows.map((row) => rowString(row, "enrollment_id")),
+    );
+    for (const row of rows) {
+      if (!issuedEnrollmentIds.has(rowString(row, "enrollment_id"))) {
+        collected.push(row);
+      }
+    }
+    if (rows.length < ELIGIBLE_CHUNK_SIZE) {
+      break; // อ่านครบทั้งคิวแล้ว — ไม่มีแถวถัดไป
+    }
+    const last = rows[rows.length - 1];
+    if (last === undefined) {
+      break;
+    }
+    cursor = { sortKey: rowString(last, "submitted_at"), id: rowString(last, "id") };
   }
-  if (query.cursor !== undefined && query.cursor !== null) {
-    const cursorPayload = decodeCursor(query.cursor);
-    builder = builder.or(cursorFilter(cursorPayload));
-  }
-  const res = await builder;
-  if (res.error !== null) {
-    throw dbFailed("cert_eligible_query_failed");
-  }
-  const rows = (res.data ?? []) as unknown as Row[];
-  // anti-join ใบ valid ที่มีอยู่ (คอลัมน์เดียว) — ตัดรายการที่ออกใบแล้วออกจากคิว
-  const issuedEnrollmentIds = await fetchValidCertEnrollmentIds(
-    client,
-    rows.map((row) => rowString(row, "enrollment_id")),
-  );
-  const eligible = rows.filter(
-    (row) => !issuedEnrollmentIds.has(rowString(row, "enrollment_id")),
-  );
   const built = buildPage({
-    rows: eligible,
+    rows: collected,
     limit: query.limit,
     sortKeyOf: (row) => rowString(row, "submitted_at"),
     idOf: (row) => rowString(row, "id"),
@@ -183,215 +359,4 @@ function toEligibleAttempt(row: Row): EligibleAttempt {
 /** or-filter เลื่อน cursor แบบ row-wise (submitted_at, id) < (sortKey, id) — เรียง DESC */
 function cursorFilter(payload: CursorPayload): string {
   return `submitted_at.lt.${payload.sortKey},and(submitted_at.eq.${payload.sortKey},id.lt.${payload.id})`;
-}
-
-/**
- * ออกประกาศนียบัตรจาก enrollment ที่จบหลักสูตรและมี attempt ที่ผ่าน —
- * ตรวจสิทธิ์ actor อยู่ที่ route (requirePermission) แล้ว ที่นี่เป็นส่วน DB/PDF/audit ล้วน
- */
-export async function issueCertificate(input: IssueCertificateInput): Promise<IssuedCertificate> {
-  const client = createSupabaseServiceRoleClient();
-  // 1) enrollment — ต้อง completed + ไม่ soft-delete (SDS §3.4a)
-  const enrollmentRes = await client
-    .from("enrollments")
-    .select("id,user_id,course_id,status,completed_at,deleted_at")
-    .eq("id", input.enrollmentId)
-    .maybeSingle();
-  if (enrollmentRes.error !== null) {
-    throw dbFailed("cert_enrollment_lookup_failed");
-  }
-  const enrollment = enrollmentRes.data as Row | null;
-  if (enrollment === null) {
-    throw new AppError("ERR-NF-001", { details: { field: "enrollmentId" } });
-  }
-  if (rowString(enrollment, "status") !== "completed" || enrollment["deleted_at"] != null) {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "enrollmentId", reason: "enrollment_not_completed" },
-    });
-  }
-
-  // 2) กันออกซ้ำ — ใบ valid ที่มีอยู่ (DB กันซ้ำจริงด้วย partial UNIQUE ที่ 0006)
-  const existingRes = await client
-    .from("certificates")
-    .select("id")
-    .eq("enrollment_id", input.enrollmentId)
-    .eq("status", "valid")
-    .maybeSingle();
-  if (existingRes.error !== null) {
-    throw dbFailed("cert_existing_lookup_failed");
-  }
-  if (existingRes.data !== null) {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "enrollmentId", reason: "valid_certificate_exists" },
-    });
-  }
-
-  // 3) attempt ที่ผ่าน (best = attempt_no สูงสุด) — เงื่อนไข eligible ตาม SDS §3.4a
-  const attemptRes = await client
-    .from("assessment_attempts")
-    .select("id,score_pct,attempt_no")
-    .eq("enrollment_id", input.enrollmentId)
-    .eq("passed", true)
-    .eq("status", "passed")
-    .not("submitted_at", "is", null)
-    .order("attempt_no", { ascending: false })
-    .limit(1);
-  if (attemptRes.error !== null) {
-    throw dbFailed("cert_attempt_lookup_failed");
-  }
-  const attempt = (attemptRes.data as Row[] | null)?.[0] as Row | undefined;
-  if (attempt === undefined) {
-    throw new AppError("ERR-VAL-001", {
-      details: { field: "enrollmentId", reason: "no_passed_attempt" },
-    });
-  }
-  // 4) snapshot ณ วันออก — ชื่อจาก first/last แล้ว fallback display_name (SDS §3.4a)
-  const profileRes = await client
-    .from("profiles")
-    .select("display_name,first_name,last_name")
-    .eq("id", rowString(enrollment, "user_id"))
-    .maybeSingle();
-  if (profileRes.error !== null || profileRes.data === null) {
-    throw dbFailed("cert_profile_lookup_failed");
-  }
-  const holderName = holderNameOf(profileRes.data as Row);
-
-  const courseRes = await client
-    .from("courses")
-    .select("title_th")
-    .eq("id", rowString(enrollment, "course_id"))
-    .maybeSingle();
-  if (courseRes.error !== null || courseRes.data === null) {
-    throw dbFailed("cert_course_lookup_failed");
-  }
-  const courseTitle = rowString(courseRes.data as Row, "title_th");
-
-  // 5) INSERT ใบ — สุ่มรหัสใหม่ทุกรอบเมื่อชน UNIQUE (23505) แล้ว retry ≤5 รอบ
-  const issuedAt = new Date();
-  let inserted: Row | null = null;
-  for (let round = 1; round <= MAX_CODE_ATTEMPTS; round += 1) {
-    const certNo = generateCertNo(issuedAt);
-    const verifyCode = generateVerifyCode();
-    const insertRes = await client
-      .from("certificates")
-      .insert({
-        cert_no: certNo,
-        verify_code: verifyCode,
-        enrollment_id: rowString(enrollment, "id"),
-        user_id: rowString(enrollment, "user_id"),
-        course_id: rowString(enrollment, "course_id"),
-        holder_name_snapshot: holderName,
-        course_title_snapshot: courseTitle,
-        credit_snapshot: null, // ธง: อ่าน credit_ledger_entries ไม่ได้ (0010:825 INSERT เท่านั้น)
-        issued_by: input.actorId,
-        status: "valid",
-      })
-      .select("id,cert_no,verify_code,issued_at")
-      .single();
-    if (insertRes.error === null) {
-      inserted = insertRes.data as Row;
-      break;
-    }
-    if (!isUniqueViolation(insertRes.error)) {
-      throw dbFailed("cert_insert_failed");
-    }
-  }
-  if (inserted === null) {
-    throw new AppError("ERR-SYS-001", { details: { reason: "cert_code_retry_exhausted" } });
-  }
-
-  // 6) PDF + Storage — พังทุกกระแง = คงใบ + pdf_media_id null + WARN (ไม่มี PII — allowlist logger)
-  let pdfMediaId: string | null = null;
-  try {
-    const pdfBytes = await renderCertificatePdf({
-      certNo: rowString(inserted, "cert_no"),
-      verifyCode: rowString(inserted, "verify_code"),
-      holderName,
-      courseTitle,
-      issuedAt: new Date(rowString(inserted, "issued_at")),
-    });
-    const storagePath = `${CERTIFICATE_BUCKET}-pdf/${rowString(inserted, "cert_no")}.pdf`;
-    const uploadRes = await client.storage
-      .from(CERTIFICATE_BUCKET)
-      .upload(storagePath, pdfBytes, { contentType: "application/pdf", upsert: false });
-    if (uploadRes.error !== null) {
-      certLogger.warn("certificate_pdf_upload_failed", {
-        route: "certificates:issue",
-        ...(input.actorId === undefined ? {} : { user_id: input.actorId }),
-      });
-    } else {
-      const mediaRes = await client
-        .from("media_assets")
-        .insert({
-          provider: "supabase_storage",
-          media_type: "document",
-          bucket: CERTIFICATE_BUCKET,
-          storage_path: storagePath,
-          mime_type: "application/pdf",
-          size_bytes: pdfBytes.byteLength,
-          status: "ready",
-          uploaded_by: input.actorId,
-        })
-        .select("id")
-        .single();
-      if (mediaRes.error !== null) {
-        certLogger.warn("certificate_media_insert_failed", {
-          route: "certificates:issue",
-          ...(input.actorId === undefined ? {} : { user_id: input.actorId }),
-        });
-      } else {
-        pdfMediaId = rowString(mediaRes.data as Row, "id");
-        const updateRes = await client
-          .from("certificates")
-          .update({ pdf_media_id: pdfMediaId })
-          .eq("id", rowString(inserted, "id"));
-        if (updateRes.error !== null) {
-          pdfMediaId = null;
-          certLogger.warn("certificate_pdf_link_update_failed", {
-            route: "certificates:issue",
-            ...(input.actorId === undefined ? {} : { user_id: input.actorId }),
-          });
-        }
-      }
-    }
-  } catch {
-    // เรนเดอร์/อัปโหลดล้มเหลว — คงใบไว้แบบไม่มี PDF (ธง: ทางเลือกที่เลือกตามใบงาน)
-    pdfMediaId = null;
-    certLogger.warn("certificate_pdf_render_failed", {
-      route: "certificates:issue",
-      ...(input.actorId === undefined ? {} : { user_id: input.actorId }),
-    });
-  }
-
-  // 7) audit CERT_ISSUE — context ตาม AUDIT §2.1 (certificate_id = entity_id · code · attempt_id ·
-  //    ผู้ออก) + `user_id` = actor ผู้ออกใบ (0008:476-486 service_role ยก context.user_id เป็น
-  //    actor_user_id ก่อน strict-keys — ไม่ส่ง = actor หายจากแถว audit)
-  await appendAuditEvent(client, {
-    action: "CERT_ISSUE",
-    entityType: "certificate",
-    entityId: rowString(inserted, "id"),
-    context: {
-      code: rowString(inserted, "cert_no"),
-      attempt_id: rowString(attempt, "id"),
-      enrollment_id: rowString(enrollment, "id"),
-      user_id: input.actorId,
-    },
-    actorId: input.actorId,
-    requestId: input.requestId ?? null,
-  });
-
-  return {
-    id: rowString(inserted, "id"),
-    certNo: rowString(inserted, "cert_no"),
-    verifyCode: rowString(inserted, "verify_code"),
-    enrollmentId: rowString(enrollment, "id"),
-    userId: rowString(enrollment, "user_id"),
-    courseId: rowString(enrollment, "course_id"),
-    holderNameSnapshot: holderName,
-    courseTitleSnapshot: courseTitle,
-    creditSnapshot: null,
-    status: "valid",
-    issuedAt: rowString(inserted, "issued_at"),
-    pdfMediaId,
-  };
 }
