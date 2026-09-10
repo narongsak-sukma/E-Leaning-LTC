@@ -106,6 +106,15 @@ const envSchemaWithRules = envSchema.superRefine((env, ctx) => {
       }
     }
   }
+  // PB-9: prod (รวม staging ที่รัน APP_ENV=prod) ห้ามตกไปใช้ service key เป็น PRF ของ cursor —
+  // fail fast ตอน boot แรงกว่า documentation ล้วน (ASVS V14)
+  if (env.APP_ENV === "prod" && env.CURSOR_HMAC_SECRET === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["CURSOR_HMAC_SECRET"],
+      message: "APP_ENV=prod ต้องตั้ง CURSOR_HMAC_SECRET เฉพาะทาง (docs/09-dev/SECRETS-PROVISIONING.md)",
+    });
+  }
 });
 
 type EnvRaw = z.infer<typeof envSchemaWithRules>;

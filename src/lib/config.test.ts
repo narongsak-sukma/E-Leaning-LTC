@@ -149,6 +149,28 @@ describe("CURSOR_HMAC_SECRET — signed cursor (API-SPECIFICATION §1.2)", () =>
   it("ค่าว่าง → ConfigError (ห้าม secret ว่าง)", () => {
     expect(() => loadConfig(baseEnv({ CURSOR_HMAC_SECRET: "   " }))).toThrow(ConfigError);
   });
+
+  it("PB-9: APP_ENV=prod ไม่ตั้ง → ConfigError พร้อมชื่อ key ใน issue (ห้าม fallback service key)", () => {
+    try {
+      loadConfig(baseEnv({ APP_ENV: "prod" }));
+      expect.unreachable("ต้อง throw ConfigError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).issues.join("\n")).toContain("CURSOR_HMAC_SECRET");
+    }
+  });
+
+  it("PB-9: APP_ENV=prod ตั้งค่าแล้ว → โหลดผ่าน (staging/prod ใช้กติกาเดียวกัน)", () => {
+    const cfg = loadConfig(
+      baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod" }),
+    );
+    expect(cfg.appEnv).toBe("prod");
+    expect(cfg.cursorHmacSecret).toBe("cursor-hmac-secret-prod");
+  });
+
+  it("PB-9: APP_ENV=local (default dev) ไม่ตั้ง → ยัง fallback null ได้ตามเดิม", () => {
+    expect(loadConfig(baseEnv()).cursorHmacSecret).toBeNull();
+  });
 });
 
 describe("กติกาความปลอดภัย env (SDS §5.1)", () => {
