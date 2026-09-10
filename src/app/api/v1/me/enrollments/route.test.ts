@@ -52,10 +52,14 @@ function row(index: number, enrolledAt: string): EnrollmentRow {
 
 /** thenable builder — `await query` ได้เหมือน PostgrestBuilder จริง */
 function makeBuilder(rows: EnrollmentRow[]) {
+  const selectCalls: string[] = [];
   const eqCalls: Array<{ column: string; value: unknown }> = [];
   const orCalls: string[] = [];
   const builder = {
-    select: vi.fn(() => builder),
+    select: vi.fn((columns: string) => {
+      selectCalls.push(columns);
+      return builder;
+    }),
     eq: vi.fn((column: string, value: unknown) => {
       eqCalls.push({ column, value });
       return builder;
@@ -70,11 +74,11 @@ function makeBuilder(rows: EnrollmentRow[]) {
       return res({ data: rows, error: null });
     },
   };
-  return { builder, eqCalls, orCalls };
+  return { builder, selectCalls, eqCalls, orCalls };
 }
 
 function mockClient(rows: EnrollmentRow[], roles: readonly string[] = ["citizen"]) {
-  const { builder, eqCalls, orCalls } = makeBuilder(rows);
+  const { builder, selectCalls, eqCalls, orCalls } = makeBuilder(rows);
   // profiles ของ session.getUser (SDS §5.5) — builder แยก: บัญชี active ค่าตั้งต้น
   const profilesBuilder = {
     select: vi.fn(() => profilesBuilder),
@@ -98,7 +102,7 @@ function mockClient(rows: EnrollmentRow[], roles: readonly string[] = ["citizen"
     _builder: builder,
   };
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
-  return { eqCalls, orCalls, order: builder.order, limit: builder.limit };
+  return { selectCalls, eqCalls, orCalls, order: builder.order, limit: builder.limit };
 }
 
 function meUrl(query = ""): Request {
@@ -133,10 +137,25 @@ describe("GET /me/enrollments — envelope + resource (§1.2/§3.3)", () => {
     const filters = mockClient([row(1, T1)]);
     const res = await GET(meUrl());
     expect(res.status).toBe(200);
-    expect(filters.eqCalls).toEqual([{ column: "user_id", value: USER_ID }]);
+    expect(filters.eqCalls).toEqual([
+      { column: "user_id", value: USER_ID },
+      { column: "courses.deleted_at", value: null },
+    ]);
     expect(filters.order).toHaveBeenCalledWith("enrolled_at", { ascending: false });
     expect(filters.order).toHaveBeenCalledWith("id", { ascending: false });
     expect(filters.limit).toHaveBeenCalledWith(21);
+  });
+
+  it("PB-7: ตัดคอร์ส soft-delete ออก — select ฝัง courses!inner + กรอง courses.deleted_at is null", async () => {
+    // จุดควบคุมของ route คือรูปร่าง query — การกรองจริงเกิดที่ PostgREST (!inner join
+    // + deleted_at is null) จึง mock ให้คืนเฉพาะแถวที่คอร์สยังไม่ถูกลบตามผลจริง
+    const filters = mockClient([row(1, T1)]);
+    const res = await GET(meUrl());
+    expect(res.status).toBe(200);
+    expect(filters.selectCalls[0]).toContain("courses!inner(deleted_at)");
+    expect(filters.eqCalls).toContainEqual({ column: "courses.deleted_at", value: null });
+    const body = (await res.json()) as { data: Array<{ courseId: string }> };
+    expect(body.data).toHaveLength(1); // แถวคอร์ส soft-delete ไม่ผ่าน query → ไม่ปรากฏใน data
   });
 
   it("limit+1 แถว → hasMore=true + nextCursor signed ชี้แถวสุดท้ายของหน้า", async () => {

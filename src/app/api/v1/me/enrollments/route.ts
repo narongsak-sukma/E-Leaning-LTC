@@ -3,6 +3,8 @@
  *
  * - ต้อง login — ไม่ login → 401 ERR-AUTH-001; ขอบเขต "เฉพาะของตัวเอง" บังคับสองชั้น:
  *   `.eq(user_id, ...)` + RLS SELECT เจ้าของแถว (DD §3.2)
+ * - PB-7: รายการตัดการลงทะเบียนของหลักสูตรที่ถูก soft-delete ออก — ฝัง courses!inner
+ *   + `.eq("courses.deleted_at", null)` (RLS ไม่กรองให้ — 0010_security.sql L381-385)
  * - envelope ตาม §1.2: { data: [...], page: { nextCursor, hasMore: true } }
  *   cursor signed (lib/api/pagination) · query ตรง PageQuery (§4 #12 — default 20, max 100)
  * - rate = READ (ตาราง §5: /me* → READ 120/min, user_id + ip)
@@ -44,8 +46,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     const supabase = await createSupabaseSsrClient();
     let query = supabase
       .from("enrollments")
-      .select("id, course_id, status, enrolled_at, expires_at, completed_at")
+      // PB-7: ฝัง courses แบบ !inner + กรอง deleted_at is null — รายการ "คอร์สของฉัน"
+      // ตัดการลงทะเบียนของหลักสูตรที่ถูก soft-delete ออก (DD §3.2) เพราะ RLS
+      // enrollments_owner_read (0010_security.sql L381-385) ไม่กรองคอร์สที่ลบแล้วให้เอง
+      .select("id, course_id, status, enrolled_at, expires_at, completed_at, courses!inner(deleted_at)")
       .eq("user_id", user.userId)
+      .eq("courses.deleted_at", null)
       .order("enrolled_at", { ascending: false })
       .order("id", { ascending: false })
       .limit(limit + 1);
