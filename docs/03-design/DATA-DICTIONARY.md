@@ -176,7 +176,7 @@ Retention: ตลอดอายุบัญชี (หลักฐานกา�
 | sort_order | int | NOT NULL DEFAULT 0 |
 | is_active | boolean | NOT NULL DEFAULT true |
 คีย์/Index: UNIQUE(slug); INDEX(parent_id)
-RLS: **SELECT** ทุกคนรวม guest (เฉพาะ is_active); **INSERT/UPDATE** staff:content/super_admin ผ่าน BFF; **DELETE** ไม่อนุญาต (ปิดด้วย is_active)
+RLS: **SELECT** ทุกคนรวม guest (เฉพาะ is_active) + **policy เสริม (DCR-4): `cc_read_admin`** — `has_any_role('staff:viewer','staff:content','super_admin')` เห็นทุกแถวรวม is_active=false (ให้ GET /admin/categories "ทุกสถานะ" ตาม API-SPEC §3.8 ได้ด้วย user-JWT — policy เสริมแบบ permissive รวมกับ cc_read); **INSERT/UPDATE** staff:content/super_admin ผ่าน BFF; **DELETE** ไม่อนุญาต (ปิดด้วย is_active)
 Retention: ถาวร (ข้อมูลอ้างอิง)
 
 #### `courses` — หลักสูตร
