@@ -8,7 +8,8 @@
  * - cert_no `LTC-<ปี ค.ศ.>-<สุ่ม 6 หลัก>` + verify_code 43 อักขระ — **CSPRNG (node:crypto randomInt)
  *   ห้าม Math.random** (SDS §3.4a — sequence/generator ที่เดาได้ใช้ไม่ได้)
  * - audit ผ่าน RPC `append_audit_event` เท่านั้น (0010_security.sql:102 revoke insert บน audit_logs
- *   จาก service_role) — สัญญา DB ปัจจุบันปฏิเสธ event ธุรกิจใต้ service_role (ดู appendAuditEvent)
+ *   จาก service_role) — 0019 ขยาย allowlist ให้เหตุการณ์ CERT และ PII_ACCESS เขียนใต้
+ *   service_role ได้
  */
 import "server-only";
 import { randomInt } from "node:crypto";
@@ -129,7 +130,7 @@ export type CertificateAuditAction = "CERT_ISSUE" | "CERT_REVOKE" | "CERT_REISSU
 export interface AuditEventInput {
   readonly action: CertificateAuditAction;
   readonly entityType: "certificate" | "enrollment" | "assessment_attempt";
-  readonly entityId: string;
+  readonly entityId: string | null;
   /** คีย์ต้องอยู่ใน allowlist ราย event ของ 0008_audit.sql (strict — AUDIT §3.2) + ห้ามมี PII */
   readonly context: Record<string, string>;
   readonly actorId?: string;
@@ -145,17 +146,16 @@ export interface AuditEventResult {
  * เขียน audit event ผ่าน RPC `append_audit_event` — **เส้นทางเดียวที่ DB เปิดให้ service_role**
  * (0010_security.sql:102 revoke insert บน audit_logs จากทุก role รวม service_role)
  *
- * **สัญญา DB จริงที่พบ (supabase/migrations/0008_audit.sql):**
- * - 390-394: `append_audit_event_internal` revoke EXECUTE จาก service_role (grant ให้ app_owner เท่านั้น)
- * - 457-461: ใต้ role `service_role` RPC รับเฉพาะ 12 event `AUTH_*` — `CERT_ISSUE/CERT_REVOKE/
- *   CERT_REISSUE/PII_ACCESS` ถูกปฏิเสธ (42501) เสมอ
- * - 525: RPC ปฏิเสธ before/after ที่ไม่ใช่ null → ฟังก์ชันนี้ส่ง null เสมอ
- * - 619-620: EXECUTE ของ RPC ตัวนอก granted to authenticated, service_role → เรียกได้ แต่ถูก filter
+ * **สัญญา DB ปัจจุบัน (0019_wave_d_batch.sql ขยาย allowlist ของ 0008_audit.sql):**
+ * - ใต้ role `service_role` RPC รับ AUTH_* 12 event **+ CERT_ISSUE/CERT_REVOKE/CERT_REISSUE/
+ *   PII_ACCESS** (AUDIT §4 L241 รับรองทางเดิน BFF service_role ตาม D36-O3) — strict keys
+ *   + PII scan ยังตรวจทุก event เหมือนเดิม
+ * - actor ยกจาก context.user_id (BFF trusted ใส่มา) แล้ว strip ออกก่อนเก็บจริง (0019)
+ * - RPC ปฏิเสธ before/after ที่ไม่ใช่ null → ฟังก์ชันนี้ส่ง null เสมอ
  *
- * จึงเรียก "แบบมีเงื่อนไข": พยายามเขียนจริงทุกครั้ง (ถ้า lead ออก migration ขยาย allowlist ให้
- * service_role หรือย้ายไป business function ตาม AUDIT §4 code path นี้ใช้ได้ทันทีโดยไม่แก้ caller)
- * และเมื่อ DB ปฏิเสธ → **ไม่ล้ม write ธุรกิจ** (ธงช่องว่าง audit ตามใบงาน) + WARN log ที่ไม่มี PII
- * เพื่อให้สังเกตเห็นช่องว่างได้จาก log — ห้ามเดาว่าเขียนสำเร็จ จึงคืนผลลัพธ์ให้ผู้เรียกตรวจได้
+ * ยังเรียก "แบบมีเงื่อนไข": เมื่อ DB ปฏิเสธ → **ไม่ล้ม write ธุรกิจ** + WARN log ที่ไม่มี PII
+ * (ทางเดิน denial นี้เหลือไว้เป็น tripwire ตรวจจับการถูกถอน allowlist/เปลี่ยนสัญญา DB)
+ * — ห้ามเดาว่าเขียนสำเร็จ จึงคืนผลลัพธ์ให้ผู้เรียกตรวจได้
  */
 export async function appendAuditEvent(
   client: SupabaseClient,

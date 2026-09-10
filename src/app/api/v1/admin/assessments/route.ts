@@ -6,7 +6,7 @@
  * staff:exam/staff:registrar/super_admin มี permission นี้; ขอบเขตกรองที่ RLS asm_read
  * 0010 L643-L651 ให้เอง) · สรุปกติกาล่าสุดจาก embed assessment_rules (เรียง effective_from desc
  * + limit 1 ที่ embed) — select เฉพาะคอลัมน์ที่ **column grant ของ authenticated** ครอบ
- * (0010 L711-L714: pass_pct/selection ไม่ได้ grant ผ่าน user-JWT จึงไม่ปรากฏใน response)
+ * (pass_pct ได้ grant เพิ่มใน 0019 · selection ยังไม่เปิดตาม 0010 L711-L714)
  *
  * POST — requirePermission("assessment:create") (instructor/staff:exam/super_admin):
  * - status = 'draft' เสมอ — server-controlled ห้ามรับจาก body (schema strict ไม่มี status);
@@ -51,7 +51,7 @@ import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 const ADMIN_ASSESSMENT_SELECT =
   "id,code,title,description,is_final,status,course_id,created_at," +
   "course:courses!left(id,created_by)," +
-  "assessment_rules(version,time_limit_minutes,question_count,max_attempts," +
+  "assessment_rules(version,pass_pct,time_limit_minutes,question_count,max_attempts," +
   "attempt_cooldown_minutes,shuffle_questions,shuffle_options,proctoring_mode,effective_from)";
 
 /** สะท้อน x-request-id ที่ middleware สร้าง กลับทุก response (SDS §5.4) */

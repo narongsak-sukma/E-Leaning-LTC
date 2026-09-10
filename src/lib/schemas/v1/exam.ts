@@ -6,8 +6,9 @@
  * - *Result = contract jsonb ขาเข้าจาก RPC (validate แบบ fail-closed ก่อนใช้)
  * - *View = ขาออก (camelCase) — validate ด้วย zod ก่อนส่งทุกครั้ง (§1-4)
  * - ความปลอดภัยข้อสอบ (D19-B1/D20-B5):
- *   · ระหว่างสอบ BFF ส่งเฉพาะโครงข้อ (questionId/seq/คำตอบของตัวเอง) — โครงสร้างสร้างแบบ
- *     whitelist จึงไม่มีช่องทางรั่ว is_correct/explanation/points_earned/question_snapshot
+ *   · ระหว่างสอบ BFF ส่งโจทย์+ตัวเลือกจาก learner_attempt_paper_view (0019 — PB-16:
+ *     เจ้าของ + in_progress เท่านั้น) ที่ view ตัด points/is_correct ทุกชั้นแล้ว
+ *     + whitelist mapper toExamPaperQuestion — ไม่มีช่องทางรั่วเฉลย/คะแนน
  *   · เฉลยเปิดฝั่ง DB เท่านั้น (learner_attempt_view เปิดเฉพาะ after_final_attempt —
  *     0009_views.sql) — BFF ส่งตาม view ไม่ filter/เปิดเฉลยเอง
  *   · session binding (D20-B5): p_session_id อ่านจาก claim `session_id` ของ access token
@@ -46,26 +47,40 @@ export const StartAttemptResult = z.object({
 
 export type StartAttemptResultParsed = z.infer<typeof StartAttemptResult>;
 
-// ─── contract jsonb ของ RPC submit_attempt (0011_functions.sql):
-//     ส่งใหม่หลังส่งแล้ว = ผลเดิม + already_submitted:true (ไม่มี correct/question_count) ───
+// ─── contract jsonb ของ RPC submit_attempt (0019 — PB-15: question_count = count(*)
+//     จริง + total_points แยก): ส่งซ้ำ = ผลเดิม + already_submitted:true (ไม่มี
+//     correct_count) — ทุกทางมี question_count/total_points ───
 export const SubmitAttemptResult = z.object({
   attempt_id: z.string().uuid(),
   status: z.enum(["passed", "failed"]),
   score_pct: z.number().int().min(0).max(100),
   passed: z.boolean(),
   correct_count: z.number().int().min(0).optional(),
-  question_count: z.number().int().min(0).optional(),
+  question_count: z.number().int().min(0),
+  total_points: z.number().int().min(0),
   already_submitted: z.literal(true).optional(),
 });
 
 export type SubmitAttemptResultParsed = z.infer<typeof SubmitAttemptResult>;
 
-// ─── ขาออก: โครงข้อระหว่างสอบ (ไร้เฉลยทุกทาง — whitelist mapper toExamQuestion) ───
+// ─── ขาออก: โจทย์ระหว่างสอบ (ไร้เฉลยทุกทาง — whitelist mapper toExamPaperQuestion) ───
+// content = โจทย์จาก learner_attempt_paper_view (0019): snapshot ตัด points/is_correct
+// ทุกชั้นแล้ว เหลือ {version,text,options:[{id,text}]} — options เรียง display order
+// อยู่แล้ว (start_attempt สร้าง snapshot ตามลำดับแสดงผล — 0011 L627-655 ไม่ต้องเรียงซ้ำ)
+export const ExamPaperContent = z.object({
+  version: z.number().int().min(1),
+  text: z.string().min(1),
+  options: z.array(z.object({ id: z.string().uuid(), text: z.string().min(1) })).min(1),
+});
+
+export type ExamPaperContentParsed = z.infer<typeof ExamPaperContent>;
+
 export const AttemptQuestionView = z.object({
   questionId: z.string().uuid(),
   seq: z.number().int().min(1),
   selectedOptionIds: z.array(z.string().uuid()).nullable(),
   answeredAt: z.iso.datetime({ offset: true }).nullable(),
+  content: ExamPaperContent,
 });
 
 export type AttemptQuestionViewParsed = z.infer<typeof AttemptQuestionView>;
@@ -83,14 +98,16 @@ export const AttemptStartView = z.object({
 
 export type AttemptStartViewParsed = z.infer<typeof AttemptStartView>;
 
-// ─── ขาออกของ POST /attempts/{id}/submit (200 — ผลตรวจทันที ตาม DCR-6) ───
+// ─── ขาออกของ POST /attempts/{id}/submit (200 — ผลตรวจทันที ตาม DCR-6 · 0019
+//     questionCount/totalPoints มีทุกทาง · correctCount เฉพาะส่งครั้งแรก) ───
 export const AttemptSubmitView = z.object({
   attemptId: z.string().uuid(),
   status: z.enum(["passed", "failed"]),
   scorePct: z.number().int().min(0).max(100),
   passed: z.boolean(),
+  questionCount: z.number().int().min(0),
+  totalPoints: z.number().int().min(0),
   correctCount: z.number().int().min(0).optional(),
-  questionCount: z.number().int().min(0).optional(),
   alreadySubmitted: z.literal(true).optional(),
 });
 
@@ -123,11 +140,12 @@ export const MyAttemptView = z.object({
 export type MyAttemptViewParsed = z.infer<typeof MyAttemptView>;
 
 // ─── ขาออกของ GET /assessments/{id} — ข้อมูลการสอบ + กติกาเวอร์ชัน effective ล่าสุด ───
-// NB: จงใจไม่มี passPct — คอลัมน์ pass_pct ไม่ได้รับ GRANT SELECT ให้ authenticated
-// (0010_security.sql L709-713 — "pass_pct/selection อ่านเต็มผ่าน BFF (service_role) เท่านั้น")
-// การ select ผ่าน user-JWT จะ error ทันที จึงต้องเว้นไว้ (ธงให้ lead: ต้องมี grant/RPC ใหม่)
+// NB: passPct เปิดตั้งแต่ 0019 (grant select (pass_pct) to authenticated — column grant
+// สะสม; selection ยังซ่อนตาม 0010 L709-713) — 0012 course_exam_summary เผย pass_pct
+// สาธารณะอยู่แล้ว จึงไม่ใช่การเปิดเพิ่ม
 export const AssessmentRulesView = z.object({
   version: z.number().int().min(1),
+  passPct: z.number().int().min(1).max(100),
   timeLimitMinutes: z.number().int().min(5).max(480),
   questionCount: z.number().int().min(1),
   maxAttempts: z.number().int().min(1),
@@ -238,6 +256,27 @@ export interface LearnerAttemptViewRow {
   readonly explanation: string | null;
 }
 
+/**
+ * แถว learner_attempt_paper_view (0019 — PB-16): เจ้าของ + in_progress เท่านั้น ·
+ * question_paper = snapshot ตัด 'points' ระดับบน + ตัด is_correct/points ในทุก option
+ * (เหลือ {question_id,version,text,options:[{id,text}]}) — ตรวจ strict ที่ mapper
+ */
+export interface LearnerAttemptPaperViewRow {
+  readonly attempt_id: string;
+  readonly user_id: string;
+  readonly assessment_id: string;
+  readonly attempt_no: number;
+  readonly status: string;
+  readonly started_at: string;
+  readonly expires_at: string;
+  readonly question_id: string;
+  readonly seq: number;
+  readonly option_order: number[] | null;
+  readonly selected_option_ids: string[] | null;
+  readonly answered_at: string | null;
+  readonly question_paper: unknown;
+}
+
 /** แถว assessment_attempts (0005_assessment.sql L90-109) ที่ GET /me/attempts ใช้ */
 export interface AttemptHistoryRow {
   readonly id: string;
@@ -266,13 +305,14 @@ export interface AssessmentRow {
 }
 
 /**
- * คอลัมน์ assessment_rules ที่ได้รับ GRANT SELECT ให้ authenticated เท่านั้น
- * (0010_security.sql L709-713 — pass_pct/selection ห้าม select ผ่าน user-JWT)
+ * คอลัมน์ assessment_rules ที่ routes อ่านผ่าน user-JWT — pass_pct ได้รับ grant
+ * select แยกใน 0019 (column grant สะสม; selection ยังไม่เปิด — 0010 L709-713)
  */
 export interface AssessmentRulesRow {
   readonly id: string;
   readonly assessment_id: string;
   readonly version: number;
+  readonly pass_pct: number;
   readonly time_limit_minutes: number;
   readonly question_count: number;
   readonly max_attempts: number;
@@ -286,13 +326,39 @@ export interface AssessmentRulesRow {
 
 // ─── mappers — whitelist เสมอ (แถว DB → resource camelCase; ไม่มีการ spread ทั้งแถว) ───
 
-/** โครงข้อระหว่างสอบ — whitelist 4 ฟิลด์เท่านั้น จึงไม่มีทางรั่วเฉลย */
-export function toExamQuestion(row: LearnerAttemptViewRow): AttemptQuestionViewParsed {
+/** question_paper จาก learner_attempt_paper_view — strict: คีย์/รูปต่างจากนี้ = contract เปลี่ยน */
+const ExamPaperJsonb = z
+  .object({
+    question_id: z.string().uuid(),
+    version: z.number().int().min(1),
+    text: z.string().min(1),
+    options: z
+      .array(z.object({ id: z.string().uuid(), text: z.string().min(1) }).strict())
+      .min(1),
+  })
+  .strict();
+
+/**
+ * โจทย์ระหว่างสอบจาก paper view (0019) — validate question_paper แบบ fail-closed
+ * (ผิด contract / question_id ไม่ตรงแถว → ERR-SYS-002) แล้ว whitelist
+ * {version,text,options[{id,text}]} — options เรียง display order อยู่แล้ว
+ * (snapshot สร้างตามลำดับแสดงผล) ไม่ต้องเรียงซ้ำฝั่ง BFF
+ */
+export function toExamPaperQuestion(row: LearnerAttemptPaperViewRow): AttemptQuestionViewParsed {
+  const parsed = ExamPaperJsonb.safeParse(row.question_paper);
+  if (!parsed.success || parsed.data.question_id !== row.question_id) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "question_paper_bad_contract" } });
+  }
   return {
     questionId: row.question_id,
     seq: row.seq,
     selectedOptionIds: row.selected_option_ids,
     answeredAt: row.answered_at,
+    content: {
+      version: parsed.data.version,
+      text: parsed.data.text,
+      options: parsed.data.options.map((o) => ({ id: o.id, text: o.text })),
+    },
   };
 }
 
@@ -329,6 +395,7 @@ export function toAssessmentDetail(
     publishedAt: assessment.published_at,
     rules: {
       version: rules.version,
+      passPct: rules.pass_pct,
       timeLimitMinutes: rules.time_limit_minutes,
       questionCount: rules.question_count,
       maxAttempts: rules.max_attempts,
@@ -410,15 +477,16 @@ function toAttemptResultQuestion(
   };
 }
 
-/** ผล submit (DCR-6 — synchronous grading) → ขาออก camelCase */
+/** ผล submit (DCR-6 — synchronous grading) → ขาออก camelCase (0019: +totalPoints เสมอ) */
 export function toSubmitView(r: SubmitAttemptResultParsed): AttemptSubmitViewParsed {
   return {
     attemptId: r.attempt_id,
     status: r.status,
     scorePct: r.score_pct,
     passed: r.passed,
+    questionCount: r.question_count,
+    totalPoints: r.total_points,
     ...(r.correct_count !== undefined ? { correctCount: r.correct_count } : {}),
-    ...(r.question_count !== undefined ? { questionCount: r.question_count } : {}),
     ...(r.already_submitted !== undefined ? { alreadySubmitted: r.already_submitted } : {}),
   };
 }

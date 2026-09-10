@@ -42,6 +42,7 @@ const T = "2026-09-10T02:02:03+00:00";
 const Q1 = "d0000000-0000-4000-8000-000000000101";
 const Q2 = "d0000000-0000-4000-8000-000000000102";
 const OPT1 = "e0000000-0000-4000-8000-000000000201";
+const OPT2 = "e0000000-0000-4000-8000-000000000202";
 
 const START_RESULT = {
   attempt_id: ATTEMPT_ID,
@@ -50,9 +51,39 @@ const START_RESULT = {
   question_count: 2,
 };
 
+// แถว learner_attempt_paper_view (0019) — question_paper = snapshot ตัดเฉลยแล้ว
+// ({question_id,version,text,options:[{id,text}]} — ไม่มี points/is_correct ทุกชั้น)
 const VIEW_ROWS = [
-  { question_id: Q1, seq: 1, selected_option_ids: null, answered_at: null },
-  { question_id: Q2, seq: 2, selected_option_ids: [OPT1], answered_at: T },
+  {
+    question_id: Q1,
+    seq: 1,
+    selected_option_ids: null,
+    answered_at: null,
+    question_paper: {
+      question_id: Q1,
+      version: 1,
+      text: "ข้อที่ 1",
+      options: [
+        { id: OPT1, text: "ตัวเลือกแรก" },
+        { id: OPT2, text: "ตัวเลือกที่สอง" },
+      ],
+    },
+  },
+  {
+    question_id: Q2,
+    seq: 2,
+    selected_option_ids: [OPT1],
+    answered_at: T,
+    question_paper: {
+      question_id: Q2,
+      version: 2,
+      text: "ข้อที่ 2",
+      options: [
+        { id: OPT1, text: "ตัวเลือกแรก" },
+        { id: OPT2, text: "ตัวเลือกที่สอง" },
+      ],
+    },
+  },
 ];
 
 interface Spec {
@@ -166,6 +197,11 @@ describe("POST /assessments/{id}/attempts — happy path", () => {
     expect(parsed.deadlineAt).toBe(T);
     expect(parsed.questionCount).toBe(2);
     expect(parsed.questions.map((q) => q.questionId)).toEqual([Q1, Q2]);
+    // 0019: โจทย์มาพร้อม content จาก paper view (version/text/options[{id,text}] เท่านั้น)
+    expect(parsed.questions[0]?.content.version).toBe(1);
+    expect(parsed.questions[0]?.content.text).toBe("ข้อที่ 1");
+    expect(parsed.questions[0]?.content.options).toHaveLength(2);
+    expect(Object.keys(parsed.questions[0]?.content.options[0] ?? {}).sort()).toEqual(["id", "text"]);
     expect(new Date(parsed.serverTime).toString()).not.toBe("Invalid Date");
     // เรียก RPC ตรง contract (p_assessment_id) และอ่านชุดข้อจาก view ของ attempt นั้น
     const startCall = client._rpcArgs.find((c) => c.fn === "start_attempt");
@@ -223,12 +259,13 @@ describe("POST /assessments/{id}/attempts — response ระหว่างส�
     }
   });
 
-  it("select เฉพาะคอลัมน์ที่ไม่ใช่เฉลย (ไม่เรียกใช้คอลัมน์เฉลยแต่อย่างใด)", async () => {
+  it("select เฉพาะคอลัมน์ที่ไม่ใช่เฉลย (question_paper ของ 0019 ต่างจาก snapshot เฉลย)", async () => {
     const { client } = await post(ASSESSMENT_ID);
     const [cols] = client._viewCalls.select;
     for (const banned of ["is_correct", "points_earned", "question_snapshot", "explanation", "*"]) {
       expect(cols).not.toContain(banned);
     }
+    expect(cols).toContain("question_paper");
   });
 });
 
@@ -312,6 +349,22 @@ describe("POST /assessments/{id}/attempts — map ผล RPC ตาม 0011_func
   it("อ่านชุดข้อล้มเหลว → 503 ERR-SYS-002", async () => {
     const { res } = await post(ASSESSMENT_ID, {
       rowsError: { message: "SQLSTATE XX000" },
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+  });
+
+  it("question_paper ผิด contract (มี points แอบแถม) → 503 ERR-SYS-002 (fail-closed ที่ mapper)", async () => {
+    const base = VIEW_ROWS[0];
+    if (base === undefined) {
+      throw new Error("fixture missing");
+    }
+    const { res } = await post(ASSESSMENT_ID, {
+      rows: [
+        { ...base, question_paper: { ...base.question_paper, points: 5 } },
+        VIEW_ROWS[1],
+      ],
     });
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string } };

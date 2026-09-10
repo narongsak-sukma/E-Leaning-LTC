@@ -2,8 +2,9 @@
  * unit tests — GET /api/v1/assessments/[id] (Wave D-1)
  *
  * mock client ตามแบบ enroll/route.test.ts — RLS asm_read/ar_read + column grant
- * (pass_pct ไม่ได้ GRANT ให้ authenticated — 0010 L709-713) อยู่ฝั่ง DB; จุดตรวจของ unit
- * test คือลำดับ handler, รูป query (table/columns/filter), mapping ผลตามทะเบียน error
+ * (pass_pct ได้ GRANT เพิ่มใน 0019 · selection ยังซ่อนตาม 0010 L709-713) อยู่ฝั่ง DB;
+ * จุดตรวจของ unit test คือลำดับ handler, รูป query (table/columns/filter), mapping ผล
+ * ตามทะเบียน error
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -53,6 +54,7 @@ const RULES_ROW = {
   id: "r0000000-0000-4000-8000-000000000004",
   assessment_id: ASSESSMENT_ID,
   version: 2,
+  pass_pct: 70,
   time_limit_minutes: 60,
   question_count: 30,
   max_attempts: 3,
@@ -159,13 +161,14 @@ describe("GET /assessments/{id} — happy path", () => {
     const parsed = AssessmentDetailView.parse(body.data);
     expect(parsed.id).toBe(ASSESSMENT_ID);
     expect(parsed.rules.version).toBe(2);
+    expect(parsed.rules.passPct).toBe(70);
     expect(res.headers.get("x-request-id")).toBe("req-d1-1");
-    // เลือกเฉพาะคอลัมน์ที่ได้ GRANT SELECT (ไม่มี pass_pct/selection)
+    // เลือกเฉพาะคอลัมน์ที่ได้ GRANT SELECT (pass_pct เปิดตั้งแต่ 0019 · selection ยังซ่อน)
     const [assessmentCols] = client._calls.assessmentCalls;
     expect(assessmentCols).not.toContain("pass_pct");
     const [rulesCols] = client._calls.rulesCalls;
     expect(rulesCols).toContain("time_limit_minutes");
-    expect(rulesCols).not.toContain("pass_pct");
+    expect(rulesCols).toContain("pass_pct");
     expect(rulesCols).not.toContain("selection");
   });
 

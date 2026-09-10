@@ -6,8 +6,8 @@
  * - rate STAFF_WRITE (§5) — user_id + ip (D12-11)
  * - query: PageQuery (limit/cursor — lib/schemas/v1/common) + courseId (optional uuid)
  * - audit PII_ACCESS — เพราะคิวแสดงชื่อผู้ผ่านเกณฑ์ (D12-23); คีย์ context ตรง allowlist
- *   ของ event นี้ (0008_audit.sql:451: endpoint/target_user_id/purpose) — ดู appendAuditEvent
- *   สำหรับสัญญา DB จริงที่ปฏิเสธ event ธุรกิจใต้ service_role
+ *   ของ event นี้ (endpoint/target_user_id/purpose — 0008:451) · 0019 เปิดให้ service_role
+ *   เขียน PII_ACCESS ได้ (entityId null เมื่อคิวว่าง — ไม่ใส่ค่าปลอมแทน)
  * - response: { data: EligibleAttempt[], page } — ไม่ log ชื่อผู้ถือ (SDS §6.2)
  */
 import { NextResponse } from "next/server";
@@ -65,7 +65,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     await auditCertificateEvent({
       action: "PII_ACCESS",
       entityType: "assessment_attempt",
-      entityId: page.data[0]?.attemptId ?? request.url,
+      entityId: page.data[0]?.attemptId ?? null,
       context: {
         endpoint: "/api/v1/admin/certificates/eligible",
         purpose: "certificate_issue_queue",

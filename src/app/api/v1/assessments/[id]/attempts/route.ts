@@ -2,13 +2,13 @@
  * POST /api/v1/assessments/[id]/attempts — เริ่มสอบ (API-SPEC 1.0.3 §3.5 · DCR-6)
  *
  * ลำดับ: path param → session+permission → rate EXAM → RPC start_attempt (DD §4.7 —
- * เขียนผ่าน SECURITY DEFINER เท่านั้น) → อ่านโครงข้อจาก learner_attempt_view (0009 —
- * เฉพาะคอลัมน์ที่ไม่ใช่เฉลย: question_id/seq/selected_option_ids/answered_at) →
- * 201 หน้าต่างสอบ + ชุดข้อไร้เฉลย + serverTime
+ * เขียนผ่าน SECURITY DEFINER เท่านั้น) → อ่านโจทย์จาก learner_attempt_paper_view
+ * (0019 — PB-16: เจ้าของ + in_progress เท่านั้น · question_paper ตัด points/is_correct
+ * ทุกชั้นที่ view เอง) → 201 หน้าต่างสอบ + ชุดโจทย์ไร้เฉลย + serverTime
  *
- * RPC ไม่คืนชุดข้อ — BFF อ่านเองหลัง start; คอลัมน์เฉลย (is_correct/explanation/
- * points_earned/question_snapshot) **ไม่ถูก select เลย** และ mapper สร้าง object แบบ
- * whitelist จึงไม่มีช่องทางรั่วระหว่างสอบ (D19-B1)
+ * RPC ไม่คืนชุดข้อ — BFF อ่านเองหลัง start; ตัวเลือกเป็น {id,text} เท่านั้นและ
+ * mapper toExamPaperQuestion whitelist ต่อ + validate strict (ผิด contract →
+ * SYS-002) จึงไม่มีช่องทางรั่วเฉลยระหว่างสอบ (D19-B1)
  *
  * permission = attempt:start (citizen/lawyer — RBAC-DESIGN §2.3 L70 "attempt:start
  * (ตัวเอง)") · ธงให้ lead: ชื่อ perm ในใบงาน "assessment:attempt" ไม่มีจริงใน rbac.ts
@@ -30,8 +30,8 @@ import {
   StartAttemptResult,
   type StartAttemptResultParsed,
   parseAssessmentIdParams,
-  toExamQuestion,
-  type LearnerAttemptViewRow,
+  toExamPaperQuestion,
+  type LearnerAttemptPaperViewRow,
 } from "@/lib/schemas/v1/exam";
 
 /** x-request-id (SDS §5.4) → envelope options (exactOptionalPropertyTypes-safe) */
@@ -74,17 +74,17 @@ export async function POST(
     }
     const start = parseStartAttemptResult(data);
 
-    // 5) อ่านโครงข้อของ attempt นี้จาก learner_attempt_view (WHERE auth.uid() ในตัว view —
-    //    select เฉพาะคอลัมน์ที่ไม่ใช่เฉลย)
+    // 5) อ่านโจทย์ของ attempt นี้จาก learner_attempt_paper_view (0019 — WHERE
+    //    auth.uid()+status='in_progress' ในตัว view; question_paper ตัดเฉลยแล้ว)
     const { data: rows, error: qError } = await supabase
-      .from("learner_attempt_view")
-      .select("question_id, seq, selected_option_ids, answered_at")
+      .from("learner_attempt_paper_view")
+      .select("question_id, seq, selected_option_ids, answered_at, question_paper")
       .eq("attempt_id", start.attempt_id)
       .order("seq", { ascending: true });
     if (qError !== null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "attempt_questions_read_failed" } });
     }
-    const viewRows = (rows ?? []) as unknown as LearnerAttemptViewRow[];
+    const viewRows = (rows ?? []) as unknown as LearnerAttemptPaperViewRow[];
     if (viewRows.length !== start.question_count) {
       // start เขียน attempt_answers ครบทุกข้อใน TX เดียว — เหลื่อม = contract ผิด fail-closed
       throw new AppError("ERR-SYS-002", { details: { reason: "attempt_questions_bad_contract" } });
@@ -95,7 +95,7 @@ export async function POST(
       deadlineAt: start.expires_at,
       serverTime: new Date().toISOString(),
       questionCount: start.question_count,
-      questions: viewRows.map(toExamQuestion),
+      questions: viewRows.map(toExamPaperQuestion),
       ...(start.takeover !== undefined ? { takeover: start.takeover } : {}),
     };
     const parsedView = AttemptStartView.safeParse(view);

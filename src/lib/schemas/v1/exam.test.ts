@@ -2,7 +2,8 @@
  * unit tests — schemas/v1/exam (contract + mapper + session binding D20-B5)
  *
  * จุดหลักที่ต้องเป็น evidence ได้:
- * - toExamQuestion สร้าง object แบบ whitelist — คีย์เฉลยหลุดเข้ามาไม่ได้แม้แถวมีครบ
+ * - toExamPaperQuestion validate question_paper ของ 0019 paper view แบบ strict +
+ *   whitelist — คีย์เฉลย (is_correct/points) หลุดเข้ามาไม่ได้แม้แถวมีครบ
  * - readJwtSessionClaim อ่าน claim `session_id` จาก access token ของ session store เท่านั้น
  */
 import { describe, expect, it } from "vitest";
@@ -12,6 +13,7 @@ import {
   AttemptResultView,
   AttemptStartView,
   AttemptSubmitView,
+  SubmitAttemptResult,
   MyAttemptView,
   parseAnswerSaveBody,
   parseAssessmentIdParams,
@@ -19,11 +21,12 @@ import {
   readJwtSessionClaim,
   toAssessmentDetail,
   toAttemptResultView,
-  toExamQuestion,
+  toExamPaperQuestion,
   toMyAttemptResource,
   toSubmitView,
   type AssessmentRow,
   type AttemptHistoryRow,
+  type LearnerAttemptPaperViewRow,
   type LearnerAttemptViewRow,
 } from "./exam";
 
@@ -61,6 +64,34 @@ function viewRow(overrides: Partial<LearnerAttemptViewRow> = {}): LearnerAttempt
       points: 5,
     },
     explanation: "เพราะข้อ ก ถูกต้อง",
+    ...overrides,
+  };
+}
+
+/** แถว learner_attempt_paper_view (0019) — question_paper = snapshot ตัดเฉลยแล้ว */
+function paperRow(overrides: Partial<LearnerAttemptPaperViewRow> = {}): LearnerAttemptPaperViewRow {
+  return {
+    attempt_id: UUID(1),
+    user_id: UUID(9),
+    assessment_id: UUID(2),
+    attempt_no: 1,
+    status: "in_progress",
+    started_at: T,
+    expires_at: "2026-09-10T02:02:03+00:00",
+    question_id: UUID(100),
+    seq: 1,
+    option_order: [2, 1],
+    selected_option_ids: [UUID(200)],
+    answered_at: T,
+    question_paper: {
+      question_id: UUID(100),
+      version: 3,
+      text: "ข้อสอบ",
+      options: [
+        { id: UUID(200), text: "ตัวเลือก ก" },
+        { id: UUID(201), text: "ตัวเลือก ข" },
+      ],
+    },
     ...overrides,
   };
 }
@@ -122,11 +153,12 @@ describe("parse helpers", () => {
   });
 });
 
-describe("toExamQuestion — whitelist 4 ฟิลด์ ไม่มีทางรั่วเฉลย", () => {
-  it("แถวที่มีคอลัมน์เฉลยครบ (ถ้า view เปิด) → ผลลัพธ์ยังมีแค่ questionId/seq/selectedOptionIds/answeredAt", () => {
-    const q = toExamQuestion(viewRow());
+describe("toExamPaperQuestion — 0019 paper view: strict + whitelist ไม่มีทางรั่วเฉลย", () => {
+  it("question_paper ตรง contract → ครบ 5 ฟิลด์ (content = {version,text,options[{id,text}]})", () => {
+    const q = toExamPaperQuestion(paperRow());
     expect(Object.keys(q).sort()).toEqual([
       "answeredAt",
+      "content",
       "questionId",
       "selectedOptionIds",
       "seq",
@@ -135,9 +167,48 @@ describe("toExamQuestion — whitelist 4 ฟิลด์ ไม่มีทา�
     expect(q.seq).toBe(1);
     expect(q.selectedOptionIds).toEqual([UUID(200)]);
     expect(q.answeredAt).toBe(T);
-    const keys = Object.keys(q).join(" ");
-    for (const leak of ["is_correct", "isCorrect", "explanation", "points_earned", "pointsEarned", "snapshot", "content"]) {
-      expect(keys).not.toContain(leak);
+    expect(q.content.version).toBe(3);
+    expect(q.content.text).toBe("ข้อสอบ");
+    expect(q.content.options).toHaveLength(2);
+    expect(Object.keys(q.content.options[0] ?? {}).sort()).toEqual(["id", "text"]);
+    // ขาออกทั้งชุดผ่าน zod ได้ (AttemptQuestionView)
+    expect(AttemptStartView.shape.questions.element.safeParse(q).success).toBe(true);
+  });
+
+  it("question_paper มีคีย์เฉลยแอบแถม (points/is_correct) → strict ปฏิเสธ ERR-SYS-002", () => {
+    const good = paperRow().question_paper as Record<string, unknown>;
+    for (const bad of [
+      { ...good, points: 5 },
+      { ...good, is_correct: true },
+      {
+        ...good,
+        options: [{ id: UUID(200), text: "ตัวเลือก ก", is_correct: true }],
+      },
+      { broken: true },
+      null,
+    ]) {
+      try {
+        toExamPaperQuestion(paperRow({ question_paper: bad as unknown }));
+        throw new Error("must throw: " + JSON.stringify(bad));
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).code).toBe("ERR-SYS-002");
+      }
+    }
+  });
+
+  it("question_paper ตรงรูปแต่ question_id ไม่ตรงแถว (คอร์รัปชัน) → ERR-SYS-002", () => {
+    try {
+      toExamPaperQuestion(
+        paperRow({
+          question_id: UUID(101),
+          question_paper: { ...(paperRow().question_paper as Record<string, unknown>) },
+        }),
+      );
+      throw new Error("must throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AppError);
+      expect((err as AppError).code).toBe("ERR-SYS-002");
     }
   });
 });
@@ -168,7 +239,7 @@ describe("mappers อื่น ๆ", () => {
     });
   });
 
-  it("toAssessmentDetail → ไม่มี passPct (pass_pct ไม่ได้ GRANT ให้ authenticated)", () => {
+  it("toAssessmentDetail → มี passPct (grant select pass_pct ตั้งแต่ 0019)", () => {
     const assessment: AssessmentRow = {
       id: UUID(2),
       course_id: UUID(3),
@@ -183,6 +254,7 @@ describe("mappers อื่น ๆ", () => {
       id: UUID(4),
       assessment_id: UUID(2),
       version: 2,
+      pass_pct: 70,
       time_limit_minutes: 60,
       question_count: 30,
       max_attempts: 3,
@@ -194,8 +266,9 @@ describe("mappers อื่น ๆ", () => {
       effective_from: T,
     });
     expect(detail.rules.timeLimitMinutes).toBe(60);
-    expect(JSON.stringify(detail)).not.toContain("passPct");
-    expect(JSON.stringify(detail)).not.toContain("pass_pct");
+    expect(detail.rules.passPct).toBe(70);
+    // selection ยังไม่เปิดตาม column grant (0010 L709-713) — ห้ามหลุดมาใน resource
+    expect(JSON.stringify(detail)).not.toContain("selection");
   });
 });
 
@@ -243,8 +316,8 @@ describe("toAttemptResultView — ส่งตาม view เป๊ะ", () => {
   });
 });
 
-describe("toSubmitView — DCR-6 ผลตรวจทันที", () => {
-  it("ส่งครั้งแรก → ครบ correctCount/questionCount ไม่มี alreadySubmitted", () => {
+describe("toSubmitView — DCR-6 ผลตรวจทันที (0019: questionCount/totalPoints มีทุกทาง)", () => {
+  it("ส่งครั้งแรก → ครบ correctCount/questionCount/totalPoints ไม่มี alreadySubmitted", () => {
     const view = toSubmitView({
       attempt_id: UUID(1),
       status: "passed",
@@ -252,6 +325,7 @@ describe("toSubmitView — DCR-6 ผลตรวจทันที", () => {
       passed: true,
       correct_count: 27,
       question_count: 30,
+      total_points: 40,
     });
     expect(AttemptSubmitView.parse(view)).toMatchObject({
       attemptId: UUID(1),
@@ -260,22 +334,42 @@ describe("toSubmitView — DCR-6 ผลตรวจทันที", () => {
       passed: true,
       correctCount: 27,
       questionCount: 30,
+      totalPoints: 40,
     });
     expect(Object.hasOwn(view, "alreadySubmitted")).toBe(false);
   });
 
-  it("ส่งซ้ำ (replay) → ผลเดิม + alreadySubmitted:true ไม่มี correctCount/questionCount", () => {
+  it("ส่งซ้ำ (replay) → ผลเดิม + alreadySubmitted:true · มี questionCount/totalPoints ตาม contract 0019 · ไม่มี correctCount", () => {
     const view = toSubmitView({
       attempt_id: UUID(1),
       status: "failed",
       score_pct: 40,
       passed: false,
+      question_count: 30,
+      total_points: 40,
       already_submitted: true,
     });
     const parsed = AttemptSubmitView.parse(view);
     expect(parsed.alreadySubmitted).toBe(true);
+    expect(parsed.questionCount).toBe(30);
+    expect(parsed.totalPoints).toBe(40);
     expect(Object.hasOwn(parsed, "correctCount")).toBe(false);
-    expect(Object.hasOwn(parsed, "questionCount")).toBe(false);
+  });
+
+  it("SubmitAttemptResult บังคับ question_count/total_points (ขาดฟิลด์ใดฟิลด์หนึ่ง → parse ไม่ผ่าน)", () => {
+    const base = {
+      attempt_id: UUID(1),
+      status: "passed" as const,
+      score_pct: 90,
+      passed: true,
+      correct_count: 27,
+    };
+    expect(SubmitAttemptResult.safeParse(base).success).toBe(false);
+    expect(SubmitAttemptResult.safeParse({ ...base, question_count: 30 }).success).toBe(false);
+    expect(SubmitAttemptResult.safeParse({ ...base, total_points: 40 }).success).toBe(false);
+    expect(
+      SubmitAttemptResult.safeParse({ ...base, question_count: 30, total_points: 40 }).success,
+    ).toBe(true);
   });
 });
 
@@ -313,17 +407,36 @@ describe("AttemptQuestionSnapshot — contract jsonb ของ start_attempt", (
     expect(AttemptQuestionSnapshot.safeParse({ broken: true }).success).toBe(false);
   });
 
-  it("AttemptStartView รับ takeover เป็น optional", () => {
+  it("AttemptStartView รับ takeover เป็น optional (ข้อสอบต้องมี content ตาม 0019)", () => {
     const base = {
       attemptId: UUID(1),
       status: "in_progress" as const,
       deadlineAt: "2026-09-10T02:02:03+00:00",
       serverTime: T,
       questionCount: 1,
-      questions: [{ questionId: UUID(100), seq: 1, selectedOptionIds: null, answeredAt: null }],
+      questions: [
+        {
+          questionId: UUID(100),
+          seq: 1,
+          selectedOptionIds: null,
+          answeredAt: null,
+          content: {
+            version: 1,
+            text: "ข้อสอบ",
+            options: [{ id: UUID(200), text: "ตัวเลือก ก" }],
+          },
+        },
+      ],
     };
     expect(AttemptStartView.safeParse(base).success).toBe(true);
     expect(AttemptStartView.safeParse({ ...base, takeover: true }).success).toBe(true);
     expect(AttemptStartView.safeParse({ ...base, questions: [] }).success).toBe(false);
+    // ขาด content = ผิด contract ใหม่ (โจทย์ระหว่างสอบมาพร้อม content เสมอ)
+    expect(
+      AttemptStartView.safeParse({
+        ...base,
+        questions: [{ questionId: UUID(100), seq: 1, selectedOptionIds: null, answeredAt: null }],
+      }).success,
+    ).toBe(false);
   });
 });

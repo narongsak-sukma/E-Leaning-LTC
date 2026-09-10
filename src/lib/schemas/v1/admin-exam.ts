@@ -243,11 +243,12 @@ export type QuestionResourceParsed = z.infer<typeof QuestionResource>;
 
 /**
  * สรุปกติกาของ GET /admin/assessments — คอลัมน์ตาม **column grant ของ authenticated**
- * (0010 L711-L714) เท่านั้น: pass_pct/selection ไม่ได้รับ grant ผ่าน user-JWT จึงไม่อยู่ใน
- * response (เส้นทาง lane นี้ใช้ user JWT — ห้าม service_role)
+ * (pass_pct ได้ grant เพิ่มใน 0019 · selection ยังไม่เปิดตาม 0010 L711-L714 —
+ * เส้นทาง lane นี้ใช้ user JWT ห้าม service_role)
  */
 export const AssessmentRuleSummary = z.object({
   version: z.number().int().min(1),
+  passPct: z.number().int().min(1).max(100),
   timeLimitMinutes: z.number().int(),
   questionCount: z.number().int(),
   maxAttempts: z.number().int(),
@@ -310,9 +311,10 @@ export type QuestionBankCreateResultParsed = z.infer<typeof QuestionBankCreateRe
 
 /* ─── แถว DB (snake_case ตามคอลัมน์จริง) + mapper ─── */
 
-/** แถว assessment_rules ที่ฝังมากับ assessments — เฉพาะคอลัมน์ที่ authenticated ได้ grant (0010 L711-L714) */
+/** แถว assessment_rules ที่ฝังมากับ assessments — เฉพาะคอลัมน์ที่ authenticated ได้ grant (pass_pct เพิ่ม 0019; selection ยังซ่อน) */
 export interface AssessmentRuleRow {
   readonly version: number;
+  readonly pass_pct: number;
   readonly time_limit_minutes: number;
   readonly question_count: number;
   readonly max_attempts: number;
@@ -345,6 +347,7 @@ export function toAdminAssessmentResource(row: AdminAssessmentRow): AdminAssessm
       ? null
       : {
           version: latestRule.version,
+          passPct: latestRule.pass_pct,
           timeLimitMinutes: latestRule.time_limit_minutes,
           questionCount: latestRule.question_count,
           maxAttempts: latestRule.max_attempts,

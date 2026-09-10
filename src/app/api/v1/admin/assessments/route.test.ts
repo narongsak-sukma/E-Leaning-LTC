@@ -146,6 +146,7 @@ function assessmentRow(overrides: Record<string, unknown> = {}): Record<string, 
     assessment_rules: [
       {
         version: 1,
+        pass_pct: 70,
         time_limit_minutes: 90,
         question_count: 30,
         max_attempts: 3,
@@ -208,7 +209,8 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     await GET(adminUrl());
     const call = calls.find((item) => item.table === "assessments");
     expect(call?.select).toContain("assessment_rules");
-    expect(call?.select?.includes("pass_pct")).toBe(false);
+    // pass_pct เปิดตั้งแต่ 0019 (column grant สะสม) — ต้องอยู่ใน embed · is_correct ยังห้าม
+    expect(call?.select?.includes("pass_pct")).toBe(true);
     expect(call?.select?.includes("is_correct")).toBe(false);
     expect(call?.orders).toContainEqual({
       column: "effective_from",

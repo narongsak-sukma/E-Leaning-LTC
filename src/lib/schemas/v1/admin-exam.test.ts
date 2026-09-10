@@ -200,6 +200,7 @@ describe("mapAdminExamDbError — PostgrestError → ทะเบียน error
 describe("mappers — response ไม่มี is_correct เด็ดขาด", () => {
   const RULE = {
     version: 2,
+    pass_pct: 70,
     time_limit_minutes: 90,
     question_count: 30,
     max_attempts: 3,
@@ -210,7 +211,7 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
     effective_from: "2026-09-01T00:00:00+00:00",
   };
 
-  it("toAdminAssessmentResource — createdBy จาก course embed + กติกาล่าสุด (ไม่มี pass_pct)", () => {
+  it("toAdminAssessmentResource — createdBy จาก course embed + กติกาล่าสุด + passPct (grant 0019)", () => {
     const row = {
       id: "d0000000-0000-4000-8000-000000000001",
       code: "FIN-01",
@@ -226,7 +227,8 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
     const resource = toAdminAssessmentResource(row);
     expect(resource.createdBy).toBe("a0000000-0000-4000-8000-000000000009");
     expect(resource.rules?.timeLimitMinutes).toBe(90);
-    expect(JSON.stringify(resource).includes("pass")).toBe(false);
+    expect(resource.rules?.passPct).toBe(70);
+    expect(JSON.stringify(resource).includes("passPct")).toBe(true);
     expect(() => AdminAssessmentResource.parse(resource)).not.toThrow();
   });
 

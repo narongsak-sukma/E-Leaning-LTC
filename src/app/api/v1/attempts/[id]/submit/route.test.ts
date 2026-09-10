@@ -68,6 +68,7 @@ function makeClient(spec: Partial<Spec> = {}) {
       passed: true,
       correct_count: 26,
       question_count: 30,
+      total_points: 40,
     },
     rpcError: null,
     ...spec,
@@ -177,6 +178,7 @@ describe("POST /attempts/{id}/submit — happy path (DCR-6)", () => {
     expect(parsed.passed).toBe(true);
     expect(parsed.correctCount).toBe(26);
     expect(parsed.questionCount).toBe(30);
+    expect(parsed.totalPoints).toBe(40);
     expect(parsed.alreadySubmitted).toBeUndefined();
     const call = client._rpcArgs.find((c) => c.fn === "submit_attempt");
     expect(call?.args).toEqual({
@@ -186,13 +188,15 @@ describe("POST /attempts/{id}/submit — happy path (DCR-6)", () => {
     expect(res.headers.get("x-request-id")).toBe("req-d1-5");
   });
 
-  it("ส่งซ้ำ (replay) → 200 ผลเดิม + alreadySubmitted:true ไม่ error (DCR-6)", async () => {
+  it("ส่งซ้ำ (replay) → 200 ผลเดิม + alreadySubmitted:true ไม่ error (DCR-6 · 0019 early-return ครบ qc/tp)", async () => {
     const { res } = await post(ATTEMPT_ID, {
       rpcData: {
         attempt_id: ATTEMPT_ID,
         status: "failed",
         score_pct: 40,
         passed: false,
+        question_count: 30,
+        total_points: 40,
         already_submitted: true,
       },
     });
@@ -202,7 +206,8 @@ describe("POST /attempts/{id}/submit — happy path (DCR-6)", () => {
     expect(parsed.alreadySubmitted).toBe(true);
     expect(parsed.status).toBe("failed");
     expect(parsed.correctCount).toBeUndefined();
-    expect(parsed.questionCount).toBeUndefined();
+    expect(parsed.questionCount).toBe(30);
+    expect(parsed.totalPoints).toBe(40);
     // replay ยังตอบ 200 เสมอ — ตรวจว่า body ไร้ field เฉลยแม้ตอน replay
     const raw = JSON.stringify(body.data);
     expect(raw).not.toContain("explanation");
