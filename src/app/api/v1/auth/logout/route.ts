@@ -4,11 +4,13 @@
  * หลัก (สะสมจาก gate r4→r8): **ไม่มีทางจบ "เหมือนสำเร็จ" (204 + ล้าง cookie) จนกว่า
  * refresh token จะถูก revoke จริง หรือ auth server ยืนยันเองว่า session ตายแล้ว**
  * - buffered client (r5): การเขียน/ลบ cookie ทั้งหมดอยู่ใน memory จนกว่า commit()
- * - อ่าน session พร้อม**ตรวจ error ของ getSession** (r7 M1): token หมดอายุ → SDK
- *   refresh ภายในเอง; refresh โดนปฏิเสธชัด (400/401/403) พร้อม token หมดอายุจริง →
- *   SDK คืน {session:null, error} = ตายจริง · แต่ 429/5xx/network ก็คืน error เหมือน
- *   กัน — ต้องแยก: อันหลังตอบ 503 และ**ไม่ commit** (deletion ที่ SDK ทำไว้ใน buffer
- *   ถูกทิ้ง) ไม่ใช่ 204 เหมือนสำเร็จ · middleware ก็ไม่ refresh เส้นนี้ให้แล้ว (r7 M1)
+ * - อ่าน session พร้อม**ตรวจ error ของ getSession** (r7 M1 · r9 M1): token หมดอายุ →
+ *   SDK refresh ภายในเอง; refresh ตอบ code ที่พิสูจน์ token ตายจริง
+ *   (refresh_token_not_found / invalid_grant / AuthSessionMissingError) →
+ *   SDK คืน {session:null, error} = ตายจริง · error อื่นทุกชนิด (รวม 401 จากชั้น
+ *   key-auth ของ gateway ที่ไม่มี code — ไม่ได้แตะ session ฝั่ง server) และ
+ *   429/5xx/network → 503 และ**ไม่ commit** (deletion ที่ SDK ทำไว้ใน buffer ถูกทิ้ง)
+ *   ไม่ใช่ 204 เหมือนสำเร็จ · middleware ก็ไม่ refresh เส้นนี้ให้แล้ว (r7 M1)
  * - **revoke ด้วย fetch ตรงเอง** (r7 M2): _signOut ของ SDK กลืน 401/403/404 เป็น
  *   error:null (bad_jwt) — ทางเดียวที่รู้ผล revoke จริงคืออ่าน status เอง
  * - revoke โดน 401/403 ทั้งที่ token ยังไม่หมดอายุตามเครื่องเรา (clock skew / ถูกเพิกถอน
@@ -36,12 +38,26 @@ function isRejected(status: number): boolean {
 
 interface AuthApiErrorLike extends Error {
   readonly status?: number;
+  readonly code?: string;
 }
 
 /**
- * error ของ SDK ที่ยืนยันว่า session ตายจริง (auth server ปฏิเสธชัด ๆ) —
- * ที่เหลือ (429/5xx/network) คือ upstream ล้มชั่วคราว: ยังไม่แตะ cookie
- * (ใช้ name แทน instanceof — คลาสของ auth-js ไม่พร้อม type ให้ import โดยตรง)
+ * error ของ SDK ที่ "ยืนยันว่า refresh token/session สิ้นสภาพจริง" เท่านั้น —
+ * ตัดสินจาก**รหัส error** ไม่ใช่ status (gate r9 M1): 401 จากชั้น key-auth ของ
+ * gateway (Kong ตอบ `{"message":"Invalid authentication credentials"}` ไม่มี code
+ * — ทดสอบกับ cluster จริง) ไม่ได้แตะ session ฝั่ง server เลย แต่เข้ามาในรูป
+ * AuthApiError 401 เหมือนกัน — ถ้ายึด status จะล้าง cookie + 204 ทิ้ง session
+ * ที่ยังมีชีวิต:
+ * - AuthSessionMissingError — ไม่มี session ในเครื่อง หรือ GoTrue ตอบ
+ *   `session_not_found` (SDK แปลงเป็นชื่อนี้ให้ใน handleError ของ fetch.js)
+ * - AuthApiError ที่ code เป็น `refresh_token_not_found` (GoTrue จริงที่ cluster
+ *   ใช้: token ตายทุกแบบ — ถูก revoke/หมดอายุ/ใช้ซ้ำ — ตอบ error_code นี้,
+ *   live probe: 400 `{"code":400,"error_code":"refresh_token_not_found"}`) หรือ
+ *   `invalid_grant` (รูป OAuth เดิม)
+ * ที่เหลือทุกอย่าง — รวม 400/401/403 ที่ไม่มี code ที่รู้จัก — ถือว่าไม่รู้
+ * ความหมาย: upstream/gateway ผิดปกติ → 503 เก็บ credential ล่าสุดไว้ ไม่ commit
+ * การลบที่ SDK queue ไว้ (ใช้ name แทน instanceof — คลาสของ auth-js ไม่พร้อม
+ * type ให้ import โดยตรง)
  */
 function isDefinitiveAuthError(error: unknown): boolean {
   if (!(error instanceof Error)) {
@@ -50,7 +66,11 @@ function isDefinitiveAuthError(error: unknown): boolean {
   if (error.name === "AuthSessionMissingError") {
     return true;
   }
-  return error.name === "AuthApiError" && isRejected((error as AuthApiErrorLike).status ?? 0);
+  if (error.name !== "AuthApiError") {
+    return false;
+  }
+  const code = (error as AuthApiErrorLike).code;
+  return code === "refresh_token_not_found" || code === "invalid_grant";
 }
 
 /** เรียก GoTrue /auth/v1/logout เอง (scope=local) — network ล้ม/ค้าง = upstream ล้ม (503) */

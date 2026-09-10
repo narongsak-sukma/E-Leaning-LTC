@@ -6,7 +6,9 @@
  * cookie แม้ revoke ล้ม → กดซ้ำได้ 204) · r6 (SDK กลืน bad_jwt) · r7 (getSession คืน
  * error จาก refresh 429 แต่ route กลืน → 204 เท็จ · bad_jwt 403 โดยไม่พยายาม refresh)
  * · r8 (ปฏิเสธซ้ำหลัง refresh สำเร็จ ≠ ตายจริง · rotation ภายใน getSession ถูกทิ้ง ·
- * base→chunks ล้างไม่ครบชื่อที่เกิดใหม่ใน buffer)
+ * base→chunks ล้างไม่ครบชื่อที่เกิดใหม่ใน buffer) · r9 (401 จากชั้น key-auth ของ
+ * gateway ไม่มี error code ≠ session ตาย — ยึด code เฉพาะ refresh_token_not_found /
+ * invalid_grant เท่านั้น รูป body ตาม live probe ของ cluster จริง)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -204,25 +206,26 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     expectOnlySbDeletions();
   });
 
-  it("revoke โดน 401 + refresh ก็โดนปฏิเสธ (401) → session ตายจริง → 204 + commit ล้าง cookie เก่า", async () => {
+  it("revoke โดน 401 + refresh ตอบ refresh_token_not_found → session ตายจริง → 204 + commit ล้าง cookie เก่า", async () => {
     jar.push(SESSION_COOKIE);
     fetchMock
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ message: "Invalid refresh token" }), {
+        new Response(JSON.stringify({ code: 401, msg: "bad jwt" }), {
           status: 401,
           headers: { "content-type": "application/json" },
         }),
       )
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: "invalid_grant", error_description: "Token is expired" }), {
-          status: 401,
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ code: 400, error_code: "refresh_token_not_found", msg: "Invalid Refresh Token: Refresh Token Not Found" }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
       );
     const res = await POST();
     expect(res.status).toBe(204);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(cookieSet).toHaveBeenCalled();
+    expectOnlySbDeletions();
   });
 
   // ---- gate r7 M1: getSession คืน error จาก refresh ภายใน (429) — ห้าม 204 เท็จ ----
@@ -245,11 +248,13 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
 
   // ---- gate r6/r7: access token หมดอายุ → SDK refresh ภายใน getSession ----
 
-  it("access หมดอายุ + refresh ถูกปฏิเสธด้วย 400 invalid_grant (GoTrue) → 204 + commit (session ตายจริง)", async () => {
+  it("access หมดอายุ + refresh ตอบ refresh_token_not_found (GoTrue จริง — live probe) → 204 + commit (session ตายจริง)", async () => {
     jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    // รูป body ตามที่ GoTrue ใน cluster ตอบจริง (probe ในเครื่อง): code เป็นตัวเลข
+    // → SDK หยิบ error_code เป็น AuthApiError.code = "refresh_token_not_found"
     fetchMock.mockResolvedValueOnce(
       new Response(
-        JSON.stringify({ error: "invalid_grant", error_description: "Invalid Refresh Token: Already Used" }),
+        JSON.stringify({ code: 400, error_code: "refresh_token_not_found", msg: "Invalid Refresh Token: Refresh Token Not Found" }),
         { status: 400, headers: { "content-type": "application/json" } },
       ),
     );
@@ -260,20 +265,63 @@ describe("POST /api/v1/auth/logout (SDK จริง + mock transport)", () => {
     expect(String(url)).toContain("/auth/v1/token");
     expect(String(url)).toContain("grant_type=refresh_token");
     expect(cookieSet).toHaveBeenCalled(); // ล้าง cookie เก่าทิ้ง
+    expectOnlySbDeletions();
   });
 
-  it("access หมดอายุ + refresh ถูกปฏิเสธ (401) → 204 + commit (session ตายจริง)", async () => {
+  // ---- gate r9 M1: 401 จาก gateway (ไม่มี error code) ≠ session ตาย — ห้าม 204 ----
+
+  it("access หมดอายุ + refresh โดน 401 จากชั้น key-auth ของ gateway (ไม่มี code) → 503 ไม่ commit ไม่ revoke (จุดรั่ว r9 M1)", async () => {
     jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    // Kong key-auth ตอบจริง (probe ในเครื่อง): 401 ไม่มี error_code ใด ๆ —
+    // ไม่ได้แตะ session ฝั่ง server เลย จึงห้ามถือว่าตายจริง
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: "invalid_grant", error_description: "Token is expired" }), {
+      new Response(JSON.stringify({ message: "Invalid authentication credentials" }), {
         status: 401,
         headers: { "content-type": "application/json" },
       }),
     );
     const res = await POST();
-    expect(res.status).toBe(204);
-    expect(fetchMock).toHaveBeenCalledTimes(1); // ไม่ revoke — ไม่มี session ที่ใช้ได้เหลืออยู่
-    expect(cookieSet).toHaveBeenCalled(); // ล้าง cookie เก่าทิ้ง
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(fetchMock).toHaveBeenCalledTimes(1); // แค่ refresh ภายใน — ไม่มีทางถึง revoke
+    expect(cookieSet).not.toHaveBeenCalled(); // SDK queue การลบไว้ แต่เราทิ้งมัน — session ยังอยู่
+  });
+
+  it("getSession หมุนสำเร็จ → revoke โดน 403 → refresh รอบถัดไปโดน 401 gateway → 503 + commit เก็บ token ใหม่ (จุดรั่ว r9 M1 เส้นที่สอง)", async () => {
+    // jar เป็น base เดี่ยวหมดอายุ → getSession refresh ภายในสำเร็จ (rotation เกิดก่อน
+    // revoke) → revoke โดน 403 bad_jwt → refreshSession โดน 401 จาก gateway (ไม่มี
+    // code) — เดิม isDefinitiveAuthError ยึด status → dead() ล้าง cookie + 204 ทิ้ง
+    // token ใหม่ที่เพิ่งออก ทั้งที่ session ฝั่ง server ยังมีชีวิต
+    jar.push({ name: SESSION_COOKIE.name, value: expiredSessionJson(0) });
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(FRESH_SESSION), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 403, msg: "bad_jwt" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Invalid authentication credentials" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const res = await POST();
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(fetchMock).toHaveBeenCalledTimes(3); // refresh ภายใน → revoke → refresh รอบสอง
+    // commit เก็บ session ที่เพิ่งหมุนไว้ — ห้ามล้างทิ้ง (session ยังมีชีวิตฝั่ง server)
+    const writes = sbCookieWrites();
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.some(([, value]) => decodedWriteValue(value).includes("access-token-fresh-2"))).toBe(true);
   });
 
   it("access หมดอายุ (session ใหญ่ chunk .0/.1) + refresh ได้ session ใหม่ + revoke สำเร็จ → 204, ไม่มี token หลงเหลือใน cookie ที่เขียนกลับ (จุดรั่ว r6 merged getAll)", async () => {
