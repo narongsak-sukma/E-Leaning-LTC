@@ -63,7 +63,8 @@ export type AdminCourse = {
   isPublic: boolean;
   /** ISO date — null = ยังไม่เคยเผยแพร่ */
   publishedAt: string | null;
-  updatedAt: string;
+  /** ISO date ตอนสร้างแถว — ตาราง courses ไม่มี updated_at (BFF schemas/admin-catalog.ts) */
+  createdAt: string;
 };
 
 /** ผลลัพธ์ที่หน้าต้องแสดงเป็น UI ไทยสุภาพ แทนการ crash */
@@ -219,7 +220,9 @@ function parseCourse(raw: unknown): AdminCourse | null {
   const version = requiredCount(raw, "version");
   const language = requiredString(raw, "language");
   const publishedAt = nullableString(raw, "publishedAt");
-  const updatedAt = requiredString(raw, "updatedAt");
+  // gate r4: BFF ส่ง createdAt (ตาราง courses ไม่มี updated_at) — parser เดิมเรียกร้อง updatedAt
+  // ที่ producer ไม่เคยส่ง ทำให้ทุกแถวตายหมด (admin list กลายเป็น kind=server เมื่อมีข้อมูล)
+  const createdAt = requiredString(raw, "createdAt");
   const status = raw["status"];
   const isPublic = raw["isPublic"];
   if (
@@ -232,7 +235,7 @@ function parseCourse(raw: unknown): AdminCourse | null {
     version === null ||
     language === null ||
     publishedAt === undefined ||
-    updatedAt === null ||
+    createdAt === null ||
     !isCourseStatus(status) ||
     typeof isPublic !== "boolean"
   ) {
@@ -250,7 +253,7 @@ function parseCourse(raw: unknown): AdminCourse | null {
     language,
     isPublic,
     publishedAt,
-    updatedAt,
+    createdAt,
   };
 }
 

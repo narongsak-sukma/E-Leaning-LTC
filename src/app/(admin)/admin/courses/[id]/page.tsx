@@ -93,7 +93,7 @@ export default async function AdminCourseDetailPage({
         <CourseStatusBadge status={course.status} />
       </div>
       <p className="mt-1 text-sm text-ink-500">
-        รหัสหลักสูตร {course.code} · เวอร์ชัน {course.version} · อัปเดตล่าสุด {formatThaiDate(course.updatedAt)}
+        รหัสหลักสูตร {course.code} · เวอร์ชัน {course.version} · สร้างเมื่อ {formatThaiDate(course.createdAt)}
       </p>
 
       <div className="mt-5">

@@ -24,6 +24,10 @@ vi.mock("next/headers", () => ({
 }));
 
 import {
+  toAdminCourseResource,
+  type AdminCourseRow,
+} from "@/lib/schemas/admin-catalog";
+import {
   ADMIN_COURSES_PAGE_SIZE,
   getAdminCategories,
   getAdminCourses,
@@ -56,7 +60,7 @@ function makeCourse(overrides: Record<string, unknown> = {}): Record<string, unk
     language: "th",
     isPublic: true,
     publishedAt: "2026-08-20",
-    updatedAt: "2026-08-20",
+    createdAt: "2026-08-20",
     ...overrides,
   };
 }
@@ -113,7 +117,7 @@ describe("GET /admin/courses (ผ่านชั้นข้อมูล getAdmi
     expect(course.language).toBe("th");
     expect(course.isPublic).toBe(true);
     expect(course.publishedAt).toBe("2026-08-20");
-    expect(course.updatedAt).toBe("2026-08-20");
+    expect(course.createdAt).toBe("2026-08-20");
     const url = fetchMock.mock.calls[0]?.[0] as URL;
     expect(url.origin).toBe("http://bff-origin.test.local");
     expect(url.pathname).toBe("/api/v1/admin/courses");
@@ -195,6 +199,49 @@ describe("GET /admin/courses (ผ่านชั้นข้อมูล getAdmi
     );
     const result = await getAdminCourses();
     expect(result).toEqual({ ok: false, kind: "server" });
+  });
+
+  it("producer–consumer: toAdminCourseResource (BFF จริง) ต้องผ่าน parser ของ fixture (gate r4)", async () => {
+    // เดิม parser เรียกร้อง updatedAt แต่ BFF ส่ง createdAt (ตาราง courses ไม่มี updated_at)
+    // ทำให้ทุกแถวตายหมด — test นี้ยึดสัญญาสองฝั่งไว้ด้วยกันกัน drift กลับมา
+    const row: AdminCourseRow = {
+      id: "44444444-4444-4444-8444-000000000003",
+      code: "LTC-CONTRACT-1",
+      title_th: "หลักสูตรทดสอบสัญญา producer–consumer",
+      title_en: "Producer Consumer Contract",
+      summary: null,
+      category_id: "11111111-1111-4111-8111-000000000010",
+      status: "published",
+      is_public: true,
+      level: "beginner",
+      version: 1,
+      language: "th",
+      published_at: "2026-09-01T00:00:00Z",
+      created_at: "2026-08-31T00:00:00Z",
+      category: {
+        id: "11111111-1111-4111-8111-000000000010",
+        slug: "contract-cat",
+        name_th: "หมวดทดสอบ",
+      },
+      course_modules: [
+        { lessons: [{ duration_sec: 600 }, { duration_sec: null }] },
+        { lessons: [] },
+      ],
+    };
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        data: [toAdminCourseResource(row)],
+        page: { nextCursor: null, hasMore: false },
+      }),
+    );
+    const result = await getAdminCourses();
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    const course = result.data.data[0] as AdminCourse;
+    expect(course.createdAt).toBe("2026-08-31T00:00:00Z");
+    expect(course.code).toBe("LTC-CONTRACT-1");
   });
 });
 

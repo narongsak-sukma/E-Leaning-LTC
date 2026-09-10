@@ -119,11 +119,11 @@ export default async function AdminCoursesPage({
       render: (course) => <CourseStatusBadge status={course.status} />,
     },
     {
-      id: "updated",
-      header: "อัปเดต",
+      id: "created",
+      header: "สร้างเมื่อ",
       align: "end",
       render: (course) => (
-        <span className="whitespace-nowrap text-ink-600">{formatThaiDate(course.updatedAt)}</span>
+        <span className="whitespace-nowrap text-ink-600">{formatThaiDate(course.createdAt)}</span>
       ),
     },
     {
