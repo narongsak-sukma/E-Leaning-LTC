@@ -122,7 +122,38 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       });
       // ตรวจ + หมุน token ถ้าใกล้หมดอายุ — ผล error ใช้ตัดสินว่าจะเผยแพร่การลบได้ไหม
       // (authorization เองเป็นของ handler/rbac ต่อไป)
-      const { error: authError } = await supabase.auth.getUser();
+      //
+      // PB-1 (refresh-ownership race): middleware เป็นเจ้าของ rotation คนเดียว
+      // โดยหมุน "ล่วงหน้า" — margin ของ SDK เอง (EXPIRY_MARGIN_MS = 3 ticks × 30s
+      // = 90 วิ ใน @supabase/auth-js ที่ติดตั้ง) แคบกว่าของเรา ทำให้เกิดหน้าต่างแข่ง:
+      // middleware เห็นเหลือ >90 วิ ไม่หมุน → ระหว่าง render ผ่านขอบ 90 วิ → BFF
+      // call ใน loader หมุนเอง → RSC ตั้ง cookie ไม่ได้ rotation หายกลางอากาศ →
+      // browser ถือ refresh token เก่าจนโดน reuse — หมุนที่นี่ด้วย LEAD 180 วิ
+      // ทำให้ทุก call ใต้ render เห็น token ที่ยังห่าง margin ของ SDK อยู่ จึงไม่
+      // มีใครหมุนซ้ำ
+      //
+      // ตัดสิน death จาก error ของ getSession เอง (PB-1): getSession → __loadSession
+      // หมุน refresh อยู่ในตัวเมื่อ token เข้า margin — refresh พลาดแต่ token จริง
+      // ยังไม่หมด → คืน session เดิม error:null (preserve); refresh พลาดและ token
+      // หมดจริง → คืน {session:null, error ของ refresh} — error นั้นแหละที่ใช้ตัดสิน
+      // ตายจริง · **ห้าม**เรียก getUser ต่อหลัง session เป็น null (ทางเดิม): SDK จะ
+      // โยน AuthSessionMissingError ซึ่ง definitive ตามชื่อ → ล้าง credential ที่
+      // โดน gateway 401/429 แบบ non-retryable ทั้งที่ยังมีชีวิต (r11 เรียกคืน)
+      const LEAD_SECONDS = 180;
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      const session = sessionData?.session ?? null;
+      let authError: Error | null = sessionError ?? null;
+      if (
+        session !== null &&
+        typeof session.expires_at === "number" &&
+        session.expires_at - Math.floor(Date.now() / 1000) < LEAD_SECONDS
+      ) {
+        // หมุนล่วงหน้า (เจ้าของ rotation คนเดียว) — refreshSession ไม่ผ่านทาง
+        // preserve fallback ของ __loadSession: error ของมันคือคำตอบตรง ๆ ของ
+        // auth server สำหรับ token นี้
+        const { error: refreshError } = await supabase.auth.refreshSession();
+        authError = refreshError ?? authError;
+      }
       const deathConfirmed = authError !== null && isDefinitiveAuthError(authError);
       // นโยบายเดียวกับ commitAuthWrites ของ SSR client (gate r12 M2): การลบสองความ
       // หมายต้องแยก — "ล้าง session" เผยแพร่เฉพาะเมื่อยืนยันตายจริง · "เก็บกวาด chunk

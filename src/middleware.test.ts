@@ -32,25 +32,29 @@ function makeRequest(method: string, path: string, headers: Record<string, strin
 }
 
 /**
- * stub client ของ @supabase/ssr — getUser จำลอง token refresh ตามจริง:
- * เรียก setAll ระหว่าง middleware กำลังทำงาน (ไม่ใช่หลัง return) เพราะ middleware
- * สร้าง response ใหม่ในทุก setAll — cookie ต้องไปอยู่กับ response สุดท้ายที่ return
+ * stub client ของ @supabase/ssr — getSession จำลอง token refresh ตามจริง (PB-1:
+ * getSession เป็นทางเข้า SDK ทางเดียวของ middleware): เรียก setAll ระหว่าง
+ * middleware กำลังทำงาน (ไม่ใช่หลัง return) เพราะ middleware สร้าง response ใหม่
+ * ในทุก setAll — cookie ต้องไปอยู่กับ response สุดท้ายที่ return · session ที่คืน
+ * อยู่พ้น LEAD (เหลือ 3500 วิ) เพื่อไม่ให้ refreshSession ถูกเรียกต่อใน stub
  */
 type StubCookie = { name: string; value: string; options?: Record<string, unknown> };
 
 function stubRefreshClient(refreshBatches: StubCookie[][] = []) {
   createServerClientMock.mockImplementation(((_url: string, _key: string, opts: unknown) => {
     const cookies = (opts as { cookies: { setAll: (batch: StubCookie[]) => void } }).cookies;
-    let round = 0;
     return {
       auth: {
-        getUser: vi.fn(async () => {
-          for (const batch of refreshBatches.slice(round)) {
+        getSession: vi.fn(async () => {
+          for (const batch of refreshBatches) {
             cookies.setAll(batch);
-            round += 1;
           }
-          return { data: { user: null }, error: null };
+          return {
+            data: { session: { expires_at: Math.floor(Date.now() / 1000) + 3500 } },
+            error: null,
+          };
         }),
+        refreshSession: vi.fn(async () => ({ data: { session: null }, error: null })),
       },
     };
   }) as never);
@@ -180,14 +184,14 @@ describe("session refresh (SDS §5.1) — cookie หมุน token เขีย
   });
 
   // ---- gate r7 M1: logout path ต้องไม่มีการ refresh ใน middleware ----
-  // getUser ของ SDK อาจเจอ 429 ระหว่าง refresh แล้วเขียนการลบ session cookie ลง
+  // getSession ของ SDK อาจเจอ 429 ระหว่าง refresh แล้วเขียนการลบ session cookie ลง
   // response กลับ browser ก่อน handler ทำงาน — logout route เป็นผู้ตัดสินเอง (buffered)
 
   it("POST /api/v1/auth/logout ผ่าน CSRF แต่**ไม่**สร้าง Supabase client (ไม่ refresh ใน middleware)", async () => {
     const res = await middleware(makeRequest("POST", "/api/v1/auth/logout", { origin: "http://localhost:3000" }));
     expect(res.status).toBe(200);
     expect(res.headers.get("x-request-id")).toBeTruthy();
-    expect(createServerClientMock).not.toHaveBeenCalled(); // ไม่มี getUser = ไม่มีการลบ cookie หลุดออกก่อน handler
+    expect(createServerClientMock).not.toHaveBeenCalled(); // ไม่มี getSession = ไม่มีการลบ cookie หลุดออกก่อน handler
     expect(res.cookies.getAll()).toEqual([]); // middleware ไม่เขียน cookie ใด ๆ บนเส้นนี้
   });
 
@@ -254,7 +258,9 @@ describe("session refresh บนหน้าเว็บ (gate r10 M2)", () => {
       seenFromGetAll = (opts as { cookies: { getAll: () => Array<{ name: string; value: string }> } })
         .cookies.getAll();
       return {
-        auth: { getUser: vi.fn(async () => ({ data: { user: null }, error: null })) },
+        auth: {
+          getSession: vi.fn(async () => ({ data: { session: null }, error: null })),
+        },
       };
     }) as never);
     const second = await middleware(
