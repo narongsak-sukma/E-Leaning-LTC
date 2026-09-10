@@ -58,17 +58,28 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   // session refresh (SDS §5.1) — token หมุนแล้วเดินต่อทั้งสองทิศทาง:
   // request cookie (handler เห็น token ใหม่) + response cookie (browser เก็บลงถาวร)
-  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  let response = NextResponse.next({ request: { headers: requestHeaders } });
   try {
     const { supabaseUrl, supabaseAnonKey } = getConfig();
     const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
       cookies: {
         getAll: () => request.cookies.getAll(),
         setAll: (cookiesToSet) => {
-          for (const { name, value, options } of cookiesToSet) {
+          // cookie ที่สะสมไว้จากรอบก่อน (ชื่อซ้ำ = ใช้ค่ารอบใหม่)
+          const carried = new Map(response.cookies.getAll().map((c) => [c.name, c] as const));
+          for (const { name, value } of cookiesToSet) {
             request.cookies.set(name, value);
-            requestHeaders.set("cookie", request.cookies.toString());
+            carried.delete(name);
+          }
+          // Next จับค่า headers ณ จุดสร้าง response — แก้ cookie header แล้วต้องสร้าง
+          // response ใหม่ (แบบเดียวกับ pattern ทางการของ @supabase/ssr) แล้วจึงเขียน
+          // cookie ที่สะสมไว้ทั้งหมด (เก่า + ใหม่) ลง response ล่าสุด
+          response = NextResponse.next({ request: { headers: requestHeaders } });
+          for (const { name, value, options } of cookiesToSet) {
             response.cookies.set(name, value, hardenedCookieOptions(options));
+          }
+          for (const cookie of carried.values()) {
+            response.cookies.set(cookie);
           }
         },
       },

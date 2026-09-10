@@ -9,7 +9,8 @@
  * - httpOnly: true เสมอ (browser คุยกับ Next BFF เท่านั้น — ไม่มี use case อ่าน cookie ฝั่ง JS)
  * - sameSite: "lax" (คู่กับ CSRF origin check ของ middleware — SDS §5.4)
  * - secure: เฉพาะ production (dev รันบน http://localhost — Secure cookie จะไม่ถูกส่งกลับ)
- * - path: "/" (ค่า default ของ library ตั้งไว้แล้ว — ระบุซ้ำกัน explicit)
+ * - path: "/" บังคับ — ไม่ยอมให้ options ของ library ตั้ง path อื่น (scope cookie
+ *   ทั้ง origin ของ BFF ที่เดียว — ค่าอื่นคือค่าแปลกปลอมจาก library)
  */
 import type { CookieOptions } from "@supabase/ssr";
 
@@ -25,7 +26,7 @@ export interface HardenedCookieOptions extends CookieOptions {
 export function hardenedCookieOptions(options: CookieOptions | undefined): HardenedCookieOptions {
   return {
     ...options,
-    path: options?.path ?? "/",
+    path: "/",
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

@@ -29,19 +29,29 @@ function makeRequest(method: string, path: string, headers: Record<string, strin
   return new NextRequest("http://localhost:3000" + path, { method, headers });
 }
 
-/** stub client ของ @supabase/ssr — เก็บ cookies adapter ไว้ให้ test เรียก setAll แทน library */
-function stubRefreshClient() {
-  let captured: {
-    getAll: () => { name: string; value: string }[];
-    setAll: (cookiesToSet: { name: string; value: string; options?: Record<string, unknown> }[]) => void;
-  } | undefined;
+/**
+ * stub client ของ @supabase/ssr — getUser จำลอง token refresh ตามจริง:
+ * เรียก setAll ระหว่าง middleware กำลังทำงาน (ไม่ใช่หลัง return) เพราะ middleware
+ * สร้าง response ใหม่ในทุก setAll — cookie ต้องไปอยู่กับ response สุดท้ายที่ return
+ */
+type StubCookie = { name: string; value: string; options?: Record<string, unknown> };
+
+function stubRefreshClient(refreshBatches: StubCookie[][] = []) {
   createServerClientMock.mockImplementation(((_url: string, _key: string, opts: unknown) => {
-    captured = (opts as { cookies: typeof captured }).cookies;
+    const cookies = (opts as { cookies: { setAll: (batch: StubCookie[]) => void } }).cookies;
+    let round = 0;
     return {
-      auth: { getUser: vi.fn(async () => ({ data: { user: null }, error: null })) },
+      auth: {
+        getUser: vi.fn(async () => {
+          for (const batch of refreshBatches.slice(round)) {
+            cookies.setAll(batch);
+            round += 1;
+          }
+          return { data: { user: null }, error: null };
+        }),
+      },
     };
   }) as never);
-  return () => captured;
 }
 
 beforeEach(() => {
@@ -119,17 +129,29 @@ describe("CSRF — fail-closed ทุก non-safe method (SDS §5.4)", () => {
 });
 
 describe("session refresh (SDS §5.1) — cookie หมุน token เขียนสองทิศทาง", () => {
-  it("setAll เขียน response cookie ด้วย flags บังคับ (httpOnly ทับ default ของ library)", async () => {
-    const res = await middleware(makeRequest("POST", "/api/v1/auth/login", { origin: "http://localhost:3000" }));
-    const cookies = createServerClientMock.mock.calls[0]?.[2] as unknown as {
-      cookies: {
-        setAll: (cookiesToSet: { name: string; value: string; options?: Record<string, unknown> }[]) => void;
-      };
-    };
-    cookies.cookies.setAll([{ name: "sb-auth-token", value: "rotated", options: { httpOnly: false } }]);
+  it("refresh กลาง request: setAll จาก library → response cookie มี flags บังคับ (httpOnly ทับ default)", async () => {
+    stubRefreshClient([[{ name: "sb-auth-token", value: "rotated", options: { httpOnly: false } }]]);
+    const res = await middleware(makeRequest("GET", "/api/v1/courses"));
     const written = res.cookies.getAll().find((c) => c.name === "sb-auth-token");
     expect(written?.value).toBe("rotated");
     expect(written).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
+    expect(res.headers.get("x-request-id")).toBeTruthy();
+  });
+
+  it("setAll หลายรอบ: cookie ของรอบก่อนถูก carry ไป response สุดท้ายครบ (middleware สร้าง response ใหม่ทุกรอบ)", async () => {
+    stubRefreshClient([
+      [{ name: "sb-1-auth-token", value: "v1", options: { httpOnly: false } }],
+      [{ name: "sb-2-auth-token", value: "v2", options: { httpOnly: false } }],
+    ]);
+    const res = await middleware(makeRequest("GET", "/api/v1/courses"));
+    const names = res.cookies.getAll().map((c) => c.name);
+    expect(names).toContain("sb-1-auth-token");
+    expect(names).toContain("sb-2-auth-token");
+    expect(res.cookies.getAll().find((c) => c.name === "sb-1-auth-token")).toMatchObject({
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+    });
   });
 
   it("Auth server ล้ม (getConfig/createServerClient โยน) → ยังตอบ 200 ปกติ (authorization เป็นของ handler)", async () => {

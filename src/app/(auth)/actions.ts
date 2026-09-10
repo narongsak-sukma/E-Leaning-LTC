@@ -46,11 +46,23 @@ const registerSchema = z.object({
   acknowledgeNotice: z.literal("on", { message: "กรุณายืนยันการรับทราบประกาศความเป็นส่วนตัว" }),
 });
 
-/** แปลง error ของ signInWithPassword เป็น code/ข้อความจากทะเบียนเท่านั้น */
+/**
+ * แปลง error ของ signInWithPassword เป็น code/ข้อความจากทะเบียนเท่านั้น
+ *
+ * ข้อจำกัด timing (API-SPEC §3.1 แนว anti-enumeration): Supabase Auth ตรวจ
+ * บัญชีถูกแบน **ก่อนตรวจรหัสผ่าน** (GoTrue ที่ compose pin ไว้) — เราจึงตอบ
+ * user_banned เหมือนรหัสผ่านผิดทุกประการ จะเหลือคือเวลาตอบที่ต่างกันเท่านั้น
+ * (ลดไม่ได้จากฝั่งแอป — หมายเหตุไว้ตามเกณฑ์ SDS §5)
+ */
 function classifyLoginError(error: { code?: string | null | undefined }): ActionOutcome {
   switch (error.code) {
     case "invalid_credentials":
       return { error: "ERR-AUTH-002" };
+    // บัญชีถูกแบน: GoTrue ตรวจก่อนรหัสผ่าน → ตอบเหมือนรหัสผ่านผิด (กัน enumeration)
+    case "user_banned":
+      return { error: "ERR-AUTH-002" };
+    // สถานะนี้เปิดเฉพาะเมื่อรหัสผ่านถูกแล้ว (GoTrue ตรวจรหัสผ่านก่อน confirmation)
+    // — ผู้ไม่รู้รหัสผ่านกระตุ้นสถานะนี้ไม่ได้ จึงแจ้งตรง ๆ ได้ (AUTH-001)
     case "email_not_confirmed":
       return { notice: "email_not_confirmed" };
     case "over_request_rate_limit":

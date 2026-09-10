@@ -61,7 +61,7 @@ function makeBuilder(rows: EnrollmentRow[]) {
   return { builder, eqCalls, orCalls };
 }
 
-function mockClient(rows: EnrollmentRow[]) {
+function mockClient(rows: EnrollmentRow[], roles: readonly string[] = ["citizen"]) {
   const { builder, eqCalls, orCalls } = makeBuilder(rows);
   // profiles ของ session.getUser (SDS §5.5) — builder แยก: บัญชี active ค่าตั้งต้น
   const profilesBuilder = {
@@ -79,6 +79,9 @@ function mockClient(rows: EnrollmentRow[]) {
         })),
       },
     },
+    // my_roles ของ requireMfaForRoles (AUTH-007 gate) — default citizen = ไม่ถูกบังคับ MFA
+    rpc: vi.fn(async (fn: string) =>
+      fn === "my_roles" ? { data: roles, error: null } : { data: null, error: null }),
     from: vi.fn((table: string) => (table === "profiles" ? profilesBuilder : builder)),
     _builder: builder,
   };
@@ -177,6 +180,14 @@ describe("GET /me/enrollments — auth + rate", () => {
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-AUTH-001");
+  });
+
+  it("บทบาทบังคับ MFA ที่ยัง aal1 → 403 ERR-AUTH-004 (AUTH-007 — /me/enrollments ไม่อยู่ enrollment-only allowlist)", async () => {
+    mockClient([], ["staff:viewer"]); // aal1 ตาม mock
+    const res = await GET(meUrl());
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-AUTH-004");
   });
 
   it("เรียก rate กลุ่ม READ — เกิน 120/min → 429 พร้อม details.group=READ", async () => {

@@ -12,7 +12,7 @@ import { AppError } from "@/lib/errors";
 import { jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
 import { decodeCursor, buildPage } from "@/lib/api/pagination";
 import { parsePageQuery } from "@/lib/schemas/v1/common";
-import { requireUser } from "@/lib/auth/session";
+import { requireMfaForRoles } from "@/lib/auth/session";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { toEnrollmentResource, type EnrollmentRow } from "@/lib/schemas/v1/enrollment";
@@ -33,8 +33,10 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$
 export async function GET(request: Request): Promise<NextResponse> {
   const options = responseOptions(request);
   try {
-    // 1) ต้อง login (ไม่ login → 401 ตาม §3.3 Errors = AUTH-001)
-    const user = await requireUser();
+    // 1) ต้อง login (ไม่ login → 401 ตาม §3.3 Errors = AUTH-001) + MFA gate:
+    //    บทบาทบังคับ MFA ที่ยัง aal1 = state enrollment-only — endpoint นี้ไม่อยู่
+    //    ใน allowlist ของ AUTH-007 (มีแค่ /auth/mfa/*, /auth/logout, GET /me) → 403 ERR-AUTH-004
+    const { user } = await requireMfaForRoles();
     // 2) rate READ (user_id + ip — D12-11)
     enforceRateLimit(request, { group: "READ", secondaryKey: user.userId });
     // 3) query กลาง (limit default 20 max 100 — strict)

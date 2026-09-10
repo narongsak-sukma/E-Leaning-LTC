@@ -92,6 +92,15 @@ it("setAll บังคับ httpOnly=true ทับ options ของ library 
   expect(store.entries[0]?.options).toMatchObject({ httpOnly: true, sameSite: "lax", path: "/" });
 });
 
+it("setAll บังคับ path=/ ทับ options ของ library (ห้าม scope cookie แคบกว่าทั้ง BFF)", async () => {
+  const store = makeCookieStore();
+  cookiesMock.mockResolvedValue(store as never);
+  await createSupabaseSsrClient();
+  const options = createServerClientMock.mock.calls[0]?.[2] as { cookies: CookieMethodsServer };
+  options.cookies.setAll?.([{ name: "sb-auth-token", value: "t", options: { path: "/auth" } }], {});
+  expect(store.entries[0]?.options).toMatchObject({ path: "/", httpOnly: true, sameSite: "lax" });
+});
+
 it("setAll ไม่พังเมื่ออยู่ใน context ที่ set cookie ไม่ได้ (Server Component read-only)", async () => {
   const store = makeCookieStore();
   store.set = () => {
