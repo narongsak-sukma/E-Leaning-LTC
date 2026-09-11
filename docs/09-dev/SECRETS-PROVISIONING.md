@@ -6,8 +6,8 @@
 
 |          |                     |
 | -------- | ------------------- |
-| สถานะ    | 1.0.0 (2026-09-11)  |
-|ที่มา     | PB-9 (C-1 flag → C-5 ใช้งานจริง) + SDS §7.1 "ตรวจครบตอน boot" |
+| สถานะ    | 1.1.0 (2026-09-11)  |
+|ที่มา     | PB-9 (C-1 flag → C-5 ใช้งานจริง) + PB-13 (ip_hash/user_agent_hash ใช้ salt เฉพาะ) + SDS §7.1 "ตรวจครบตอน boot" |
 | หลักการ  | secret จริงอยู่ที่ platform env เท่านั้น (Vercel/Supabase) — ห้ามลง repo/ลง log/ลง .env ที่ถูก track (binding rules) |
 
 ## 1. หลักการกลาง
@@ -29,6 +29,7 @@
 | Env var | ที่มาของค่า | เก็บที่ไหน | ผลข้างเคียงการหมุน |
 | --- | --- | --- | --- |
 | `CURSOR_HMAC_SECRET` | **generate เอง** — `openssl rand -base64 32` | Vercel env (server) | cursor ที่ออกก่อนหมุนใช้ไม่ได้ทันที (listing ตอบ 400 `ERR-VAL-001` — ผู้ใช้เริ่มหน้าใหม่ได้ตามปกติ) แต่ **ห้ามหมุนกลางช่วงสอบ** |
+| `IP_HASH_SALT` | **generate เอง** — `openssl rand -base64 32` (PB-13) | Vercel env (server) | hash ของ verification ใหม่เปลี่ยนค่าทันที — แถวเก่าใน `certificate_verifications` (append-only) เก็บ digest ของ salt เก่าไว้ จับคู่ ip_hash เดียวกันข้ามรอบหมุนไม่ได้อีก (ไม่มี downtime/ไม่กระทบผู้ใช้ — rate limit PUBLIC_READ คีย์จาก IP ดิบใน memory ไม่ใช่ hash) |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase platform (Project Settings → API) | Vercel env + อ้างอิงโดย compose ไม่ได้ใน prod | หมุน service key ที่ Supabase → อัปเดต Vercel env ให้ตรงกันในรอบเดียว |
 | `SUPABASE_DB_POOLER_URL` | Supabase pooler (transaction mode — SDS §8) | Vercel env | **connection string ฝังรหัสผ่าน DB** — หมุนรหัสผ่าน DB ที่ Supabase แล้วต้องอัปเดต env นี้ (ค่าใหม่) + deploy ใหม่ทุกครั้ง ไม่ใช่เปลี่ยนตาม project/region เท่านั้น |
 | `R2_*` (เมื่อ `MEDIA_PROVIDER=r2`) | Cloudflare R2 | Vercel env | rotate = คู่ Access Key/Secret พร้อมกัน |
@@ -70,17 +71,44 @@ reload) แล้วพิสูจน์ว่าคีย์เก่าตา
 เริ่มหน้าใหม่ได้ตามปกติ — เฉพาะช่วงสอบ (assessment window) ให้เลี่ยงตามคอลัมน์
 ผลข้างเคียง
 
-## 4. สิ่งที่บังคับโดยกลไก (ไม่ใช่แค่เอกสาร)
+## 4. `IP_HASH_SALT` — ขั้นตอนจัดค่า (PB-13)
+
+ทำไมต้องแยก: dev ที่ไม่ตั้งจะ fallback ใช้ `SUPABASE_ANON_KEY` เป็น salt ของ
+`ip_hash`/`user_agent_hash` ตอนตรวจสอบประกาศนียบัตรสาธารณะ
+(`GET /api/v1/certificates/{code}`) — anon key เป็นค่าสาธารณะที่ใครก็อ่านได้
+จาก client bundle ของแอป ทำให้ salt ไม่ใช่ค่าลับจริง: IP ที่รู้ค่าจะถอยกลับ
+เป็น digest ได้ (คำนวณตาราง rainbow-table ต่อ salt ค่าเดียว) ขัด DD §3.4 "ห้ามเก็บข้อมูลที่ระบุตัว
+ได้ในรูปที่ถอยง่าย" · sha256 เป็น one-way จึงไม่เปิดเผยค่า salt ออกนอกกระบวนการ
+
+ขั้นตอน (staging/prod ทุกครั้งที่ตั้งระบบใหม่) — แบบแผนเดียวกับ §3:
+
+1. generate: `openssl rand -base64 32` (≥ 32 bytes entropy)
+2. ตั้งเป็น env ของ platform (Vercel → Project → Settings → Environment Variables)
+   โดยไม่ผ่านไฟล์ใด ๆ ใน repo
+3. deploy ใหม่ — env ของ Vercel มีผลเฉพาะ deployment ที่สร้างหลังตั้งค่า
+4. ตรวจว่าบังคับจริง — ถ้า `APP_ENV=prod` และไม่มี `IP_HASH_SALT`:
+   `instrumentation.register` throw `ConfigError` ตอน bootstrap + `/api/health`
+   ตอบ 503 + call site fail-closed (กลไกเดียวกับ PB-9 — ดู §3 ข้อ 4)
+5. ตรวจผลบน deployment ที่ตั้งค่าครบ: `/api/health` ตอบ 200 และตรวจประกาศนียบัตร
+   ตอบ 200 ตามปกติ (hash เปลี่ยนค่าทันที — ไม่มี error ใด ๆ ฝั่งผู้ใช้)
+
+การหมุนภายหลัง: ทำข้อ 1–3 ซ้ำ · digest ของ verification ที่บันทึกหลังหมุนใช้
+salt ใหม่ — แถว append-only เดิมคง digest เก่าไว้ (จับคู่ข้ามรอบหมุนไม่ได้ —
+ยอมรับได้เพราะคอลัมน์มีไว้เพื่อสถิติ/ตรวจสอบการใช้งานผิดปกติ ไม่ใช่ identity) ·
+ไม่มี downtime และไม่ต้องเลี่ยงช่วงสอบ (ต่างจาก `CURSOR_HMAC_SECRET`)
+
+## 5. สิ่งที่บังคับโดยกลไก (ไม่ใช่แค่เอกสาร)
 
 | กลไก | ที่ไหน |
 | --- | --- |
 | prod ไม่ตั้ง `CURSOR_HMAC_SECRET` → bootstrap throw + health 503 + call site พังหมด | `src/lib/config.ts` (superRefine PB-9) + `src/instrumentation.ts` (register) + `/api/health` (readiness) — tests: `config.test.ts` / `instrumentation.test.ts` / `health/route.test.ts` |
+| prod ไม่ตั้ง `IP_HASH_SALT` → bootstrap throw + health 503 + call site พังหมด (กลไกเดียวกับ PB-9) | `src/lib/config.ts` (superRefine PB-13) + `src/instrumentation.ts` + `/api/health` — tests: `config.test.ts` (IP_HASH_SALT describe) + `certificates/[code]/route.hash-salt.test.ts` |
 | service key ขึ้นต้น `NEXT_PUBLIC_` → ไม่ start | `loadConfig` (`PUBLIC_SERVICE_ROLE_BAN`) + eslint rule `ltc/no-public-service-role` |
 | config module (อ่าน secret ทั้งหมด) เข้า client bundle → build พังทันที | `src/lib/config.ts` `import "server-only"` (แบบแผนเดียวกับ `lib/supabase/server.ts` / `lib/auth/session.ts`) |
 | provider ไม่ครบค่าประกอบ → ไม่ start | `envSchemaWithRules` (R2/stream/smtp/resend) |
 | secret หลุดเข้า repo → CI จับ (ยกเว้นไฟล์เอกสาร/ตัวอย่างที่ allowlist — ดู §1.4) | gitleaks 5 ด่าน (ci.yml) |
 
-## 5. คำถามค้าง (ไม่บล็อกการใช้งาน)
+## 6. คำถามค้าง (ไม่บล็อกการใช้งาน)
 
 - Q5 (region ของ Supabase/Vercel) ยังรอยืนยันกับสภาทนายความ — กระทบตำแหน่งที่
   secret ถูกเก็บ (region ของ platform env) ไม่กระทบวิธีจัดค่าในเอกสารนี้

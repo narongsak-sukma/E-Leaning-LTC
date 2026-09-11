@@ -162,7 +162,7 @@ describe("CURSOR_HMAC_SECRET — signed cursor (API-SPECIFICATION §1.2)", () =>
 
   it("PB-9: APP_ENV=prod ตั้งค่าแล้ว → โหลดผ่าน (staging/prod ใช้กติกาเดียวกัน)", () => {
     const cfg = loadConfig(
-      baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod" }),
+      baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod", IP_HASH_SALT: "ip-hash-salt-prod" }),
     );
     expect(cfg.appEnv).toBe("prod");
     expect(cfg.cursorHmacSecret).toBe("cursor-hmac-secret-prod");
@@ -170,6 +170,43 @@ describe("CURSOR_HMAC_SECRET — signed cursor (API-SPECIFICATION §1.2)", () =>
 
   it("PB-9: APP_ENV=local (default dev) ไม่ตั้ง → ยัง fallback null ได้ตามเดิม", () => {
     expect(loadConfig(baseEnv()).cursorHmacSecret).toBeNull();
+  });
+});
+
+describe("IP_HASH_SALT — salt ของ ip_hash/user_agent_hash ตรวจประกาศนียบัตร (PB-13 · DD §3.4)", () => {
+  it("ไม่ตั้ง → ipHashSalt = null (route ตรวจประกาศนียบัตร fallback ใช้ anon key เฉพาะ dev)", () => {
+    expect(loadConfig(baseEnv()).ipHashSalt).toBeNull();
+  });
+
+  it("ตั้งค่า → เก็บค่าตาม env (trim แล้ว)", () => {
+    const cfg = loadConfig(baseEnv({ IP_HASH_SALT: "  ip-hash-salt-dev  " }));
+    expect(cfg.ipHashSalt).toBe("ip-hash-salt-dev");
+  });
+
+  it("ค่าว่าง → ConfigError (ห้าม salt ว่าง)", () => {
+    expect(() => loadConfig(baseEnv({ IP_HASH_SALT: "   " }))).toThrow(ConfigError);
+  });
+
+  it("PB-13: APP_ENV=prod ไม่ตั้ง → ConfigError พร้อมชื่อ key ใน issue (ห้าม fallback anon key สาธารณะ)", () => {
+    try {
+      loadConfig(baseEnv({ APP_ENV: "prod" }));
+      expect.unreachable("ต้อง throw ConfigError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).issues.join("\n")).toContain("IP_HASH_SALT");
+    }
+  });
+
+  it("PB-13: APP_ENV=prod ตั้งค่าแล้ว → โหลดผ่าน (staging/prod ใช้กติกาเดียวกัน)", () => {
+    const cfg = loadConfig(
+      baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod", IP_HASH_SALT: "ip-hash-salt-prod" }),
+    );
+    expect(cfg.appEnv).toBe("prod");
+    expect(cfg.ipHashSalt).toBe("ip-hash-salt-prod");
+  });
+
+  it("PB-13: APP_ENV=local (default dev) ไม่ตั้ง → ยัง fallback null ได้ตามเดิม", () => {
+    expect(loadConfig(baseEnv()).ipHashSalt).toBeNull();
   });
 });
 

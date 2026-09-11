@@ -72,6 +72,8 @@ const envSchema = z.object({
   LOGIN_LOCKOUT_ATTEMPTS: intFromEnv(5, 1, 100),
   // — Cursor HMAC (API-SPEC §1.2 — cursor ต้อง signed) —
   CURSOR_HMAC_SECRET: optionalString,
+  // — Salt ของ hash ตรวจสอบประกาศนียบัตร (PB-13 — ip_hash + user_agent_hash ใช้ค่าเดียวกัน) —
+  IP_HASH_SALT: optionalString,
   // — การเรียน —
   VIDEO_HEARTBEAT_SEC: intFromEnv(15, 1, 600),
   VIDEO_COMPLETE_PCT: intFromEnv(80, 1, 100), // ธง Q6 — รอยืนยันกับสภาทนายความ
@@ -119,6 +121,15 @@ const envSchemaWithRules = envSchema.superRefine((env, ctx) => {
       message: "APP_ENV=prod ต้องตั้ง CURSOR_HMAC_SECRET เฉพาะทาง (docs/09-dev/SECRETS-PROVISIONING.md)",
     });
   }
+  // PB-13: prod ห้ามใช้ anon key (ค่าสาธารณะ) เป็น salt ของ ip_hash/user_agent_hash —
+  // hash ถอยง่ายสำหรับ IP ที่รู้ค่า salt (DD §3.4 · SDS §3.4c) — กติกาเดียวกับ PB-9
+  if (env.APP_ENV === "prod" && env.IP_HASH_SALT === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["IP_HASH_SALT"],
+      message: "APP_ENV=prod ต้องตั้ง IP_HASH_SALT เฉพาะทาง (docs/09-dev/SECRETS-PROVISIONING.md)",
+    });
+  }
 });
 
 type EnvRaw = z.infer<typeof envSchemaWithRules>;
@@ -151,6 +162,14 @@ export interface AppConfig {
    * ของ service key) — HMAC เป็น one-way PRF จึงไม่เปิดเผยคีย์ต้นฉบับออกนอกกระบวนการ
    */
   cursorHmacSecret: string | null;
+  /**
+   * Salt ของ ip_hash/user_agent_hash ตอนตรวจสอบประกาศนียบัตรสาธารณะ
+   * (DD §3.4) — optional env `IP_HASH_SALT`; ไม่ตั้ง = null → route ตรวจ
+   * ประกาศนียบัตร fallback ใช้ `supabaseAnonKey` (ค่าสาธารณะ — dev-grade,
+   * ยอมรับได้เฉพาะ dev; prod ต้องตั้ง IP_HASH_SALT — superRefine fail fast
+   * ตอน boot) · sha256 เป็น one-way จึงไม่เปิดเผยค่า salt ออกนอกกระบวนการ
+   */
+  ipHashSalt: string | null;
   mediaProvider: "supabase_storage" | "r2" | "stream";
   mediaSignedUrlTtlSec: number;
   r2: {
@@ -192,6 +211,7 @@ function toConfig(env: EnvRaw): AppConfig {
     supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
     supabaseDbPoolerUrl: env.SUPABASE_DB_POOLER_URL ?? null,
     cursorHmacSecret: env.CURSOR_HMAC_SECRET ?? null,
+    ipHashSalt: env.IP_HASH_SALT ?? null,
     mediaProvider: env.MEDIA_PROVIDER,
     mediaSignedUrlTtlSec: env.MEDIA_SIGNED_URL_TTL_SEC,
     r2:
