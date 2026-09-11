@@ -53,6 +53,15 @@ export function shouldRefreshAfterError(error: unknown): boolean {
   );
 }
 
+/**
+ * ปิดโมดัลกลาง submitting ต้องถูกกั้นทุกช่องทาง (ยกเลิก/Escape/ฉากหลัง — gate r2
+ * MINOR): ถ้าปิ่นปล่อยปิดได้ ผลตอบกลับที่มาช้าจะตั้ง refreshOnClose หลังโมดัลปิด
+ * ไปแล้ว — ครั้งนั้นไม่ refresh ตามที่ข้อความสัญญา และ flag ค้างไป session ถัดไป
+ */
+export function modalCloseBlocked(phase: CertRowActionPhase): boolean {
+  return phase === "submitting";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -455,7 +464,9 @@ export function certRowActionReducer(state: CertRowActionState, event: CertRowAc
         ? { ...state, phase: "error", message: event.message }
         : state;
     case "CLOSE":
-      return CERT_ROW_ACTION_DEFAULT;
+      // กันซ้ำชั้น reducer (gate r2 MINOR): submitting ปิดไม่ได้ — ผลล่าช้าต้องรอ
+      // ตกถึง success/error ก่อน โมดัลจะปิดพร้อม refresh ตามที่สัญญาไว้
+      return state.phase === "submitting" ? state : CERT_ROW_ACTION_DEFAULT;
     default:
       return state;
   }
@@ -534,6 +545,10 @@ export function CertificateRowActions({
   };
 
   const handleClose = () => {
+    // กั้นการปิดทุกช่องทางกลาง submitting (gate r2 MINOR) — ดู modalCloseBlocked
+    if (modalCloseBlocked(state.phase)) {
+      return;
+    }
     setReasonError(null);
     dispatch({ type: "CLOSE" });
     if (refreshOnClose.current) {

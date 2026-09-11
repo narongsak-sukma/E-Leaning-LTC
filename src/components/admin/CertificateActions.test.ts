@@ -17,6 +17,7 @@ import {
   issueTitleOf,
   manageConfirmLabelOf,
   manageTitleOf,
+  modalCloseBlocked,
   parseIssuedCertificateView,
   parseRevokedCertificateView,
   parseReissuedCertificateView,
@@ -232,6 +233,27 @@ describe("certRowActionReducer — ปุ่มเพิกถอน/ออก�
     expect(state.actionKind).toBe("revoke");
     const reset = certRowActionReducer(state, { type: "CLOSE" });
     expect(reset).toEqual(CERT_ROW_ACTION_DEFAULT);
+  });
+
+  it("CLOSE กลาง submitting ถูกกั้น — ผลล่าช้าต้องตกถึง success/error ก่อน (gate r2 MINOR)", () => {
+    let state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REVOKE" });
+    state = certRowActionReducer(state, { type: "SUBMIT" });
+    const frozen = certRowActionReducer(state, { type: "CLOSE" });
+    expect(frozen.phase).toBe("submitting");
+    // ผลสำเร็จมาทีหลังยังตกถึง success ได้ (โมดัลเปิดรอ พร้อมข้อความ + refresh ตอนปิด)
+    const success = certRowActionReducer(frozen, { type: "RESOLVE_SUCCESS", certNo: "CERT-2569-000009" });
+    expect(success.phase).toBe("success");
+    expect(success.resultCertNo).toBe("CERT-2569-000009");
+  });
+});
+
+describe("modalCloseBlocked — กั้นปิดทุกช่องทางกลาง submitting (gate r2 MINOR)", () => {
+  it("submitting → true · ทุก phase อื่น → false", () => {
+    expect(modalCloseBlocked("submitting")).toBe(true);
+    expect(modalCloseBlocked("idle")).toBe(false);
+    expect(modalCloseBlocked("confirming")).toBe(false);
+    expect(modalCloseBlocked("success")).toBe(false);
+    expect(modalCloseBlocked("error")).toBe(false);
   });
 });
 
