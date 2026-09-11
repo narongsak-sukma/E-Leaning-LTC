@@ -162,12 +162,20 @@ export function createExamAnswerSaver(
     if (item === undefined) {
       return;
     }
-    item.choiceIds = applyToggle(item.choiceIds, choiceId);
+    const next = applyToggle(item.choiceIds, choiceId);
+    if (next.length === 0) {
+      // สัญญา API ขั้นต่ำ 1 ตัวเลือก/ข้อ (API-SPEC 4 #7 · zod min(1)) — ห้ามถอด
+      // ตัวเลือกสุดท้ายจนเหลือ 0 เพราะบันทึก [] จะถูกปฏิเสธทุกครั้ง ทำให้ flush
+      // ก่อนส่งติดค้างเป็น false และผู้เรียนแก้คำตอบไม่ได้ — เปลี่ยนคำตอบด้วย
+      // การเลือกตัวใหม่ก่อนแล้วจึงถอดตัวเดิม
+      return;
+    }
+    item.choiceIds = next;
     item.error = false;
     markDirtyAndSchedule(item, questionId);
-    // emit ทุกคลิกเสมอ — แม้ยังอยู่ในช่วง throttle/saving ที่ markDirtyAndSchedule
-    // ไม่ได้เรียก attemptSave (ซึ่ง emit เอง) เพราะ checkbox เป็น controlled state
-    // ถ้าไม่ emit เดี๋ยวนี้ UI จะค้างคำตอบเดิม และคลิกซ้ำจะกลายเป็นถอดคำตอบโดยไม่ตั้งใจ
+    // emit ทุกคลิกที่เปลี่ยนคำตอบจริง — แม้ยังอยู่ในช่วง throttle/saving ที่
+    // markDirtyAndSchedule ไม่ได้เรียก attemptSave (ซึ่ง emit เอง) เพราะ checkbox
+    // เป็น controlled state ถ้าไม่ emit เดี๋ยวนี้ UI จะค้างคำตอบเดิม
     emit();
   };
 

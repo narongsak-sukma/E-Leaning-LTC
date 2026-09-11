@@ -593,7 +593,10 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
         dispatch({ type: "REJECT", message: "ระบบตอบกลับรูปแบบไม่ถูกต้อง ลองใหม่อีกครั้ง" });
         return;
       }
-      dispatch({ type: "RESOLVE_SUCCESS", view: view.newCertificate });
+      // ส่ง view ทั้งก้อน (ReissuedCertificateView) — reducer ดึง newCertificate เอง
+      // (ส่งเฉพาะ view.newCertificate จะไม่มี key "newCertificate" ให้ reducer จับ
+      // โมดัลสำเร็จจึงไม่แสดงเลขใบใหม่)
+      dispatch({ type: "RESOLVE_SUCCESS", view });
       router.refresh();
     } catch (error) {
       dispatch({ type: "REJECT", message: describeError(error) });

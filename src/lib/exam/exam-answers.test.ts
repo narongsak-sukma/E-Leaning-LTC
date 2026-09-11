@@ -96,8 +96,29 @@ describe("createExamAnswerSaver", () => {
     saver.toggle(Q1, B); // ยังอยู่ในหน้าต่าง 10 วิ — ต้องเห็น [A, B] ทันที ไม่รอ timer
     expect(state.snapshots.length).toBe(emitsBefore + 1);
     expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([A, B]);
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(saves[1]).toEqual([Q1, [A, B]]);
+    saver.dispose();
+  });
+
+  it("ถอดตัวเลือกสุดท้าย = no-op (สัญญา API ขั้นต่ำ 1 ตัวเลือก/ข้อ — ห้ามส่ง [])", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:10+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saves).toEqual([[Q1, [A]]]);
+    const emitsBefore = state.snapshots.length;
+    saver.toggle(Q1, A); // ถอดตัวสุดท้าย → ต้องเป็น no-op
+    expect(state.snapshots.length).toBe(emitsBefore);
+    expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([A]);
+    expect(saver.hasUnsaved()).toBe(false);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(saves).toHaveLength(1); // ไม่มีการบันทึก [] ขึ้น server เด็ดขาด
     saver.dispose();
   });
 
