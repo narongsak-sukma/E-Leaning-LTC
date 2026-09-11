@@ -1,0 +1,215 @@
+/**
+ * exam-answers.test — unit test ตัวบันทึกคำตอบอัตโนมัติ (autosave)
+ *
+ * - คลิกแรกของแต่ละข้อ = บันทึกทันที (DS 7.1) · ครั้งถัดไปห่างขั้นต่ำ 10 วิ/ข้อ
+ *   (API-SPECIFICATION 5 หมายเหตุ 3)
+ * - เปลี่ยนคำตอบระหว่างบันทึกอยู่ = ตั้ง dirty แล้วบันทึกซ้ำอัตโนมัติหลังรอบแรกจบ
+ * - บันทึกไม่สำเร็จ = error flag + dirty ค้าง (คำตอบยังอยู่ในหน้า ธง D37-6 ก)
+ * - flushAll ก่อนส่ง: ข้าม throttle เสมอ · สำเร็จครบ = true / มีค้าง = false
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  createExamAnswerSaver,
+  type ExamAnswerSaverDeps,
+  type ExamAnswerSnapshot,
+} from "./exam-answers";
+
+const Q1 = "30000000-0000-4000-8000-000000000001";
+const Q2 = "30000000-0000-4000-8000-000000000002";
+const A = "40000000-0000-4000-8000-00000000000a";
+const B = "40000000-0000-4000-8000-00000000000b";
+
+function makeDeps(
+  saveImpl: (questionId: string, choiceIds: readonly string[]) => Promise<{ savedAt: string }>,
+  state: { snapshots: ExamAnswerSnapshot[] },
+): ExamAnswerSaverDeps {
+  return {
+    // Date.now ถูก mock ร่วมกับ setTimeout โดย vi.useFakeTimers - throttle จึงเดินตามเวลาจริงของเทสต์
+    now: () => Date.now(),
+    save: saveImpl,
+    onStateChange: (snapshot) => {
+      state.snapshots.push(snapshot);
+    },
+  };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("createExamAnswerSaver", () => {
+  it("คลิกแรกของข้อ = บันทึกทันที (ไม่รอ 10 วิ)", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:00+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saves).toEqual([[Q1, [A]]]);
+    expect(state.snapshots.at(-1)?.[Q1]?.savedAt).toBe("2026-09-10T08:00:00+07:00");
+  });
+
+  it("เปลี่ยนคำตอบซ้ำในช่วงสั้น ๆ = throttle ที่ 10 วิ/ข้อ แล้วบันทึกค่าล่าสุด", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:01+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A); // ทันที
+    await vi.advanceTimersByTimeAsync(0);
+    saver.toggle(Q1, B); // ทับใน 10 วิ → ตั้ง timer
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(saves).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saves).toHaveLength(2);
+    expect(saves[1]).toEqual([Q1, [A, B]]);
+    saver.dispose();
+  });
+
+  it("ข้อต่างกัน throttle แยกกัน (คลิกแรกของ Q2 ก็ทันที)", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [], [Q2]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:02+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    saver.toggle(Q2, B);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saves).toEqual([
+      [Q1, [A]],
+      [Q2, [B]],
+    ]);
+    saver.dispose();
+  });
+
+  it("เปลี่ยนคำตอบระหว่างบันทึกค้างอยู่ = dirty ค้างแล้วบันทึกซ้ำหลังรอบแรกจบ", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    let releaseFirst: ((v: { savedAt: string }) => void) | null = null;
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        if (saves.length === 0) {
+          saves.push([q, c]);
+          return new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:03+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A); // รอบแรกค้าง (inflight)
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saves).toHaveLength(1);
+    saver.toggle(Q1, B); // ระหว่าง inflight → dirty
+    expect(saves).toHaveLength(1);
+    // อ่านผ่าน closure (narrowing ไม่ทะลุขอบเขตฟังก์ชัน - TS จะไม่ตีความว่าเป็น null เสมอ)
+    const getRelease = (): ((v: { savedAt: string }) => void) | null => releaseFirst;
+    getRelease()?.({ savedAt: "2026-09-10T08:00:04+07:00" });
+    // รอบแรกจบ → dirty ถูกตั้งเวลาบันทึกซ้ำตาม throttle "ห่างขั้นต่ำ 10 วิ/ข้อ" จากครั้งล่าสุด
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saves).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(saves).toHaveLength(2);
+    expect(saves[1]).toEqual([Q1, [A, B]]);
+    expect(saver.hasUnsaved()).toBe(false);
+    saver.dispose();
+  });
+
+  it("บันทึกไม่สำเร็จ = error flag + dirty ค้าง (คำตอบยังอยู่ในหน้า)", async () => {
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async () => {
+        throw new Error("network down");
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    await vi.advanceTimersByTimeAsync(0);
+    const item = state.snapshots.at(-1)?.[Q1];
+    expect(item?.error).toBe(true);
+    expect(item?.saving).toBe(false);
+    expect(item?.choiceIds).toEqual([A]);
+    expect(saver.hasUnsaved()).toBe(true);
+    saver.dispose();
+  });
+
+  it("flushAll: ข้าม throttle บันทึกทุกข้อค้าง แล้วคืน true เมื่อสะอาด", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [], [Q2]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:05+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A); // ทันที Q1
+    await vi.advanceTimersByTimeAsync(0);
+    saver.toggle(Q1, B); // dirty รอ timer
+    saver.toggle(Q2, A); // คลิกแรกของ Q2 = ทันทีเช่นกัน
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saves).toHaveLength(2);
+    const clean = await saver.flushAll();
+    expect(clean).toBe(true);
+    // Q1 ถูกบันทึกซ้ำอีกครั้งหลัง flush (Q2 สะอาดแล้วจึงไม่บันทึกซ้ำ)
+    expect(saves).toHaveLength(3);
+    expect(saves.some(([q, c]) => q === Q1 && c.length === 2 && c[1] === B)).toBe(true);
+    expect(saver.hasUnsaved()).toBe(false);
+    saver.dispose();
+  });
+
+  it("flushAll: บันทึกไม่สำเร็จ = คืน false (ผู้เรียนยังกดส่งได้ แต่รู้ว่ามีค้าง)", async () => {
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async () => {
+        throw new Error("still down");
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    await vi.advanceTimersByTimeAsync(0);
+    const clean = await saver.flushAll();
+    expect(clean).toBe(false);
+    saver.dispose();
+  });
+
+  it("dispose: ยกเลิก timer ค้าง ไม่ emit ต่อ", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:06+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    await vi.advanceTimersByTimeAsync(0);
+    saver.toggle(Q1, B); // ตั้ง timer รอบที่สอง
+    saver.dispose();
+    const snapshotsBefore = state.snapshots.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(saves).toHaveLength(1);
+    expect(state.snapshots.length).toBe(snapshotsBefore);
+  });
+});
