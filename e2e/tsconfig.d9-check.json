@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "plugins": []
+  },
+  "include": [
+    "d9-helpers.ts",
+    "e2e-05-learn-progress.spec.ts",
+    "e2e-07-exam-rules-eligibility.spec.ts",
+    "e2e-08-exam-pass.spec.ts",
+    "e2e-09-exam-retake.spec.ts",
+    "e2e-10-registrar-issues-certificate.spec.ts",
+    "e2e-11-public-verify.spec.ts",
+    "e2e-12-instructor-admin-shell.spec.ts"
+  ]
+}
