@@ -35,13 +35,12 @@ import {
   certLogger,
   certRpcError,
   dbFailed,
-  rowString,
   unwrapScalarRow,
-  type Row,
 } from "./shared";
 import {
   CertCoreRowSchema,
   EligibleAttemptRowSchema,
+  PdfAttachRowSchema,
   type EligibleAttemptRowParsed,
 } from "@/lib/schemas/v1/certificate";
 
@@ -185,16 +184,18 @@ export async function attachCertificatePdf(
       });
       return null;
     }
-    const row = (Array.isArray(rpc.data) ? rpc.data[0] : rpc.data) as Row | null;
-    if (row === null) {
-      // สัญญา DB เพี้ยน (คำตอบไม่ใช่ object) — คงใบ ไม่เดาค่า (D36-O6)
+    // r9-O3: exact-one unwrap + strict 2 คีย์ {pdf_media_id, attached} — array ยาว
+    // 0/≥2 คงเป็น array ให้ schema ตีตก; คีย์เกิน/ขาด/ชนิดเพี้ยน = drift → ถือว่า
+    // attach ล้ม (คงใบ D36-O6) ไม่ใช่ดึง media id จากแถวแรกแบบเงียบ ๆ
+    const parsedAttach = PdfAttachRowSchema.safeParse(unwrapScalarRow(rpc.data));
+    if (!parsedAttach.success) {
       certLogger.warn("certificate_pdf_attach_failed", {
         route: "certificates:issue",
         user_id: actorId,
       });
       return null;
     }
-    return rowString(row, "pdf_media_id");
+    return parsedAttach.data.pdf_media_id;
   } catch {
     // attach pipeline ล้มเหลวระหว่างทาง (contract drift ของ rowString รวม) — คงใบ
     certLogger.warn("certificate_pdf_attach_failed", {

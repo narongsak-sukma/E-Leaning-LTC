@@ -155,7 +155,7 @@ describe("GET /api/v1/certificates/{code} — 200 เสมอ (D8/D11-14)", () 
 });
 
 describe("GET /api/v1/certificates/{code} — RPC contract + rate + headers", () => {
-  it("พารามิเตอร์ RPC ครบ: ip_hash เป็น sha256 (ไม่ใช่ IP ตรง) + UA ตัดทอน 256 + request_id", async () => {
+  it("พารามิเตอร์ RPC ครบ: ip_hash + user_agent_hash เป็น sha256 hex64 (ไม่มีข้อความดิบ — r9-O1) + request_id", async () => {
     const rpc = makeSsrClient({ data: foundRow(), error: null });
     const longAgent = "Mozilla/5.0 " + "a".repeat(300);
     const request = new Request("http://localhost:3000/api/v1/certificates/LTC-2026-000001", {
@@ -169,22 +169,45 @@ describe("GET /api/v1/certificates/{code} — RPC contract + rate + headers", ()
       p_code: "LTC-2026-000001",
       p_source: "manual",
       p_ip_hash: expect.any(String),
-      p_user_agent: longAgent.slice(0, 256),
+      p_user_agent_hash: expect.any(String),
       p_request_id: "req-d2-9",
     });
     const args = rpc.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(args["p_ip_hash"]).toMatch(/^[0-9a-f]{64}$/);
     expect(args["p_ip_hash"]).not.toBe(IP);
+    // r9-O1: UA ไม่ถูกส่งดิบ/ตัดทอนแล้วส่ง — hash เท่านั้น (anon ใส่ PII ใน header
+    // ไม่มีทางไปถึงตาราง append-only ได้)
+    expect(args["p_user_agent_hash"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(args)).not.toContain("Mozilla");
     expect(JSON.stringify(args)).not.toContain("203.0.113.7");
+    // hash เสถียร: UA เดียวกัน → digest เดียวกัน
+    await GET(
+      new Request("http://localhost:3000/api/v1/certificates/LTC-2026-000001", {
+        headers: { "user-agent": longAgent },
+      }),
+      ctx("LTC-2026-000001"),
+    );
+    const args2 = rpc.mock.calls[1]?.[1] as Record<string, unknown>;
+    expect(args2["p_user_agent_hash"]).toBe(args["p_user_agent_hash"]);
     expect(vi.mocked(clientIpFrom)).toHaveBeenCalledWith(request);
   });
 
-  it("ไม่มี user-agent → p_user_agent เป็น null", async () => {
+  it("ไม่มี user-agent → p_user_agent_hash เป็น null", async () => {
     const rpc = makeSsrClient({ data: foundRow(), error: null });
     const request = new Request("http://localhost:3000/api/v1/certificates/LTC-2026-000001");
     await GET(request, ctx("LTC-2026-000001"));
     const args = rpc.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect(args["p_user_agent"]).toBeNull();
+    expect(args["p_user_agent_hash"]).toBeNull();
+  });
+
+  it("r9-O1: UA เป็นช่องว่างล้วน → p_user_agent_hash เป็น null (ไม่ hash ค่าว่าง)", async () => {
+    const rpc = makeSsrClient({ data: foundRow(), error: null });
+    const request = new Request("http://localhost:3000/api/v1/certificates/LTC-2026-000001", {
+      headers: { "user-agent": "   " },
+    });
+    await GET(request, ctx("LTC-2026-000001"));
+    const args = rpc.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(args["p_user_agent_hash"]).toBeNull();
   });
 
   it("RPC ล้ม → 503 ERR-SYS-002 แบบ opaque (log/audit ไม่เกิด — TX เดียวกับ RPC)", async () => {

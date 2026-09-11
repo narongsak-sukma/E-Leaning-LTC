@@ -91,7 +91,8 @@ interface Spec {
   aal: "aal1" | "aal2";
   roles: readonly string[];
   start: { data: unknown; error: { message: string } | null };
-  rows: unknown[] | null;
+  // r9-O2: ครอบกรณี container ปลอม ({length:1} ไม่ใช่ array จริง) ด้วย
+  rows: unknown;
   rowsError: { message: string } | null;
 }
 
@@ -128,7 +129,7 @@ function makeClient(spec: Partial<Spec> = {}) {
       viewCalls.order.push([column, opts]);
       return viewBuilder;
     }),
-    then(res: (v: { data: unknown[] | null; error: { message: string } | null }) => unknown) {
+    then(res: (v: { data: unknown; error: { message: string } | null }) => unknown) {
       return res({ data: full.rows, error: full.rowsError });
     },
   };
@@ -222,7 +223,7 @@ describe("POST /assessments/{id}/attempts — happy path", () => {
 });
 
 describe("POST /assessments/{id}/attempts — response ระหว่างสอบต้องไร้เฉลย (D19-B1)", () => {
-  it("แม้แถว view (จำลอง) มีคอลัมน์เฉลยครบ ขาออกก็ห้ามมี is_correct/explanation/points_earned/snapshot", async () => {
+  it("แม้แถว view (จำลอง) มีคอลัมน์เฉลยครบ — r9-O2 แล้วคอลัมน์เหล่านั้นคือ drift ขาเข้า: 503 ก่อนถึง mapper และขาออกไม่มีคีย์เฉลยเด็ดขาด", async () => {
     const { res } = await post(ASSESSMENT_ID, {
       rows: [
         {
@@ -241,8 +242,13 @@ describe("POST /assessments/{id}/attempts — response ระหว่างส�
         },
       ],
     });
-    expect(res.status).toBe(201);
-    const raw = JSON.stringify(await res.json());
+    // เดิม (ถึง r8): mapper whitelist ตัดคีย์เฉลยแล้วตอบ 201 — r9-O2 เข้มขึ้น:
+    // คอลัมน์เฉลยรั่วมากับแถว = สัญญา select เปลี่ยน = drift → 503 ไม่ใช่ 201 เฉย ๆ
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_paper_row_drift");
+    const raw = JSON.stringify(body);
     for (const leak of [
       "is_correct",
       "isCorrect",
@@ -417,5 +423,65 @@ describe("POST /assessments/{id}/attempts — auth / validation / rate", () => {
     expect(body.error.code).toBe("ERR-RATE-001");
     expect(body.error.details.group).toBe("EXAM");
     expect(third.res.headers.get("retry-after")).not.toBeNull();
+  });
+});
+
+describe("r9-O2: แถว paper ขาเข้า drift → 503 fail-closed (ไม่ใช่ 500/strip เงียบ 201)", () => {
+  it("สำเร็จแต่ data null → 503 attempt_paper_rows_not_array ไม่ใช่ 201 หน้าว่าง", async () => {
+    const { res } = await post(ASSESSMENT_ID, { rows: null });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_paper_rows_not_array");
+  });
+
+  it("container ปลอม ({length:1} ผ่าน length check เดิม) → 503 attempt_paper_rows_not_array ไม่ใช่ TypeError 500", async () => {
+    const { res } = await post(ASSESSMENT_ID, {
+      start: { data: { ...START_RESULT, question_count: 1 }, error: null },
+      rows: { length: 1 },
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_paper_rows_not_array");
+  });
+
+  it("แถว null ใน array ([null] ครบจำนวน) → 503 attempt_paper_row_drift ไม่ใช่ TypeError 500", async () => {
+    const { res } = await post(ASSESSMENT_ID, {
+      start: { data: { ...START_RESULT, question_count: 1 }, error: null },
+      rows: [null],
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_paper_row_drift");
+  });
+
+  it("แถวมีคีย์เกินนอก select 5 คอลัมน์ (is_correct รั่ว) → 503 attempt_paper_row_drift ไม่ strip เงียบแล้ว 201", async () => {
+    const { res } = await post(ASSESSMENT_ID, {
+      rows: [{ ...VIEW_ROWS[0], is_correct: true }, VIEW_ROWS[1]],
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_paper_row_drift");
+  });
+
+  it("แถวขาดคีย์ question_paper ไปเลย → 503 attempt_paper_row_drift", async () => {
+    const missing = { ...VIEW_ROWS[0] } as Record<string, unknown>;
+    delete missing["question_paper"];
+    const { res } = await post(ASSESSMENT_ID, { rows: [missing, VIEW_ROWS[1]] });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_paper_row_drift");
+  });
+
+  it("จำนวนแถวไม่ตรง question_count (ผ่าน schema แล้ว) → 503 attempt_questions_bad_contract ตามเดิม", async () => {
+    const { res } = await post(ASSESSMENT_ID, { rows: [VIEW_ROWS[0]] });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("attempt_questions_bad_contract");
   });
 });

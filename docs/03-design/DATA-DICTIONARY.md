@@ -518,7 +518,7 @@ Retention: ถาวร (เอกสารสิทธิ)
 | verify_code | text | NOT NULL (ค่าที่ผู้ตรวจสอบส่งมา — ไม่ FK เพราะ not_found ก็ต้องบันทึก) |
 | result | verification_result | NOT NULL |
 | ip_hash | text | NOT NULL (sha256 + salt — ไม่เก็บ IP ตรง) |
-| user_agent | text | NULL (ตัดทอน 128 อักขรา) |
+| user_agent_hash | text | NULL (sha256 hex 64 + CHECK `^[0-9a-f]{64}$` — r9-O1: header UA เป็นค่าอิสระของ anon จึง hash ก่อนเก็บเหมือน ip_hash ไม่เก็บข้อความดิบ) |
 | source | text | NOT NULL DEFAULT 'qr', CHECK IN ('qr','manual') |
 | verified_at | timestamptz | NOT NULL DEFAULT now() |
 คีย์/Index: INDEX(verified_at); INDEX(verify_code)

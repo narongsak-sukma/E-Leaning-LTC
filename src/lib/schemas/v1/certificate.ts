@@ -244,10 +244,23 @@ export const EligibleAttemptRowSchema = z
   })
   .strict();
 
+/** แถวของ admin_attach_certificate_pdf (0019-r2 F2 — jsonb 2 คีย์ exact):
+ *  pdf_media_id = uuid ของ media row ที่ INSERT ใน TX เดียวกัน (มีเสมอ) ·
+ *  attached = true ครั้งแรก / false เมื่อ idempotent ซ้ำ (R12d)
+ *  r9-O3: issue/reissue ต้องตรวจครบสองคีย์หลัง exact-one unwrap — คีย์เกิน/ขาด =
+ *  drift ถือว่า attach ล้ม (คงใบ D36-O6) ไม่ใช่ดึง media id จากแถวเพี้ยน */
+export const PdfAttachRowSchema = z
+  .object({
+    pdf_media_id: z.string().uuid(),
+    attached: z.boolean(),
+  })
+  .strict();
+
 export type CertCoreRowParsed = z.infer<typeof CertCoreRowSchema>;
 export type ReissueRowParsed = z.infer<typeof ReissueRowSchema>;
 export type RevokedRowParsed = z.infer<typeof RevokedRowSchema>;
 export type EligibleAttemptRowParsed = z.infer<typeof EligibleAttemptRowSchema>;
+export type PdfAttachRowParsed = z.infer<typeof PdfAttachRowSchema>;
 
 export type CertificateIdParamsParsed = z.infer<typeof CertificateIdParams>;
 

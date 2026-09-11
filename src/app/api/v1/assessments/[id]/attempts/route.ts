@@ -26,10 +26,12 @@ import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import {
+  AttemptPaperRowSchema,
   AttemptStartView,
   StartAttemptResult,
   type StartAttemptResultParsed,
   parseAssessmentIdParams,
+  parseInboundRow,
   toExamPaperQuestion,
   type LearnerAttemptPaperViewRow,
 } from "@/lib/schemas/v1/exam";
@@ -84,7 +86,15 @@ export async function POST(
     if (qError !== null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "attempt_questions_read_failed" } });
     }
-    const viewRows = (rows ?? []) as unknown as LearnerAttemptPaperViewRow[];
+    // r9-O2: ความสำเร็จแต่ container ไม่ใช่ array (null/object ปลอม) = drift → 503
+    // ไม่ใช่ `?? []` กลืนเป็น 201 หน้าว่าง หรือ TypeError → 500
+    if (!Array.isArray(rows)) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "attempt_paper_rows_not_array" } });
+    }
+    // แถวละ schema strict 5 คีย์ตาม select — คีย์เกิน/ขาด/แถว null = drift → 503
+    const viewRows: LearnerAttemptPaperViewRow[] = rows.map((raw) =>
+      parseInboundRow(AttemptPaperRowSchema, raw, "attempt_paper_row_drift"),
+    );
     if (viewRows.length !== start.question_count) {
       // start เขียน attempt_answers ครบทุกข้อใน TX เดียว — เหลื่อม = contract ผิด fail-closed
       throw new AppError("ERR-SYS-002", { details: { reason: "attempt_questions_bad_contract" } });

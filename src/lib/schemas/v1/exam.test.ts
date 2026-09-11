@@ -31,6 +31,7 @@ import {
   AttemptHistoryRowSchema,
   AssessmentRowSchema,
   AssessmentRulesRowSchema,
+  AttemptPaperRowSchema,
   parseInboundRow,
   type AssessmentRow,
   type AttemptHistoryRow,
@@ -77,17 +78,11 @@ function viewRow(overrides: Partial<LearnerAttemptViewRow> = {}): LearnerAttempt
 
 /** แถว learner_attempt_paper_view (0019) — question_paper = snapshot ตัดเฉลยแล้ว */
 function paperRow(overrides: Partial<LearnerAttemptPaperViewRow> = {}): LearnerAttemptPaperViewRow {
+  // r9-O2: interface กระจก select 5 คีย์ของ route (view 13 คอลัมน์ — route ไม่เคย
+  // เลือก option_order เป็นต้น) — คีย์อื่นของ view ที่แอบติดมา = drift ไม่ใช่ของจริง
   return {
-    attempt_id: UUID(1),
-    user_id: UUID(9),
-    assessment_id: UUID(2),
-    attempt_no: 1,
-    status: "in_progress",
-    started_at: T,
-    expires_at: "2026-09-10T02:02:03+00:00",
     question_id: UUID(100),
     seq: 1,
-    option_order: [2, 1],
     selected_option_ids: [UUID(200)],
     answered_at: T,
     question_paper: {
@@ -683,5 +678,52 @@ describe("r8-N1 — inbound row schemas ของแถว DB ตาม select �
     }
     const parsed = parseInboundRow(AssessmentRowSchema, assessmentRow, "assessment_row_drift");
     expect(parsed.id).toBe(UUID(2));
+  });
+});
+
+describe("r9-O2 — AttemptPaperRowSchema: แถว paper ขาเข้า strict 5 คีย์ตาม select ของ route", () => {
+  it("positive control — แถว 5 คีย์ตาม select ผ่าน (question_paper ฝัง ExamPaperJsonb strict)", () => {
+    const parsed = AttemptPaperRowSchema.parse(paperRow());
+    expect(parsed.question_id).toBe(UUID(100));
+    expect(parsed.question_paper.options).toHaveLength(2);
+  });
+
+  it("แถว null → fail (ไม่ใช่ TypeError ที่ mapper)", () => {
+    expect(AttemptPaperRowSchema.safeParse(null).success).toBe(false);
+  });
+
+  it("ขาดคีย์ question_paper ไปเลย → fail (คีย์หาย ≠ ค่า null จริง)", () => {
+    const missing = { ...paperRow() } as Record<string, unknown>;
+    delete missing["question_paper"];
+    expect(AttemptPaperRowSchema.safeParse(missing).success).toBe(false);
+  });
+
+  it("คีย์เกินนอก select 5 คอลัมน์ (option_order ของ view รั่วมา) → fail ไม่ strip เงียบ", () => {
+    expect(
+      AttemptPaperRowSchema.safeParse({ ...paperRow(), option_order: [2, 1] }).success,
+    ).toBe(false);
+  });
+
+  it("question_paper เพี้ยน (option มี is_correct) → fail ที่ schema ก่อนถึง mapper", () => {
+    const bad = paperRow().question_paper as Record<string, unknown>;
+    const options = bad["options"] as Array<Record<string, unknown>>;
+    expect(
+      AttemptPaperRowSchema.safeParse({
+        ...paperRow(),
+        question_paper: { ...bad, options: [{ ...options[0], is_correct: true }] },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("parseInboundRow พร้อม reason ประจำทาง → AppError ERR-SYS-002 attempt_paper_row_drift", () => {
+    let err: unknown;
+    try {
+      parseInboundRow(AttemptPaperRowSchema, null, "attempt_paper_row_drift");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).code).toBe("ERR-SYS-002");
+    expect((err as AppError).details?.["reason"]).toBe("attempt_paper_row_drift");
   });
 });

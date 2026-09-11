@@ -317,19 +317,16 @@ export interface LearnerAttemptViewRow {
 /**
  * แถว learner_attempt_paper_view (0019 — PB-16): เจ้าของ + in_progress เท่านั้น ·
  * question_paper = snapshot ตัด 'points' ระดับบน + ตัด is_correct/points ในทุก option
- * (เหลือ {question_id,version,text,options:[{id,text}]}) — ตรวจ strict ที่ mapper
+ * (เหลือ {question_id,version,text,options:[{id,text}]})
+ *
+ * r9-O2: view มี 13 คอลัมน์ แต่ route เลือก 5 (question_id, seq,
+ * selected_option_ids, answered_at, question_paper) — interface กระจก select
+ * นั้น (เดิมพิมพ์ตาม view กว้าง แล้ว route cast ข้าม) · แถวที่มาจริงต้องผ่าน
+ * AttemptPaperRowSchema strict 5 คีย์ก่อนถึง mapper
  */
 export interface LearnerAttemptPaperViewRow {
-  readonly attempt_id: string;
-  readonly user_id: string;
-  readonly assessment_id: string;
-  readonly attempt_no: number;
-  readonly status: string;
-  readonly started_at: string;
-  readonly expires_at: string;
   readonly question_id: string;
   readonly seq: number;
-  readonly option_order: number[] | null;
   readonly selected_option_ids: string[] | null;
   readonly answered_at: string | null;
   readonly question_paper: unknown;
@@ -497,6 +494,22 @@ const ExamPaperJsonb = z
       .min(1),
   })
   .strict();
+
+// ─── r9-O2: แถวขาเข้าของ POST /assessments/{id}/attempts — select 5 คอลัมน์
+// (question_id, seq, selected_option_ids, answered_at, question_paper) พอดี:
+// คอลัมน์อื่นของ view ที่รั่วมา / คีย์หาย / แถว null = drift → 503 ผ่าน
+// parseInboundRow (ไม่ใช่ cast ผ่านแล้ว TypeError 500 หรือ strip เงียบ 201) ───
+export const AttemptPaperRowSchema = z
+  .object({
+    question_id: z.string().uuid(),
+    seq: z.number().int().min(1),
+    selected_option_ids: z.array(z.string().uuid()).nullable(),
+    answered_at: z.iso.datetime({ offset: true }).nullable(),
+    question_paper: ExamPaperJsonb,
+  })
+  .strict();
+
+export type AttemptPaperRowParsed = z.infer<typeof AttemptPaperRowSchema>;
 
 /**
  * โจทย์ระหว่างสอบจาก paper view (0019) — validate question_paper แบบ fail-closed

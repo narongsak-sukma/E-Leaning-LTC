@@ -747,11 +747,22 @@ grant execute on function public.admin_reissue_certificate(uuid, uuid, text)
 -- ── public verify (B3/B5): SELECT 4 ฟิลด์ + verification log + audit TX เดียว ──
 -- EXECUTE anon+authenticated (route ของ D-2 เรียกผ่าน SSR user client — ไม่มี
 -- service_role อีกต่อไป); verify_code คอลัมน์ UNIQUE (0006) จับทั้ง QR และ manual
+--
+-- 0019-r9 (O1): เลิกเก็บ user_agent ข้อความดิบ — คอลัมน์เปลี่ยนเป็น
+-- user_agent_hash (sha256 hex 64 ตัวพิมพ์เล็ก เหมือน ip_hash) พร้อม CHECK
+-- กันค่าอิสระของผู้ใช้ (อีเมล/เบอร์โทร = PII) จาก header ที่ anon ควบคุมได้
+-- เข้าตาราง append-only — truncation อย่างเดียวไม่พอ (r9 gate O1)
+alter table public.certificate_verifications
+  rename column user_agent to user_agent_hash;
+alter table public.certificate_verifications
+  add constraint certificate_verifications_user_agent_hash_format
+  check (user_agent_hash is null or user_agent_hash ~ '^[0-9a-f]{64}$');
+
 create or replace function public.record_certificate_verification(
   p_code text,
   p_source text,
   p_ip_hash text,
-  p_user_agent text,
+  p_user_agent_hash text,
   p_request_id text
 ) returns jsonb
 language plpgsql security definer
@@ -790,6 +801,13 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: request_id ไม่ถูกรูปแบบ (ERR-VAL-001|request_id_invalid)'
       using errcode = '22023';
   end if;
+  -- 0019-r9 (O1): user_agent_hash = sha256 hex 64 ตัวพิมพ์เล็ก เหมือน ip_hash —
+  -- แหล่งสร้างเดียวคือ BFF (route hash UA ก่อนส่ง); ค่าอิสระ (อีเมล = PII)
+  -- จาก header ของ anon เข้าตาราง append-only ไม่ได้
+  if p_user_agent_hash is not null and p_user_agent_hash !~ '^[0-9a-f]{64}$' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: user_agent_hash ไม่ถูกรูปแบบ (ERR-VAL-001|user_agent_hash_invalid)'
+      using errcode = '22023';
+  end if;
   -- 0019-r2 (F4): รหัสที่ผิดรูปแบบทั้ง cert_no และ verify_code ชัดเจน → ตอบ
   -- not_found ทันทีโดยไม่ persist และไม่ audit — กันค่าอิสระของผู้ใช้
   -- (เช่น อีเมล) ลง certificate_verifications.verify_code และ audit
@@ -809,8 +827,8 @@ begin
   -- เก็บ log ทุกครั้ง (DD §3.4): verify_code ที่ลงคือ "รหัสที่ผู้ใช้พิมพ์/สแกน" (input)
   -- ไม่ใช่ verify_code จริงของแถว — กัน secret หลุดไปตารางอื่นเมื่อค้นด้วย cert_no
   if not found then
-    insert into public.certificate_verifications (verify_code, result, ip_hash, user_agent, source)
-    values (v_code, 'not_found', p_ip_hash, left(p_user_agent, 256), p_source);
+    insert into public.certificate_verifications (verify_code, result, ip_hash, user_agent_hash, source)
+    values (v_code, 'not_found', p_ip_hash, p_user_agent_hash, p_source);
     perform public.append_audit_event_internal(
       'CERT_VERIFY_PUBLIC', 'certificate', null, null, null,
       jsonb_build_object('code', v_code, 'result', 'not_found'),
@@ -818,8 +836,8 @@ begin
     return jsonb_build_object('code', v_code, 'course_title', null,
                               'issued_at', null, 'status', 'not_found');
   end if;
-  insert into public.certificate_verifications (verify_code, result, ip_hash, user_agent, source)
-  values (v_code, v_status::public.verification_result, p_ip_hash, left(p_user_agent, 256), p_source);
+  insert into public.certificate_verifications (verify_code, result, ip_hash, user_agent_hash, source)
+  values (v_code, v_status::public.verification_result, p_ip_hash, p_user_agent_hash, p_source);
   perform public.append_audit_event_internal(
     'CERT_VERIFY_PUBLIC', 'certificate', null, null, null,
     jsonb_build_object('code', v_code, 'result', v_status),

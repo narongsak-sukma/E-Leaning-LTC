@@ -34,9 +34,6 @@ import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 /** ความยาว code สูงสุดที่ยอมรับ (cert_no = 12 ตัวอักษร, verify_code = nanoid 43) */
 const CODE_MAX_LENGTH = 128;
 
-/** user_agent ตัดทอนก่อนส่งให้ RPC (กัน header ยาวรื้อแถว — DD §3.4) */
-const USER_AGENT_MAX = 256;
-
 /** รูป cert_no ตามทะเบียน LTC-<ปี>-<6 หลัก> — ใช้จำแนก source qr/manual (D10) */
 const CERT_NO_RE = /^LTC-\d{4}-\d{6}$/;
 
@@ -56,13 +53,16 @@ function ipHashOf(ip: string): string {
   return createHash("sha256").update(ip + supabaseAnonKey).digest("hex");
 }
 
-/** user_agent ตัดทอน + ตัดค่าว่าง → null (ไม่ log PII อื่น) */
-function userAgentOf(request: Request): string | null {
+/** user_agent_hash = sha256(ua + salt) — r9-O1: header เป็นค่าอิสระของ anon
+ *  (ใส่อีเมล/เบอร์โทรได้) จึงห้ามเก็บข้อความดิบลงตาราง append-only · ใช้ salt
+ *  ชุดเดียวกับ ipHashOf (ธง dev-grade เดียวกัน — PB-13 ตามหลังครอบทั้งสองค่า) */
+function userAgentHashOf(request: Request): string | null {
   const raw = request.headers.get("user-agent");
   if (raw === null) return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
-  return trimmed.slice(0, USER_AGENT_MAX);
+  const { supabaseAnonKey } = getConfig();
+  return createHash("sha256").update(trimmed + supabaseAnonKey).digest("hex");
 }
 
 /** {code} ดิบ → ค่าที่ใช้ค้น (trim + จำกัดความยาว — ตัดเศษเกินทิ้ง ไม่ error) */
@@ -130,7 +130,7 @@ export async function GET(
       p_code: code,
       p_source: isManual ? "manual" : "qr",
       p_ip_hash: ipHashOf(clientIpFrom(request)),
-      p_user_agent: userAgentOf(request),
+      p_user_agent_hash: userAgentHashOf(request),
       p_request_id: request.headers.get("x-request-id"),
     });
     if (rpc.error !== null) {

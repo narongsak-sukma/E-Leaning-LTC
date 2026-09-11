@@ -310,6 +310,59 @@ describe("issueCertificate — PDF/Storage/attach พัง = คงใบ + pdf
     expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
   });
 
+  it("r9-O3: attach RPC คืน array ยาว 2 (แถวที่สองต้องหายเงียบไม่ได้) → drift = attach ล้ม คงใบ", async () => {
+    serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: [attachRow(true), { junk: true }], error: null }
+          : { data: coreRow(), error: null },
+    });
+    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
+    expect(cert.status).toBe("valid");
+    expect(cert.pdfMediaId).toBeNull();
+    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+  });
+
+  it("r9-O3: attach RPC คืน array เปล่า → drift = attach ล้ม ไม่ fabricate id", async () => {
+    serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: [], error: null }
+          : { data: coreRow(), error: null },
+    });
+    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
+    expect(cert.pdfMediaId).toBeNull();
+    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+  });
+
+  it("r9-O3: แถว attach ขาดคีย์ attached → drift = attach ล้ม (ไม่ใช่ถือว่าสำเร็จเพราะ pdf_media_id ถูกอย่างเดียว)", async () => {
+    serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: { pdf_media_id: MEDIA_ID }, error: null }
+          : { data: coreRow(), error: null },
+    });
+    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
+    expect(cert.pdfMediaId).toBeNull();
+    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+  });
+
+  it("r9-O3: แถว attach มีคีย์เกิน (storage_path รั่วมา) → drift = attach ล้ม ไม่ strip เงียบ", async () => {
+    serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: { ...attachRow(true), storage_path: "certificates-pdf/LTC-2026-000123.pdf" }, error: null }
+          : { data: coreRow(), error: null },
+    });
+    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
+    expect(cert.pdfMediaId).toBeNull();
+    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+  });
+
   it("attach idempotent (ใบมี pdf_media_id อยู่แล้ว → attached=false) → คืน id เดิมไม่ throw", async () => {
     serviceClient({
       ...happySpec(),
