@@ -2,7 +2,7 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 1.1.1 — DCR-7 (Wave E): view `course_exam_summary` เพิ่มคอลัมน์ `assessment_id` (PB-17) · `question_snapshot` เพิ่มคีย์ `type` (PB-18) · ตารางใหม่ `cert_bulk_jobs` (§3.7) · อ่านบทเรียนยอม enrollment active/completed (ปิด D39 — D55-4) · 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.1.2 — DCR-8 (Wave E Phase 2, migration 0026): ตารางใหม่ `feature_flags` (§3.7) + RPC runner `admin_cert_bulk_issue_run`/`cert_auto_issue_tick` (CRT-008) + `cert_issue_core` เพิ่ม `p_mode` manual/bulk/auto ลง audit context + policy `app_owner` ของ `cert_bulk_jobs` ให้ runner (D55-5/D55-7) · 1.1.1 — DCR-7 (Wave E): view `course_exam_summary` เพิ่มคอลัมน์ `assessment_id` (PB-17) · `question_snapshot` เพิ่มคีย์ `type` (PB-18) · ตารางใหม่ `cert_bulk_jobs` (§3.7) · อ่านบทเรียนยอม enrollment active/completed (ปิด D39 — D55-4) · 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-3 (Wave A — deliverable 7)                 |
 | สถานะ    | ผ่าน CTO gate (codex รอบ 5: PASS — D17)           |
@@ -722,8 +722,25 @@ Retention: แถว 12 เดือน (ไฟล์ 7 วันตาม expir
 | created_at | timestamptz | NOT NULL DEFAULT now() |
 | finished_at | timestamptz | NULL |
 คีย์/Index: PK(id); INDEX(status) WHERE status IN ('pending','running'); INDEX(created_by, created_at DESC)
-RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ทุกการเข้าถึงผ่าน BFF `service_role` เท่านั้น (บทบาท gate ที่ BFF: staff:registrar + super_admin ตาม D55-2) — **append-only เกี่ยวกับผล: ห้าม UPDATE issued_count/failed_count นอก job path ของ BFF**
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ทุกการเข้าถึงผ่าน BFF `service_role` เท่านั้น (บทบาท gate ที่ BFF: staff:registrar + super_admin ตาม D55-2) — **append-only เกี่ยวกับผล: ห้าม UPDATE issued_count/failed_count นอก job path ของ BFF** · **DCR-8 (0026): เพิ่ม policy `app_owner_select_cert_bulk_jobs`/`app_owner_update_cert_bulk_jobs`** ให้ runner `admin_cert_bulk_issue_run` (SECURITY DEFINER owner `app_owner` ไม่มี BYPASSRLS — ต้องมี policy เองแบบเดียวกับ `certificates` ใน 0019; select-for-update ต้องมีทั้งคู่ SELECT+UPDATE)
 Retention: ถาวร (ประวัติงานออกใบ — ตรวจสอบย้อนหลัง)
+
+RPC (0026): **`admin_cert_bulk_issue_run(p_job_id, p_request_id)`** — BFF เรียกหลังสร้าง job: lock job (`FOR UPDATE`) → guard สถานะ (completed/failed → `ERR-VAL-001|bulk_job_already_finished`) → วน `admin_cert_bulk_pick` ชุดละ 200 จนหมดคิว โดยแต่ละใบ `SAVEPOINT` + `cert_issue_core(actor=job.created_by, mode='bulk')` → เก็บความคืบหน้าทุกรอบ → จบ status completed/failed (round cap 500 — คงความคืบหน้า ไม่ raise); **`cert_auto_issue_tick()`** — cron `ltc-cert-auto-issue` ทุก 2 นาที (SRS AC ≤ 5 นาที): อ่าน flag `cert_auto_issue` (ปิด → skip) → advisory lock `ltc:cert_auto_issue` (กำลังรัน → skip) → ≤ 5 รอบ × 200 ด้วย actor ระบบ `00000000-0000-4000-8000-00000000a170` mode='auto'
+
+#### `feature_flags` — feature flag ของ job ระบบ **(DCR-8 · D55-7 · CRT-008)**
+
+วัตถุประสงค์ (ตารางใหม่ 0026): source of truth ฝั่ง DB ของ flag คุม job อัตโนมัติ — แก้ได้โดย super_admin ผ่าน BFF (`service_role`) โดยไม่ต้อง redeploy; BFF อ่านอย่างเดียว (E-6) · seed flag แรก `cert_auto_issue` default **false** (ปิดจนกว่าจะสั่งเปิด)
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| key | text | PK CHECK `^[a-z][a-z0-9_]{0,63}$` |
+| enabled | boolean | NOT NULL DEFAULT false |
+| note | text | NULL (คำอธิบาย/เหตุผลการสั่ง) |
+| updated_at | timestamptz | NOT NULL DEFAULT now() |
+| updated_by | uuid | NULL FK→profiles (ผู้สั่งล่าสุด) |
+คีย์/Index: PK(key)
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — อ่าน/เขียนผ่าน BFF `service_role` เท่านั้น · policy `app_owner_select_feature_flags` ให้ `cert_auto_issue_tick` (SECURITY DEFINER — เหตุผลเดียวกับ cert_bulk_jobs ข้างบน: ไม่มี policy แล้ว select-into ได้ null เงียบ ๆ = flag ปิดตลอด)
+Retention: ถาวร
 
 Reporting ทั้งหมดอ่านผ่าน view + สิทธิ์ staff เท่านั้น (SDS §2 M7): `v_credit_balance` (ยอด credit ต่อรอบ/ประเภท จาก SUM ledger), `v_enrollment_progress` (สรุปความคืบหน้าจาก lesson_progress), `v_assessment_statistics` (ผลสอบต่อหลักสูตร), `v_certificates_issued` — นิยามใน migration แยก; export CSV ทำที่ BFF โดย stream จาก view
 
