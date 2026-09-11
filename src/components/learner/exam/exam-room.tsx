@@ -97,38 +97,6 @@ function initialSnapshotOf(
   return snapshot;
 }
 
-/**
- * PB-18: ข้อเลือกเดียว (single_choice/true_false) — เลือกตัวใหม่ = แทนที่ตัวเดิม
- * (replace แทน append) แต่โครง state ต่อข้อ (selected ids) คงเดิม — ทำผ่าน toggle
- * ของเอนจิ้น autosave เดิม: เลือกตัวใหม่ก่อน (จำนวนยังไม่ลด — เอนจิ้นห้าม state
- * ว่างต่อข้อ) แล้วจึงถอดตัวเก่าทีละตัว ผลสุทธิ์คือเหลือตัวที่เพิ่งเลือกตัวเดียว
- * (คลิกตัวที่เลือกอยู่ซ้ำ browser ไม่ยิง change อยู่แล้ว · ถ้า seed จาก takeover
- * ทิ้งไว้หลายตัว การคลิกตัวใดตัวหนึ่งจะถอดตัวอื่นจนเหลือตัวนั้น)
- */
-export function selectSingleChoice(
-  saver: ExamAnswerSaver,
-  questionId: string,
-  optionId: string,
-  currentChoiceIds: readonly string[],
-): void {
-  if (currentChoiceIds.includes(optionId)) {
-    // คลิกตัวที่เลือกอยู่แล้ว: ถอดเฉพาะตัวอื่น (เช่น seed หลายตัว) — ตัวนี้คงอยู่
-    for (const otherId of currentChoiceIds) {
-      if (otherId !== optionId) {
-        saver.toggle(questionId, otherId);
-      }
-    }
-    return;
-  }
-  saver.toggle(questionId, optionId);
-  for (const otherId of currentChoiceIds) {
-    if (otherId !== optionId) {
-      saver.toggle(questionId, otherId);
-    }
-  }
-}
-
-
 export function ExamRoom({
   attemptId,
 }: {
@@ -535,15 +503,7 @@ export function ExamRoom({
                     disabled={phase.kind === "submitting" || timeup}
                     onChange={() => {
                       if (currentIsSingleSelect) {
-                        const saver = saverRef.current;
-                        if (saver !== null) {
-                          selectSingleChoice(
-                            saver,
-                            currentQuestion.questionId,
-                            option.id,
-                            answers[currentQuestion.questionId]?.choiceIds ?? [],
-                          );
-                        }
+                        saverRef.current?.setSingle(currentQuestion.questionId, option.id);
                         return;
                       }
                       saverRef.current?.toggle(currentQuestion.questionId, option.id);

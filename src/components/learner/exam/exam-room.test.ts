@@ -5,9 +5,10 @@
  * - multiple_choice → input checkbox หลายอันเหมือนเดิม (ไม่มีคำแนะนำ เลือกได้ข้อเดียว)
  * - single_choice / true_false → input radio + name ต่อข้อ + คำแนะนำ "เลือกได้ข้อเดียว"
  *   (a11y/e2e คงแบบแผนเดิม: fieldset + label ครอบ input — .check() ใช้ได้ทั้งสองชนิด)
- * - selectSingleChoice: เลือกใหม่ = แทนที่ตัวเดิม (replace แทน append) บนโครง state
- *   selected ids เดิม — พิสูจน์กับเอนจิ้น autosave จริง (createExamAnswerSaver)
- *   ว่า state สุดท้ายและที่บันทึกล่าสุดคือ [ตัวที่เพิ่งเลือก] เสมอ
+ * - ข้อเลือกเดียว: เลือกใหม่ = แทนที่ตัวเดิม (replace แทน append) ผ่าน setSingle
+ *   ของเอนจิ้น autosave (atomic — gate p0-r1 MAJOR-1) — พิสูจน์กับเอนจิ้นจริง
+ *   (createExamAnswerSaver) ว่าทุก payload ที่บันทึกขึ้น server เป็น [ตัวเดียว]
+ *   ตรงกับที่ผู้เรียนเห็นบนจอเสมอ ไม่มีค่า transient สองตัวหลุดขึ้นไป
  *
  * หมายเหตุการทดสอบใน node env (ไม่มี DOM): ตามแบบแผน logout-button.test.ts +
  * (learner)/error.test.ts — เรนเดอร์ด้วย renderToStaticMarkup โดย shim useState
@@ -45,7 +46,7 @@ vi.mock("next/link", () => ({
   default: (): null => null,
 }));
 
-import { ExamRoom, selectSingleChoice } from "./exam-room";
+import { ExamRoom } from "./exam-room";
 import { createExamAnswerSaver, type ExamAnswerSaver, type ExamAnswerSnapshot } from "@/lib/exam/exam-answers";
 import type { ExamPaperQuestionType, ExamPaperSession } from "@/lib/exam/exam-api";
 
@@ -164,37 +165,40 @@ function makeSaver(initial: Readonly<Record<string, readonly string[]>>): {
   return { saver, saves, snapshot };
 }
 
-describe("selectSingleChoice — เลือกใหม่ = แทนที่ (PB-18)", () => {
-  it("เลือก B ทับ A: สถานะจบที่ [B] (เลือกใหม่ก่อนแล้วถอดตัวเก่า — ไม่ติดกฎห้ามว่าง)", async () => {
+describe("setSingle ของเอนจิ้น autosave (onChange ของข้อเลือกเดียว) — เลือกใหม่ = แทนที่แบบ atomic (PB-18/gate p0-r1 MAJOR-1)", () => {
+  it("เลือก B ทับ A: บันทึก [B] ครั้งเดียว — ทุก payload ยาว 1 ตัว ไม่มี [A,B] หลุดขึ้น server", async () => {
     const { saver, saves, snapshot } = makeSaver({ [Q1]: [OPT_A] });
-    selectSingleChoice(saver, Q1, OPT_B, [OPT_A]);
+    saver.setSingle(Q1, OPT_B);
     await saver.flushAll();
     expect(snapshot.current[Q1]?.choiceIds).toEqual([OPT_B]);
-    expect(saves.at(-1)?.choiceIds).toEqual([OPT_B]);
+    expect(saves).toEqual([{ questionId: Q1, choiceIds: [OPT_B] }]);
+    for (const save of saves) {
+      expect(save.choiceIds).toHaveLength(1);
+    }
     saver.dispose();
   });
 
-  it("ยังไม่ได้เลือก ([]): เลือก B = [B]", async () => {
+  it("ยังไม่ได้เลือก ([]): เลือก B = บันทึก [B]", async () => {
     const { saver, saves, snapshot } = makeSaver({ [Q1]: [] });
-    selectSingleChoice(saver, Q1, OPT_B, []);
+    saver.setSingle(Q1, OPT_B);
     await saver.flushAll();
     expect(snapshot.current[Q1]?.choiceIds).toEqual([OPT_B]);
-    expect(saves.at(-1)?.choiceIds).toEqual([OPT_B]);
+    expect(saves).toEqual([{ questionId: Q1, choiceIds: [OPT_B] }]);
     saver.dispose();
   });
 
-  it("seed หลายตัวจาก takeover ([A,B]) แล้วคลิก B = เหลือ [B]", async () => {
+  it("seed หลายตัวจาก takeover ([A,B]) แล้วคลิก B = ยุบเหลือ [B] ใน save เดียว", async () => {
     const { saver, saves, snapshot } = makeSaver({ [Q1]: [OPT_A, OPT_B] });
-    selectSingleChoice(saver, Q1, OPT_B, [OPT_A, OPT_B]);
+    saver.setSingle(Q1, OPT_B);
     await saver.flushAll();
     expect(snapshot.current[Q1]?.choiceIds).toEqual([OPT_B]);
-    expect(saves.at(-1)?.choiceIds).toEqual([OPT_B]);
+    expect(saves).toEqual([{ questionId: Q1, choiceIds: [OPT_B] }]);
     saver.dispose();
   });
 
   it("คลิกตัวที่เลือกอยู่แล้ว (เลือกครบ 1 ตัว) = ไม่เปลี่ยนแปลง ไม่เรียก save", async () => {
     const { saver, saves } = makeSaver({ [Q1]: [OPT_B] });
-    selectSingleChoice(saver, Q1, OPT_B, [OPT_B]);
+    saver.setSingle(Q1, OPT_B);
     await saver.flushAll();
     expect(saves).toHaveLength(0);
     expect(saver.hasUnsaved()).toBe(false);

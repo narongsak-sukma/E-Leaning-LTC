@@ -344,4 +344,164 @@ describe("createExamAnswerSaver", () => {
     expect(saves).toHaveLength(1);
     expect(state.snapshots.length).toBe(snapshotsBefore);
   });
+
+  // ─── setSingle (PB-18/gate p0-r1 MAJOR-1): ข้อเลือกเดียว atomic — ทุก payload
+  //     ที่ออกจากเครื่องยนต์ต้องเป็นคำตอบตัวเดียวที่ผู้เรียนเห็นบนจอเสมอ
+  //     ห้ามมีค่า transient สองตัว ([A,B]) หลุดขึ้น server เด็ดขาด แม้หมดเวลากลางคัน ───
+  describe("setSingle — atomic replace", () => {
+    it("เลือก B แทน A หลังพ้นหน้าต่าง throttle = บันทึก [B] ทันที — ทุก payload ยาว 1 ตัวเสมอ", async () => {
+      const saves: Array<[string, readonly string[]]> = [];
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [] },
+        makeDeps(async (q, c) => {
+          saves.push([q, c]);
+          return { savedAt: "2026-09-10T08:00:20+07:00" };
+        }, state),
+      );
+      saver.setSingle(Q1, A); // คลิกแรก = ทันที
+      await vi.advanceTimersByTimeAsync(0);
+      expect(saves).toEqual([[Q1, [A]]]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      saver.setSingle(Q1, B); // พ้น 10 วิ = บันทึกทันทีอีกครั้ง
+      await vi.advanceTimersByTimeAsync(0);
+      expect(saves).toEqual([
+        [Q1, [A]],
+        [Q1, [B]],
+      ]);
+      // gate p0-r1 MAJOR-1: ทุก payload ต้องยาว 1 — ห้ามมี [A,B] หลุดขึ้น server เลย
+      for (const [q, choiceIds] of saves) {
+        expect(q).toBe(Q1);
+        expect(choiceIds).toHaveLength(1);
+      }
+      expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([B]);
+      expect(saver.hasUnsaved()).toBe(false);
+      saver.dispose();
+    });
+
+    it("เลือก B แทน A ในหน้าต่าง throttle = timer ยิง [B] — แม้หมดเวลาก่อนรอบถัดไป server ก็ไม่เคยเห็น [A,B]", async () => {
+      const saves: Array<[string, readonly string[]]> = [];
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [] },
+        makeDeps(async (q, c) => {
+          saves.push([q, c]);
+          return { savedAt: "2026-09-10T08:00:21+07:00" };
+        }, state),
+      );
+      saver.setSingle(Q1, A); // save#1 ทันที
+      await vi.advanceTimersByTimeAsync(0);
+      saver.setSingle(Q1, B); // ยังใน 10 วิ → timer
+      // UI ต้องเห็น [B] ทันที (controlled) แต่ server ยังมีแค่ [A]
+      expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([B]);
+      expect(saves).toEqual([[Q1, [A]]]);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(saves).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(saves).toEqual([
+        [Q1, [A]],
+        [Q1, [B]],
+      ]);
+      for (const [, choiceIds] of saves) {
+        expect(choiceIds).toHaveLength(1);
+      }
+      // สมมติหมดเวลาตอนนี้ (cron 0020 ปิดตาม expires_at) — ค่าสุดท้ายบน server คือ [B]
+      // ตรงกับที่ผู้เรียนเห็นบนจอเป๊ะ ไม่ใช่ [A,B]
+      expect(saves.at(-1)?.[1]).toEqual([B]);
+      expect(saver.hasUnsaved()).toBe(false);
+      saver.dispose();
+    });
+
+    it("seed หลายตัวจาก takeover ([A,B]) แล้วคลิก A = ยุบเหลือ [A] ตัวเดียวใน save เดียว", async () => {
+      const saves: Array<[string, readonly string[]]> = [];
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [A, B] },
+        makeDeps(async (q, c) => {
+          saves.push([q, c]);
+          return { savedAt: "2026-09-10T08:00:22+07:00" };
+        }, state),
+      );
+      saver.setSingle(Q1, A);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(saves).toEqual([[Q1, [A]]]);
+      expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([A]);
+      saver.dispose();
+    });
+
+    it("คลิกตัวที่เลือกอยู่แล้ว = no-op ไม่ตั้งรอบันทึก", async () => {
+      const saves: Array<[string, readonly string[]]> = [];
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [A] },
+        makeDeps(async (q, c) => {
+          saves.push([q, c]);
+          return { savedAt: "2026-09-10T08:00:23+07:00" };
+        }, state),
+      );
+      const emitsBefore = state.snapshots.length;
+      saver.setSingle(Q1, A);
+      expect(state.snapshots.length).toBe(emitsBefore);
+      expect(saver.hasUnsaved()).toBe(false);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(saves).toHaveLength(0);
+      saver.dispose();
+    });
+
+    it("เปลี่ยนตัวเลือกระหว่างบันทึกค้าง (inflight [A]) = รอบแรกจบแล้วบันทึกซ้ำ [B] — ไม่มี payload สองตัว", async () => {
+      const saves: Array<[string, readonly string[]]> = [];
+      let releaseFirst: ((v: { savedAt: string }) => void) | null = null;
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [] },
+        makeDeps(async (q, c) => {
+          if (saves.length === 0) {
+            saves.push([q, c]);
+            return new Promise((resolve) => {
+              releaseFirst = resolve;
+            });
+          }
+          saves.push([q, c]);
+          return { savedAt: "2026-09-10T08:00:24+07:00" };
+        }, state),
+      );
+      saver.setSingle(Q1, A); // inflight [A]
+      await vi.advanceTimersByTimeAsync(0);
+      saver.setSingle(Q1, B); // ระหว่าง inflight → dirty
+      expect(saves).toHaveLength(1);
+      const getRelease = (): ((v: { savedAt: string }) => void) | null => releaseFirst;
+      getRelease()?.({ savedAt: "2026-09-10T08:00:25+07:00" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(saves).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(saves).toHaveLength(2);
+      expect(saves[1]).toEqual([Q1, [B]]);
+      for (const [, choiceIds] of saves) {
+        expect(choiceIds).toHaveLength(1);
+      }
+      expect(saver.hasUnsaved()).toBe(false);
+      saver.dispose();
+    });
+
+    it("หลัง terminal: setSingle อัปเดตคำตอบในหน้าได้ แต่ห้ามยิงบันทึกเพิ่ม", async () => {
+      let saveCalls = 0;
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [] },
+        makeDeps(async () => {
+          saveCalls += 1;
+          throw new ExamApiError("ERR-ASM-004", 409, "หมดเวลาสอบ");
+        }, state),
+      );
+      saver.setSingle(Q1, A); // → terminal 004
+      await vi.advanceTimersByTimeAsync(0);
+      expect(saveCalls).toBe(1);
+      saver.setSingle(Q1, B); // หลัง terminal — ในหน้าเท่านั้น
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(saveCalls).toBe(1);
+      expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([B]);
+      expect(saver.hasUnsaved()).toBe(false);
+      saver.dispose();
+    });
+  });
 });
