@@ -282,8 +282,14 @@ on conflict do nothing;
 --          ต้องมีตัวเลือกครบก่อน (D20-M3) และผู้เปิดต้องเป็น staff:exam) ==
 set local "request.jwt.claims" = '{"sub":"11111111-1111-4111-8111-000000000002","role":"authenticated"}';
 update public.questions set status = 'active'
- where bank_id = 'eeeeeeee-eeee-4eee-8eee-000000000001'
-   and id <> 'f0f0f0f0-f0f0-4f0f-8f0f-000000000006'; -- ข้อ 0006 คง draft → view นับได้ 5
+ where id in ('f0f0f0f0-f0f0-4f0f-8f0f-000000000001',
+              'f0f0f0f0-f0f0-4f0f-8f0f-000000000002',
+              'f0f0f0f0-f0f0-4f0f-8f0f-000000000003',
+              'f0f0f0f0-f0f0-4f0f-8f0f-000000000004',
+              'f0f0f0f0-f0f0-4f0f-8f0f-000000000005'); -- ข้อ 0006 คง draft → view นับได้ 5
+              -- (0028 · codex gate r2 MINOR-2: เดิมกรองด้วย bank_id + id <> 0006 —
+              --  รันซ้ำบน DB ที่ developer เพิ่ม/ปิดข้อใหม่ใน bank เดียวกัน = ถูกปลุก
+              --  โดยไม่ตั้งใจ · ระบุ 5 id ยาว ๆ แทน = no-op จริงบน DB ที่โตแล้ว)
 
 -- == 12) enrollments (active + cancelled) ==
 insert into public.enrollments

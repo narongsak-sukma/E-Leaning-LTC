@@ -35,6 +35,22 @@
  *      (มองเห็นจาก session อื่น) → เรียกซ้ำจบ completed 3 ไม่มีใบซ้ำ
  *   M3 scope ของ auto — assert ฝั่งชุดอัตโนมัติว่าโลกนอก fixture (หลักสูตร 4) ไม่มีใบ
  *      เกิดขึ้นระหว่าง flag เปิด
+ *
+ * ชุด regression ของ gate r2 (0028):
+ *   MAJOR-1 cursor durable ข้าม CALL — bulk: job ใหม่บนคิว 200 ชื่อว่าง ชนเพดาน
+ *      120 ×2 รอบ ต้องเดินต่อจนจบ 0/200/200 **ไม่นับซ้ำ** (cursor หาย = รอบสอง
+ *      เดิน 120 ตัวเดิม → running 0/240 — assert completed จับได้) · auto: tick
+ *      เพดาน 1 ×2 รอบ รอบสามต้องออกคนมีชื่อโดย failed สะสมรอบสาม = 0 (cursor
+ *      หาย = ล้มซ้ำ 2 ตัวเดิม = 2) · คิวหมด = reset → แถวเก่า (submitted_at เก่า
+ *      กว่า cursor) กลับมาถูกลองใหม่ได้ (retry)
+ *   MAJOR-2 เพดาน 100,000 — job สะสม 99,999 + เดินอีก 1 แถว → ปิด 'failed'
+ *      พอดีที่ 100,000 · job ที่สะสม 100,000 อยู่แล้ว → ปิด 'failed' ทันทีไม่
+ *      ประมวลผลแถวใด
+ *   MAJOR-3 step(null) ปลอดภัยบน DB ร่วม — ก่อนเรียกทุกครั้งพิสูจน์ว่าไม่มี job
+ *      ต่างชุด (pending/running) ค้างอยู่ ไม่งั้น fail ก่อนแตะ (ห้าม suite แตะ
+ *      งานจริงของคนอื่น) · afterAll คืน cron ใน finally (cleanup ล้มก็ต้องคืน)
+ *   MINOR-1 (r2) หลักฐาน M3 — คนนอก scope ที่ **ออกใบได้** (ชื่อครบ ยังไม่มีใบ)
+ *      ต้องไม่มีใบ + ไม่มี audit หลัง tick (เดิมตรวจเฉพาะคนชื่อว่างที่ออกไม่ได้อยู่แล้ว)
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { psql, psqlRows } from "./helpers.js";
@@ -84,6 +100,10 @@ const E9_COURSE4_ID = "99999999-9999-4999-8999-00000000e904";
 const E9_COURSE5_ID = "99999999-9999-4999-8999-00000000e905";
 /** หลักสูตร 6 ของชุด M2 — 3 คนออกได้ สำหรับพิสูจน์ stop ที่เพดาน/resume ไม่ซ้ำใบ */
 const E9_COURSE6_ID = "99999999-9999-4999-8999-00000000e906";
+/** หลักสูตร 7 ของชุด MAJOR-1 (r2) auto — ชื่อว่าง 2 หน้าคิว + คนมีชื่อ 1 ท้ายคิว ไล่ข้าม tick */
+const E9_COURSE7_ID = "99999999-9999-4999-8999-00000000e907";
+/** หลักสูตร 8 ของชุด MAJOR-2 (r2) — พิสูจน์เพดาน 100,000 ของ job (คนเดียวต่อ job) */
+const E9_COURSE8_ID = "99999999-9999-4999-8999-00000000e908";
 /** profile staff ของชุด — ผู้สร้าง job (cert_bulk_jobs.created_by) = actor ของใบที่ออกแบบ bulk */
 const E9_STAFF_ID = "11111111-1111-4111-8111-00000000e901";
 /** งานทั้งห้า: 1 ออกใบจริง · 2 anti-join · 3 TX ต่อใบ · 4 M1 bulk · 5 M2 stop/resume */
@@ -92,7 +112,12 @@ const E9_JOB2_ID = "dd000000-0000-4000-8000-00000000e902";
 const E9_JOB3_ID = "dd000000-0000-4000-8000-00000000e903";
 const E9_JOB4_ID = "dd000000-0000-4000-8000-00000000e904";
 const E9_JOB5_ID = "dd000000-0000-4000-8000-00000000e905";
-/** หลักสูตรทั้งหกของ fixture (ใช้ใน cleanup แบบครอบทั้งโลกของชุด รวมแถว generate_series) */
+/** งานของชุด r2 (seed เฉพาะใน test ของตัวเอง — ห้ามค้าง pending ก่อน test idle): 6 เพดาน
+ *  เข้าใกล้ 100k · 7 ถึง 100k อยู่แล้ว · 8 cursor durable ข้าม CALL บนคิว 200 ชื่อว่าง */
+const E9_JOB6_ID = "dd000000-0000-4000-8000-00000000e906";
+const E9_JOB7_ID = "dd000000-0000-4000-8000-00000000e907";
+const E9_JOB8_ID = "dd000000-0000-4000-8000-00000000e908";
+/** หลักสูตรทั้งแปดของ fixture (ใช้ใน cleanup แบบครอบทั้งโลกของชุด รวมแถว generate_series) */
 const E9_COURSES = [
   E9_COURSE_ID,
   E9_COURSE2_ID,
@@ -100,7 +125,15 @@ const E9_COURSES = [
   E9_COURSE4_ID,
   E9_COURSE5_ID,
   E9_COURSE6_ID,
+  E9_COURSE7_ID,
+  E9_COURSE8_ID,
 ] as const;
+/** id ของคนที่ seed แบบ lazy ใน test เฉพาะ (ไม่อยู่ใน PEOPLE — ไม่ให้ test ก่อนหน้าเห็น):
+ *  15 = คนนอก scope ที่ออกใบได้ (MINOR-1 r2 · หลักสูตร 4) · 16 = แถวเก่าสุดของหลักสูตร 5
+ *  (พิสูจน์ reset ของ cursor) · 17 = แถวเก่าสุดของหลักสูตร 7 (เหมือนกันฝั่ง cross-tick) */
+const E9_P15_OUTSIDE = person(15, "ผู้เรียนนอกขอบเขตอัตโนมัติ", "นอกขอบเขต", "สิบห้า", E9_COURSE4_ID);
+const E9_P16_OLDEST = person(16, "ผู้เรียนแถวเก่าสุด", "แถวเก่า", "สิบหก", E9_COURSE5_ID);
+const E9_P17_OLDEST = person(17, "ผู้เรียนแถวเก่าสุดเจ็ด", "แถวเก่า", "สิบเจ็ด", E9_COURSE7_ID);
 
 interface E9Person {
   readonly course: string;
@@ -113,7 +146,7 @@ interface E9Person {
   readonly emailLocal: string;
 }
 
-/** สร้าง id ตายตัวของคนที่ n (1..11) — profile/enrollment/attempt แยกกลุ่ม uuid ไม่ทับกัน */
+/** สร้าง id ตายตัวของคนที่ n (1..17) — profile/enrollment/attempt แยกกลุ่ม uuid ไม่ทับกัน */
 function person(
   n: number,
   display: string,
@@ -141,10 +174,16 @@ function person(
  *   6   = คู่ของชุด TX ต่อใบ (หลักสูตร 3 เดียวกับคน 3) — ชื่อครบ → ออกได้ ใบเดียว
  *   4-5 = ชุด auto (หลักสูตร 2) — tick แบบระบุหลักสูตรต้องออกพอดี 2 ใบ
  *   7-9 = ชุด M2 (หลักสูตร 6) — ชื่อครบ 3 คน สำหรับ stop ที่เพดาน 2 แล้ว resume
- *   10  = คนมีชื่อท้ายคิวของชุด M1 auto (หลักสูตร 5 — หน้าคิวเป็นคนชื่อว่าง 3 คน)
- *   11  = คนมีชื่อท้ายคิวของชุด M1 bulk (หลักสูตร 4 — หน้าคิวเป็นคนชื่อว่าง 200 คน)
- * (คนชื่อว่างจำนวนมากของ M1 สร้างด้วย generate_series ใน seedE9Dcr8Fixtures — id กลุ่ม
- *  33333333/44444444/55555555 + หลัก b=ชุด bulk, c=ชุด auto)
+ *   10  = คนมีชื่อท้ายคิวของ M1 auto (หลักสูตร 5 — หน้าคิวเป็นคนชื่อว่าง 3 คน)
+ *   11  = คนมีชื่อท้ายคิวของ M1 bulk (หลักสูตร 4 — หน้าคิวเป็นคนชื่อว่าง 200 คน)
+ *   12  = คนมีชื่อท้ายคิวของ MAJOR-1 (r2) auto ข้าม tick (หลักสูตร 7 — หน้าคิว 2 คน)
+ *   13  = คนที่ job ถึงเพดาน 100k ไว้แล้วต้องไม่ออกให้ (หลักสูตร 8 · MAJOR-2 r2)
+ *   14  = คนเดียวที่ job เพดานเข้าใกล้ 100k เดินได้ก่อนปิดตัว (หลักสูตร 8 · MAJOR-2 r2)
+ * (คน 15/16/17 ไม่อยู่ใน PEOPLE — seed แบบ lazy กลาง test ของตัวเอง (seedLazyPerson):
+ *  15 = คนนอก scope ที่ออกใบได้ (MINOR-1 r2 · หลักสูตร 4) · 16/17 = แถวเก่าสุดของ
+ *  หลักสูตร 5/7 พิสูจน์ reset ของ cursor · คนชื่อว่างจำนวนมากของ M1/r2 สร้างด้วย
+ *  generate_series ใน seedE9Dcr8Fixtures — id กลุ่ม 33333333/44444444/55555555 +
+ *  หลัก b=ชุด bulk, c=ชุด auto, d=ชุด r2 ข้าม tick)
  */
 const PEOPLE: readonly E9Person[] = [
   person(1, "ผู้เรียนทดสอบ DCR-8 หนึ่ง", "สมชายทดสอบ", "ใจดีหนึ่ง", E9_COURSE_ID),
@@ -158,6 +197,9 @@ const PEOPLE: readonly E9Person[] = [
   person(9, "ผู้เรียนทดสอบ DCR-8 เก้า", "สมพรทดสอบ", "ใจเพชรเก้า", E9_COURSE6_ID),
   person(10, "ผู้เรียนเดินผ่านคิวอัตโนมัติ", "เดินผ่านทดสอบ", "ท้ายคิวสิบ", E9_COURSE5_ID),
   person(11, "ผู้เรียนเดินผ่านคิวชุดใหญ่", "เดินผ่านทดสอบ", "ท้ายคิวสิบเอ็ด", E9_COURSE4_ID),
+  person(12, "ผู้เรียนข้ามติ๊กอัตโนมัติ", "ข้ามติ๊กทดสอบ", "ท้ายคิวสิบสอง", E9_COURSE7_ID),
+  person(13, "ผู้เรียนเพดานค้าง", "เพดานทดสอบ", "สิบสาม", E9_COURSE8_ID),
+  person(14, "ผู้เรียนเพดานใกล้", "เพดานทดสอบ", "สิบสี่", E9_COURSE8_ID),
 ];
 
 const BULK_OK = PEOPLE.slice(0, 2); // ชุด bulk — ออกใบได้
@@ -217,11 +259,58 @@ async function restoreCertCrons(): Promise<void> {
   `);
 }
 
+/** seed คนเดียวแบบ lazy กลาง test (คน 15/16/17 — ไม่อยู่ใน PEOPLE ไม่ให้ test
+ *  ก่อนหน้าเห็น) · minutesAgo คุมตำแหน่งในคิว (เก่าแรง = ท้ายคิว — ใช้พิสูจน์ว่า
+ *  reset ของ cursor ทำให้แถวเก่ากว่าจุดเดินล่าสุดกลับมาถูกเห็นหลัง sweep จบ) */
+async function seedLazyPerson(p: E9Person, minutesAgo: number): Promise<void> {
+  await psql(`
+    insert into public.profiles (id, display_name, first_name, last_name, email, preferred_locale)
+    values ('${p.profile}', '${p.display}', ${p.firstName === null ? "null" : `'${p.firstName}'`},
+            ${p.lastName === null ? "null" : `'${p.lastName}'`}, '${p.emailLocal}@ltc.test', 'th')
+    on conflict (id) do nothing;
+    insert into public.enrollments (id, user_id, course_id, status, completed_at)
+    values ('${p.enrollment}', '${p.profile}', '${p.course}', 'completed',
+            now() - interval '2 hours')
+    on conflict (id) do nothing;
+    insert into public.assessment_attempts
+      (id, assessment_id, user_id, enrollment_id, rules_id, attempt_no, status, session_id,
+       lease_expires_at, started_at, expires_at, submitted_at, score_pct, passed,
+       question_count, correct_count)
+    values ('${p.attempt}', '${SEED_EXAM_ID}', '${p.profile}', '${p.enrollment}', '${SEED_RULES_ID}',
+            1, 'passed', 'e9-dcr8-lazy-session', now() - interval '3 hours',
+            now() - interval '3 hours', now() + interval '1 hour',
+            now() - interval '${minutesAgo} minutes', 100, true, 5, 5)
+    on conflict (id) do nothing;
+  `);
+}
+
+/** MAJOR-3 (r2): พิสูจน์ก่อนทุกครั้งที่จะเรียก step(null) ว่าไม่มี job ต่างชุด
+ *  (pending/running) ค้างใน DB ร่วม — มี = ล้มก่อนแตะ (suite นี้ห้ามแย่ง/แตะงาน
+ *  จริงของคนอื่น · ล้มดัง ๆ ดีกว่าเงียบทำลาย — dev DB อาจมีงานจริงค้างได้) */
+async function assertNoForeignJobs(): Promise<void> {
+  const ours = [
+    E9_JOB1_ID, E9_JOB2_ID, E9_JOB3_ID, E9_JOB4_ID, E9_JOB5_ID,
+    E9_JOB6_ID, E9_JOB7_ID, E9_JOB8_ID,
+  ].map((id) => `'${id}'`).join(",");
+  const rows = await psqlRows<{ n: number }>(`
+    select count(*)::int as n from public.cert_bulk_jobs
+     where status in ('pending', 'running') and id not in (${ours});
+  `);
+  const foreign = rows[0]?.n ?? 0;
+  if (foreign > 0) {
+    throw new Error(
+      `พบ job ต่างชุด (pending/running) ค้าง ${foreign} แถวใน DB ร่วม — ` +
+      "suite นี้ห้ามแตะงานของคนอื่น (MAJOR-3 r2) ตรวจก่อนรันต่อ",
+    );
+  }
+}
+
 /** ล้างโลกของชุด DCR-8 ทั้งหมด (เรียงตาม FK — RESTRICT) + ปิด flag ทิ้งเป็นสถานะปลอดภัย
  *  ลบแบบครอบทั้งหลักสูตรของชุด (ครอบแถว generate_series ของ M1 ด้วย) */
 async function cleanupE9Dcr8World(): Promise<void> {
   const courseList = E9_COURSES.map((c) => `'${c}'`).join(",");
-  const profileList = [`'${E9_STAFF_ID}'`, ...PEOPLE.map((p) => `'${p.profile}'`)].join(",");
+  const profileList = [`'${E9_STAFF_ID}'`, ...PEOPLE.map((p) => `'${p.profile}'`),
+    `'${E9_P15_OUTSIDE.profile}'`, `'${E9_P16_OLDEST.profile}'`, `'${E9_P17_OLDEST.profile}'`].join(",");
   await psql(`
     -- flag ต้องจบเป็น false เสมอ (cron จริงกลับมาทำงานหลัง afterAll)
     update public.feature_flags set enabled = false where key = 'cert_auto_issue';
@@ -232,11 +321,16 @@ async function cleanupE9Dcr8World(): Promise<void> {
     delete from public.certificates
      where enrollment_id in (select id from public.enrollments where course_id in (${courseList}));
     delete from public.cert_bulk_jobs
-     where id in ('${E9_JOB1_ID}', '${E9_JOB2_ID}', '${E9_JOB3_ID}', '${E9_JOB4_ID}', '${E9_JOB5_ID}');
+     where id in ('${E9_JOB1_ID}', '${E9_JOB2_ID}', '${E9_JOB3_ID}', '${E9_JOB4_ID}', '${E9_JOB5_ID}',
+                  '${E9_JOB6_ID}', '${E9_JOB7_ID}', '${E9_JOB8_ID}');
+    -- 0028: cursor ของ auto ที่ suite นี้เขียน (เฉพาะ scope ของ fixture — ห้ามแตะ
+    -- '*' ของ cron จริง)
+    delete from public.cert_auto_cursor
+     where scope_key in ('${E9_COURSE2_ID}', '${E9_COURSE5_ID}', '${E9_COURSE7_ID}');
     delete from public.assessment_attempts
      where enrollment_id in (select id from public.enrollments where course_id in (${courseList}));
     delete from public.enrollments where course_id in (${courseList});
-    -- หลักสูตรทั้งหกต้องลบก่อนโปรไฟล์ staff (FK courses.created_by → profiles — RESTRICT)
+    -- หลักสูตรทั้งแปดต้องลบก่อนโปรไฟล์ staff (FK courses.created_by → profiles — RESTRICT)
     delete from public.courses where id in (${courseList});
     delete from public.profiles where id in (${profileList})
       or id::text like '33333333-3333-4333-8333-0000000%';
@@ -288,7 +382,13 @@ async function seedE9Dcr8Fixtures(): Promise<void> {
        'หลักสูตรทดสอบ DCR-8 เดินผ่านคิวอัตโนมัติ (integration)', false, 'published', now()),
       ('${E9_COURSE6_ID}', 'E9-DCR8-M2',
        (select id from public.course_categories order by id limit 1), '${E9_STAFF_ID}',
-       'หลักสูตรทดสอบ DCR-8 หยุดกลางทาง (integration)', false, 'published', now())
+       'หลักสูตรทดสอบ DCR-8 หยุดกลางทาง (integration)', false, 'published', now()),
+      ('${E9_COURSE7_ID}', 'E9-DCR8-X1',
+       (select id from public.course_categories order by id limit 1), '${E9_STAFF_ID}',
+       'หลักสูตรทดสอบ DCR-8 ข้ามติ๊กอัตโนมัติ (integration)', false, 'published', now()),
+      ('${E9_COURSE8_ID}', 'E9-DCR8-CP',
+       (select id from public.course_categories order by id limit 1), '${E9_STAFF_ID}',
+       'หลักสูตรทดสอบ DCR-8 เพดานแสนแถว (integration)', false, 'published', now())
     on conflict (id) do nothing;
     -- job ห้าแถว (pending) ไล่อายุ created_at — step(null) หยิบเก่าที่สุดก่อนเสมอ
     -- (job 1-2 scoped หลักสูตร bulk · 3 หลักสูตรชุดใบล้ม · 4 ชุด M1 bulk · 5 ชุด M2)
@@ -377,6 +477,36 @@ async function seedE9Dcr8Fixtures(): Promise<void> {
       from generate_series(1, 3) gs
     on conflict (id) do nothing;
   `);
+
+  // ── MAJOR-1 (r2) auto ข้าม tick (หลักสูตร 7): คนชื่อว่าง 2 คนหน้าคิว
+  //    (submitted_at ~30 นาทีก่อน — ใหม่กว่าคน 12 ที่ ~65 นาทีก่อน = ท้ายคิว)
+  await psql(`
+    insert into public.profiles (id, display_name, first_name, last_name, email, preferred_locale)
+    select ('33333333-3333-4333-8333-0000000d' || lpad(gs::text, 4, '0'))::uuid, '', null, null,
+           'e9-r2-d-' || gs || '@ltc.test', 'th'
+      from generate_series(1, 2) gs
+    on conflict (id) do nothing;
+    insert into public.enrollments (id, user_id, course_id, status, completed_at)
+    select ('44444444-4444-4444-8444-0000000d' || lpad(gs::text, 4, '0'))::uuid,
+           ('33333333-3333-4333-8333-0000000d' || lpad(gs::text, 4, '0'))::uuid,
+           '${E9_COURSE7_ID}', 'completed', now() - interval '1 hour'
+      from generate_series(1, 2) gs
+    on conflict (id) do nothing;
+    insert into public.assessment_attempts
+      (id, assessment_id, user_id, enrollment_id, rules_id, attempt_no, status, session_id,
+       lease_expires_at, started_at, expires_at, submitted_at, score_pct, passed,
+       question_count, correct_count)
+    select ('55555555-5555-4555-8555-0000000d' || lpad(gs::text, 4, '0'))::uuid,
+           '${SEED_EXAM_ID}',
+           ('33333333-3333-4333-8333-0000000d' || lpad(gs::text, 4, '0'))::uuid,
+           ('44444444-4444-4444-8444-0000000d' || lpad(gs::text, 4, '0'))::uuid,
+           '${SEED_RULES_ID}', 1, 'passed', 'e9-r2-auto-session',
+           now() - interval '2 hours', now() - interval '2 hours', now() + interval '1 hour',
+           now() - interval '30 minutes' + make_interval(secs => gs::double precision),
+           100, true, 5, 5
+      from generate_series(1, 2) gs
+    on conflict (id) do nothing;
+  `);
 }
 
 describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบัตรเป็นชุด + อัตโนมัติ (worker ของ 0027 บน DB จริง)", () => {
@@ -387,8 +517,13 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
   }, 60_000);
 
   afterAll(async () => {
-    await cleanupE9Dcr8World(); // รวมถึงบังคับ flag = false ครั้งสุดท้าย (safety net)
-    await restoreCertCrons(); // คืนนิยาม cron ของ 0027 ก่อนปล่อย dev stack
+    // MAJOR-3 (r2): cleanup ล้มก็ต้องคืน cron จริงของ dev stack เสมอ (try/finally —
+    // เดิม cleanup ล้ม = ข้าม restore ทิ้ง worker จริงตายเงียบ)
+    try {
+      await cleanupE9Dcr8World(); // รวมถึงบังคับ flag = false ครั้งสุดท้าย (safety net)
+    } finally {
+      await restoreCertCrons(); // คืนนิยาม cron ของ 0027/0028 ก่อนปล่อย dev stack
+    }
   });
 
   // ─── 1) bulk path: worker รัน job ออกใบจริง ──────────────────────────────────
@@ -489,6 +624,8 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
   it("bulk: worker แบบไม่ระบุ job หยิบ pending เก่าสุด (job 2) — คิวออกครบแล้วได้ issued=0 (anti-join กันออกซ้ำ)", async () => {
     // ณ ตอนนี้ pending = job 2 (เก่าสุด), 3, 4, 5 — step(null) ต้องเลือก job 2
     // (คิวของ job 2 scoped หลักสูตร bulk ว่างตามฐาน: คน 1-2 มีใบ valid แล้ว)
+    // MAJOR-3 (r2): พิสูจน์ก่อนแตะ step(null) — ไม่มี job ต่างชุดค้างใน DB ร่วม
+    await assertNoForeignJobs();
     const body = await callProc<StepResult>(
       "call public.admin_cert_bulk_issue_step(null, 1000, null)",
     );
@@ -694,6 +831,8 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
 
   it("bulk: ไม่มี job ค้าง → สัญญา idle { job_id: null, status: 'idle' } (worker จบเร็ว)", async () => {
     // ณ ตอนนี้ job ทั้งห้า completed หมดแล้ว (ไม่มี pending/running เหลือในโลกของชุด)
+    // MAJOR-3 (r2): พิสูจน์ก่อนแตะ step(null) — ไม่มี job ต่างชุดค้างใน DB ร่วม
+    await assertNoForeignJobs();
     const body = await callProc<StepResult>(
       "call public.admin_cert_bulk_issue_step(null, 1000, null)",
     );
@@ -701,6 +840,137 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
     expect(body.job_id).toBeNull();
     expect(body.status).toBe("idle");
   });
+
+  // ─── 1b) ชุด r2 (0028): cursor durable ข้าม CALL + เพดาน 100,000 ของ job ──────
+
+  it("bulk MAJOR-1 (r2): cursor durable ข้าม CALL — ชนเพดาน 120 กลางคิว 200 ชื่อว่าง รอบสองเดินต่อจนจบ completed 0/200/200 ไม่นับซ้ำ", async () => {
+    // job 8 สร้างเฉพาะ test นี้ (lazy — ห้ามค้าง pending ก่อน test idle): scoped
+    // หลักสูตร 4 ที่ job 4 เดินจบไปแล้ว — คิวที่เหลือ = คนชื่อว่าง 200 (คน 11 มีใบ
+    // ถูก anti-join ตัดแล้ว) · แบบเดิม (0027) cursor อยู่ในหน่วยความจำ = รอบสอง
+    // เดิน 120 ตัวเดิม → running 0/240 — assert completed จับได้
+    await psql(`
+      insert into public.cert_bulk_jobs (id, created_by, course_id, status, created_at)
+      values ('${E9_JOB8_ID}', '${E9_STAFF_ID}', '${E9_COURSE4_ID}', 'pending',
+              now() - interval '10 minutes')
+      on conflict (id) do nothing;
+    `);
+    const first = await callProc<StepResult>(
+      `call public.admin_cert_bulk_issue_step('${E9_JOB8_ID}', 120, null)`,
+    );
+    expect(first.job_id).toBe(E9_JOB8_ID);
+    expect(first.status).toBe("running");
+    expect(first.issued_count).toBe(0);
+    expect(first.failed_count).toBe(120);
+    expect(first.total_attempts).toBe(120);
+
+    // ความคืบหน้า + **cursor** ค้างจริงข้าม CALL (มองจาก session อื่น — psql คนละ process)
+    const mid = await psqlRows<{
+      status: string;
+      failed: number;
+      cursorTs: string | null;
+      cursorAid: string | null;
+    }>(`
+      select status::text, failed_count as failed,
+             cursor_submitted_at::text as "cursorTs", cursor_attempt_id::text as "cursorAid"
+        from public.cert_bulk_jobs where id = '${E9_JOB8_ID}';
+    `);
+    expect(mid[0]?.status).toBe("running");
+    expect(mid[0]?.failed).toBe(120);
+    expect(mid[0]?.cursorTs).not.toBeNull();
+    expect(mid[0]?.cursorAid).not.toBeNull();
+
+    // รอบสอง (CALL ใหม่ · worker รอบถัดไป): เดินต่อจาก cursor แถวที่ 121-200 (80
+    // แถว) คิวหมด → completed สะสม 0/200/200 — ไม่มีแถวถูกนับซ้ำ
+    const second = await callProc<StepResult>(
+      `call public.admin_cert_bulk_issue_step('${E9_JOB8_ID}', 120, null)`,
+    );
+    expect(second.job_id).toBe(E9_JOB8_ID);
+    expect(second.status).toBe("completed");
+    expect(second.issued_count).toBe(0);
+    expect(second.failed_count).toBe(200);
+    expect(second.total_attempts).toBe(200);
+  }, 180_000);
+
+  it("bulk MAJOR-2 (r2): job สะสม 99,999 + เดินอีก 1 แถว (เพดาน p_max_certs=1) → ปิด 'failed' พอดี 100,000 ในรอบเดียวกัน — แถวที่ถูกเดินได้ใบจริง", async () => {
+    // job 6 lazy: จำลอง job ที่สะสมความล้ม 99,999 จากรอบก่อน (update counts ตรง ๆ)
+    // · คิวหลักสูตร 8 = คน 14 (55 นาที — หน้าคิว) แล้วคน 13 (60 นาที) · แบบเดิม
+    // (0027): ตรวจเพดาน*หลัง* branch ชน v_max → p_max_certs=1 ออกเป็น 'running'
+    // ทั้งที่ครบ 100,000 แล้ว — assert 'failed' จับได้
+    await psql(`
+      insert into public.cert_bulk_jobs (id, created_by, course_id, status, created_at)
+      values ('${E9_JOB6_ID}', '${E9_STAFF_ID}', '${E9_COURSE8_ID}', 'pending',
+              now() - interval '8 minutes')
+      on conflict (id) do nothing;
+      update public.cert_bulk_jobs
+         set failed_count = 99999, total_attempts = 99999
+       where id = '${E9_JOB6_ID}';
+    `);
+    const body = await callProc<StepResult>(
+      `call public.admin_cert_bulk_issue_step('${E9_JOB6_ID}', 1, null)`,
+    );
+    expect(body.job_id).toBe(E9_JOB6_ID);
+    expect(body.status).toBe("failed");
+    expect(body.issued_count).toBe(1);
+    expect(body.failed_count).toBe(99999);
+    expect(body.total_attempts).toBe(100000);
+
+    // คน 14 (แถวเดียวที่ถูกเดิน) ได้ใบ valid จริง + job ปิดจริง (finished_at +
+    // last_error = ข้อความเพดานของ 0028)
+    const named = PEOPLE[13]; // คน 14
+    const namedCert = await psqlRows<{ n: number }>(`
+      select count(*)::int as n from public.certificates
+       where enrollment_id = '${named?.enrollment ?? ""}' and status = 'valid';
+    `);
+    expect(namedCert[0]?.n).toBe(1);
+    const jobs = await psqlRows<{ status: string; finishedAt: string | null; lastError: string }>(`
+      select status::text, finished_at::text as "finishedAt",
+             coalesce(last_error, '') as "lastError"
+        from public.cert_bulk_jobs where id = '${E9_JOB6_ID}';
+    `);
+    expect(jobs[0]?.status).toBe("failed");
+    expect(jobs[0]?.finishedAt).not.toBeNull();
+    expect(jobs[0]?.lastError).toContain("ERR-SYS-002");
+    expect(jobs[0]?.lastError).toContain("bulk_row_limit");
+  }, 60_000);
+
+  it("bulk MAJOR-2 (r2): job ที่สะสม 100,000 อยู่แล้ว → ปิด 'failed' ทันทีไม่ประมวลผลแถวใด (คนในคิวไม่ถูกออกใบ)", async () => {
+    // job 7 lazy: คิวหลักสูตร 8 ยังเหลือคน 13 (คน 14 มีใบจาก test ก่อน — anti-join
+    // ตัดแล้ว) · แบบเดิม (0027) ไม่มี pre-check → เดินคน 13 ก่อนค่อยพบเพดาน = เขา
+    // ได้ใบทั้งที่ job ตายไปแล้ว — assert issued 0 + ไม่มีใบ จับได้
+    await psql(`
+      insert into public.cert_bulk_jobs (id, created_by, course_id, status, created_at)
+      values ('${E9_JOB7_ID}', '${E9_STAFF_ID}', '${E9_COURSE8_ID}', 'pending',
+              now() - interval '6 minutes')
+      on conflict (id) do nothing;
+      update public.cert_bulk_jobs
+         set failed_count = 100000, total_attempts = 100000
+       where id = '${E9_JOB7_ID}';
+    `);
+    const body = await callProc<StepResult>(
+      `call public.admin_cert_bulk_issue_step('${E9_JOB7_ID}', 1000, null)`,
+    );
+    expect(body.job_id).toBe(E9_JOB7_ID);
+    expect(body.status).toBe("failed");
+    expect(body.issued_count).toBe(0);
+    expect(body.failed_count).toBe(100000);
+    expect(body.total_attempts).toBe(100000);
+
+    // คน 13 ไม่มีใบเกิดขึ้นเลย + job ปิดจริงด้วยข้อความเพดาน (pre-check path)
+    const skipped = PEOPLE[12]; // คน 13
+    const skippedCerts = await psqlRows<{ n: number }>(`
+      select count(*)::int as n from public.certificates
+       where enrollment_id = '${skipped?.enrollment ?? ""}';
+    `);
+    expect(skippedCerts[0]?.n).toBe(0);
+    const jobs = await psqlRows<{ status: string; finishedAt: string | null; lastError: string }>(`
+      select status::text, finished_at::text as "finishedAt",
+             coalesce(last_error, '') as "lastError"
+        from public.cert_bulk_jobs where id = '${E9_JOB7_ID}';
+    `);
+    expect(jobs[0]?.status).toBe("failed");
+    expect(jobs[0]?.finishedAt).not.toBeNull();
+    expect(jobs[0]?.lastError).toContain("bulk_row_limit");
+  }, 60_000);
 
   // ─── 2) auto path (CRT-008): cert_auto_issue_tick + feature_flags ───────────
 
@@ -770,9 +1040,14 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
     }
   }, 120_000);
 
-  it("auto M1+M3: tick scoped หลักสูตร 5 เดินผ่านคนชื่อว่าง 3 หน้าคิว ออกใบคนท้ายได้ (1/3) · โลกนอก fixture ไม่ถูกแตะ", async () => {
+  it("auto M1+M3 (r2): tick scoped เดินผ่านคนชื่อว่าง 3 หน้าคิว ออกใบคนท้ายได้ (1/3) · คนนอก scope ที่ออกได้ไม่ถูกแตะ · sweep จบ = reset → retry", async () => {
     try {
       await psql(`update public.feature_flags set enabled = true where key = 'cert_auto_issue';`);
+
+      // MINOR-1 (r2): คนนอก scope ที่ **ออกใบได้จริง** (ชื่อครบ ผ่าน ยังไม่มีใบ) บน
+      // หลักสูตร 4 — seed ก่อน tick แล้วพิสูจน์ว่า tick ของหลักสูตร 5 ไม่แตะเขา (เดิม
+      // ตรวจเฉพาะคนชื่อว่างที่ออกไม่ได้อยู่แล้ว — ไม่ใช่หลักฐาน scope)
+      await seedLazyPerson(E9_P15_OUTSIDE, 20);
 
       const first = await callProc<TickResult>(
         `call public.cert_auto_issue_tick('${E9_COURSE5_ID}', 1000, null)`,
@@ -796,22 +1071,116 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
       `);
       expect(namelessCerts[0]?.n).toBe(0);
 
-      // M3: แถวนอกขอบเขต (หลักสูตร 4 ของชุด bulk — ผ่านเงื่อนไขทั้งคิว) ไม่ถูกออกใบ
-      // โดย tick ของ test (สัญญา scope ของ 0027 — ต่างจาก sweep กลางของ 0026)
-      const outsideScope = await psqlRows<{ n: number }>(`
-        select count(*)::int as n from public.certificates c
-         where c.enrollment_id::text like '44444444-4444-4444-8444-0000000b%';
+      // M3 + MINOR-1: คนนอก scope ที่ออกได้ยังไม่มีใบ · ระบบไม่เคยออกใบบนหลักสูตร 4
+      // เลย (สัญญา scope ของ 0027/0028 — ต่างจาก sweep กลางของ 0026)
+      const outsideCert = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.certificates
+         where enrollment_id = '${E9_P15_OUTSIDE.enrollment}';
       `);
-      expect(outsideScope[0]?.n).toBe(0);
+      expect(outsideCert[0]?.n).toBe(0);
+      const autoOnOutsideCourse = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.certificates c
+          join public.enrollments e on e.id = c.enrollment_id
+         where e.course_id = '${E9_COURSE4_ID}' and c.issued_by = '${AUTO_ACTOR_ID}';
+      `);
+      expect(autoOnOutsideCourse[0]?.n).toBe(0);
 
-      // tick รอบสอง (scoped เดิม): คนมีชื่อมีใบแล้ว → issued=0 (คนชื่อว่างยังอยู่ในคิว
-      // และยังล้ม — cursor เริ่มใหม่ทุก call ตามสัญญา ไม่จำตำแหน่งข้าม call)
+      // tick รอบสอง: sweep ก่อนหน้า**จบครบ** (ไม่ชนเพดาน) → cursor ถูก reset เป็น
+      // รอบใหม่ → คนชื่อว่างถูกลองใหม่ (ล้มอีก — bounded ต่อ tick ด้วย p_max_certs)
       const second = await callProc<TickResult>(
         `call public.cert_auto_issue_tick('${E9_COURSE5_ID}', 1000, null)`,
       );
       expect(second.skipped).toBe(false);
       expect(second.issued_count).toBe(0);
       expect(second.failed_count).toBe(3);
+
+      // reset proof: แถวที่ submitted_at เก่ากว่าทุกแถวที่เดินไปแล้ว (seed ตอนหลัง)
+      // ต้องกลับมาถูกเห็นหลัง sweep จบ — ถ้า cursor ค้างไม่ reset เขาจะล่องหนไปตลอด
+      await seedLazyPerson(E9_P16_OLDEST, 90);
+      const third = await callProc<TickResult>(
+        `call public.cert_auto_issue_tick('${E9_COURSE5_ID}', 1000, null)`,
+      );
+      expect(third.skipped).toBe(false);
+      expect(third.issued_count).toBe(1);
+      expect(third.failed_count).toBe(3);
+      const oldestCert = await psqlRows<{ n: number; issuedBy: string }>(`
+        select count(*)::int as n, min(issued_by::text) as "issuedBy"
+          from public.certificates
+         where enrollment_id = '${E9_P16_OLDEST.enrollment}' and status = 'valid';
+      `);
+      expect(oldestCert[0]?.n).toBe(1);
+      expect(oldestCert[0]?.issuedBy).toBe(AUTO_ACTOR_ID);
+    } finally {
+      await psql(`update public.feature_flags set enabled = false where key = 'cert_auto_issue';`);
+    }
+  }, 120_000);
+
+  it("auto MAJOR-1 (r2): cursor durable ข้าม tick — เพดาน 1 ×2 รอบ รอบสามออกคนมีชื่อ failed=0 ไม่ล้มซ้ำ · คิวหมด = reset → แถวเก่ากลับมาถูกลองใหม่", async () => {
+    try {
+      await psql(`update public.feature_flags set enabled = true where key = 'cert_auto_issue';`);
+
+      // tick 1 (เพดาน 1): คนชื่อว่างตัวที่ 1 (หัวคิว ~30 นาที) ล้ม — cursor ของ scope
+      // นี้ถูกบันทึกแล้ว (durable ใน cert_auto_cursor — ไม่ใช่หน่วยความจำ procedure)
+      const t1 = await callProc<TickResult>(
+        `call public.cert_auto_issue_tick('${E9_COURSE7_ID}', 1, null)`,
+      );
+      expect(t1.skipped).toBe(false);
+      expect(t1.issued_count).toBe(0);
+      expect(t1.failed_count).toBe(1);
+      const cur1 = await psqlRows<{ ts: string | null; aid: string | null }>(`
+        select cursor_submitted_at::text as ts, cursor_attempt_id::text as aid
+          from public.cert_auto_cursor where scope_key = '${E9_COURSE7_ID}';
+      `);
+      expect(cur1[0]?.ts).not.toBeNull();
+      expect(cur1[0]?.aid).not.toBeNull();
+
+      // tick 2 (เพดาน 1 · CALL ใหม่): เดินต่อจาก cursor → คนชื่อว่างตัวที่ 2 (รูป
+      // 0027 ที่ cursor หาย = ตัวที่ 1 ซ้ำ — ตัวเลขรอบนี้จับไม่ได้ จับที่รอบสาม)
+      const t2 = await callProc<TickResult>(
+        `call public.cert_auto_issue_tick('${E9_COURSE7_ID}', 1, null)`,
+      );
+      expect(t2.skipped).toBe(false);
+      expect(t2.issued_count).toBe(0);
+      expect(t2.failed_count).toBe(1);
+
+      // tick 3 (เพดาน 1000): เหลือคนมีชื่อ 1 คน — ออกใบเดียว **failed=0** (cursor
+      // หายข้าม CALL = ล้มซ้ำ 2 ตัวเดิม = failed 2 — นี่คือจุดจับ MAJOR-1 ฝั่ง auto)
+      const t3 = await callProc<TickResult>(
+        `call public.cert_auto_issue_tick('${E9_COURSE7_ID}', 1000, null)`,
+      );
+      expect(t3.skipped).toBe(false);
+      expect(t3.issued_count).toBe(1);
+      expect(t3.failed_count).toBe(0);
+      const named = PEOPLE[11]; // คน 12 — ท้ายคิวของหลักสูตร 7
+      const namedCert = await psqlRows<{ n: number; issuedBy: string }>(`
+        select count(*)::int as n, min(issued_by::text) as "issuedBy"
+          from public.certificates
+         where enrollment_id = '${named?.enrollment ?? ""}' and status = 'valid';
+      `);
+      expect(namedCert[0]?.n).toBe(1);
+      expect(namedCert[0]?.issuedBy).toBe(AUTO_ACTOR_ID);
+
+      // sweep จบ (ไม่ชนเพดาน) → cursor ของ scope reset เป็น null (จบรอบ retry)
+      const cur3 = await psqlRows<{ ts: string | null }>(`
+        select cursor_submitted_at::text as ts
+          from public.cert_auto_cursor where scope_key = '${E9_COURSE7_ID}';
+      `);
+      expect(cur3[0]?.ts).toBeNull();
+
+      // reset proof: แถวเก่าสุด (submitted_at เก่ากว่าทุกแถวที่เดินไปแล้ว — seed ตอน
+      // นี้) กลับมาถูกเห็น + คนชื่อว่างถูกลองใหม่ (retry รอบ sweep ใหม่ — ล้มอีก 2)
+      await seedLazyPerson(E9_P17_OLDEST, 90);
+      const t4 = await callProc<TickResult>(
+        `call public.cert_auto_issue_tick('${E9_COURSE7_ID}', 1000, null)`,
+      );
+      expect(t4.skipped).toBe(false);
+      expect(t4.issued_count).toBe(1);
+      expect(t4.failed_count).toBe(2);
+      const oldestCert = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.certificates
+         where enrollment_id = '${E9_P17_OLDEST.enrollment}' and status = 'valid';
+      `);
+      expect(oldestCert[0]?.n).toBe(1);
     } finally {
       await psql(`update public.feature_flags set enabled = false where key = 'cert_auto_issue';`);
     }

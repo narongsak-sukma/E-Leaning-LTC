@@ -1,5 +1,13 @@
 -- 0027_cert_bulk_worker_redesign — แก้ codex gate r1 (Wave E Phase 2) M1+M2+M3
 --
+-- ⚠️ SUPERSEDED (ส่วน procedure) โดย 0028_cert_cursor_durable.sql — codex gate r2
+--    (2026-09-12 · /tmp/codex-gate-e-p2-r2.txt) พบ MAJOR-1 (cursor อยู่ในหน่วยความจำ
+--    ของ procedure หายข้าม CALL → เดินแถวล้มซ้ำจากหัวคิว) + MAJOR-2 (เพดาน 100,000
+--    แถวของ job ถูกข้ามได้) → 0028 แทนที่ admin_cert_bulk_issue_step และ
+--    cert_auto_issue_tick ทั้งตัว (create or replace พร้อม cursor durable) ·
+--    สิ่งที่ยัง canonical จากไฟล์นี้: admin_cert_bulk_pick v2 (cursor picker) ·
+--    ตาราง cert_bulk_jobs/cron สองตัว/grants — 0028 ไม่แตะ
+--
 -- สิ่งที่ gate ตัดสิน (2026-09-12 · /tmp/codex-gate-e-p2-r1.txt):
 --   M1 แถวที่ออกใบไม่ได้ปิดกั้นคิวทั้งหมด — 0026 หยิบ "200 แถวแรก" ซ้ำทุกรอบ
 --      (anti-join ตัดเฉพาะใบที่ออกสำเร็จ) แถวที่ล้มอยู่หน้าคิวตลอดชีวิต เมื่อทั้ง
