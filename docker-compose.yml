@@ -95,6 +95,10 @@ services:
       PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_API_MAX_ROWS: "1000"
+      # gate p1-r1 MAJOR-1: PostgREST 12 ปิด aggregate โดยดีฟอลต์ — monitoring/statistics
+      # ใช้ id.count()/score_pct.avg() ผ่าน user-JWT client จึงต้องเปิดไว้ (พิสูจน์ด้วย
+      # curl /rest/v1/courses?select=id.count() ก่อน-หลัง: 400 PGRST123 → 200)
+      PGRST_DB_AGGREGATES_ENABLED: "true"
     networks: [ltc-dev]
 
   # ----------------------------------------------------------------- Storage API

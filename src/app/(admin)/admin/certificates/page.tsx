@@ -3,39 +3,80 @@ import Link from "next/link";
 
 import { AdminDataState } from "@/components/admin/AdminDataState";
 import {
-  CertificateManagePanel,
+  CertificateRowActions,
   IssueCertificateButton,
 } from "@/components/admin/CertificateActions";
 import { DataTable, type DataTableColumn } from "@/components/admin/DataTable";
 import { getAdminCourses, getAdminStaffSession } from "@/lib/fixtures/admin";
-import { getEligibleAttempts } from "@/lib/exam-admin.server";
+import { getAdminCertificates, getEligibleAttempts } from "@/lib/exam-admin.server";
 import {
   canIssueCertificate,
   canRevokeCertificate,
+  CERT_STATUS_LABEL_TH,
+  CERT_STATUS_OPTIONS,
+  CERT_STATUS_TONE,
   firstSearchParam,
   formatThaiDateTime,
+  isExamAdminCertificateStatus,
+  type ExamAdminCertificateRow,
   type ExamAdminEligibleAttempt,
 } from "@/lib/exam-admin.view";
 
 export const metadata: Metadata = {
   title: "ประกาศนียบัตร · หลังบ้านสอบ",
   description:
-    "คิวผู้มีสิทธิ์รับประกาศนียบัตรและการจัดการใบ — ออกใบ เพิกถอน และออกใบแทน",
+    "คิวผู้มีสิทธิ์รับประกาศนียบัตร ทะเบียนใบที่ออกแล้ว และการจัดการใบ — ออกใบ เพิกถอน และออกใบแทน",
 };
 
 /**
- * หน้าทะเบียนประกาศนียบัตร — คิวผู้มีสิทธิ์รับใบ + แผงจัดการใบที่ออกแล้ว
+ * หน้าทะเบียนประกาศนียบัตร (Wave E · PB-20) — คิวผู้มีสิทธิ์รับใบ + ทะเบียนใบที่ออกแล้ว
  * - คิว: GET /api/v1/admin/certificates/eligible (สิทธิ์ certificate:issue — SoD T9)
- * - ออกใบ: ปุ่มต่อแถว → POST /api/v1/admin/certificates
- * - เพิกถอน/ออกใบแทน: แผงรับ uuid ของใบ (ยังไม่มี endpoint รายการใบ — ธงให้ lead)
+ * - ออกใบ: ปุ่มต่อแถว → POST /api/v1/admin/certificates (พฤติกรรมเดิมคงเดิม)
+ * - ทะเบียน + ค้นหา: GET /api/v1/admin/certificates (D55-2 — staff:registrar/
+ *   super_admin · แสดง snapshot ผู้ถือ/หลักสูตร · BFF เขียน audit PII_ACCESS ทุกครั้ง
+ *   ที่เปิดดู) — URL = state จริง (เงื่อนไขค้นหา + cursor อยู่ใน query string)
+ * - เพิกถอน/ออกใบแทน: ปุ่มต่อแถวของตารางทะเบียน (ใช้ id ของแถว — แทนแผงรับ uuid เดิม)
  * - การแสดงชื่อผู้เรียนถูกบันทึก audit ที่ BFF อยู่แล้ว — หน้าไม่ log เอง
  */
 
-/** href ของหน้ารายการคิว — รักษา cursor ที่เลือกไว้ (URL = state จริง) */
-function buildCertificatesHref(options: { cursor?: string }): string {
+/** class ของ badge สถานะใบตาม tone (ภาษาเดียวกับ badge ของ repo) */
+function statusToneClassOf(tone: "success" | "danger" | "neutral"): string {
+  if (tone === "success") {
+    return "bg-green-50 text-green-800";
+  }
+  if (tone === "danger") {
+    return "bg-red-50 text-red-700";
+  }
+  return "bg-mist-100 text-ink-600";
+}
+
+/**
+ * href ของหน้า — รักษาเงื่อนไขค้นหา + cursor ที่เลือกไว้ (URL = state จริง · แบบ eligible)
+ * cursor สองตัวแยกกัน: คิวใช้ `cursor` (เดิม) · ทะเบียนใช้ `cert_cursor`
+ * เพื่อไม่ให้การเลื่อนหน้าของตารางใดตารางหนึ่งรบกวนอีกตาราง
+ */
+function buildCertificatesHref(options: {
+  queueCursor?: string | undefined;
+  registryCursor?: string | undefined;
+  certNo?: string | undefined;
+  verifyCode?: string | undefined;
+  status?: string | undefined;
+}): string {
   const search = new URLSearchParams();
-  if (options.cursor !== undefined && options.cursor.length > 0) {
-    search.set("cursor", options.cursor);
+  if (options.queueCursor !== undefined && options.queueCursor.length > 0) {
+    search.set("cursor", options.queueCursor);
+  }
+  if (options.registryCursor !== undefined && options.registryCursor.length > 0) {
+    search.set("cert_cursor", options.registryCursor);
+  }
+  if (options.certNo !== undefined && options.certNo.length > 0) {
+    search.set("cert_no", options.certNo);
+  }
+  if (options.verifyCode !== undefined && options.verifyCode.length > 0) {
+    search.set("verify_code", options.verifyCode);
+  }
+  if (options.status !== undefined && options.status.length > 0) {
+    search.set("status", options.status);
   }
   const query = search.toString();
   return query.length > 0 ? `/admin/certificates?${query}` : "/admin/certificates";
@@ -47,7 +88,14 @@ export default async function AdminCertificatesPage({
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const params = await searchParams;
-  const cursor = firstSearchParam(params["cursor"]);
+
+  /* เงื่อนไขค้นหา + ตำแหน่งหน้า (URL = state) — ค่าแปลกปลอม = ไม่ระบุ (fail-closed) */
+  const queueCursor = firstSearchParam(params["cursor"]);
+  const registryCursor = firstSearchParam(params["cert_cursor"]);
+  const certNo = firstSearchParam(params["cert_no"]) ?? "";
+  const verifyCode = firstSearchParam(params["verify_code"]) ?? "";
+  const statusRaw = firstSearchParam(params["status"]);
+  const status = isExamAdminCertificateStatus(statusRaw) ? statusRaw : undefined;
 
   /* สิทธิ์แสดงผลจาก /api/v1/me จริง — การตัดสินจริงอยู่ที่ BFF เสมอ (SoD T9) */
   const session = await getAdminStaffSession();
@@ -56,7 +104,7 @@ export default async function AdminCertificatesPage({
   const canRevoke = canRevokeCertificate(roles);
 
   /* คิวผู้มีสิทธิ์รับใบ — โหลดเมื่อมีสิทธิ์ออกใบเท่านั้น (ข้อมูลผู้เรียน = PII) */
-  const queue = canIssue ? await getEligibleAttempts({ cursor }) : null;
+  const queue = canIssue ? await getEligibleAttempts({ cursor: queueCursor }) : null;
   if (queue !== null && !queue.ok) {
     return (
       <div>
@@ -122,11 +170,75 @@ export default async function AdminCertificatesPage({
     },
   ];
 
+  /* ทะเบียนใบที่ออกแล้ว — โหลดเมื่อมีบทบาทอ่านทะเบียน (D55-2 · BFF ตัดสินจริงเสมอ) */
+  const registry = canRevoke
+    ? await getAdminCertificates({
+        certNo,
+        verifyCode,
+        status,
+        cursor: registryCursor,
+      })
+    : null;
+  const registryRows = registry !== null && registry.ok ? registry.data.data : [];
+  const registryPage = registry !== null && registry.ok ? registry.data.page : null;
+
+  const registryColumns: Array<DataTableColumn<ExamAdminCertificateRow>> = [
+    {
+      id: "certNo",
+      header: "เลขที่ใบ",
+      render: (row) => <span className="font-semibold whitespace-nowrap text-ink-900">{row.certNo}</span>,
+    },
+    {
+      id: "holder",
+      header: "ผู้ถือใบ (snapshot)",
+      render: (row) => (
+        <span className="font-semibold text-ink-900">
+          {row.holderName.length > 0 ? row.holderName : "(ยังไม่ระบุชื่อ)"}
+        </span>
+      ),
+    },
+    {
+      id: "course",
+      header: "หลักสูตร (snapshot)",
+      render: (row) => <span>{row.courseTitle}</span>,
+    },
+    {
+      id: "status",
+      header: "สถานะ",
+      render: (row) => (
+        <span
+          className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${statusToneClassOf(CERT_STATUS_TONE[row.status])}`}
+        >
+          {CERT_STATUS_LABEL_TH[row.status]}
+        </span>
+      ),
+    },
+    {
+      id: "issued",
+      header: "วันที่ออก",
+      render: (row) => (
+        <span className="whitespace-nowrap text-ink-600">{formatThaiDateTime(row.issuedAt)}</span>
+      ),
+    },
+    {
+      id: "actions",
+      header: "การจัดการ",
+      render: (row) => (
+        <CertificateRowActions
+          certificateId={row.id}
+          certNo={row.certNo}
+          status={row.status}
+          canManage={canRevoke}
+        />
+      ),
+    },
+  ];
+
   return (
     <div>
       <h1 className="font-heading text-xl font-bold text-ink-900 sm:text-2xl">ประกาศนียบัตร</h1>
       <p className="mt-1 text-sm text-ink-500">
-        คิวผู้ผ่านเกณฑ์รอออกใบ และการจัดการใบที่ออกแล้ว (ทะเบียนประกาศนียบัตร)
+        คิวผู้ผ่านเกณฑ์รอออกใบ และทะเบียนประกาศนียบัตรที่ออกแล้ว
       </p>
 
       {canIssue ? (
@@ -150,7 +262,12 @@ export default async function AdminCertificatesPage({
           </p>
           {queuePage !== null && queuePage.hasMore && queuePage.nextCursor !== null ? (
             <Link
-              href={buildCertificatesHref({ cursor: queuePage.nextCursor })}
+              href={buildCertificatesHref({
+                queueCursor: queuePage.nextCursor,
+                certNo,
+                verifyCode,
+                status,
+              })}
               className="mt-2 inline-flex rounded-[10px] border border-brand-600 bg-white px-[18px] py-2 font-heading text-sm font-semibold text-brand-700 hover:bg-brand-50"
             >
               หน้าถัดไป
@@ -163,9 +280,142 @@ export default async function AdminCertificatesPage({
         </p>
       )}
 
-      <div className="mt-6">
-        <CertificateManagePanel canRevoke={canRevoke} />
-      </div>
+      <section className="mt-8">
+        <h2 className="font-heading text-base font-semibold text-ink-900">
+          ทะเบียนประกาศนียบัตรที่ออกแล้ว
+        </h2>
+
+        {canRevoke ? (
+          registry !== null && registry.ok ? (
+            <>
+              {/* ค้นหา — GET form (URL = state) · ค่าว่าง = ไม่ระบุ (BFF ตัดช่องว่างก่อนตรวจ) */}
+              <form method="get" action="/admin/certificates" className="mt-3 space-y-3">
+                {queueCursor !== null ? (
+                  <input type="hidden" name="cursor" value={queueCursor} />
+                ) : null}
+                <fieldset className="flex flex-wrap items-end gap-3">
+                  <legend className="sr-only">ค้นหาทะเบียนประกาศนียบัตร</legend>
+                  <div>
+                    <label
+                      htmlFor="cert-search-cert-no"
+                      className="block text-sm font-medium text-ink-700"
+                    >
+                      เลขที่ใบ (นำหน้า)
+                    </label>
+                    <input
+                      id="cert-search-cert-no"
+                      name="cert_no"
+                      type="text"
+                      defaultValue={certNo}
+                      maxLength={64}
+                      className="mt-1 w-56 rounded-[10px] border border-mist-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="cert-search-verify-code"
+                      className="block text-sm font-medium text-ink-700"
+                    >
+                      รหัสตรวจสอบ (ตรงตัว)
+                    </label>
+                    <input
+                      id="cert-search-verify-code"
+                      name="verify_code"
+                      type="text"
+                      defaultValue={verifyCode}
+                      maxLength={64}
+                      className="mt-1 w-56 rounded-[10px] border border-mist-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="cert-search-status"
+                      className="block text-sm font-medium text-ink-700"
+                    >
+                      สถานะ
+                    </label>
+                    <select
+                      id="cert-search-status"
+                      name="status"
+                      defaultValue={status ?? ""}
+                      className="mt-1 w-48 rounded-[10px] border border-mist-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
+                    >
+                      {CERT_STATUS_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="submit"
+                    className="rounded-[10px] bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-card hover:bg-brand-700"
+                  >
+                    ค้นหา
+                  </button>
+                </fieldset>
+              </form>
+
+              <div className="mt-3">
+                <DataTable
+                  caption="ตารางทะเบียนประกาศนียบัตร (snapshot ของวันออกใบ — แถวผิดรูปจะไม่ถูกแสดง)"
+                  columns={registryColumns}
+                  rows={registryRows}
+                  getKey={(row) => row.id}
+                  emptyTitle="ยังไม่มีใบที่ตรงเงื่อนไข"
+                  emptyHint="ลองปรับเงื่อนไขค้นหา หรือใบที่เพิ่งออกจะปรากฏในทะเบียนนี้ทันที"
+                />
+              </div>
+              <p className="mt-3 text-sm text-ink-500">
+                หน้านี้แสดง {registryRows.length} ใบ
+                {registryPage !== null && registryPage.hasMore ? " — ยังมีรายการต่อ" : ""}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                {registryPage !== null &&
+                registryPage.hasMore &&
+                registryPage.nextCursor !== null ? (
+                  <Link
+                    href={buildCertificatesHref({
+                      queueCursor,
+                      registryCursor: registryPage.nextCursor,
+                      certNo,
+                      verifyCode,
+                      status,
+                    })}
+                    className="inline-flex rounded-[10px] border border-brand-600 bg-white px-[18px] py-2 font-heading text-sm font-semibold text-brand-700 hover:bg-brand-50"
+                  >
+                    หน้าถัดไปของทะเบียน
+                  </Link>
+                ) : null}
+                {registryCursor !== null ? (
+                  <Link
+                    href={buildCertificatesHref({ queueCursor, certNo, verifyCode, status })}
+                    className="inline-flex rounded-[10px] border border-mist-300 bg-white px-[18px] py-2 font-heading text-sm font-semibold text-ink-700 hover:bg-mist-100"
+                  >
+                    กลับไปหน้าแรกของทะเบียน
+                  </Link>
+                ) : null}
+              </div>
+            </>
+          ) : registry === null ? null : (
+            <div className="mt-3">
+              <AdminDataState
+                kind={registry.kind}
+                retryHref={buildCertificatesHref({
+                  registryCursor,
+                  certNo,
+                  verifyCode,
+                  status,
+                })}
+              />
+            </div>
+          )
+        ) : (
+          <p className="mt-3 rounded-[10px] bg-mist-100 px-3 py-2 text-sm leading-relaxed text-ink-600">
+            คุณไม่มีสิทธิ์ดูทะเบียนประกาศนียบัตร — แสดงเฉพาะผู้รับผิดชอบทะเบียนและผู้ดูแลระบบ
+          </p>
+        )}
+      </section>
     </div>
   );
 }

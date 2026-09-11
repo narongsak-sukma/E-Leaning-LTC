@@ -185,6 +185,16 @@ async function CourseDetailContent({ params }: CoursePageProps) {
                   <li className="tabular-nums">เกณฑ์ผ่าน {course.exam.passScorePct}%</li>
                   <li className="tabular-nums">สอบได้ไม่เกิน {course.exam.maxAttempts} ครั้ง</li>
                 </ul>
+                {course.exam.assessmentId !== null ? (
+                  <div className="mt-4">
+                    <Link
+                      className="inline-flex rounded-[10px] bg-brand-600 px-6 py-2 font-heading text-sm font-semibold text-white shadow-card hover:bg-brand-700"
+                      href={`/courses/${encodeURIComponent(course.id)}/exam/${encodeURIComponent(course.exam.assessmentId)}`}
+                    >
+                      เข้าสอบ
+                    </Link>
+                  </div>
+                ) : null}
                 <p className="mt-3 text-sm leading-relaxed text-ink-500">
                   ผู้เรียนที่สอบผ่านเกณฑ์จะได้รับประกาศนียบัตรจากสภาทนายความแห่งประเทศไทย พร้อมบันทึก{" "}
                   <span className="tabular-nums">{course.credits}</span> หน่วยกิตเข้า Credit Bank

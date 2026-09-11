@@ -1,6 +1,6 @@
 "use client";
 
-import { useReducer, useState } from "react";
+import { useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -17,8 +17,10 @@ import { ConfirmModal } from "./ConfirmModal";
  *
  * - IssueCertificateButton — คิวผู้มีสิทธิ์ → ออกใบ (POST /api/v1/admin/certificates
  *   body {enrollmentId} strict → 201 IssuedCertificateResource)
- * - CertificateManagePanel — จัดการใบที่ออกแล้ว: เพิกถอน (POST .../{id}/revoke
- *   body {reason} ≥10 ตัวอักษร) / ออกใบแทน (POST .../{id}/reissue ไม่มี body → 201)
+ * - CertificateRowActions (Wave E · PB-20) — ปุ่มเพิกถอน/ออกใบแทนต่อแถวของตาราง
+ *   ทะเบียนใบ (ย้ายมาจากแผงรับ uuid เดิม — ใช้ id ของแถวแทนการพิมพ์ uuid):
+ *   เพิกถอน POST .../{id}/revoke body {reason} ≥10 ตัวอักษร / ออกใบแทน
+ *   POST .../{id}/reissue ไม่มี body → 201 · แสดงเฉพาะแถวสถานะ valid
  * - ทุก action ร้ายแรงผ่าน ConfirmModal ภาษาไทยก่อนยิงเสมอ · 403 → แจ้งไม่มีสิทธิ์
  *   (ERR-RBAC-001) ไม่ crash · ข้อมูลใบที่ได้กลับตรวจรูปก่อนใช้ (fail-closed → null)
  */
@@ -37,6 +39,27 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** รูปแบบ uuid → boolean */
 export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value.trim());
+}
+
+/**
+ * ตัดสินว่า error ของ action แถวสัญญาว่า "รายการจะรีเฟรชให้อัตโนมัติ" หรือไม่
+ * (gate p1-r1 MINOR-6) — 409 (สถานะใบเปลี่ยน) / 404 (ไม่พบใบ) = ข้อมูลแถวที่เซิร์ฟเวอร์
+ * ถืออยู่ไม่ตรงกับหน้าอีกแล้ว จึงต้อง refresh ตอนปิดโมดัล · error อื่น (403/VAL/
+ * transport) ไม่สัญญา — ปล่อยผู้ใช้กดค้นหาใหม่เอง
+ */
+export function shouldRefreshAfterError(error: unknown): boolean {
+  return (
+    error instanceof AdminApiError && (error.status === 409 || error.status === 404)
+  );
+}
+
+/**
+ * ปิดโมดัลกลาง submitting ต้องถูกกั้นทุกช่องทาง (ยกเลิก/Escape/ฉากหลัง — gate r2
+ * MINOR): ถ้าปิ่นปล่อยปิดได้ ผลตอบกลับที่มาช้าจะตั้ง refreshOnClose หลังโมดัลปิด
+ * ไปแล้ว — ครั้งนั้นไม่ refresh ตามที่ข้อความสัญญา และ flag ค้างไป session ถัดไป
+ */
+export function modalCloseBlocked(phase: CertRowActionPhase): boolean {
+  return phase === "submitting";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -232,93 +255,6 @@ export function certIssueReducer(state: CertIssueState, event: CertIssueEvent): 
   }
 }
 
-/* ─── state machine ของแผงจัดการใบ (pure — test ได้ใน node) ─── */
-
-export type CertManagePhase =
-  | "idle"
-  | "revoking"
-  | "reissuing"
-  | "submitting"
-  | "success"
-  | "error";
-
-/** ชนิดการดำเนินการที่กำลังรัน — กำหนดว่าโมดัลใดเปิดอยู่ */
-export type CertManageActionKind = "revoke" | "reissue";
-
-export interface CertManageState {
-  readonly phase: CertManagePhase;
-  /** ชนิดการดำเนินการล่าสุด — null ตอน idle · คงอยู่ตลอด submitting/error/success */
-  readonly actionKind: CertManageActionKind | null;
-  readonly certIdInput: string;
-  readonly reasonInput: string;
-  readonly message: string | null;
-  readonly issuedView: IssuedCertificateView | null;
-}
-
-export const CERT_MANAGE_DEFAULT: CertManageState = {
-  phase: "idle",
-  actionKind: null,
-  certIdInput: "",
-  reasonInput: "",
-  message: null,
-  issuedView: null,
-};
-
-export type CertManageEvent =
-  | { type: "TYPE_CERT_ID" | "TYPE_REASON"; value: string }
-  | { type: "REQUEST_REVOKE" | "REQUEST_REISSUE" }
-  | { type: "SUBMIT" }
-  | {
-      type: "RESOLVE_SUCCESS";
-      view: IssuedCertificateView | RevokedCertificateView | ReissuedCertificateView | null;
-    }
-  | { type: "REJECT"; message: string }
-  | { type: "CLOSE" };
-
-/** แก้ input ได้ตอน idle และ revoking (กรอกเหตุผลในโมดัล) — กันแก้กลางคันขณะกำลังส่ง */
-export function certManageReducer(state: CertManageState, event: CertManageEvent): CertManageState {
-  switch (event.type) {
-    case "TYPE_CERT_ID":
-      return state.phase === "idle" ? { ...state, certIdInput: event.value } : state;
-    case "TYPE_REASON":
-      return state.phase === "idle" || state.phase === "revoking"
-        ? { ...state, reasonInput: event.value }
-        : state;
-    case "REQUEST_REVOKE":
-      return state.phase === "idle"
-        ? { ...state, phase: "revoking", actionKind: "revoke", message: null, issuedView: null }
-        : state;
-    case "REQUEST_REISSUE":
-      return state.phase === "idle"
-        ? { ...state, phase: "reissuing", actionKind: "reissue", message: null, issuedView: null }
-        : state;
-    case "SUBMIT":
-      return state.phase === "revoking" || state.phase === "reissuing"
-        ? { ...state, phase: "submitting" }
-        : state;
-    case "RESOLVE_SUCCESS":
-      return state.phase === "submitting"
-        ? {
-            ...state,
-            phase: "success",
-            message: null,
-            issuedView:
-              event.view !== null && "newCertificate" in event.view
-                ? event.view.newCertificate
-                : null,
-          }
-        : state;
-    case "REJECT":
-      return state.phase === "submitting"
-        ? { ...state, phase: "error", message: event.message }
-        : state;
-    case "CLOSE":
-      return CERT_MANAGE_DEFAULT;
-    default:
-      return state;
-  }
-}
-
 /* ─── component — ปุ่มออกใบต่อแถวคิว (client) ─── */
 
 const CERTIFICATE_CREATE_PATH = "/api/v1/admin/certificates";
@@ -461,65 +397,146 @@ export function IssueCertificateButton({
   );
 }
 
-/* ─── component — แผงจัดการใบที่ออกแล้ว (client) ─── */
 
-const CERTIFICATE_REVOKE_PATH_PREFIX = "/api/v1/admin/certificates/";
-const REISSUE_SEGMENT = "/reissue";
-const REVOKE_SEGMENT = "/revoke";
+/* ─── state machine ของปุ่มเพิกถอน/ออกใบแทนต่อแถว (pure — test ได้ใน node) ─── */
 
-const REVOKE_TEXTAREA_CLASS =
-  "w-full rounded-[10px] border border-mist-300 bg-white px-3 py-2 text-sm text-ink-900 focus:border-brand-600 focus:outline-none";
+export type CertRowActionPhase = "idle" | "confirming" | "submitting" | "success" | "error";
 
-/** หัวข้อโมดัลของแผงจัดการ — ภาษาไทยตามชนิดการดำเนินการและ phase (pure — test ได้) */
-export function manageTitleOf(phase: CertManagePhase, kind: "revoke" | "reissue"): string {
-  if (phase === "success") {
-    return kind === "revoke" ? "เพิกถอนใบสำเร็จ" : "ออกใบแทนสำเร็จ";
-  }
-  if (phase === "error") {
-    return "ดำเนินการไม่สำเร็จ";
-  }
-  if (phase === "submitting") {
-    return kind === "revoke" ? "กำลังเพิกถอนใบ..." : "กำลังออกใบแทน...";
-  }
-  return kind === "revoke" ? "ยืนยันการเพิกถอนใบประกาศนียบัตร" : "ยืนยันการออกใบแทน";
+/** ชนิด action ของแถว — กำหนดโมดัลที่เปิด (เพิกถอนมีช่องเหตุผล · ออกใบแทนไม่มี) */
+export type CertRowActionKind = "revoke" | "reissue";
+
+export interface CertRowActionState {
+  readonly phase: CertRowActionPhase;
+  readonly actionKind: CertRowActionKind | null;
+  /** เหตุผลเพิกถอน — พิมพ์ได้เฉพาะช่วง confirming ของ revoke (ค้างเนื้อความเดิมตอน submitting) */
+  readonly reason: string;
+  /** ข้อความสำเร็จ/ล้มเหลวที่คงอยู่จนกดปิด (กัน unmount ทิ้งผลลัพธ์) */
+  readonly message: string | null;
+  /** certNo ของผลลัพธ์ (ใบใหม่ของ reissue) — null จนกว่าจะสำเร็จ */
+  readonly resultCertNo: string | null;
 }
 
-/** ป้ายปุ่มยืนยันของแผงจัดการตาม phase */
-export function manageConfirmLabelOf(phase: CertManagePhase): string {
+export const CERT_ROW_ACTION_DEFAULT: CertRowActionState = {
+  phase: "idle",
+  actionKind: null,
+  reason: "",
+  message: null,
+  resultCertNo: null,
+};
+
+export type CertRowActionEvent =
+  | { type: "REQUEST_REVOKE" }
+  | { type: "REQUEST_REISSUE" }
+  | { type: "TYPE_REASON"; value: string }
+  | { type: "SUBMIT" }
+  | { type: "RESOLVE_SUCCESS"; certNo: string }
+  | { type: "REJECT"; message: string }
+  | { type: "CLOSE" };
+
+/**
+ * reducer ต่อแถว — idle → confirming → submitting → success | error → idle
+ * ปุ่มเปิดได้ทีละ action (REQUEST_* ตาม actionKind ห้ามสลับกลางอากาศ)
+ */
+export function certRowActionReducer(state: CertRowActionState, event: CertRowActionEvent): CertRowActionState {
+  switch (event.type) {
+    case "REQUEST_REVOKE":
+      return state.phase === "idle"
+        ? { phase: "confirming", actionKind: "revoke", reason: "", message: null, resultCertNo: null }
+        : state;
+    case "REQUEST_REISSUE":
+      return state.phase === "idle"
+        ? { phase: "confirming", actionKind: "reissue", reason: "", message: null, resultCertNo: null }
+        : state;
+    case "TYPE_REASON":
+      return state.phase === "confirming" && state.actionKind === "revoke"
+        ? { ...state, reason: event.value }
+        : state;
+    case "SUBMIT":
+      return state.phase === "confirming"
+        ? { ...state, phase: "submitting" }
+        : state;
+    case "RESOLVE_SUCCESS":
+      return state.phase === "submitting"
+        ? { ...state, phase: "success", message: null, resultCertNo: event.certNo }
+        : state;
+    case "REJECT":
+      return state.phase === "submitting"
+        ? { ...state, phase: "error", message: event.message }
+        : state;
+    case "CLOSE":
+      // กันซ้ำชั้น reducer (gate r2 MINOR): submitting ปิดไม่ได้ — ผลล่าช้าต้องรอ
+      // ตกถึง success/error ก่อน โมดัลจะปิดพร้อม refresh ตามที่สัญญาไว้
+      return state.phase === "submitting" ? state : CERT_ROW_ACTION_DEFAULT;
+    default:
+      return state;
+  }
+}
+
+/** หัวข้อโมดัลตาม phase + actionKind — ภาษาไทยทั้งหมด */
+export function manageTitleOf(phase: CertRowActionPhase, kind: CertRowActionKind): string {
+  if (phase === "success") {
+    return kind === "revoke" ? "เพิกถอนสำเร็จ" : "ออกใบแทนสำเร็จ";
+  }
+  if (phase === "error") {
+    return kind === "revoke" ? "เพิกถอนไม่สำเร็จ" : "ออกใบแทนไม่สำเร็จ";
+  }
+  return kind === "revoke" ? "ยืนยันการเพิกถอนประกาศนียบัตร" : "ยืนยันการออกใบแทน";
+}
+
+/** ป้ายปุ่มยืนยันตาม phase + actionKind */
+export function manageConfirmLabelOf(phase: CertRowActionPhase, kind: CertRowActionKind): string {
   if (phase === "success" || phase === "error") {
     return "ปิด";
   }
   if (phase === "submitting") {
-    return "กำลังดำเนินการ...";
+    return kind === "revoke" ? "กำลังเพิกถอน..." : "กำลังออกใบแทน...";
   }
-  return "ยืนยันดำเนินการ";
+  return kind === "revoke" ? "ยืนยันเพิกถอน" : "ยืนยันออกใบแทน";
 }
 
-export interface CertificateManagePanelProps {
-  /** certificate:revoke — false = ซ่อนแผงทั้งหมด (ตัดสินที่ BFF เสมอ) */
-  readonly canRevoke: boolean;
+/* ─── component — ปุ่มเพิกถอน/ออกใบแทนต่อแถวทะเบียน (client · Wave E PB-20) ─── */
+
+const CERT_REVOKE_PATH_PREFIX = "/api/v1/admin/certificates";
+
+export interface CertificateRowActionsProps {
+  /** id ของใบจากแถวตาราง — ใช้แทนการพิมพ์ uuid (ย้ายมาจากแผง uuid เดิม) */
+  readonly certificateId: string;
+  /** เลขที่ใบ — ใช้ใน confirm dialog + aria-label (ไม่ log ที่ฝั่ง client) */
+  readonly certNo: string;
+  /** แสดงปุ่มเฉพาะแถว valid — revoked/superseded ไม่มี action ให้ทำ */
+  readonly status: "valid" | "revoked" | "superseded";
+  /** D55-2 — false = ไม่แสดงปุ่ม (ตัดสินที่ BFF เสมอ) */
+  readonly canManage: boolean;
 }
 
-export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProps) {
+export function CertificateRowActions({
+  certificateId,
+  certNo,
+  status,
+  canManage,
+}: CertificateRowActionsProps) {
   const router = useRouter();
-  const [state, dispatch] = useReducer(certManageReducer, CERT_MANAGE_DEFAULT);
-  const [inputError, setInputError] = useState<string | null>(null);
-  // ข้อความตรวจเหตุผลเพิกถอนในโมดัล (แยกจาก inputError ที่อยู่นอกโมดัล —
-  // ผู้ใช้มองไม่เห็น inputError ขณะโมดัลเปิดอยู่)
+  const [state, dispatch] = useReducer(certRowActionReducer, CERT_ROW_ACTION_DEFAULT);
+  /** error ของช่องเหตุผล (ตรวจตอนกดยืนยัน — เคลียร์เมื่อแก้/ปิดโมดัล) */
   const [reasonError, setReasonError] = useState<string | null>(null);
+  /** gate p1-r1 MINOR-6: หน่วง router.refresh() ไว้ตอนปิดโมดัล — สำเร็จแล้ว refresh ทันที
+   *  จะทำให้แถว re-render เป็น null (revoked/superseded ไม่มีปุ่ม) ก่อนผู้ใช้อ่านข้อความ
+   *  "เลขที่ใบใหม่" ทิ้ง · ตั้ง flag ทั้งกรณีสำเร็จและ 409/404 (ข้อความสัญญาว่าจะรีเฟรช) */
+  const refreshOnClose = useRef(false);
 
+  /** จุดเดียวที่ map error ของ BFF → ข้อความไทย (แบบ IssueCertificateButton) */
   const describeError = (error: unknown): string => {
     if (error instanceof AdminApiError && error.status === 403) {
       return "คุณไม่มีสิทธิ์จัดการประกาศนียบัตร (ERR-RBAC-001)";
     }
     if (error instanceof AdminApiError && error.status === 409) {
-      return "สถานะใบไม่ตรงกับการดำเนินการ (เช่น ใบถูกเพิกถอนไปแล้ว)";
+      return "สถานะของใบเปลี่ยนไปแล้ว — รายการจะรีเฟรชให้อัตโนมัติ";
+    }
+    if (error instanceof AdminApiError && error.status === 404) {
+      return "ไม่พบประกาศนียบัตรนี้ — รายการจะรีเฟรชให้อัตโนมัติ";
     }
     if (error instanceof AdminApiError && error.code === "ERR-VAL-001") {
       return `ข้อมูลไม่ถูกต้อง: ${validationFieldLabels(error.fields).join(", ")}`;
-    }
-    if (error instanceof AdminApiError && error.status === 404) {
-      return "ไม่พบใบประกาศนียบัตรตามรหัสที่ระบุ";
     }
     if (error instanceof AdminApiError) {
       return error.message;
@@ -527,227 +544,161 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
     return TRANSPORT_FALLBACK_MESSAGE;
   };
 
-  /** เริ่มเพิกถอน — ตรวจ uuid ก่อนเปิดโมดัลยืนยัน (เหตุผลกรอก/ตรวจในโมดัลตอนส่งจริง) */
-  const requestRevoke = () => {
-    if (!isUuid(state.certIdInput)) {
-      setInputError("รหัสอ้างอิงต้องเป็น uuid ที่ถูกต้อง");
-      return;
-    }
-    setInputError(null);
-    setReasonError(null);
-    dispatch({ type: "REQUEST_REVOKE" });
-  };
-
-  /** เริ่มออกใบแทน — ตรวจ uuid ก่อนเปิดโมดัลยืนยัน */
-  const requestReissue = () => {
-    if (!isUuid(state.certIdInput)) {
-      setInputError("รหัสอ้างอิงต้องเป็น uuid ที่ถูกต้อง");
-      return;
-    }
-    setInputError(null);
-    dispatch({ type: "REQUEST_REISSUE" });
-  };
-
-  /** เพิกถอนจริง — POST .../{id}/revoke body {reason} → 200 RevokedCertificateResource */
-  const performRevoke = async () => {
-    // ตรวจเหตุผลตรงนี้ (ในโมดัล) เพราะช่องกรอกอยู่ในโมดัล — ห้ามตรวจก่อนเปิดโมดัล
-    // ไม่งั้นผู้ใช้ไม่มีทางกรอกได้เลย (วงจรตาย)
-    if (!revokeReasonValid(state.reasonInput)) {
-      setReasonError(
-        `กรุณาระบุเหตุผลอย่างน้อย ${REVOKE_REASON_MIN_LENGTH} ตัวอักษรก่อนยืนยันการเพิกถอน`,
-      );
-      return;
-    }
-    setReasonError(null);
-    const certId = state.certIdInput.trim();
-    dispatch({ type: "SUBMIT" });
-    try {
-      const { body } = await postAdminJson(
-        CERTIFICATE_REVOKE_PATH_PREFIX + encodeURIComponent(certId) + REVOKE_SEGMENT,
-        { reason: state.reasonInput.trim() },
-      );
-      const data = unwrapDataEnvelope(body);
-      const view = data === null ? null : parseRevokedCertificateView(data);
-      if (view === null) {
-        dispatch({ type: "REJECT", message: "ระบบตอบกลับรูปแบบไม่ถูกต้อง ลองใหม่อีกครั้ง" });
-        return;
-      }
-      dispatch({ type: "RESOLVE_SUCCESS", view });
-      router.refresh();
-    } catch (error) {
-      dispatch({ type: "REJECT", message: describeError(error) });
-    }
-  };
-
-  /** ออกใบแทนจริง — POST .../{id}/reissue ไม่มี body → 201 ReissuedCertificateResource */
-  const performReissue = async () => {
-    const certId = state.certIdInput.trim();
-    dispatch({ type: "SUBMIT" });
-    try {
-      const { body } = await postAdminJson(
-        CERTIFICATE_REVOKE_PATH_PREFIX + encodeURIComponent(certId) + REISSUE_SEGMENT,
-      );
-      const data = unwrapDataEnvelope(body);
-      const view = data === null ? null : parseReissuedCertificateView(data);
-      if (view === null) {
-        dispatch({ type: "REJECT", message: "ระบบตอบกลับรูปแบบไม่ถูกต้อง ลองใหม่อีกครั้ง" });
-        return;
-      }
-      // ส่ง view ทั้งก้อน (ReissuedCertificateView) — reducer ดึง newCertificate เอง
-      // (ส่งเฉพาะ view.newCertificate จะไม่มี key "newCertificate" ให้ reducer จับ
-      // โมดัลสำเร็จจึงไม่แสดงเลขใบใหม่)
-      dispatch({ type: "RESOLVE_SUCCESS", view });
-      router.refresh();
-    } catch (error) {
-      dispatch({ type: "REJECT", message: describeError(error) });
-    }
-  };
-
   const handleClose = () => {
+    // กั้นการปิดทุกช่องทางกลาง submitting (gate r2 MINOR) — ดู modalCloseBlocked
+    if (modalCloseBlocked(state.phase)) {
+      return;
+    }
     setReasonError(null);
     dispatch({ type: "CLOSE" });
+    if (refreshOnClose.current) {
+      refreshOnClose.current = false;
+      router.refresh();
+    }
   };
 
-  if (!canRevoke) {
+  /** กดยืนยันในโมดัล — ตรวจเหตุผลของ revoke ที่นี่ (กันยิง BFF ด้วยเหตุผลสั้นเกิน) */
+  const handleConfirm = () => {
+    if (state.phase === "confirming") {
+      if (state.actionKind === "revoke" && !revokeReasonValid(state.reason)) {
+        setReasonError(`กรุณาระบุเหตุผลอย่างน้อย ${REVOKE_REASON_MIN_LENGTH} ตัวอักษร`);
+        return;
+      }
+      void performSubmit();
+      return;
+    }
+    if (state.phase === "success" || state.phase === "error") {
+      handleClose();
+    }
+  };
+
+  const performSubmit = async () => {
+    const kind = state.actionKind;
+    if (kind === null) {
+      return;
+    }
+    dispatch({ type: "SUBMIT" });
+    try {
+      if (kind === "revoke") {
+        const { body } = await postAdminJson(
+          `${CERT_REVOKE_PATH_PREFIX}/${certificateId}/revoke`,
+          { reason: state.reason.trim() },
+        );
+        const data = unwrapDataEnvelope(body);
+        const view = data === null ? null : parseRevokedCertificateView(data);
+        if (view === null) {
+          dispatch({
+            type: "REJECT",
+            message: "ระบบตอบกลับรูปแบบไม่ถูกต้อง กรุณาลองใหม่ (ยังไม่ได้เพิกถอน)",
+          });
+          return;
+        }
+        dispatch({ type: "RESOLVE_SUCCESS", certNo: view.certNo });
+      } else {
+        const { body } = await postAdminJson(
+          `${CERT_REVOKE_PATH_PREFIX}/${certificateId}/reissue`,
+          {},
+        );
+        const data = unwrapDataEnvelope(body);
+        const view = data === null ? null : parseReissuedCertificateView(data);
+        if (view === null) {
+          dispatch({
+            type: "REJECT",
+            message: "ระบบตอบกลับรูปแบบไม่ถูกต้อง กรุณาลองใหม่ (ยังไม่ได้ออกใบแทน)",
+          });
+          return;
+        }
+        dispatch({ type: "RESOLVE_SUCCESS", certNo: view.newCertificate.certNo });
+      }
+      // ไม่ refresh ทันที — รอผู้ใช้ปิดโมดัลก่อน (ดู refreshOnClose ประกาศด้านบน)
+      refreshOnClose.current = true;
+    } catch (error) {
+      // 409/404 = สถานะแถวเปลี่ยนที่เซิร์ฟเวอร์แล้ว ข้อความสัญญาว่า "จะรีเฟรชให้อัตโนมัติ"
+      if (shouldRefreshAfterError(error)) {
+        refreshOnClose.current = true;
+      }
+      dispatch({ type: "REJECT", message: describeError(error) });
+    }
+  };
+
+  if (!canManage || status !== "valid") {
     return null;
   }
 
   return (
-    <section className="rounded-[14px] border border-mist-300 bg-white p-4">
-      <h2 className="font-heading text-base font-semibold text-ink-900">จัดการใบที่ออกแล้ว</h2>
-      <p className="mt-1 text-sm text-ink-600">
-        ระบุรหัสอ้างอิงใบประกาศนียบัตร (uuid) จากทะเบียน — ระบบยังไม่มีหน้าค้นรายการใบ
-        ให้ดำเนินการตามรหัสเท่านั้น
-      </p>
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
-        <div>
-          <label className="block">
-            <span className="mb-1 block font-heading text-sm font-semibold text-ink-900">
-              รหัสอ้างอิงใบ (uuid)
-            </span>
-            <input
-              type="text"
-              className="w-full rounded-[10px] border border-mist-300 bg-white px-3 py-2 text-sm text-ink-900 focus:border-brand-600 focus:outline-none"
-              value={state.certIdInput}
-              disabled={state.phase !== "idle"}
-              onChange={(event) => dispatch({ type: "TYPE_CERT_ID", value: event.target.value })}
-            />
-          </label>
-        </div>
-        <div className="flex items-end gap-2">
-          <button
-            type="button"
-            className="rounded-[10px] border border-red-600 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={state.phase !== "idle"}
-            onClick={requestRevoke}
-          >
-            เพิกถอนใบ
-          </button>
-          <button
-            type="button"
-            className="rounded-[10px] border border-brand-600 px-3 py-2 text-sm font-semibold text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={state.phase !== "idle"}
-            onClick={requestReissue}
-          >
-            ออกใบแทน
-          </button>
-        </div>
+    <>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="rounded-[10px] border border-red-300 px-3 py-1.5 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:bg-mist-200 disabled:text-ink-500"
+          aria-label={`เพิกถอนใบ ${certNo}`}
+          disabled={state.phase !== "idle"}
+          onClick={() => dispatch({ type: "REQUEST_REVOKE" })}
+        >
+          เพิกถอน
+        </button>
+        <button
+          type="button"
+          className="rounded-[10px] border border-brand-300 px-3 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:bg-mist-200 disabled:text-ink-500"
+          aria-label={`ออกใบแทนใบ ${certNo}`}
+          disabled={state.phase !== "idle"}
+          onClick={() => dispatch({ type: "REQUEST_REISSUE" })}
+        >
+          ออกใบแทน
+        </button>
       </div>
-      {inputError !== null ? (
-        <p className="mt-2 text-sm text-red-600" role="alert">
-          {inputError}
-        </p>
-      ) : null}
-
       <ConfirmModal
-        open={state.actionKind === "revoke" && state.phase !== "idle"}
+        open={state.phase !== "idle"}
         onClose={handleClose}
-        title={manageTitleOf(state.phase, "revoke")}
+        title={manageTitleOf(state.phase, state.actionKind === "reissue" ? "reissue" : "revoke")}
         description={
-          state.phase === "revoking"
-            ? "การเพิกถอนมีผลทันที และจะถูกบันทึกเหตุผลไว้ในทะเบียน — ดำเนินการต่อหรือไม่"
+          state.phase === "confirming"
+            ? state.actionKind === "revoke"
+              ? `ยืนยันเพิกถอนใบ ${certNo} — ใบจะไม่สามารถใช้ตรวจสอบสิทธิ์ได้ทันที`
+              : `ยืนยันออกใบแทนใบ ${certNo} — ใบเดิมจะถูกแทนด้วยใบใหม่ (สถานะ superseded)`
             : undefined
         }
-        confirmLabel={manageConfirmLabelOf(state.phase)}
+        confirmLabel={manageConfirmLabelOf(state.phase, state.actionKind === "reissue" ? "reissue" : "revoke")}
         confirmDisabled={state.phase === "submitting"}
         confirmDisabledReason={state.phase === "submitting" ? "กำลังดำเนินการ กรุณารอสักครู่" : undefined}
-        cancelLabel={state.phase === "submitting" ? "ปิด" : "ยกเลิก"}
-        onConfirm={() => {
-          if (state.phase === "revoking") {
-            void performRevoke();
-            return;
-          }
-          if (state.phase === "success" || state.phase === "error") {
-            handleClose();
-          }
-        }}
+        cancelLabel={state.phase === "success" || state.phase === "error" ? "ปิด" : "ยกเลิก"}
+        onConfirm={handleConfirm}
       >
-        {state.phase === "revoking" ? (
-          <label className="block">
-            <span className="mb-1 block font-heading text-sm font-semibold text-ink-900">
-              เหตุผลการเพิกถอน (บังคับ อย่างน้อย 10 ตัวอักษร)
-            </span>
+        {state.phase === "confirming" && state.actionKind === "revoke" ? (
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-ink-700" htmlFor="cert-revoke-reason">
+              เหตุผลการเพิกถอน <span className="text-red-600">(จำเป็น · อย่างน้อย {REVOKE_REASON_MIN_LENGTH} ตัวอักษร)</span>
+            </label>
             <textarea
-              className={REVOKE_TEXTAREA_CLASS}
-              value={state.reasonInput}
+              id="cert-revoke-reason"
+              className="w-full rounded-[10px] border border-mist-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
               rows={3}
-              onChange={(event) => dispatch({ type: "TYPE_REASON", value: event.target.value })}
+              value={state.reason}
+              onChange={(event) => {
+                setReasonError(null);
+                dispatch({ type: "TYPE_REASON", value: event.target.value });
+              }}
             />
-            {reasonError !== null ? (
-              <span className="mt-1 block text-sm text-red-600" role="alert">
+            {reasonError === null ? null : (
+              <p className="text-sm text-red-700" role="alert">
                 {reasonError}
-              </span>
-            ) : null}
-          </label>
+              </p>
+            )}
+          </div>
         ) : null}
-        {state.phase === "error" && state.message !== null ? (
-          <p className="mt-2 rounded-[10px] bg-red-50 p-3 text-sm text-red-700" role="alert">
-            {state.message}
-          </p>
-        ) : null}
-        {state.phase === "success" ? (
-          <p className="mt-2 rounded-[10px] bg-green-50 p-3 text-sm text-green-800" role="status">
-            เพิกถอนใบสำเร็จ — สถานะใบเปลี่ยนเป็น &quot;เพิกถอนแล้ว&quot; ทันที
-          </p>
-        ) : null}
-      </ConfirmModal>
-
-      <ConfirmModal
-        open={state.actionKind === "reissue" && state.phase !== "idle"}
-        onClose={handleClose}
-        title={manageTitleOf(state.phase, "reissue")}
-        description={
-          state.phase === "reissuing"
-            ? "ระบบจะปิดใบเดิมเป็น \"superseded\" และออกใบใหม่แทนทันที — ดำเนินการต่อหรือไม่"
-            : undefined
-        }
-        confirmLabel={manageConfirmLabelOf(state.phase)}
-        confirmDisabled={state.phase === "submitting"}
-        confirmDisabledReason={state.phase === "submitting" ? "กำลังดำเนินการ กรุณารอสักครู่" : undefined}
-        cancelLabel={state.phase === "submitting" ? "ปิด" : "ยกเลิก"}
-        onConfirm={() => {
-          if (state.phase === "reissuing") {
-            void performReissue();
-            return;
-          }
-          if (state.phase === "success" || state.phase === "error") {
-            handleClose();
-          }
-        }}
-      >
         {state.phase === "success" ? (
           <p className="rounded-[10px] bg-green-50 p-3 text-sm text-green-800" role="status">
-            {state.issuedView !== null
-              ? `ออกใบแทนสำเร็จ เลขที่ ${state.issuedView.certNo} — ใบใหม่เข้าทะเบียนแล้ว ใบเดิมถูกปิดเป็น "superseded"`
-              : "ดำเนินการสำเร็จ — รายการจะรีเฟรชอัตโนมัติ"}
+            {state.actionKind === "reissue"
+              ? `ออกใบแทนสำเร็จ เลขที่ใบใหม่ ${state.resultCertNo ?? "—"} — รายการจะรีเฟรชอัตโนมัติ`
+              : `เพิกถอนสำเร็จ (ใบ ${state.resultCertNo ?? certNo}) — รายการจะรีเฟรชอัตโนมัติ`}
           </p>
         ) : null}
-        {state.phase === "error" && state.message !== null ? (
+        {state.phase === "error" ? (
           <p className="rounded-[10px] bg-red-50 p-3 text-sm text-red-700" role="alert">
-            {state.message}
+            {state.message ?? "เกิดข้อผิดพลาด กรุณาลองใหม่"}
           </p>
         ) : null}
       </ConfirmModal>
-    </section>
+    </>
   );
 }

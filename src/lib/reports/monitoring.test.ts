@@ -1,0 +1,317 @@
+/**
+ * monitoring.test — คิวมอนิเตอร์ + สถิติผลสอบ (Wave E · D55-6)
+ * ตรวจ: aggregate ฝั่ง DB (id.count()/score_pct.avg()) · overdue = lt(expires_at) ·
+ * กลุ่มตาม course_id จาก assessments lookup · ไม่มี user_id รายคน · merge avg เข้า view
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.hoisted(() => {
+  process.env.PUBLIC_BASE_URL = "https://elearning.lawyerthai.test";
+  process.env.SUPABASE_URL = "https://stub.supabase.co";
+  process.env.SUPABASE_ANON_KEY = "stub-anon-key";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "stub-service-role-key";
+});
+
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
+
+import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import { getExamMonitoring, getExamStatistics } from "./monitoring";
+
+/** builder จำลอง PostgREST (chainable + awaitable — บันทึกการเรียกทุก method) ·
+ *  .range() ตัดข้อมูลตามหน้าเหมือน PostgREST จริง (getExamStatistics เรียกผ่าน
+ *  listAssessmentStatistics ของ views ซึ่งเป็น batch loop — gate p1-r1 MAJOR-2) ·
+ *  .in() กรองแถวจริงก่อนตัดหน้า (gate r3 MINOR — lookup ต้องพิสูจน์ว่าแบ่งชุดถูก
+ *  ไม่ใช่ส่งชุดเดิมซ้ำแล้วผ่านเพราะ mock คืนทุกแถว) · column ตรงทั้ง snake_case
+ *  ของแถว view และ camelCase alias ของ aggregate */
+function makeBuilder(result: { data: unknown; error: unknown }) {
+  let rangeFrom = 0;
+  let rangeTo = Number.POSITIVE_INFINITY;
+  const inFilters: Array<{ column: string; values: readonly unknown[] }> = [];
+  const b = {
+    select: vi.fn(() => b),
+    eq: vi.fn(() => b),
+    gte: vi.fn(() => b),
+    lte: vi.fn(() => b),
+    lt: vi.fn(() => b),
+    in: vi.fn((column: string, values: readonly unknown[]) => {
+      inFilters.push({ column, values });
+      return b;
+    }),
+    not: vi.fn(() => b),
+    order: vi.fn(() => b),
+    range: vi.fn((from: number, to: number) => {
+      rangeFrom = from;
+      rangeTo = to;
+      return b;
+    }),
+    limit: vi.fn(() => b),
+    then: vi.fn((onFulfilled: (v: unknown) => unknown) => {
+      let data: unknown = result.data;
+      if (Array.isArray(data) && inFilters.length > 0) {
+        data = data.filter((row) => {
+          if (typeof row !== "object" || row === null) {
+            return false;
+          }
+          return inFilters.every(({ column, values }) => {
+            const camel = column.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
+            const record = row as Record<string, unknown>;
+            const value = record[column] ?? record[camel];
+            return values.includes(value);
+          });
+        });
+      }
+      if (Array.isArray(data) && rangeTo !== Number.POSITIVE_INFINITY) {
+        data = data.slice(rangeFrom, rangeTo + 1);
+      }
+      return Promise.resolve({ ...result, data }).then(onFulfilled as never, undefined as never);
+    }),
+  };
+  return b;
+}
+
+type Builder = ReturnType<typeof makeBuilder>;
+type Result = { data: unknown; error: unknown };
+
+/**
+ * client จำลอง — from(table) สร้าง builder ใหม่ทุกครั้งโดยไล่ลำดับการเรียกต่อตาราง
+ * (callIndex 0,1,2...) — resolver ตัดสินผลลัพธ์ (รองรับ query เดิมซ้ำหลายรอบ เช่น agg 2 รอบ)
+ */
+function setupClient(resolver: (table: string, callIndex: number) => Result) {
+  const made: Array<{ table: string; builder: Builder }> = [];
+  const counts = new Map<string, number>();
+  const client = {
+    from: vi.fn((table: string) => {
+      const idx = counts.get(table) ?? 0;
+      counts.set(table, idx + 1);
+      const builder = makeBuilder(resolver(table, idx));
+      made.push({ table, builder });
+      return builder;
+    }),
+  };
+  vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
+  return {
+    buildersFor: (table: string): Builder[] =>
+      made.filter((m) => m.table === table).map((m) => m.builder),
+  };
+}
+
+/** PostgREST aggregate rows — รูปแบบตาม select string ของ monitoring.ts */
+const A2 = "a2000000-0000-4000-8000-000000000002";
+const A1 = "a1000000-0000-4000-8000-000000000001";
+const C1 = "c1000000-0000-4000-8000-000000000001";
+const AGG_ROW = { assessmentId: A1, inProgress: 3 };
+const OVERDUE_ROW = { assessmentId: A1, overdue: 2 };
+
+/** resolver กลางของคิวมอนิเตอร์ — ครั้งที่ 0 = in_progress agg · ครั้งที่ 1 = overdue agg */
+function monitoringResolver(table: string, idx: number): Result {
+  if (table === "assessment_attempts") {
+    return idx === 0 ? { data: [AGG_ROW], error: null } : { data: [OVERDUE_ROW], error: null };
+  }
+  if (table === "assessments") {
+    return { data: [{ id: A1, courseId: C1 }], error: null };
+  }
+  return { data: [], error: null };
+}
+
+beforeEach(() => {
+  vi.mocked(createSupabaseSsrClient).mockReset();
+});
+
+describe("getExamMonitoring — คิวสอบ (aggregate ฝั่ง DB)", () => {
+  it("ใช้ PostgREST aggregate + กรอง status=in_progress · overdue เพิ่ม lt(expires_at)", async () => {
+    const { buildersFor } = setupClient(monitoringResolver);
+    await getExamMonitoring();
+    const [inProgress, overdue] = buildersFor("assessment_attempts");
+    expect(inProgress!.select).toHaveBeenCalledWith("assessmentId:assessment_id,inProgress:id.count()");
+    expect(inProgress!.eq).toHaveBeenCalledWith("status", "in_progress");
+    expect(inProgress!.order).toHaveBeenCalledWith("assessment_id", { ascending: true });
+    expect(inProgress!.lt).not.toHaveBeenCalled();
+    expect(overdue!.select).toHaveBeenCalledWith("assessmentId:assessment_id,overdue:id.count()");
+    expect(overdue!.lt).toHaveBeenCalledTimes(1);
+    const ltArgs = overdue!.lt.mock.calls[0]! as unknown as [string, string];
+    expect(ltArgs[0]).toBe("expires_at");
+    expect(typeof ltArgs[1]).toBe("string");
+  });
+
+  it("summary/byAssessment/byCourse ตรง aggregate + lookup assessments (id, course_id)", async () => {
+    const { buildersFor } = setupClient(monitoringResolver);
+    const out = await getExamMonitoring();
+    expect(out.summary).toEqual({ inProgressCount: 3, overdueCount: 2 });
+    expect(out.byAssessment).toEqual([{ assessmentId: A1, inProgress: 3, overdue: 2 }]);
+    expect(out.byCourse).toEqual([{ courseId: C1, inProgress: 3, overdue: 2 }]);
+    expect(out.generatedAt).toBeTruthy();
+    const [lookup] = buildersFor("assessments");
+    expect(lookup!.select).toHaveBeenCalledWith("id, courseId:course_id");
+    expect(lookup!.in).toHaveBeenCalledWith("id", [A1]);
+  });
+
+  it("ไม่มี user_id รายคนใน payload (aggregate เท่านั้น)", async () => {
+    setupClient(monitoringResolver);
+    const out = await getExamMonitoring();
+    const json = JSON.stringify(out);
+    expect(json).not.toContain("userId");
+    expect(json).not.toContain("user_id");
+  });
+
+  it("กลุ่มเกิน 1,000 อ่านต่อหน้าจนหมดจริง — summary ไม่โดน PGRST_API_MAX_ROWS ตัดเงียบ (gate r2 MAJOR)", async () => {
+    // 1,001 กลุ่ม (assessment ละ 1 attempt) — ครั้งเดียวจะได้แค่ 1,000 กลุ่มแรก
+    const uuid = (i: number) =>
+      `a0000000-0000-4000-8000-${(i + 0x1000000).toString(16).padStart(12, "0")}`;
+    const ids = Array.from({ length: 1001 }, (_, i) => uuid(i));
+    const inRows = ids.map((assessmentId) => ({ assessmentId, inProgress: 1 }));
+    const overRows = ids.map((assessmentId) => ({ assessmentId, overdue: 1 }));
+    const courseRows = ids.map((id) => ({ id, courseId: C1 }));
+    const { buildersFor } = setupClient((table, idx) => {
+      // in_progress อ่านจนจบก่อน (call 0,1) แล้ว overdue จึงเริ่ม (call 2,3) — ตามลำดับ await จริง
+      if (table === "assessment_attempts") {
+        return idx < 2 ? { data: inRows, error: null } : { data: overRows, error: null };
+      }
+      if (table === "assessments") {
+        return { data: courseRows, error: null };
+      }
+      return { data: [], error: null };
+    });
+    const out = await getExamMonitoring();
+    expect(out.summary).toEqual({ inProgressCount: 1001, overdueCount: 1001 });
+    expect(out.byAssessment).toHaveLength(1001);
+    expect(out.byAssessment[0]).toEqual({ assessmentId: ids[0], inProgress: 1, overdue: 1 });
+    expect(out.byAssessment[1000]).toEqual({ assessmentId: ids[1000]!, inProgress: 1, overdue: 1 });
+    expect(out.byCourse).toEqual([{ courseId: C1, inProgress: 1001, overdue: 1001 }]);
+    // agg 2 คิว × 2 หน้า (1,000 + 1) + lookup 1,001 id แบ่ง 6 ชุด (200×5 + 1)
+    expect(buildersFor("assessment_attempts")).toHaveLength(4);
+    expect(buildersFor("assessments")).toHaveLength(6);
+    const [page0, page1] = buildersFor("assessment_attempts");
+    expect(page0!.range).toHaveBeenCalledWith(0, 999);
+    expect(page1!.range).toHaveBeenCalledWith(1000, 1999);
+    // ชุด id ของ lookup ทั้ง 6 ไม่ซ้ำกันเลย — เรียงต่อเนื่อง ชุดสุดท้าย id เดียว
+    // (mock กรองตาม .in() จริง → ถ้าส่งชุดเดิมซ้ำ แถวจะหายและ byCourse ไม่ครบ 1,001)
+    const lookups = buildersFor("assessments");
+    expect(lookups[0]!.in).toHaveBeenCalledWith("id", ids.slice(0, 200));
+    expect(lookups[4]!.in).toHaveBeenCalledWith("id", ids.slice(800, 1000));
+    expect(lookups[5]!.in).toHaveBeenCalledWith("id", ids.slice(1000));
+  });
+
+  it("data:null ไม่มี error ที่ agg คิว → attempts_agg_container_drift (fail-closed)", async () => {
+    setupClient((table) => {
+      if (table === "assessment_attempts") {
+        return { data: null, error: null };
+      }
+      return { data: [], error: null };
+    });
+    await expect(getExamMonitoring()).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "attempts_agg_container_drift" },
+    });
+  });
+
+  it("data:null ที่ assessments lookup → assessments_lookup_container_drift (fail-closed)", async () => {
+    setupClient((table, idx) => {
+      if (table === "assessment_attempts") {
+        return idx === 0 ? { data: [AGG_ROW], error: null } : { data: [OVERDUE_ROW], error: null };
+      }
+      if (table === "assessments") {
+        return { data: null, error: null };
+      }
+      return { data: [], error: null };
+    });
+    await expect(getExamMonitoring()).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "assessments_lookup_container_drift" },
+    });
+  });
+});
+
+describe("getExamStatistics — view + avg (merge)", () => {
+  it("merge avg เข้าแถว view · avg ไม่เจอ → null", async () => {
+    const { buildersFor } = setupClient((table, idx) => {
+      if (table === "v_assessment_statistics") {
+        return { data: [{ assessment_id: A1, attempt_total: 10, attempt_passed: 4, pass_rate_pct: 40 }], error: null };
+      }
+      if (table === "assessment_attempts") {
+        return idx === 0 ? { data: [{ assessmentId: A1, avgScore: 82.5 }], error: null } : { data: [], error: null };
+      }
+      return { data: [], error: null };
+    });
+    const out = await getExamStatistics({ limit: 10 });
+    expect(out.rows[0]).toEqual({
+      assessmentId: A1,
+      attemptTotal: 10,
+      attemptPassed: 4,
+      passRatePct: 40,
+      avgScorePct: 82.5,
+    });
+    expect(out.truncated).toBe(false);
+    const avg = buildersFor("assessment_attempts")[0]!;
+    expect(avg.select).toHaveBeenCalledWith("assessmentId:assessment_id,avgScore:score_pct.avg()");
+    expect(avg.not).toHaveBeenCalledWith("submitted_at", "is", null);
+    expect(avg.in).toHaveBeenCalledWith("assessment_id", [A1]);
+  });
+
+  it("view มี 2 assessment แต่ avg คืนแค่ตัวเดียว → อีกตัว avgScorePct null", async () => {
+    setupClient((table) => {
+      if (table === "v_assessment_statistics") {
+        return {
+          data: [
+            { assessment_id: A1, attempt_total: 10, attempt_passed: 4, pass_rate_pct: 40 },
+            { assessment_id: A2, attempt_total: 5, attempt_passed: 1, pass_rate_pct: 20 },
+          ],
+          error: null,
+        };
+      }
+      if (table === "assessment_attempts") {
+        return { data: [{ assessmentId: A1, avgScore: 70 }], error: null };
+      }
+      return { data: [], error: null };
+    });
+    const out = await getExamStatistics({ limit: 10 });
+    expect(out.rows.map((r) => r.avgScorePct)).toEqual([70, null]);
+  });
+
+  it("data:null ไม่มี error ที่ avg agg → avg_score_agg_container_drift (fail-closed)", async () => {
+    setupClient((table) => {
+      if (table === "v_assessment_statistics") {
+        return { data: [{ assessment_id: A1, attempt_total: 10, attempt_passed: 4, pass_rate_pct: 40 }], error: null };
+      }
+      if (table === "assessment_attempts") {
+        return { data: null, error: null };
+      }
+      return { data: [], error: null };
+    });
+    await expect(getExamStatistics({ limit: 10 })).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "avg_score_agg_container_drift" },
+    });
+  });
+
+  it("avg lookup ข้ามชุด 200 — 201 assessment แบ่ง 2 ชุดต่อเนื่อง ชุดสุดท้าย id เดียว (gate r3 MINOR)", async () => {
+    const ids = Array.from(
+      { length: 201 },
+      (_, i) => `b0000000-0000-4000-8000-${(i + 0x1000000).toString(16).padStart(12, "0")}`,
+    );
+    const statRows = ids.map((assessment_id) => ({
+      assessment_id,
+      attempt_total: 2,
+      attempt_passed: 1,
+      pass_rate_pct: 50,
+    }));
+    const avgRows = ids.map((assessmentId) => ({ assessmentId, avgScore: 66.5 }));
+    const { buildersFor } = setupClient((table) => {
+      if (table === "v_assessment_statistics") {
+        return { data: statRows, error: null };
+      }
+      if (table === "assessment_attempts") {
+        return { data: avgRows, error: null };
+      }
+      return { data: [], error: null };
+    });
+    const out = await getExamStatistics({ limit: 250 });
+    expect(out.rows).toHaveLength(201);
+    // mock กรองตาม .in() จริง — แถวไหนตกนอกชุดจะหายไป ค่าเฉลี่ยไม่ครบทั้ง 201
+    expect(out.rows.every((row) => row.avgScorePct === 66.5)).toBe(true);
+    const chunks = buildersFor("assessment_attempts");
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.in).toHaveBeenCalledWith("assessment_id", ids.slice(0, 200));
+    expect(chunks[1]!.in).toHaveBeenCalledWith("assessment_id", ids.slice(200));
+  });
+});

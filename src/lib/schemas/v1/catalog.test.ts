@@ -3,7 +3,14 @@
  */
 import { describe, expect, it } from "vitest";
 import { AppError } from "../../errors";
-import { CatalogCoursesQuery, CourseIdParams, parseCatalogCoursesQuery, parseCourseIdParam } from "./catalog";
+import {
+  CatalogCoursesQuery,
+  CourseExamSummaryView,
+  CourseIdParams,
+  parseCatalogCoursesQuery,
+  parseCourseExamSummaryRow,
+  parseCourseIdParam,
+} from "./catalog";
 
 describe("CatalogCoursesQuery (PageQuery + ฟิลเตอร์ catalog)", () => {
   it("default limit = 20 เมื่อไม่ส่ง limit/cursor (§1.2)", () => {
@@ -113,5 +120,76 @@ describe("parseCourseIdParam", () => {
     expect((err as AppError).code).toBe("ERR-VAL-001");
     expect((err as AppError).httpStatus).toBe(400);
     expect((err as AppError).details).toEqual({ fields: ["id"] });
+  });
+});
+
+describe("CourseExamSummaryView (ขาออก object exam ของ GET /courses/{id} — DCR-7/PB-17)", () => {
+  /** object ที่ผ่าน schema — แก้ค่าเดียวเพื่อทดสอบรายกรณี */
+  const VALID_EXAM = {
+    questionCount: 30,
+    timeLimitMinutes: 60,
+    passScorePct: 70,
+    maxAttempts: 3,
+    assessmentId: "a0000000-0000-4000-8000-000000000001",
+  };
+
+  it("object ครบ 5 ฟิลด์ (assessmentId เป็น uuid) ผ่าน", () => {
+    expect(CourseExamSummaryView.parse(VALID_EXAM)).toEqual(VALID_EXAM);
+  });
+
+  it("assessmentId = null ผ่าน (หลักสูตรไม่มีข้อสอบ)", () => {
+    expect(CourseExamSummaryView.parse({ ...VALID_EXAM, assessmentId: null })).toEqual({
+      ...VALID_EXAM,
+      assessmentId: null,
+    });
+  });
+
+  it("assessmentId ไม่ใช่ uuid → ไม่ผ่าน", () => {
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, assessmentId: "not-a-uuid" }).success).toBe(false);
+  });
+
+  it("ขอบเขตฟิลด์: questionCount < 0 / passScorePct 0 หรือ 101 / timeLimitMinutes 4 / maxAttempts 0 ไม่ผ่าน", () => {
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, questionCount: -1 }).success).toBe(false);
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, passScorePct: 0 }).success).toBe(false);
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, passScorePct: 101 }).success).toBe(false);
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, timeLimitMinutes: 4 }).success).toBe(false);
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, maxAttempts: 0 }).success).toBe(false);
+  });
+
+  it("key แปลกปลอมถูกปฏิเสธ (.strict() — D43 L1)", () => {
+    expect(CourseExamSummaryView.safeParse({ ...VALID_EXAM, extra: 1 }).success).toBe(false);
+  });
+
+  it("ฟิลด์หาย (ไม่มี assessmentId) ไม่ผ่าน — nullable ไม่ใช่ optional", () => {
+    const { assessmentId: _omitted, ...withoutAssessmentId } = VALID_EXAM;
+    void _omitted;
+    expect(CourseExamSummaryView.safeParse(withoutAssessmentId).success).toBe(false);
+  });
+});
+
+describe("parseCourseExamSummaryRow (แถวดิบ view course_exam_summary — ตรวจก่อน map)", () => {
+  const VALID_ROW = {
+    question_count: 30,
+    time_limit_minutes: 60,
+    pass_score_pct: 70,
+    max_attempts: 3,
+    assessment_id: "a0000000-0000-4000-8000-000000000001",
+  };
+
+  it("แถวครบ 5 คอลัมน์ (assessment_id เป็น uuid / null) ผ่าน", () => {
+    expect(parseCourseExamSummaryRow(VALID_ROW)).toEqual(VALID_ROW);
+    expect(parseCourseExamSummaryRow({ ...VALID_ROW, assessment_id: null })).toEqual({
+      ...VALID_ROW,
+      assessment_id: null,
+    });
+  });
+
+  it("คอลัมน์เกิน/หาย → ERR-SYS-002 reason course_exam_summary_row_drift (strict — 0019-r2 F5)", () => {
+    expect(() => parseCourseExamSummaryRow({ ...VALID_ROW, extra: 1 })).toThrow(AppError);
+    expect(() => parseCourseExamSummaryRow({ ...VALID_ROW, assessment_id: undefined })).toThrow(AppError);
+  });
+
+  it("ค่าผิดชนิด (assessment_id ไม่ใช่ uuid) → ERR-SYS-002", () => {
+    expect(() => parseCourseExamSummaryRow({ ...VALID_ROW, assessment_id: "not-a-uuid" })).toThrow(AppError);
   });
 });
