@@ -133,6 +133,67 @@ describe("getExamMonitoring — คิวสอบ (aggregate ฝั่ง DB)",
     expect(json).not.toContain("userId");
     expect(json).not.toContain("user_id");
   });
+
+  it("กลุ่มเกิน 1,000 อ่านต่อหน้าจนหมดจริง — summary ไม่โดน PGRST_API_MAX_ROWS ตัดเงียบ (gate r2 MAJOR)", async () => {
+    // 1,001 กลุ่ม (assessment ละ 1 attempt) — ครั้งเดียวจะได้แค่ 1,000 กลุ่มแรก
+    const uuid = (i: number) =>
+      `a0000000-0000-4000-8000-${(i + 0x1000000).toString(16).padStart(12, "0")}`;
+    const ids = Array.from({ length: 1001 }, (_, i) => uuid(i));
+    const inRows = ids.map((assessmentId) => ({ assessmentId, inProgress: 1 }));
+    const overRows = ids.map((assessmentId) => ({ assessmentId, overdue: 1 }));
+    const courseRows = ids.map((id) => ({ id, courseId: C1 }));
+    const { buildersFor } = setupClient((table, idx) => {
+      // in_progress อ่านจนจบก่อน (call 0,1) แล้ว overdue จึงเริ่ม (call 2,3) — ตามลำดับ await จริง
+      if (table === "assessment_attempts") {
+        return idx < 2 ? { data: inRows, error: null } : { data: overRows, error: null };
+      }
+      if (table === "assessments") {
+        return { data: courseRows, error: null };
+      }
+      return { data: [], error: null };
+    });
+    const out = await getExamMonitoring();
+    expect(out.summary).toEqual({ inProgressCount: 1001, overdueCount: 1001 });
+    expect(out.byAssessment).toHaveLength(1001);
+    expect(out.byAssessment[0]).toEqual({ assessmentId: ids[0], inProgress: 1, overdue: 1 });
+    expect(out.byAssessment[1000]).toEqual({ assessmentId: ids[1000]!, inProgress: 1, overdue: 1 });
+    expect(out.byCourse).toEqual([{ courseId: C1, inProgress: 1001, overdue: 1001 }]);
+    // agg 2 คิว × 2 หน้า (1,000 + 1) + lookup 1,001 id แบ่ง 6 ชุด (200×5 + 1)
+    expect(buildersFor("assessment_attempts")).toHaveLength(4);
+    expect(buildersFor("assessments")).toHaveLength(6);
+    const [page0, page1] = buildersFor("assessment_attempts");
+    expect(page0!.range).toHaveBeenCalledWith(0, 999);
+    expect(page1!.range).toHaveBeenCalledWith(1000, 1999);
+  });
+
+  it("data:null ไม่มี error ที่ agg คิว → attempts_agg_container_drift (fail-closed)", async () => {
+    setupClient((table) => {
+      if (table === "assessment_attempts") {
+        return { data: null, error: null };
+      }
+      return { data: [], error: null };
+    });
+    await expect(getExamMonitoring()).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "attempts_agg_container_drift" },
+    });
+  });
+
+  it("data:null ที่ assessments lookup → assessments_lookup_container_drift (fail-closed)", async () => {
+    setupClient((table, idx) => {
+      if (table === "assessment_attempts") {
+        return idx === 0 ? { data: [AGG_ROW], error: null } : { data: [OVERDUE_ROW], error: null };
+      }
+      if (table === "assessments") {
+        return { data: null, error: null };
+      }
+      return { data: [], error: null };
+    });
+    await expect(getExamMonitoring()).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "assessments_lookup_container_drift" },
+    });
+  });
 });
 
 describe("getExamStatistics — view + avg (merge)", () => {
@@ -179,5 +240,21 @@ describe("getExamStatistics — view + avg (merge)", () => {
     });
     const out = await getExamStatistics({ limit: 10 });
     expect(out.rows.map((r) => r.avgScorePct)).toEqual([70, null]);
+  });
+
+  it("data:null ไม่มี error ที่ avg agg → avg_score_agg_container_drift (fail-closed)", async () => {
+    setupClient((table) => {
+      if (table === "v_assessment_statistics") {
+        return { data: [{ assessment_id: A1, attempt_total: 10, attempt_passed: 4, pass_rate_pct: 40 }], error: null };
+      }
+      if (table === "assessment_attempts") {
+        return { data: null, error: null };
+      }
+      return { data: [], error: null };
+    });
+    await expect(getExamStatistics({ limit: 10 })).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "avg_score_agg_container_drift" },
+    });
   });
 });

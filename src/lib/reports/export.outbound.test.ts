@@ -25,7 +25,7 @@ vi.mock("@/lib/reports/views", () => ({
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { runExport } from "./export";
-import { listEnrollmentProgress } from "./views";
+import { listAssessmentStatistics, listCreditBalances, listEnrollmentProgress } from "./views";
 
 /** uuid ทดสอบ */
 const E1 = "e1000000-0000-4000-8000-000000000001";
@@ -50,6 +50,8 @@ function setupServiceOk() {
 beforeEach(() => {
   vi.mocked(createSupabaseServiceRoleClient).mockReset();
   vi.mocked(listEnrollmentProgress).mockReset();
+  vi.mocked(listAssessmentStatistics).mockReset();
+  vi.mocked(listCreditBalances).mockReset();
 });
 
 describe("runExport — ขาออก strict ก่อน serialize (MINOR-4)", () => {
@@ -128,5 +130,52 @@ describe("runExport — ขาออก strict ก่อน serialize (MINOR-4)"
     });
     expect(result.rowCount).toBe(1);
     expect(result.body).toContain(E1);
+  });
+
+  it("assessments: passRatePct เกิน 100 → assessments_outbound_row_drift (ครอบทุก type — gap ของ r2)", async () => {
+    setupServiceOk();
+    vi.mocked(listAssessmentStatistics).mockResolvedValue({
+      rows: [
+        {
+          assessmentId: E1,
+          attemptTotal: 10,
+          attemptPassed: 4,
+          passRatePct: 104, // drift ขอบเขต — สัญญากำหนด 0-100
+        },
+      ] as never,
+      truncated: false,
+    });
+    await expect(runExport({
+      type: "assessments",
+      format: "csv",
+      requestedBy: "staff-1",
+      requestId: null,
+    })).rejects.toMatchObject({
+      details: { reason: "assessments_outbound_row_drift" },
+    });
+  });
+
+  it("credits: creditType ว่าง → credits_outbound_row_drift (ครอบทุก type — gap ของ r2)", async () => {
+    setupServiceOk();
+    vi.mocked(listCreditBalances).mockResolvedValue({
+      rows: [
+        {
+          userId: U1,
+          renewalCycleId: C1,
+          creditType: "", // drift ความยาว — สัญญากำหนด min(1)
+          balance: 3.5,
+          lastEntryAt: null,
+        },
+      ] as never,
+      truncated: false,
+    });
+    await expect(runExport({
+      type: "credits",
+      format: "json",
+      requestedBy: "staff-1",
+      requestId: null,
+    })).rejects.toMatchObject({
+      details: { reason: "credits_outbound_row_drift" },
+    });
   });
 });
