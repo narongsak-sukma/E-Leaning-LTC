@@ -499,7 +499,10 @@ export async function enrollMfaTotp(email: string): Promise<Aal2Session> {
   );
   const grantBody = (grant.json ?? {}) as { access_token?: string };
   if (grant.status >= 400 || typeof grantBody.access_token !== "string") {
-    throw new Error(`password grant ล้ม (${grant.status}): ${grant.text.slice(0, 200)}`);
+    // gate phase2-r1 MAJOR-1: ห้ามใส่ response body ใน error — GoTrue อาจตอบสำเร็จ
+    // แต่ผิดรูป (เช่น มี token บางส่วน) และ body ติดไปกับรายงาน Playwright ได้
+    // (รายงานเฉพาะขั้นตอน + status ทุกจุดของ auth/MFA)
+    throw new Error(`password grant ล้ม (${grant.status})`);
   }
   const accessToken = grantBody.access_token;
   // เส้นทาง MFA จริงของ GoTrue (auth-js: POST /factors, /factors/{id}/challenge, /factors/{id}/verify)
@@ -517,7 +520,8 @@ export async function enrollMfaTotp(email: string): Promise<Aal2Session> {
   const secret = enrollBody.totp?.secret;
   const factorId = enrollBody.id;
   if (enroll.status >= 400 || typeof secret !== "string" || typeof factorId !== "string") {
-    throw new Error(`mfa/enroll ล้ม (${enroll.status}): ${enroll.text.slice(0, 200)}`);
+    // gate phase2-r1 MAJOR-1: body ของ enroll มี TOTP secret — ห้ามหลุดลง error
+    throw new Error(`mfa/enroll ล้ม (${enroll.status})`);
   }
   const code = totpNow(secret);
   const challenge = await restCall(
@@ -528,7 +532,7 @@ export async function enrollMfaTotp(email: string): Promise<Aal2Session> {
   );
   const challengeBody = (challenge.json ?? {}) as { id?: string };
   if (challenge.status >= 400 || typeof challengeBody.id !== "string") {
-    throw new Error(`mfa/challenge ล้ม (${challenge.status}): ${challenge.text.slice(0, 200)}`);
+    throw new Error(`mfa/challenge ล้ม (${challenge.status})`);
   }
   const verify = await restCall(
     "POST",
@@ -541,7 +545,8 @@ export async function enrollMfaTotp(email: string): Promise<Aal2Session> {
     refresh_token?: string;
   };
   if (verify.status >= 400 || typeof verifyBody.access_token !== "string" || typeof verifyBody.refresh_token !== "string") {
-    throw new Error(`mfa/verify ล้ม (${verify.status}): ${verify.text.slice(0, 200)}`);
+    // gate phase2-r1 MAJOR-1: body ของ verify มี access_token — ห้ามหลุดลง error
+    throw new Error(`mfa/verify ล้ม (${verify.status})`);
   }
   const aal = jwtAal(verifyBody.access_token);
   if (aal !== "aal2") {
