@@ -6,14 +6,14 @@
  *
  *   · RBAC matrix (0004-r3) ให้ instructor มี question_bank:view จริง และ BFF GET
  *     /api/v1/admin/question-banks ก็รับ instructor — แต่
- *   · src/app/(admin)/admin/layout.tsx บังคับ ADMIN_STAFF_ROLES = [staff:viewer,
+ *   · src/app/(admin)/layout.tsx:50-59 บังคับ ADMIN_STAFF_ROLES = [staff:viewer,
  *     staff:content, staff:exam, staff:registrar, super_admin] (src/lib/fixtures/admin.ts:92)
  *     ซึ่ง **ไม่รวม instructor** → ไม่ว่าเข้าหน้าใดใต้ /admin/* จะถูก redirect("/login")
- *     ทั้งคู่ (fail-closed ก่อนถึงหน้า/BFF เสมอ)
+ *     ทั้งคู่ (fail-closed ก่อนถึงหน้า/BFF เสมอ) — **เป็นนโยบายทางการแล้วตาม RBAC-DESIGN
+ *     §2.5 (D55-3): admin shell = บทบาท staff ทุกสาย + super_admin เท่านั้น · instructor workspace
+ *     แยกในอนาคต (ไม่ใช่ /admin/*)**
  *
- * spec นี้จึง **บันทึกพฤติกรรมจริง** (redirect ไป /login ทั้งสองหน้า) ไว้เป็นหลักฐาน
- * ของธง — ไม่ enshrine ว่าพฤติกรรมนี้ถูกต้องตามนโยบาย: ถ้า lead ตัดสินใจให้ instructor
- * เข้า question-banks ได้ (แก้ layout/matrix) ให้ปรับ assertion ข้อแรกตามการตัดสินนั้น
+ * spec นี้จึง **บันทึกพฤติกรรมจริงตามนโยบาย §2.5** (redirect ไป /login ทั้งสองหน้า)
  * (ผู้ใช้ instructor สร้างใหม่ d9-* + role ผ่าน psql — profile สาธิตของ seed
  * instructor.demo@ltc.local ไม่มีแถว auth.users จึง login ผ่านฟอร์มไม่ได้)
  */
