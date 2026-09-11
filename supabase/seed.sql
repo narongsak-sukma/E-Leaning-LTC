@@ -238,6 +238,12 @@ on conflict do nothing;
 -- ทั้ง 6 ข้อ insert เป็น draft ก่อน (guard_question_activation: active ต้องมีตัวเลือกก่อน
 -- — D20-M3 — และเปิดโดย staff:exam เท่านั้น) แล้วค่อย activate 5 ข้อหลัง insert options
 -- (ดู step activate ท้ายไฟล์) — view course_exam_summary ต้องนับได้ 5
+-- r3 MINOR-3: เก็บ id ข้อที่ INSERT ใหม่จริงในรอบนี้ (RETURNING ของ data-modifying CTE)
+-- เพื่อ activate เฉพาะข้อใหม่ — แม้ staff จะปิด (retired) ข้อ seed เดิมไปแล้ว การรัน
+-- seed ซ้ำก็ไม่ปลุกกลับ active (แหล่งความจริง = รอบ INSERT นี้เท่านั้น)
+drop table if exists seed_new_questions;
+create temp table seed_new_questions (id uuid not null primary key);
+with ins as (
 insert into public.questions
   (id, bank_id, type, difficulty, question_text, explanation, points, status, tags, created_by, version) values
   ('f0f0f0f0-f0f0-4f0f-8f0f-000000000001', 'eeeeeeee-eeee-4eee-8eee-000000000001', 'single_choice', 'easy',
@@ -252,7 +258,11 @@ insert into public.questions
    'การยื่นคำให้การของจำเลยภายในกี่วัน', '15 วัน', 1, 'draft', array['procedural'], '11111111-1111-4111-8111-000000000001', 1),
   ('f0f0f0f0-f0f0-4f0f-8f0f-000000000006', 'eeeeeeee-eeee-4eee-8eee-000000000001', 'single_choice', 'medium',
    'ข้อร่าง (ไม่นับใน question_count)', null, 1, 'draft', array['prose'], '11111111-1111-4111-8111-000000000001', 1)
-on conflict do nothing;
+  on conflict do nothing
+  returning id
+)
+insert into seed_new_questions select id from ins
+ where id <> 'f0f0f0f0-f0f0-4f0f-8f0f-000000000006'; -- ข้อ 0006 คง draft → view นับได้ 5
 
 -- == 11) bank question_options (4 options per active question, exactly 1 correct each) ==
 insert into public.question_options (id, question_id, option_text, is_correct, sort_order) values
@@ -281,15 +291,11 @@ on conflict do nothing;
 -- == 11b) activate โจทย์ธนาคารข้อสอบ 5 ข้อ (ทางการตาม guard_question_activation —
 --          ต้องมีตัวเลือกครบก่อน (D20-M3) และผู้เปิดต้องเป็น staff:exam) ==
 set local "request.jwt.claims" = '{"sub":"11111111-1111-4111-8111-000000000002","role":"authenticated"}';
-update public.questions set status = 'active'
- where id in ('f0f0f0f0-f0f0-4f0f-8f0f-000000000001',
-              'f0f0f0f0-f0f0-4f0f-8f0f-000000000002',
-              'f0f0f0f0-f0f0-4f0f-8f0f-000000000003',
-              'f0f0f0f0-f0f0-4f0f-8f0f-000000000004',
-              'f0f0f0f0-f0f0-4f0f-8f0f-000000000005'); -- ข้อ 0006 คง draft → view นับได้ 5
-              -- (0028 · codex gate r2 MINOR-2: เดิมกรองด้วย bank_id + id <> 0006 —
-              --  รันซ้ำบน DB ที่ developer เพิ่ม/ปิดข้อใหม่ใน bank เดียวกัน = ถูกปลุก
-              --  โดยไม่ตั้งใจ · ระบุ 5 id ยาว ๆ แทน = no-op จริงบน DB ที่โตแล้ว)
+update public.questions q set status = 'active'
+  from seed_new_questions n
+ where q.id = n.id; -- เฉพาะข้อที่ INSERT ใหม่จริงในรอบนี้ (0029 · codex gate r3 MINOR-3:
+                    -- id-list ตามตัวอักษรยังปลุกแถว seed เดิมที่ staff ปิด (retired)
+                    -- ไว้แล้วเมื่อรัน seed ซ้ำ — RETURNING ของรอบนี้แหล่งเดียว)
 
 -- == 12) enrollments (active + cancelled) ==
 insert into public.enrollments

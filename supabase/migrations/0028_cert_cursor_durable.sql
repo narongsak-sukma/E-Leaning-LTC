@@ -23,6 +23,15 @@
 -- ข้อจำกัด PG ≥15 (D60) ยังบังคับ: procedure ที่ COMMIT ต้อง INVOKER เปล่า —
 --   ไม่มี security definer ไม่มี set search_path (0B000) · อ้างชื่อ 2-part ครบ
 
+-- ⚠️ SUPERSEDED (ส่วน tick) โดย 0029_cert_auto_arrival_first.sql — codex gate r3
+--    (2026-09-12 · /tmp/codex-gate-e-p2-r3.txt) พบ MAJOR-1 ฝั่ง auto: แถวที่ส่ง
+--    ใหม่กว่า cursor มองไม่เห็นจนกว่า sweep เก่าจะหมดคิวและ reset — ผู้ผ่านเงื่อนไข
+--    ที่มากลาง sweep รอเกิน 5 นาทีได้ (ขัด SRS AC ≤5 นาที) → 0029 แทนที่
+--    cert_auto_issue_tick ด้วย tick สองเฟส (fresh lane ก่อน backlog + คู่ขอบบน
+--    sweep_top ใน cert_auto_cursor · picker ใหม่ admin_cert_auto_fresh_pick) ·
+--    สิ่งที่ยัง canonical จากไฟล์นี้: step ของ bulk (admin_cert_bulk_issue_step) +
+--    คอลัมน์ cursor ของ cert_bulk_jobs + ตาราง cert_auto_cursor (0029 เติมคอลัมน์)
+
 -- ═══ (1) คอลัมน์ cursor ของ bulk job (MAJOR-1) ═══
 alter table public.cert_bulk_jobs
   add column if not exists cursor_submitted_at timestamptz,
