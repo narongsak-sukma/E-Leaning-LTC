@@ -1,7 +1,9 @@
 /**
  * learning — data layer ฝั่งผู้เรียน (Phase 1 — เรียก BFF จริงผ่าน /api/v1)
  *
- * - ทุกฟังก์ชัน fetch จริง ผ่าน helper absolute-origin:
+ * - ทุกฟังก์ชัน fetch จริง ผ่าน transport กลาง src/lib/api/transport.ts (PB-19 — แกน
+ *   absolute-origin + cookie forward + x-ltc-bff-internal เฉพาะ server + error envelope §1.3
+ *   รวมศูนย์ที่เดียว กัน drift):
  *   · browser → window.location.origin (same-origin fetch — Origin/Sec-Fetch-Site ผ่าน middleware CSRF เอง)
  *   · server (RSC) → ต้องส่ง origin + cookieHeader ผ่าน FetchCallOptions (ดู learning.server.ts)
  * - เฉลยแบบทดสอบไม่อยู่ในไฟล์นี้เด็ดขาด (D28/DCR-5): โจทย์มาจาก GET /lessons/{id}/quiz
@@ -12,6 +14,7 @@
  */
 import { z } from "zod";
 
+import { ApiError, fetchJson, type TransportCallOptions } from "@/lib/api/transport";
 import { CourseProgressView, LessonProgressView, QuizSubmitView } from "@/lib/schemas/v1/progress";
 import { EnrollmentResource } from "@/lib/schemas/v1/enrollment";
 
@@ -172,34 +175,17 @@ export function enrollCourseUrl(courseId: string): string {
   return `/api/v1/courses/${encodeURIComponent(courseId)}/enroll`;
 }
 
-// ——— transport กลาง — absolute-origin helper + error envelope (§1.3) ———
+// ——— transport — ตัวห่อบาง ๆ ของ transport กลาง src/lib/api/transport.ts (PB-19) ———
 
 /**
- * ตัวเลือกของการเรียก API — browser ไม่ต้องส่ง (same-origin เอง);
- * server/RSC ต้องส่ง origin + cookieHeader (forward session cookie ให้ BFF เพราะ
- * fetch จาก RSC ไม่แนบ cookie ของ request ให้เอง)
+ * ตัวเลือกของการเรียก API — alias ของ TransportCallOptions ใน transport กลาง (PB-19);
+ * browser ไม่ต้องส่ง (same-origin เอง); server/RSC ต้องส่ง origin + cookieHeader (forward
+ * session cookie ให้ BFF เพราะ fetch จาก RSC ไม่แนบ cookie ของ request ให้เอง)
  */
-export interface FetchCallOptions {
-  /** origin สัมบูรณ์ เช่น https://learn.lawcouncil.go.th — บังคับเมื่อเรียกจากฝั่ง server */
-  origin?: string;
-  /** ค่า header Cookie ที่ forward จาก request ปัจจุบัน (server เท่านั้น) */
-  cookieHeader?: string;
-}
+export type FetchCallOptions = TransportCallOptions;
 
-/** error ฝั่ง client — code อ้างทะเบียน src/lib/errors (§1.3) · ข้อความไทยจาก envelope ของ BFF */
-export class ApiError extends Error {
-  readonly code: string;
-  readonly status: number;
-
-  constructor(code: string, status: number, message: string) {
-    super(message);
-    this.name = "ApiError";
-    this.code = code;
-    this.status = status;
-  }
-}
-
-const TRANSPORT_FALLBACK_MESSAGE = "ไม่สามารถติดต่อระบบได้ กรุณาลองใหม่อีกครั้ง";
+/** error ฝั่ง client — คลาสเดียวกับ transport กลาง (PB-19) · code อ้างทะเบียน src/lib/errors (§1.3) · ข้อความไทยจาก envelope ของ BFF */
+export { ApiError };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -225,18 +211,9 @@ function lessonTypeOf(value: unknown): LessonType {
   throw contractViolation();
 }
 
-function resolveOrigin(options?: FetchCallOptions): string {
-  if (options?.origin !== undefined && options.origin.length > 0) {
-    return options.origin;
-  }
-  if (typeof window !== "undefined") {
-    return window.location.origin;
-  }
-  throw new Error("ต้องระบุ origin ใน FetchCallOptions เมื่อเรียก API จากฝั่ง server (RSC)");
-}
-
 /**
- * เรียก BFF แบบ JSON — คืน { status, body } ดิบ · ผิดพลาด (non-2xx / parse ไม่ได้ / network) → ApiError
+ * เรียก BFF แบบ JSON — ตัวห่อบาง ๆ ส่งตรงเข้า transport กลาง src/lib/api/transport.ts (PB-19)
+ * คืน { status, body } ดิบ · ผิดพลาด (non-2xx / parse ไม่ได้ / network) → ApiError
  * (204 = สำเร็จไม่มี body → body เป็น null — ใช้กับ POST /auth/logout)
  */
 async function requestJson(
@@ -244,63 +221,7 @@ async function requestJson(
   init: { readonly method: "GET" | "POST"; readonly body?: unknown; readonly keepalive?: boolean },
   options?: FetchCallOptions,
 ): Promise<{ status: number; body: unknown }> {
-  const origin = resolveOrigin(options);
-  const headers: Record<string, string> = { accept: "application/json" };
-  if (init.method === "POST") {
-    headers["content-type"] = "application/json; charset=utf-8";
-  }
-  if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
-    headers.cookie = options.cookieHeader;
-  }
-  // gate-cleanup r1 M1: ขาเรียกจาก server (RSC ผ่าน learning.server.ts) ประกาศตัวเป็นขาใน —
-  // middleware เห็น header นี้แล้วจะไม่หมุน token (Set-Cookie ของขาในไม่มีทางถึง browser —
-  // RSC ตั้ง cookie เองไม่ได้ หมุนตรงนั้น = ทิ้ง rotation กลางอากาศ) · เฉพาะฝั่ง server
-  // (typeof window) — โมดูลนี้ client ใช้ร่วมด้วย (logout keepalive) และขาบราวเซอร์คือขานอก
-  if (typeof window === "undefined") {
-    headers["x-ltc-bff-internal"] = "1";
-  }
-  const requestInit: RequestInit = {
-    method: init.method,
-    headers,
-    credentials: "same-origin",
-    cache: "no-store",
-  };
-  if (init.method === "POST" && init.body !== undefined) {
-    requestInit.body = JSON.stringify(init.body);
-  }
-  if (init.keepalive === true) {
-    requestInit.keepalive = true;
-  }
-  let response: Response;
-  try {
-    response = await fetch(new URL(path, origin), requestInit);
-  } catch {
-    throw new ApiError("ERR-SYS-001", 0, TRANSPORT_FALLBACK_MESSAGE);
-  }
-  if (response.status === 204) {
-    return { status: 204, body: null };
-  }
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
-  if (!response.ok) {
-    const envelope = isRecord(body) && isRecord(body["error"]) ? body["error"] : null;
-    const code =
-      envelope !== null && typeof envelope["code"] === "string" && envelope["code"].length > 0
-        ? envelope["code"]
-        : `HTTP_${response.status}`;
-    const message =
-      envelope !== null &&
-      typeof envelope["message"] === "string" &&
-      envelope["message"].length > 0
-        ? envelope["message"]
-        : TRANSPORT_FALLBACK_MESSAGE;
-    throw new ApiError(code, response.status, message);
-  }
-  return { status: response.status, body };
+  return fetchJson(path, init, options);
 }
 
 /** validate ข้อมูลขาออกของ BFF ด้วย schema กลาง — ไม่ผ่าน = contract ผิดรูป → ERR-SYS-001 */

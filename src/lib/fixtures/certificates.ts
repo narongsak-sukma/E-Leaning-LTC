@@ -9,9 +9,9 @@
  *   ตาม lane D-2 (id, cert_no, course_title, issued_at, status) — ไม่มี holder_name
  * - ดาวน์โหลด PDF GET /api/v1/certificates/{id}/pdf — {id} = **uuid ของใบ** (ต่างจาก verify
  *   ที่ใช้ code) — UI ดาวน์โหลดด้วย <a> browser ปกติ ไม่ fetch อ่านเป็น text
- * - transport จำลองแบบ learning.ts (absolute-origin + cookie forward + x-ltc-bff-internal
- *   เมื่อเรียกจาก server) — แยกไฟล์เองเพราะ learning.ts เป็นกรรมสิทธิ์ lane C-7/D-0 (D4);
- *   รวมศูนย์ transport กลางเป็นธง Phase 1 เช่นเดียวกับ RPC-error parser ของ C-11
+ * - transport ผ่านชั้นกลาง src/lib/api/transport.ts (PB-19 — รวมศูนย์แกน absolute-origin +
+ *   cookie forward + x-ltc-bff-internal เฉพาะ server + error envelope §1.3 ไว้ที่เดียว) —
+ *   เลิกพึ่ง transport ของ learning.ts ตรง ๆ (learning.ts เป็นกรรมสิทธิ์ lane C-7/D-0 — D4)
  * - ข้อความผู้ใช้ทั้งหมดเป็นภาษาไทย (ผ่าน pure helpers ที่ทดสอบได้)
  */
 import { z } from "zod";
@@ -25,7 +25,7 @@ import {
   type VerificationResultValue,
 } from "@/lib/schemas/v1/certificate";
 
-import { ApiError, type FetchCallOptions } from "./learning";
+import { ApiError, fetchJson, type TransportCallOptions } from "@/lib/api/transport";
 
 // ——— ทะเบียนข้อความไทย (pure — ทดสอบได้โดยไม่ต้อง stub อะไร) ———
 
@@ -115,9 +115,8 @@ export function publicVerifyPageUrl(code: string): string {
   return `/verify/${encodeURIComponent(code)}`;
 }
 
-// ——— transport — absolute-origin + error envelope (§1.3) แบบเดียวกับ learning.ts ———
+// ——— transport — ผ่านชั้นกลาง src/lib/api/transport.ts (PB-19) ———
 
-const TRANSPORT_FALLBACK_MESSAGE = "ไม่สามารถติดต่อระบบได้ กรุณาลองใหม่อีกครั้ง";
 const CONTRACT_MESSAGE = "เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,65 +126,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** ข้อมูลขาออกของ BFF ผิดรูปตามสัญญา — opaque เหมือน internal error (SDS §6.1) */
 function contractViolation(): ApiError {
   return new ApiError("ERR-SYS-001", 500, CONTRACT_MESSAGE);
-}
-
-function resolveOrigin(options?: FetchCallOptions): string {
-  if (options?.origin !== undefined && options.origin.length > 0) {
-    return options.origin;
-  }
-  if (typeof window !== "undefined") {
-    return window.location.origin;
-  }
-  throw new Error("ต้องระบุ origin ใน FetchCallOptions เมื่อเรียก API จากฝั่ง server (RSC)");
-}
-
-/** เรียก BFF แบบ GET — คืน body ดิบ · non-2xx/parse ไม่ได้/network → ApiError (envelope §1.3) */
-async function requestJson(
-  path: string,
-  options?: FetchCallOptions,
-): Promise<{ status: number; body: unknown }> {
-  const origin = resolveOrigin(options);
-  const headers: Record<string, string> = { accept: "application/json" };
-  if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
-    headers.cookie = options.cookieHeader;
-  }
-  // ขาเรียกจาก server (RSC) ประกาศตัวเป็นขาใน — middleware จะไม่หมุน token ใน request นี้
-  // (เหมือน learning.ts — Set-Cookie ของขาในไม่มีทางถึง browser)
-  if (typeof window === "undefined") {
-    headers["x-ltc-bff-internal"] = "1";
-  }
-  let response: Response;
-  try {
-    response = await fetch(new URL(path, origin), {
-      method: "GET",
-      headers,
-      credentials: "same-origin",
-      cache: "no-store",
-    });
-  } catch {
-    throw new ApiError("ERR-SYS-001", 0, TRANSPORT_FALLBACK_MESSAGE);
-  }
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
-  if (!response.ok) {
-    const envelope = isRecord(body) && isRecord(body["error"]) ? body["error"] : null;
-    const code =
-      envelope !== null && typeof envelope["code"] === "string" && envelope["code"].length > 0
-        ? envelope["code"]
-        : `HTTP_${response.status}`;
-    const message =
-      envelope !== null &&
-      typeof envelope["message"] === "string" &&
-      envelope["message"].length > 0
-        ? envelope["message"]
-        : TRANSPORT_FALLBACK_MESSAGE;
-    throw new ApiError(code, response.status, message);
-  }
-  return { status: response.status, body };
 }
 
 // ——— data layer ประกาศนียบัตร ———
@@ -203,9 +143,9 @@ const CERTIFICATE_VIEW_KEYS = "code,course_title,issued_at,status";
 
 export async function verifyCertificate(
   code: string,
-  options?: FetchCallOptions,
+  options?: TransportCallOptions,
 ): Promise<CertificatePublicViewParsed> {
-  const { body } = await requestJson(verifyCertificateApiUrl(code), options);
+  const { body } = await fetchJson(verifyCertificateApiUrl(code), { method: "GET" }, options);
   if (!isRecord(body) || Object.keys(body).sort().join(",") !== CERTIFICATE_VIEW_KEYS) {
     throw contractViolation();
   }
@@ -226,9 +166,9 @@ export interface MyCertificatesPageResult {
  * · แถวใดผิดสัญญา → ERR-SYS-001 ทั้งหน้า (fail-closed แบบเดียวกับ route ขาออก BFF)
  */
 export async function getMyCertificates(
-  options?: FetchCallOptions,
+  options?: TransportCallOptions,
 ): Promise<MyCertificatesPageResult> {
-  const { body } = await requestJson(myCertificatesApiUrl(), options);
+  const { body } = await fetchJson(myCertificatesApiUrl(), { method: "GET" }, options);
   if (!isRecord(body) || !Array.isArray(body["data"])) {
     throw contractViolation();
   }

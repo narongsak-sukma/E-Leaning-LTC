@@ -93,6 +93,7 @@ function paperRow(overrides: Partial<LearnerAttemptPaperViewRow> = {}): LearnerA
         { id: UUID(200), text: "ตัวเลือก ก" },
         { id: UUID(201), text: "ตัวเลือก ข" },
       ],
+      type: "single_choice",
     },
     ...overrides,
   };
@@ -169,7 +170,7 @@ describe("parse helpers", () => {
 });
 
 describe("toExamPaperQuestion — 0019 paper view: strict + whitelist ไม่มีทางรั่วเฉลย", () => {
-  it("question_paper ตรง contract → ครบ 5 ฟิลด์ (content = {version,text,options[{id,text}]})", () => {
+  it("question_paper ตรง contract → ครบ 5 ฟิลด์ (content = {version,text,options[{id,text}],type})", () => {
     const q = toExamPaperQuestion(paperRow());
     expect(Object.keys(q).sort()).toEqual([
       "answeredAt",
@@ -186,6 +187,9 @@ describe("toExamPaperQuestion — 0019 paper view: strict + whitelist ไม่�
     expect(q.content.text).toBe("ข้อสอบ");
     expect(q.content.options).toHaveLength(2);
     expect(Object.keys(q.content.options[0] ?? {}).sort()).toEqual(["id", "text"]);
+    // PB-18/0022: ชนิดข้อส่งต่อจาก view ไม่แปลงค่า
+    expect(q.content.type).toBe("single_choice");
+    expect(Object.keys(q.content).sort()).toEqual(["options", "text", "type", "version"]);
     // ขาออกทั้งชุดผ่าน zod ได้ (AttemptQuestionView)
     expect(AttemptStartView.shape.questions.element.safeParse(q).success).toBe(true);
   });
@@ -439,6 +443,7 @@ describe("AttemptQuestionSnapshot — contract jsonb ของ start_attempt", (
             version: 1,
             text: "ข้อสอบ",
             options: [{ id: UUID(200), text: "ตัวเลือก ก" }],
+            type: "multiple_choice",
           },
         },
       ],

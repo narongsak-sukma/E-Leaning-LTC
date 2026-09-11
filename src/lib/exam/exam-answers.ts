@@ -71,6 +71,14 @@ export interface ExamAnswerSaver {
   /** ผู้เรียนเปลี่ยนคำตอบ - เพิ่ม/ถอด choiceId (ข้อละ 1-10 ตัวเลือกตาม API-SPEC 4 #7) */
   toggle(questionId: string, choiceId: string): void;
   /**
+   * ตั้งคำตอบข้อเลือกเดียวแบบอะตอมิก (PB-18/gate p0-r1 MAJOR-1): state กลายเป็น
+   * [choiceId] ครั้งเดียวแล้ว schedule บันทึกครั้งเดียว — ไม่ผ่าน toggle สองจังหวะ
+   * (เพิ่ม B แล้วถอด A) เพราะระหว่างสองจังหวะ autosave อาจจับค่า [A,B] ไปบันทึกจริง
+   * และถ้าหมดเวลาตอนนั้น (cron 0020 ปิด attempt ตาม expires_at) server จะตรวจ
+   * คำตอบผิดจากที่ผู้เรียนเห็นบนจอ · seed หลายตัวจาก takeover ก็ยุบเหลือตัวเดียว
+   */
+  setSingle(questionId: string, choiceId: string): void;
+  /**
    * บังคับบันทึกทุกข้อที่ยังไม่ถูกบันทึก (ก่อน submit) - ข้าม throttle เสมอ
    * ok=false + terminalCode = server ปิด attempt แล้ว (004/005) ให้ห้องสอบจัดการ
    * ok=false + terminalCode=null = ยังมีข้อบันทึกไม่สำเร็จแบบชั่วคราว (เช่น เน็ต)
@@ -240,6 +248,36 @@ export function createExamAnswerSaver(
     emit();
   };
 
+  const setSingle = (questionId: string, choiceId: string): void => {
+    if (disposed) {
+      return;
+    }
+    const item = runtime.get(questionId);
+    if (item === undefined) {
+      return;
+    }
+    if (item.choiceIds.length === 1 && item.choiceIds[0] === choiceId) {
+      // เลือกตัวเดิมที่เลือกอยู่แล้ว (radio ปกติไม่ยิง change ซ้ำ แต่กัน path
+      // programmatic/seed) — ไม่มีการเปลี่ยนคำตอบ ไม่ตั้งรอบันทึกเปล่า ๆ
+      return;
+    }
+    if (terminal !== null) {
+      // หลังเกิดเหตุ terminal ห้องสอบกำลังปิด — อัปเดตคำตอบในหน้าได้ แต่
+      // ห้ามตั้งรอบันทึก/ตั้ง timer เพิ่ม (attempt ปิดแล้วฝั่ง server)
+      item.choiceIds = [choiceId];
+      emit();
+      return;
+    }
+    // atomic replace: state กลายเป็น [choiceId] ครั้งเดียวแล้ว schedule ครั้งเดียว —
+    // request ที่ออกไปจากที่นี่จึงไม่มีทางแบกค่า transient สองตัว (gate p0-r1 MAJOR-1)
+    item.choiceIds = [choiceId];
+    item.error = false;
+    markDirtyAndSchedule(item, questionId);
+    // emit ทุกคลิกที่เปลี่ยนคำตอบจริง — controlled state ต้องเห็นค่าใหม่ทันที
+    // แม้ markDirtyAndSchedule ยังไม่ยิง attemptSave (ช่วง throttle/saving)
+    emit();
+  };
+
   const hasUnsaved = (): boolean => {
     for (const item of runtime.values()) {
       if (item.dirty) {
@@ -305,5 +343,5 @@ export function createExamAnswerSaver(
     }
   };
 
-  return { toggle, flushAll, hasUnsaved, dispose };
+  return { toggle, setSingle, flushAll, hasUnsaved, dispose };
 }

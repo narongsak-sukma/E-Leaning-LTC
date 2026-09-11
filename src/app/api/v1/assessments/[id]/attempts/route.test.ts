@@ -67,6 +67,7 @@ const VIEW_ROWS = [
         { id: OPT1, text: "ตัวเลือกแรก" },
         { id: OPT2, text: "ตัวเลือกที่สอง" },
       ],
+      type: "single_choice",
     },
   },
   {
@@ -82,6 +83,7 @@ const VIEW_ROWS = [
         { id: OPT1, text: "ตัวเลือกแรก" },
         { id: OPT2, text: "ตัวเลือกที่สอง" },
       ],
+      type: "true_false",
     },
   },
 ];
@@ -203,6 +205,9 @@ describe("POST /assessments/{id}/attempts — happy path", () => {
     expect(parsed.questions[0]?.content.text).toBe("ข้อที่ 1");
     expect(parsed.questions[0]?.content.options).toHaveLength(2);
     expect(Object.keys(parsed.questions[0]?.content.options[0] ?? {}).sort()).toEqual(["id", "text"]);
+    // 0022/PB-18: ชนิดข้อส่งต่อจาก paper view ไปยังห้องสอบ (radio เมื่อตอบข้อเดียว)
+    expect(parsed.questions[0]?.content.type).toBe("single_choice");
+    expect(parsed.questions[1]?.content.type).toBe("true_false");
     expect(new Date(parsed.serverTime).toString()).not.toBe("Invalid Date");
     // เรียก RPC ตรง contract (p_assessment_id) และอ่านชุดข้อจาก view ของ attempt นั้น
     const startCall = client._rpcArgs.find((c) => c.fn === "start_attempt");

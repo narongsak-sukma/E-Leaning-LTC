@@ -9,6 +9,9 @@
  *   นาฬิกา client ใช้วัดช่วงเวลาที่ผ่านไปเท่านั้น (ธง lead: timer จาก server เท่านั้น)
  * - autosave ต่อข้อผ่าน exam-answers (ทันทีครั้งแรก + ห่างขั้นต่ำ 10 วิ/ข้อ) และ
  *   flush ทุกข้อก่อนกดส่ง
+ * - ชนิดข้อ (PB-18 — content.type จาก snapshot 0022): single_choice/true_false =
+ *   input radio ตอบได้ข้อเดียว (เลือกใหม่ = แทนที่ตัวเดิม) · multiple_choice =
+ *   checkbox หลายอันเหมือนเดิม — โครง state คำตอบ (selected ids) คงเดิมทั้งสองชนิด
  * - ส่งข้อสอบ: flushAll → submitAttempt (Idempotency-Key ต่อ mount) → เคลียร์แคชชุดข้อ
  *   → ไปหน้าผลสอบ — คะแนน/ผ่าน-ไม่ผ่านไม่ parse ที่ client (ธง lead ข้อ 4)
  * - ไม่มีเฉลยในไฟล์นี้ทุกทาง (ธง lead ข้อ 3)
@@ -93,7 +96,6 @@ function initialSnapshotOf(
   }
   return snapshot;
 }
-
 
 export function ExamRoom({
   attemptId,
@@ -294,6 +296,10 @@ export function ExamRoom({
 
   const questions = session?.questions ?? [];
   const currentQuestion = questions[currentIdx] ?? null;
+  // PB-18: ชนิดของข้อปัจจุบัน — single_choice/true_false = ตอบได้ข้อเดียว (radio)
+  const currentIsSingleSelect =
+    currentQuestion?.content.type === "single_choice" ||
+    currentQuestion?.content.type === "true_false";
   const answeredCount = questions.filter(
     (question) => (answers[question.questionId]?.choiceIds.length ?? 0) > 0,
   ).length;
@@ -478,6 +484,9 @@ export function ExamRoom({
             ข้อ {currentQuestion.seq} จาก {questions.length}
           </legend>
           <p className="whitespace-pre-line text-base text-ink-900">{currentQuestion.content.text}</p>
+          {currentIsSingleSelect ? (
+            <p className="mt-1 text-xs text-ink-500">เลือกได้ข้อเดียว</p>
+          ) : null}
           <div className="mt-4 space-y-2">
             {currentQuestion.content.options.map((option) => {
               const checked = (answers[currentQuestion.questionId]?.choiceIds ?? []).includes(option.id);
@@ -487,11 +496,16 @@ export function ExamRoom({
               return (
                 <label key={option.id} className={optionClass}>
                   <input
-                    type="checkbox"
+                    type={currentIsSingleSelect ? "radio" : "checkbox"}
+                    name={currentIsSingleSelect ? "exam-choice-" + currentQuestion.questionId : undefined}
                     className="mt-1 accent-brand-600"
                     checked={checked}
                     disabled={phase.kind === "submitting" || timeup}
                     onChange={() => {
+                      if (currentIsSingleSelect) {
+                        saverRef.current?.setSingle(currentQuestion.questionId, option.id);
+                        return;
+                      }
                       saverRef.current?.toggle(currentQuestion.questionId, option.id);
                     }}
                   />
