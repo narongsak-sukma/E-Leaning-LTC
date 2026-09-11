@@ -78,8 +78,8 @@
 | --- | --- | --- | --- | --- |
 | ASSESSMENT_CONFIG_CHANGE | staff:exam, super_admin | assessment_id, ฟิลด์กติกาที่แก้, version | NOTICE | — |
 | EXAM_ATTEMPT_START | citizen, lawyer | attempt_id, assessment_id, deadline_at | NOTICE | — |
-| EXAM_SUBMIT | citizen, lawyer | attempt_id, จำนวนข้อที่ตอบ, submit_at vs deadline, idempotency_key | NOTICE | — |
-| EXAM_TIME_LIMIT_EXCEED | ระบบ | attempt_id, ความล่าช้า (วินาที) | WARN | — |
+| EXAM_SUBMIT | citizen, lawyer, ระบบ (auto D-10) | attempt_id, จำนวนข้อที่ตอบ, submit_at vs deadline, idempotency_key · auto path เพิ่ม `auto=true` + `late_seconds` (D-10) | NOTICE | — |
+| EXAM_TIME_LIMIT_EXCEED | — | **รวมกับ EXAM_SUBMIT แถวเดียวตั้งแต่ D-10** (auto=true + late_seconds แทน event แยก — ปิด 1 attempt = audit 1 แถว) | WARN | — |
 | EXAM_SESSION_TAKEOVER | ระบบ (D12-21: ASM-011) | attempt_id, session_id เดิม→ใหม่, สาเหตุ (disconnect นานเกิน `exam_disconnect_grace_minutes` + lease_expires_at ครบ), ip_hash | WARN | — |
 | EXAM_GRADE_OVERRIDE | staff:exam | attempt_id, คะแนนเดิม→ใหม่, reason | WARN | ผลกระทบต่อสิทธิ์ของบุคคล |
 | CERT_ISSUE | staff:registrar | certificate_id, code, attempt_id, ผู้ออก | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล |
@@ -301,7 +301,7 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 | AUTH_LOGIN_FAIL ≥ 20/ชม. จาก ip_hash เดียว | super_admin | สรุปรายชั่วโมง |
 | AUTH_LOCKOUT ของบัญชี staff | super_admin + เจ้าของบัญชี | ทันที |
 | AUDIT_CHAIN_VERIFY = broken | super_admin + ช่องทางเตือนภัย (เช่น webhook ภายนอกที่ config) | ทันที — ต้องสอบสวนก่อนทำอย่างอื่น |
-| EXAM_TIME_LIMIT_EXCEED > 60 วินาที ต่อ attempt | staff:exam | สรุปรายวัน |
+| EXAM_SUBMIT (auto=true, D-10) ที่ late_seconds > 60 วินาที ต่อ attempt | staff:exam | สรุปรายวัน |
 
 ### 6.2 การตรวจสอบไหล (สรุป)
 
