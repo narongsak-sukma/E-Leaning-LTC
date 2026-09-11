@@ -3,6 +3,13 @@
 -- D55-7 (CRT-008: async สแกน passed-no-valid-cert ≤5 นาที · idempotent · flag ปิด default ·
 -- ห้าม sync ใน submit TX — ตัวนี้เป็น cron ล้วนไม่แตะ submit path)
 --
+-- ⚠️ ถูก 0027_cert_bulk_worker_redesign แทนบางส่วนแล้ว (codex gate r1 M1/M2/M3):
+--   runner `admin_cert_bulk_issue_run` และ tick `cert_auto_issue_tick()` แบบ function
+--   ถูก drop และแทนด้วย procedure commit-ต่อ-ใบของ 0027 (worker model — BFF POST
+--   insert-only 202) · ส่วนที่ไฟล์นี้ยังเป็น canonical: โปรไฟล์ระบบ a170,
+--   cert_issue_core v2 (p_mode), feature_flags + seed flag, policy D58 ของ
+--   cert_bulk_jobs/feature_flags
+--
 -- สิ่งที่ไฟล์นี้ทำ:
 --   (0) โปรไฟล์ระบบสำหรับ actor ของโหมด auto (profiles.id ไม่ผูก auth.users — seed ใส่ตรงได้)
 --   (1) cert_issue_core เพิ่ม p_mode ('manual'|'bulk'|'auto' default 'manual') — audit CERT_ISSUE

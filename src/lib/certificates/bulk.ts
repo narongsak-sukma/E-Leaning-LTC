@@ -4,52 +4,51 @@
  * **service_role รวมศูนย์ที่ src/lib/certificates/** (D36-O3)** — route เรียกฟังก์ชัน
  * ของ lib เท่านั้น (ห้าม import service client ตรง)
  *
- * - POST /admin/certificates/bulk: BFF insert แถว `cert_bulk_jobs` (0023 — RLS เปิด
- *   fail-closed เหลือ service_role เท่านั้น) created_by = ผู้เรียก แล้วรันทันทีด้วย
- *   RPC `admin_cert_bulk_issue_run` (0026 — EXECUTE ให้ service_role) · การออกใบ batch
- *   200 + TX เดียวต่อใบ + audit CERT_ISSUE mode='bulk' ต่อใบ **เกิดใน TX ฝั่ง DB แล้ว**
- *   — BFF ไม่เขียน audit ซ้ำ (แบบแผนเดียวกับ issue.ts)
- * - GET /admin/certificates/bulk/{jobId}: select แถว job เดียว — **การเห็น: เจ้าของ job
- *   (created_by = ผู้เรียก) หรือ super_admin เท่านั้น** (registrar คนอื่นเจอ job ของ
- *   เพื่อน = ตอบเหมือนไม่พบ ไม่เฉลยว่ามีจริง — กัน enumeration)
- * - ขาเข้า (แถวตาราง/ผล RPC) และขาออก (resource ของ route) ตรวจ zod .strict() ทั้งสอง
- *   ชั้น — drift = ERR-SYS-002 fail-closed ไม่ strip/fabricate เงียบ ๆ (แบบแผน
+ * - POST /admin/certificates/bulk (โมเดล worker ของ 0027 ตาม codex gate r1 M1/M2):
+ *   BFF insert แถว `cert_bulk_jobs` (0023 — RLS เปิด fail-closed เหลือ service_role
+ *   เท่านั้น) created_by = ผู้เรียก status 'pending' แล้วตอบ 202 ทันที — **ไม่รันใน
+ *   request** (เดิม 0026 รอ RPC จบ job ใน TX เดียว = ความคืบหน้าไม่ durable) ·
+ *   worker `admin_cert_bulk_issue_step` (pg_cron `ltc-cert-bulk-step` ทุกนาที —
+ *   PostgREST CALL procedure ไม่ได้ จึงอยู่ฝั่ง cron ล้วน) หยิบ job มารัน commit
+ *   ต่อใบ: ใบ + audit CERT_ISSUE mode='bulk' + counts ของ job เป็น TX เดียว *ต่อใบ*
+ *   และเดินผ่านแถวที่ล้มด้วย cursor (M1) — BFF ไม่เขียน audit ซ้ำอยู่ดี
+ * - GET /admin/certificates/bulk/{jobId}: select แถว job เดียว — เห็นความคืบหน้าสด
+ *   ระหว่าง worker รัน (commit ต่อใบ) · **การเห็น: เจ้าของ job (created_by = ผู้เรียก)
+ *   หรือ super_admin เท่านั้น** (registrar คนอื่นเจอ job ของเพื่อน = ตอบเหมือนไม่พบ
+ *   ไม่เฉลยว่ามีจริง — กัน enumeration)
+ * - ขาเข้า (แถวตาราง) และขาออก (resource ของ route) ตรวจ zod .strict() ทั้งสองชั้น — drift = ERR-SYS-002 fail-closed ไม่ strip/fabricate เงียบ ๆ (แบบแผน
  *   r6-L1/r7-M2 เดียวกับ issue/list)
  */
 import "server-only";
 import { z } from "zod";
 import { AppError } from "@/lib/errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
-import { certRpcError, dbFailed, unwrapScalarRow } from "./shared";
+import { dbFailed } from "./shared";
 
 /** เวลา ISO 8601 (ยอมทั้ง Z และ +00:00 — เดียวกับ schema กลางของ repo) */
 const IsoTimestamp = z.iso.datetime({ offset: true });
 
-/** สถานะ job — CHECK ของ cert_bulk_jobs (0023) */
+/** สถานะ job — CHECK ของ cert_bulk_jobs (0023) · 0027: POST ตอบ 'pending' ตอนสร้าง
+ *  (worker เป็นผู้เปลี่ยนเป็น running/completed/failed หลังจากนั้น) */
 export const BULK_JOB_STATUSES = ["pending", "running", "completed", "failed"] as const;
-
-/** สถานะที่ RPC `admin_cert_bulk_issue_run` คืนได้เมื่อรันจบ (0026 — รันจบเสมอ) */
-export const BULK_RUN_STATUSES = ["completed", "failed"] as const;
 
 /**
  * ความยาวสูงสุดของ lastError ที่ออกทาง GET (สัญญา API §3.6 — "last_error ตัดทอน")
- * — DB เก็บได้ถึง 500 อักขระ (left(sqlerrm(), 500) ใน 0026) แต่ resource ตัดที่ 200
+ * — DB เก็บได้ถึง 500 อักขระ (left(sqlerrm, 500) ใน 0027) แต่ resource ตัดที่ 200
  */
 export const LAST_ERROR_MAX = 200;
 
 /* ─── ขาเข้า: แถว/ผลลัพธ์จาก DB — .strict() จับคีย์หาย/คีย์เกิน/ค่าผิดชนิด (drift) ─── */
 
-/** แถวที่ INSERT .select("id") คืน — exact 1 คีย์ (แบบแผน created-row zod ของ export.ts) */
-export const BulkJobIdRowSchema = z.object({ id: z.string().uuid() }).strict();
-
 /**
- * jsonb ที่ `admin_cert_bulk_issue_run` คืน (0026 — jsonb_build_object 5 คีย์ exact ·
- * PostgREST อาจ wrap scalar เป็น array — ผ่าน unwrapScalarRow ก่อน)
+ * แถวที่ INSERT .select(...) คืน — สถานะเริ่มต้นของ job 5 คีย์ exact (id + status +
+ * counts ศูนย์ — worker ของ 0027 เป็นคนเพิ่ม counts ภายหลัง) · แบบแผน created-row
+ * zod ของ export.ts
  */
-export const BulkRunResultSchema = z
+export const BulkJobCreatedRowSchema = z
   .object({
-    job_id: z.string().uuid(),
-    status: z.enum(BULK_RUN_STATUSES),
+    id: z.string().uuid(),
+    status: z.enum(BULK_JOB_STATUSES),
     total_attempts: z.number().int().min(0),
     issued_count: z.number().int().min(0),
     failed_count: z.number().int().min(0),
@@ -77,11 +76,12 @@ export type BulkJobRowParsed = z.infer<typeof BulkJobRowSchema>;
 
 /* ─── ขาออก: resource ของ route — route ครอบด้วย parseOutgoingView อีกชั้น ─── */
 
-/** ผลสร้าง+รัน job (POST /admin/certificates/bulk → 202) — camelCase strict */
+/** ผลสร้าง job (POST /admin/certificates/bulk → 202) — camelCase strict · 0027:
+ *  สถานะเริ่มต้น 'pending' + counts ศูนย์ (worker รันต่อ — ตามผลด้วย GET) */
 export const BulkJobResultResource = z
   .object({
     jobId: z.string().uuid(),
-    status: z.enum(BULK_RUN_STATUSES),
+    status: z.enum(BULK_JOB_STATUSES),
     totalAttempts: z.number().int().min(0),
     issuedCount: z.number().int().min(0),
     failedCount: z.number().int().min(0),
@@ -106,12 +106,12 @@ export const BulkJobStatusResource = z
 export type BulkJobResult = z.infer<typeof BulkJobResultResource>;
 export type BulkJobStatus = z.infer<typeof BulkJobStatusResource>;
 
-/** ข้อมูลสร้าง+รัน job — actorId มาจาก requirePermission ที่ route ตรวจแล้ว */
+/** ข้อมูลสร้าง job — actorId มาจาก requirePermission ที่ route ตรวจแล้ว · 0027:
+ *  ไม่มี requestId — การรันเกิดฝั่ง worker ไม่ผูก request ใด */
 export interface CreateBulkJobInput {
   readonly actorId: string;
   /** null = ทุกหลักสูตร (course_id nullable ตาม DDL 0023) */
   readonly courseId: string | null;
-  readonly requestId?: string | null;
 }
 
 /** อ่านสถานะ job — ผู้เรียกต้องผ่าน role gate ที่ route แล้ว · การเห็นกำหนดที่นี่:
@@ -123,19 +123,18 @@ export interface GetBulkJobInput {
 }
 
 /**
- * สร้าง job (cert_bulk_jobs) แล้วรันทันทีด้วย RPC `admin_cert_bulk_issue_run` —
+ * สร้าง job (cert_bulk_jobs) — **insert อย่างเดียว ไม่รันใน request** (0027 · M2) —
  * สิทธิ์ actor อยู่ที่ route (requirePermission) แล้ว ที่นี่คือ service_role query ล้วน
  *
- * - insert ล้ม = ERR-SYS-002 fail-closed **ก่อนเรียก RPC เสมอ** (job ไม่มีแถว = runner
- *   ต้อง ERR-NF-001 ตาม 0026 — ห้ามปล่อยให้เกิดเอง)
- * - RPC error มีป้าย (ERR-XXX-NNN|reason) → map ตามทะเทียน (certRpcError เดียวกับ
- *   issue.ts): ERR-NF-001 → 404, ERR-VAL-001 → 400, อื่น ๆ → ERR-SYS-002 แบบ opaque
- * - job ที่ถูก insert แล้วแต่ RPC ล้ม (เช่น ถูกรันซ้ำจนจบ) คงสถานะจริงในตาราง —
- *   status endpoint เป็นความจริงเดียวของความคืบหน้า
+ * - worker `admin_cert_bulk_issue_step` (pg_cron `ltc-cert-bulk-step` ทุกนาที) หยิบ
+ *   job 'pending'/'running' มารัน: ใบ + audit mode='bulk' + counts ของ job commit เป็น
+ *   TX เดียว *ต่อใบ* (ความคืบหน้า durable — GET เห็นสดระหว่างรัน · job หยุดกลางคัน
+ *   ถูก resume อัตโนมัติโดยรอบถัดไป · anti-join กันออกซ้ำ)
+ * - insert ล้ม = ERR-SYS-002 fail-closed · created-row ตรวจ strict 5 คีย์ (id ไม่ใช่
+ *   uuid = drift ของแถวที่เขียนไว้ ห้ามตอบออกไป)
  */
 export async function createBulkJob(input: CreateBulkJobInput): Promise<BulkJobResult> {
   const client = createSupabaseServiceRoleClient();
-  // 1) insert แถว job — created_by = ผู้เรียก, course_id null = ทุกหลักสูตร, status 'pending'
   const inserted = await client
     .from("cert_bulk_jobs")
     .insert({
@@ -143,37 +142,21 @@ export async function createBulkJob(input: CreateBulkJobInput): Promise<BulkJobR
       course_id: input.courseId,
       status: "pending",
     })
-    .select("id")
+    .select("id, status, total_attempts, issued_count, failed_count")
     .single();
   if (inserted.error !== null) {
     throw dbFailed("cert_bulk_job_insert_failed");
   }
-  // created-row ตรวจ strict เหมือนแถวที่อ่านมา (gate p1-r1 MINOR-4) — id ไม่ใช่ uuid =
-  // drift ของแถวที่เขียนไว้ ห้ามใช้ต่อเป็น p_job_id ของ runner
-  const idRow = BulkJobIdRowSchema.safeParse(inserted.data);
-  if (!idRow.success) {
+  const row = BulkJobCreatedRowSchema.safeParse(inserted.data);
+  if (!row.success) {
     throw dbFailed("cert_bulk_job_insert_row_drift");
   }
-  const jobId = idRow.data.id;
-  // 2) รัน job — mutation ออกใบ+audit CERT_ISSUE mode='bulk' อยู่ใน RPC ฝั่ง DB ทั้งหมด
-  const rpc = await client.rpc("admin_cert_bulk_issue_run", {
-    p_job_id: jobId,
-    p_request_id: input.requestId ?? null,
-  });
-  if (rpc.error !== null) {
-    throw certRpcError(rpc.error, "cert_bulk_run_failed");
-  }
-  const runRow = BulkRunResultSchema.safeParse(unwrapScalarRow(rpc.data));
-  if (!runRow.success) {
-    throw dbFailed("cert_bulk_run_row_drift");
-  }
-  const run = runRow.data;
   return {
-    jobId: run.job_id,
-    status: run.status,
-    totalAttempts: run.total_attempts,
-    issuedCount: run.issued_count,
-    failedCount: run.failed_count,
+    jobId: row.data.id,
+    status: row.data.status,
+    totalAttempts: row.data.total_attempts,
+    issuedCount: row.data.issued_count,
+    failedCount: row.data.failed_count,
   };
 }
 

@@ -1,10 +1,11 @@
 /**
  * Unit tests: src/lib/certificates/bulk.ts — bulk job ออกใบเป็นชุด (Wave E — E-4)
  *
- * ครอบ: createBulkJob = insert cert_bulk_jobs → RPC admin_cert_bulk_issue_run เดียว
- * (mutation+audit ฝั่ง DB) · getBulkJob = select แถวเดียว + การเห็นเจ้าของ/super_admin
- * · drift fail-closed ทุกชั้น (created-row/ผล RPC/แถวตาราง) — ERR-SYS-002 ไม่ strip
- * เงียบ · last_error ตัดทอน 200 ตัวอักษร
+ * ครอบ (โมเดล worker ของ 0027 — gate r1 M2): createBulkJob = insert cert_bulk_jobs
+ * อย่างเดียว (status 'pending' · ไม่มี RPC ใน request อีกแล้ว — pg_cron worker
+ * `admin_cert_bulk_issue_step` หยิบ job ไปรันต่อใบ-commit) · getBulkJob = select
+ * แถวเดียว + การเห็นเจ้าของ/super_admin · drift fail-closed ทุกชั้น (created-row/
+ * แถวตาราง) — ERR-SYS-002 ไม่ strip เงียบ · last_error ตัดทอน 200 ตัวอักษร
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -48,27 +49,27 @@ function jobRow(overrides: Row = {}): Row {
   };
 }
 
-/** jsonb ที่ admin_cert_bulk_issue_run คืน (0026 — 5 คีย์ exact) */
-function runResult(overrides: Row = {}): Row {
+/** แถวที่ INSERT .select() คืนตอนสร้าง job (0027 — 5 คีย์ exact: id + status
+ *  'pending' + counts ศูนย์ — worker เป็นคนเพิ่ม counts ภายหลัง) */
+function createdRow(overrides: Row = {}): Row {
   return {
-    job_id: JOB_ID,
-    status: "completed",
-    total_attempts: 3,
-    issued_count: 2,
-    failed_count: 1,
+    id: JOB_ID,
+    status: "pending",
+    total_attempts: 0,
+    issued_count: 0,
+    failed_count: 0,
     ...overrides,
   };
 }
 
 /**
- * spec ของ fake service client — rpc dispatch ตามชื่อฟังก์ชัน · from() จำลอง builder
- * สองรูปที่ bulk.ts ใช้: insert().select().single() และ select().eq().maybeSingle()
+ * spec ของ fake service client · from() จำลอง builder สองรูปที่ bulk.ts ใช้:
+ * insert().select().single() และ select().eq().maybeSingle() — ไม่มี rpc แล้ว
+ * (โมเดล worker 0027: BFF insert อย่างเดียว ไม่เรียก procedure ผ่าน PostgREST)
  */
 interface FakeSpec {
-  /** ผลของ .single() หลัง insert — default { data: { id: JOB_ID }, error: null } */
+  /** ผลของ .single() หลัง insert — default { data: createdRow(), error: null } */
   insertJob?: () => Resolve;
-  /** dispatch rpc ตามชื่อ — default สำเร็จด้วย runResult() */
-  rpc?: (fn: string) => Resolve;
   /** แถวที่ .maybeSingle() คืน — null = data null (ไม่พบ) · default jobRow() */
   selectJob?: () => Row | null;
   /** error ฝั่ง query ของ select แทนแถว */
@@ -76,11 +77,6 @@ interface FakeSpec {
 }
 
 function serviceClient(spec: FakeSpec = {}) {
-  const rpc = vi.fn(async (fn: string) =>
-    spec.rpc !== undefined
-      ? spec.rpc(fn)
-      : { data: runResult(), error: null },
-  );
   const inserted: Array<{ table: string; values: Row; selectColumns: string }> = [];
   const selected: Array<{ table: string; columns: string; eqColumn: string; eqValue: unknown }> = [];
   const from = vi.fn((table: string) => ({
@@ -90,7 +86,7 @@ function serviceClient(spec: FakeSpec = {}) {
           inserted.push({ table, values, selectColumns });
           return spec.insertJob !== undefined
             ? spec.insertJob()
-            : { data: { id: JOB_ID }, error: null };
+            : { data: createdRow(), error: null };
         },
       }),
     }),
@@ -107,111 +103,70 @@ function serviceClient(spec: FakeSpec = {}) {
       }),
     }),
   }));
-  const client = { rpc, from };
+  const client = { from };
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
-  return { rpc, from, inserted, selected };
+  return { from, inserted, selected };
 }
 
 beforeEach(() => {
   vi.mocked(createSupabaseServiceRoleClient).mockReset();
 });
 
-describe("createBulkJob — insert cert_bulk_jobs + RPC admin_cert_bulk_issue_run", () => {
-  it("happy path: insert created_by/course_id/status ถูกต้อง → rpc ชื่อ+พารามิเตอร์ถูกต้อง → map camelCase ครบ", async () => {
+describe("createBulkJob — insert cert_bulk_jobs อย่างเดียว (worker ของ 0027 รันต่อ)", () => {
+  it("happy path: insert created_by/course_id/status pending → select 5 คีย์ → map camelCase ครบ", async () => {
     const ctx = serviceClient();
-    const job = await createBulkJob({ actorId: STAFF_ID, courseId: COURSE_ID, requestId: "req-1" });
+    const job = await createBulkJob({ actorId: STAFF_ID, courseId: COURSE_ID });
     expect(job).toEqual({
       jobId: JOB_ID,
-      status: "completed",
-      totalAttempts: 3,
-      issuedCount: 2,
-      failedCount: 1,
+      status: "pending",
+      totalAttempts: 0,
+      issuedCount: 0,
+      failedCount: 0,
     });
     expect(ctx.inserted).toEqual([
       {
         table: "cert_bulk_jobs",
         values: { created_by: STAFF_ID, course_id: COURSE_ID, status: "pending" },
-        selectColumns: "id",
+        selectColumns: "id, status, total_attempts, issued_count, failed_count",
       },
     ]);
-    expect(ctx.rpc).toHaveBeenCalledTimes(1);
-    expect(ctx.rpc).toHaveBeenCalledWith("admin_cert_bulk_issue_run", {
-      p_job_id: JOB_ID,
-      p_request_id: "req-1",
-    });
   });
 
-  it("courseId null (ทุกหลักสูตร) + requestId ไม่ระบุ → course_id null + p_request_id null", async () => {
+  it("courseId null (ทุกหลักสูตร) → course_id null ในแถวที่ insert", async () => {
     const ctx = serviceClient();
     const job = await createBulkJob({ actorId: STAFF_ID, courseId: null });
-    expect(job.status).toBe("completed");
     expect(ctx.inserted[0]?.values).toEqual({
       created_by: STAFF_ID,
       course_id: null,
       status: "pending",
     });
-    expect(ctx.rpc).toHaveBeenCalledWith("admin_cert_bulk_issue_run", {
-      p_job_id: JOB_ID,
-      p_request_id: null,
-    });
-  });
-
-  it("PostgREST wrap scalar เป็น array หลักเดียว → unwrap ได้ (แบบเดียวกับ issue.ts)", async () => {
-    serviceClient({ rpc: () => ({ data: [runResult()], error: null }) });
-    const job = await createBulkJob({ actorId: STAFF_ID, courseId: null });
     expect(job.jobId).toBe(JOB_ID);
+    expect(job.status).toBe("pending");
   });
 
-  it.each([
-    ["ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|bulk_job_not_found)", "ERR-NF-001", "bulk_job_not_found"],
-    [
-      "ข้อมูลไม่ถูกต้อง: job นี้จบไปแล้ว สร้าง job ใหม่เพื่อออกส่วนที่เหลือ (ERR-VAL-001|bulk_job_already_finished)",
-      "ERR-VAL-001",
-      "bulk_job_already_finished",
-    ],
-    ["ข้อมูลไม่ถูกต้อง: ต้องระบุ job (ERR-VAL-001|job_id_required)", "ERR-VAL-001", "job_id_required"],
-  ])("RPC error มีป้าย → map ตรง: %s", async (message, code, reason) => {
-    serviceClient({ rpc: () => ({ data: null, error: { message } }) });
+  it("insert ล้ม (RLS/เครือข่าย) → ERR-SYS-002 cert_bulk_job_insert_failed (ไม่มี job ถูกสร้าง)", async () => {
+    serviceClient({ insertJob: () => ({ data: null, error: { message: "rls denied" } }) });
     const error = await createBulkJob({ actorId: STAFF_ID, courseId: null }).catch(
       (e: unknown) => e,
     );
-    expect(error, message).toBeInstanceOf(AppError);
-    expect((error as AppError).code, message).toBe(code);
-    expect((error as AppError).details, message).toEqual({ reason });
-  });
-
-  it("RPC error ไม่มีป้าย → ERR-SYS-002 opaque (ไม่ leak SQL)", async () => {
-    serviceClient({ rpc: () => ({ data: null, error: { code: "XX000", message: "boom" } }) });
-    const error = await createBulkJob({ actorId: STAFF_ID, courseId: null }).catch(
-      (e: unknown) => e,
-    );
-    expect((error as AppError).code).toBe("ERR-SYS-002");
-    expect((error as AppError).details).toEqual({ reason: "cert_bulk_run_failed" });
-  });
-
-  it("insert ล้ม → ERR-SYS-002 fail-closed ก่อนเรียก RPC (ไม่รัน job ที่ไม่มีแถว)", async () => {
-    const ctx = serviceClient({ insertJob: () => ({ data: null, error: { message: "rls denied" } }) });
-    const error = await createBulkJob({ actorId: STAFF_ID, courseId: null }).catch(
-      (e: unknown) => e,
-    );
+    expect(error).toBeInstanceOf(AppError);
     expect((error as AppError).code).toBe("ERR-SYS-002");
     expect((error as AppError).details).toEqual({ reason: "cert_bulk_job_insert_failed" });
-    expect(ctx.rpc).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["แถวไม่มี id (data null)", null],
-    ["id ไม่ใช่ uuid", { id: "not-a-uuid" }],
-    ["แถวมีคีย์เกิน", { id: JOB_ID, extra_key: 1 }],
-    ["แถวมีหลาย id", { id: JOB_ID, id2: JOB_ID }],
-  ])("created-row drift: %s → ERR-SYS-002 ไม่เอาไปเป็น p_job_id", async (_label, row) => {
-    const ctx = serviceClient({ insertJob: () => ({ data: row, error: null }) });
+    ["แถวไม่มี (data null)", null],
+    ["id ไม่ใช่ uuid", { ...createdRow(), id: "not-a-uuid" }],
+    ["แถวมีคีย์เกิน", { ...createdRow(), extra_key: 1 }],
+    ["counts ผิดชนิด (string)", { ...createdRow(), issued_count: "0" }],
+    ["status นอก enum", { ...createdRow(), status: "queued" }],
+  ])("created-row drift: %s → ERR-SYS-002 ไม่ตอบ 202 ด้วยแถวเพี้ยน", async (_label, row) => {
+    serviceClient({ insertJob: () => ({ data: row, error: null }) });
     const error = await createBulkJob({ actorId: STAFF_ID, courseId: null }).catch(
       (e: unknown) => e,
     );
     expect((error as AppError).code).toBe("ERR-SYS-002");
     expect((error as AppError).details).toEqual({ reason: "cert_bulk_job_insert_row_drift" });
-    expect(ctx.rpc).not.toHaveBeenCalled();
   });
 });
 

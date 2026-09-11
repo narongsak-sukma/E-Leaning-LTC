@@ -6,7 +6,10 @@
  *      (d8-exam-cert-flow ตรวจเฉพาะการตัดเฉลย/แต้มของ question_paper — ไม่ได้แตะ type)
  *   2) admin_list_certificates (0023): keyset pagination บน tuple (issued_at, id) แบบ
  *      ลำดับเสถียร desc + ฟิลด์ตาม returns table + ตัวกรอง status/cert_no/verify_code/
- *      course_id + การ clamp จำนวน (p_limit 0 → 1 แถว · 1000 → สูงสุด 101 แถว)
+ *      course_id + การ clamp จำนวน (p_limit 0 → 1 แถว · 1000 → สูงสุด 101 แถว —
+ *      พิสูจน์ "ครอบ" จริงด้วย fixture ใบ ≥102 แถว: clamp ตัดเหลือ 101 พอดี ·
+ *      prefix ของ cert_no ตัดจริง (ไม่ใช่เลขเต็ม) และ keyset กรณี issued_at เท่ากัน
+ *      ตัดสินด้วย id ตาม tuple — ปิดข้อ m2 ของ codex gate r1)
  *      หมายเหตุ: 0023 ไม่ได้นิยาม audit ระดับ DB สำหรับ list (audit PII_ACCESS ทำที่
  *      BFF ตามหัวไฟล์ 0023 — อยู่นอกขอบเขต DB ของชุดนี้)
  *
@@ -75,6 +78,13 @@ const E9D7_ENROLLMENT_ID = "bb000000-0000-4000-8000-00000000e972";
 const E9D7_PASSED_ATTEMPT_ID = "aa000000-0000-4000-8000-00000000e973";
 /** attempt in_progress พร้อม snapshot 2 รูปแบบ — เป้าของ paper view */
 const E9D7_PAPER_ATTEMPT_ID = "aa000000-0000-4000-8000-00000000e974";
+/** หลักสูตรของโลกใบ 102 ใบ (clamp/tie ของ m2) — แยกจากหลักสูตรหลักของชุด */
+const E9D7_BIG_COURSE_ID = "99999999-9999-4999-8999-00000000e975";
+
+/** id ของใบใบที่ n (1..102) ของโลกใบ 102 ใบ — ตายตัว เรียงตามเลข เพื่อ assert ลำดับ id desc */
+function bigCertId(n: number): string {
+  return `99999999-9999-4999-8999-0000000e${n.toString().padStart(4, "0")}`;
+}
 
 /** comparator อ้างอิงของลำดับ list — tuple (issued_at desc, id desc) ตาม ORDER BY ของ 0023 */
 function byIssuedDescIdDesc(a: CertListRow, b: CertListRow): number {
@@ -125,7 +135,8 @@ describe.skipIf(!DB_URL)("DCR-7 กระดาษข้อสอบคีย์
       delete from public.profiles
        where id in (select id from auth.users where email like 'e9-dcr7-%');
       delete from auth.users where email like 'e9-dcr7-%';
-      delete from public.courses where id = '${E9D7_COURSE_ID}';
+      delete from public.courses
+       where id in ('${E9D7_COURSE_ID}', '${E9D7_BIG_COURSE_ID}');
     `);
   }
 
@@ -352,5 +363,96 @@ describe.skipIf(!DB_URL)("DCR-7 กระดาษข้อสอบคีย์
     const hugeLimit = await listCerts({ p_limit: 1000 });
     expect(hugeLimit.length).toBeGreaterThan(0);
     expect(hugeLimit.length).toBeLessThanOrEqual(101);
+  });
+
+  // ─── 3) โลกใบ 102 ใบ: clamp ครอบจริง + prefix ตัดจริง + keyset tie ของ id (m2 ของ gate r1) ──
+
+  /** หว่านโลกใบ 102 ใบ **แบบขี้เกียจใน test แรกของชุดนี้** (ไม่ยุ่งกับตัวเลข 2 ใบของ
+   *  test ก่อนหน้า): ใบ insert ตรง (ไม่ผ่าน RPC) ในคำสั่งเดียว → issued_at เดียวกัน
+   *  ทั้ง 102 ใบพอดี = วัตถุดิบของการพิสูจน์ tie-break ด้วย id · enrollment ของโลกนี้
+   *  ตั้ง deleted_at เพื่อไม่ชน uq_enrollments_user_course_active (partial เฉพาะ
+   *  แถวที่ยังมีชีวิต) และใบตรึง id ตายตัวเพื่อ assert ลำดับได้เป๊ะ */
+  async function seedBigCertWorld(): Promise<void> {
+    await psql(`
+      insert into public.courses
+        (id, code, category_id, created_by, title_th, is_public, status, published_at)
+      values
+        ('${E9D7_BIG_COURSE_ID}', 'E9-DCR7-BIG',
+         (select id from public.course_categories order by id limit 1), '${STAFF_EXAM_DEMO_ID}',
+         'หลักสูตรทดสอบ DCR-7 คิวใหญ่ (integration)', false, 'published', now())
+      on conflict (id) do nothing;
+      insert into public.enrollments
+        (id, user_id, course_id, status, completed_at, deleted_at)
+      select ('88888888-8888-4888-8888-0000000f' || lpad(gs::text, 4, '0'))::uuid,
+             (select id from auth.users where email like 'e9-dcr7-%' limit 1),
+             '${E9D7_BIG_COURSE_ID}', 'completed', now() - interval '1 hour', now()
+        from generate_series(1, 102) gs
+      on conflict (id) do nothing;
+      insert into public.certificates
+        (id, cert_no, verify_code, enrollment_id, user_id, course_id, holder_name_snapshot,
+         course_title_snapshot, issued_by, issued_at, status)
+      select ('99999999-9999-4999-8999-0000000e' || lpad(gs::text, 4, '0'))::uuid,
+             'LTC-2099-' || lpad(gs::text, 6, '0'),
+             rpad('e9d7big' || lpad(gs::text, 4, '0') || '-', 43, 'x'),
+             ('88888888-8888-4888-8888-0000000f' || lpad(gs::text, 4, '0'))::uuid,
+             (select id from auth.users where email like 'e9-dcr7-%' limit 1),
+             '${E9D7_BIG_COURSE_ID}', 'ทดสอบ คิวใหญ่อี9',
+             'หลักสูตรทดสอบ DCR-7 คิวใหญ่ (integration)',
+             '${STAFF_EXAM_DEMO_ID}', now(), 'valid'
+        from generate_series(1, 102) gs
+      on conflict (id) do nothing;
+    `);
+  }
+
+  it("list clamp ครอบจริง (m2): ผู้ถือมี 104 ใบ + p_limit 1000 → ตัดเหลือ 101 พอดี · prefix cert_no ตัดจริงแยกโลกได้", async () => {
+    await seedBigCertWorld(); // โลกใบ 102 ใบเกิดหลัง test ก่อนหน้าทั้งหมด (ตัวเลขเดิมไม่กระทบ)
+
+    // holder มี 104 ใบจริง (102 ของโลกใหญ่ + valid + superseded) — clamp 101 ตัดจริง:
+    // แถวที่หายไปต้องเป็น "ท้ายลำดับ" ยิ่งกว่า (โลกใบใบเล็กสุด + ใบ RPC ทั้งสอง)
+    const rows = await listCerts({ p_holder_user_id: user.id, p_limit: 1000 });
+    expect(rows).toHaveLength(101);
+    const sorted = [...rows].sort(byIssuedDescIdDesc);
+    expect(rows.map((row) => row.id)).toEqual(sorted.map((row) => row.id));
+    expect(rows.some((row) => row.id === bigCertId(1))).toBe(false); // ท้ายสุดของโลกใบถูกตัด
+    expect(rows[0]?.id).toBe(bigCertId(102)); // หัวลำดับ = id มากสุด (issued_at ใหม่สุด)
+
+    // prefix แบบ "ตัดจริง" ไม่ใช่เลขเต็ม (ข้อ m2): 8 ตัวแรก match ทั้งโลกใบ 102 → clamp 101
+    const prefixed = await listCerts({ p_holder_user_id: user.id, p_cert_no: "LTC-2099", p_limit: 1000 });
+    expect(prefixed).toHaveLength(101);
+    for (const row of prefixed) {
+      expect(row.cert_no.startsWith("LTC-2099-")).toBe(true);
+    }
+
+    // prefix ลึกถึงเลขท้าย: 'LTC-2099-00010' → เจอเฉพาะ 000100-000102 พอดี 3 ใบ
+    const subset = await listCerts({ p_holder_user_id: user.id, p_cert_no: "LTC-2099-00010" });
+    expect(subset.map((row) => row.cert_no).sort()).toEqual([
+      "LTC-2099-000100",
+      "LTC-2099-000101",
+      "LTC-2099-000102",
+    ]);
+  }, 120_000);
+
+  it("list keyset tie (m2): issued_at เท่ากันทั้งคิว — cursor tuple ตัดสินด้วย id desc ล้วน ไม่หวนคืน", async () => {
+    // โลกใบ 102 ใบถูก insert ด้วยคำสั่งเดียว → issued_at ซ้ำกันทั้งหมด (พิสูจน์จากแถวจริง)
+    const all = await listCerts({ p_holder_user_id: user.id, p_cert_no: "LTC-2099", p_limit: 1000 });
+    expect(all.length).toBeGreaterThan(1);
+    expect(new Set(all.map((row) => row.issued_at)).size).toBe(1);
+
+    // หน้าละ 1: หน้าแรก = id มากสุด · หน้าถัดไปจาก cursor (issued_at เท่ากัน!) ต้องได้
+    // id รองลงมา — ถ้า keyset เทียบเฉพาะ issued_at (ไม่ใช่ tuple) เคอร์เซอร์นี้จะไป
+    // ไม่ถึงแถวไหนเลย (ไม่มีแถวที่เก่ากว่า) = พังตรงนี้พอดี
+    const page1 = await listCerts({ p_holder_user_id: user.id, p_cert_no: "LTC-2099", p_limit: 1 });
+    expect(page1[0]?.id).toBe(bigCertId(102));
+    const page2 = await listCerts({
+      p_holder_user_id: user.id,
+      p_cert_no: "LTC-2099",
+      p_after_issued_at: page1[0]?.issued_at,
+      p_after_id: page1[0]?.id,
+      p_limit: 1,
+    });
+    expect(page2[0]?.id).toBe(bigCertId(101));
+    expect(page2[0]?.cert_no).toBe("LTC-2099-000101");
+    // ทิศทาง: แถวถัดไป "เก่ากว่า" ตาม tuple — issued_at เท่ากันจึงคือ id น้อยกว่า
+    expect(byIssuedDescIdDesc(page1[0] as CertListRow, page2[0] as CertListRow)).toBe(-1);
   });
 });

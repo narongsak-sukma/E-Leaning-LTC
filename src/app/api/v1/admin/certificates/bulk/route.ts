@@ -6,14 +6,15 @@
  *   (staff:exam ไม่มี certificate:issue → 403 ERR-RBAC-001 — SoD T9)
  * - rate STAFF_WRITE (§5) — key user_id + ip (D12-11)
  * - body { courseId: uuid | null } (strict — extra key ปฏิเสธ) — null = ทุกหลักสูตร
- * - ขั้นตอน: insert cert_bulk_jobs (created_by = ผู้เรียก) → RPC
- *   `admin_cert_bulk_issue_run` (p_request_id = x-request-id — แบบเดียวกับ issue route;
- *   header ไม่มี = null) — audit CERT_ISSUE mode='bulk' ต่อใบเกิดใน TX ฝั่ง DB แล้ว
- *   BFF ไม่เขียน audit ซ้ำ
+ * - ขั้นตอน (โมเดล worker ของ 0027 — gate r1 M2): insert cert_bulk_jobs (created_by =
+ *   ผู้เรียก, status 'pending') แล้วตอบ 202 ทันที **ไม่รันใน request** · worker
+ *   `admin_cert_bulk_issue_step` ของ pg_cron (`ltc-cert-bulk-step` ทุกนาที) หยิบ job
+ *   รันต่อใบ-commit — audit CERT_ISSUE mode='bulk' ต่อใบเกิดฝั่ง DB (request_id เป็น
+ *   null เพราะไม่ได้ออกใน request ใด) ผู้เรียกตามผลด้วย GET …/{jobId} (worker pickup
+ *   ≤1 นาที + รันตามคิว)
  * - 202 { data: { jobId, status, totalAttempts, issuedCount, failedCount } } — ขาออก
  *   zod strict (parseOutgoingView) — ค่านอกสัญญา = ERR-SYS-002 fail-closed แบบเดียวกับ
- *   issue.ts · error จาก RPC แมปตามแบบแผน issue.ts (ERR-NF-001 → 404, ERR-VAL-001 →
- *   400, อื่น ๆ → ERR-SYS-002 ไทย ไม่ leak detail)
+ *   issue.ts · insert ล้ม = ERR-SYS-002 ไทย ไม่ leak detail (dbFailed — job ไม่ถูกสร้าง)
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -48,7 +49,7 @@ async function parseBody(request: Request): Promise<{ courseId: string | null }>
   return parsed.data;
 }
 
-/** POST — สร้าง+รัน job ออกใบเป็นชุด (202 Accepted — สัญญา §3.6 ของ endpoint นี้) */
+/** POST — สร้าง job ออกใบเป็นชุด แล้ว worker รันต่อ (202 Accepted — §3.6) */
 export async function POST(request: Request): Promise<NextResponse> {
   const options = optionsOf(request);
   try {
@@ -58,12 +59,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     enforceRateLimit(request, { group: "STAFF_WRITE", secondaryKey: userId });
     // 3) body strict — { courseId: uuid | null }
     const { courseId } = await parseBody(request);
-    // 4) เขียนผ่าน lib (service_role รวมศูนย์ใน lib — D36-O3)
-    const job = await createBulkJob({
-      actorId: userId,
-      courseId,
-      requestId: options.requestId ?? null,
-    });
+    // 4) เขียนผ่าน lib (service_role รวมศูนย์ใน lib — D36-O3) — insert job อย่างเดียว
+    //    worker ของ pg_cron (≤1 นาที) หยิบไปรันต่อใบ-commit (0027 M2 — ไม่รันใน request)
+    const job = await createBulkJob({ actorId: userId, courseId });
     // r6-L1: ขาออกตรวจ strict ก่อนตอบ — drift (คีย์เกิน/ผิดชนิดจาก lib) → 503 ไม่ strip เงียบ
     const view = parseOutgoingView(BulkJobResultResource, job, "bulk_job_result_drift");
     return new NextResponse(JSON.stringify({ data: view }), {

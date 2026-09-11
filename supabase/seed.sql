@@ -2,7 +2,8 @@
 -- supabase/seed.sql - dev seed (D25-O3): catalog + demo users for dev/integration tests
 -- source: DATA-DICTIONARY 1.1.0 (migrations 0001-0012) - D25-O3 "dev seeds courses instead of authoring"
 --
--- how to run (dev stack must be up + migrated first - migrate.sh does NOT run seed):
+-- how to run: อัตโนมัติ — db-migrate service ของ compose apply seed ทุกครั้งที่ up (ดู docker/db/migrate.sh ขั้น 4)
+--   รันมือเองได้เมื่อแก้ไฟล์นี้ระหว่าง stack รันอยู่แล้ว:
 --   docker compose exec -T db sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres -1 -v ON_ERROR_STOP=1' \
 --     < supabase/seed.sql
 --

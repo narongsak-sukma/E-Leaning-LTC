@@ -63,5 +63,18 @@ for f in /migrations/*.sql; do
   fi
 done
 
+# --- 4) dev seed (supabase/seed.sql — idempotent: fixed UUIDs + on conflict do nothing) ---
+# เดิมเป็น manual step ตาม header ของ seed.sql — fresh volume (down -v) จึงลืม seed ได้
+# (เจอจริงจาก replay รอบ gate r1: integration ที่อ้าง seed ตายทั้งชุด) · ผูกกับ boot เลย
+# note: ไม่ track ใน _dev.migrations — seed คง idempotent ของตัวเอง รันทุกครั้งที่ up
+# note: ไม่ใส่ -1 (single-transaction ของ psql) — ไฟล์เปิด begin; ... commit; เอง สองชั้น
+#       จะเกิด WARNING "no transaction in progress" ตอน commit ครั้งที่สอง
+if [ -f /seed.sql ]; then
+  echo "[db-migrate] seeding: /seed.sql"
+  psql -v ON_ERROR_STOP=1 -f /seed.sql
+else
+  echo "[db-migrate] WARN: /seed.sql not mounted - skip seed"
+fi
+
 echo "[db-migrate] done rc=$rc"
 exit "$rc"

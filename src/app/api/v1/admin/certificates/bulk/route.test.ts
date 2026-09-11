@@ -41,13 +41,14 @@ const STAFF_ID = "a0000000-0000-4000-8000-000000000001";
 const JOB_ID = "50000000-0000-4000-8000-000000000001";
 const COURSE_ID = "b0000000-0000-4000-8000-000000000001";
 
-/** ผลที่ lib คืนเมื่อรัน job จบ (camelCase — ตรง BulkJobResultResource) */
+/** ผลที่ lib คืนตอนสร้าง job (camelCase — ตรง BulkJobResultResource · โมเดล worker
+ * ของ 0027: POST ได้ status 'pending' + counts ศูนย์ — ค่าปลายทางมาจาก GET) */
 const jobResult = {
   jobId: JOB_ID,
-  status: "completed",
-  totalAttempts: 12,
-  issuedCount: 10,
-  failedCount: 2,
+  status: "pending",
+  totalAttempts: 0,
+  issuedCount: 0,
+  failedCount: 0,
 };
 
 /** client จำลองสำหรับ requirePermission — roles/aal ตั้งต่อ test */
@@ -140,7 +141,7 @@ describe("POST bulk — 400 contract (body strict)", () => {
 });
 
 describe("POST bulk — 202 + envelope", () => {
-  it("registrar + courseId null → 202 { data } ครบ + x-request-id สะท้อน + lib รับครบ", async () => {
+  it("registrar + courseId null → 202 { data } ครบ + x-request-id สะท้อน + lib รับ { actorId, courseId } exact", async () => {
     mockAuth(["staff:registrar"]);
     vi.mocked(createBulkJob).mockResolvedValue(jobResult as never);
     const res = await POST(postRequest({ courseId: null }));
@@ -150,15 +151,16 @@ describe("POST bulk — 202 + envelope", () => {
     const body = (await res.json()) as { data: Record<string, unknown> };
     expect(body.data).toEqual({
       jobId: JOB_ID,
-      status: "completed",
-      totalAttempts: 12,
-      issuedCount: 10,
-      failedCount: 2,
+      status: "pending",
+      totalAttempts: 0,
+      issuedCount: 0,
+      failedCount: 0,
     });
-    expect(vi.mocked(createBulkJob).mock.calls[0]?.[0]).toMatchObject({
+    // โมเดล worker 0027: lib insert อย่างเดียว — ไม่มี requestId ส่งลง DB อีก
+    // (audit ของ worker request_id เป็น null) · toEqual exact จับคีย์เกินด้วย
+    expect(vi.mocked(createBulkJob).mock.calls[0]?.[0]).toEqual({
       actorId: STAFF_ID,
       courseId: null,
-      requestId: "req-e4-1",
     });
   });
 
@@ -170,7 +172,7 @@ describe("POST bulk — 202 + envelope", () => {
     expect(vi.mocked(createBulkJob).mock.calls[0]?.[0]).toMatchObject({ courseId: COURSE_ID });
   });
 
-  it("lib โยน ERR-VAL-001 (RPC แจ้ง job จบแล้ว) → 400 ข้อความไทยตามทะเบียน", async () => {
+  it("lib โยน ERR-VAL-001 → 400 ข้อความไทยตามทะเบียน (แมป error กลางของ route)", async () => {
     mockAuth(["staff:registrar"]);
     const { AppError } = await import("@/lib/errors");
     vi.mocked(createBulkJob).mockRejectedValue(new AppError("ERR-VAL-001"));
@@ -181,7 +183,7 @@ describe("POST bulk — 202 + envelope", () => {
     expect(body.error.message).toBe(errorDefinition("ERR-VAL-001").message);
   });
 
-  it("lib โยน ERR-NF-001 (RPC แจ้งไม่พบ job) → 404", async () => {
+  it("lib โยน ERR-NF-001 → 404 (แมป error กลางของ route)", async () => {
     mockAuth(["staff:registrar"]);
     const { AppError } = await import("@/lib/errors");
     vi.mocked(createBulkJob).mockRejectedValue(new AppError("ERR-NF-001"));
@@ -191,7 +193,7 @@ describe("POST bulk — 202 + envelope", () => {
     expect(body.error.code).toBe("ERR-NF-001");
   });
 
-  it("lib โยน ERR-SYS-002 (insert/RPC ล้ม fail-closed) → 503", async () => {
+  it("lib โยน ERR-SYS-002 (insert ล้ม fail-closed) → 503", async () => {
     mockAuth(["staff:registrar"]);
     const { AppError } = await import("@/lib/errors");
     vi.mocked(createBulkJob).mockRejectedValue(new AppError("ERR-SYS-002"));
