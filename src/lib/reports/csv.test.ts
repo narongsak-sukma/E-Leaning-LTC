@@ -29,6 +29,37 @@ describe("csvField — RFC 4180", () => {
   });
 });
 
+describe("csvField — ป้องกัน CSV formula injection (gate p1-r1 MINOR-5)", () => {
+  it("= + - @ นำหน้า → นำหน้าด้วย ' (Excel/Sheets เห็นเป็นข้อความ ไม่ใช่สูตร)", () => {
+    expect(csvField("=1+1")).toBe("'=1+1");
+    expect(csvField("+SUM(A1:A9)")).toBe("'+SUM(A1:A9)");
+    expect(csvField("-2+3|calc")).toBe("'-2+3|calc");
+    expect(csvField("@cmd|' /C calc")).toBe("'@cmd|' /C calc");
+  });
+  it("tab/CR นำหน้า → นำหน้าด้วย ' เช่นกัน (โปรแกรมบางตัวกลืนเข้าสูตร)", () => {
+    // tab ไม่อยู่ในเงื่อนไข quote ของ RFC → ออกมาเปล่า ๆ · CR เป็น line break →
+    // ถูกครอบ quote ตาม RFC ด้วย (นำหน้า ' ก่อนเสมอ)
+    expect(csvField("\t=cmd")).toBe("'\t=cmd");
+    expect(csvField("\rcmd")).toBe('"\'\rcmd"');
+  });
+  it("ค่าปกติ/ว่าง/' นำหน้าอยู่แล้ว → ไม่แตะ", () => {
+    expect(csvField("abc123")).toBe("abc123");
+    expect(csvField("")).toBe("");
+    expect(csvField("50")).toBe("50");
+    expect(csvField("'already")).toBe("'already");
+  });
+  it("สูตรที่มี comma → ' ก่อนแล้วค่อยครอบ quote RFC 4180", () => {
+    expect(csvField("=HYPERLINK(\"a,b\")")).toBe('"\'=HYPERLINK(""a,b"")"');
+  });
+});
+
+describe("buildCsv — แถวสูตรผ่านตารางจริง", () => {
+  it("เซลล์ =1+1 ออกมาเป็น '=1+1 ในไฟล์", () => {
+    const csv = buildCsv(["หัว"], [["=1+1"]]);
+    expect(csv).toBe(CSV_BOM + "หัว" + "\r\n'=1+1\r\n");
+  });
+});
+
 describe("buildCsv — BOM + header ไทย + CRLF", () => {
   const headers = ["รหัส", "ความคืบหน้า (%)"];
   it("บรรทัดแรก = BOM + header · จบด้วย CRLF", () => {

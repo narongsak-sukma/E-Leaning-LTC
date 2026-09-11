@@ -71,8 +71,13 @@ async function countInProgressPerAssessment(overdueOnly: boolean): Promise<Array
   if (error !== null) {
     throw dbFailed(overdueOnly ? "attempts_overdue_agg_failed" : "attempts_in_progress_agg_failed");
   }
+  // fail-closed ของ container (gate p1-r1 MINOR-3): data:null/object = drift — ห้าม
+  // `data ?? []` ตีตกเป็น "ว่าง" เพราะ aggregate ผิดรูปจะกลายเป็นตัวเลข 0 ปลอม
+  if (!Array.isArray(data)) {
+    throw dbFailed("attempts_agg_container_drift");
+  }
   const out: Array<{ assessmentId: string; count: number }> = [];
-  for (const row of data ?? []) {
+  for (const row of data) {
     // แยกกิ่ง parse ต่อ schema เพื่อให้ TS เห็นชนิดตรงข้าง (ternary บน schema ทำ union ที่ access ไม่ได้)
     if (overdueOnly) {
       const parsed = parseAggRow(MonitoringOverdueRow, row, "attempts_agg_row_drift");
@@ -98,8 +103,12 @@ async function courseOfAssessments(assessmentIds: readonly string[]): Promise<Ma
   if (error !== null) {
     throw dbFailed("assessments_lookup_failed");
   }
+  // fail-closed ของ container (gate p1-r1 MINOR-3) — เหตุผลเดียวกับ aggregate ข้างบน
+  if (!Array.isArray(data)) {
+    throw dbFailed("assessments_lookup_container_drift");
+  }
   const map = new Map<string, string>();
-  for (const row of data ?? []) {
+  for (const row of data) {
     const parsed = parseAggRow(AssessmentCourseRow, row, "assessments_lookup_row_drift");
     map.set(parsed.id, parsed.courseId);
   }
@@ -160,8 +169,12 @@ async function averageScorePerAssessment(assessmentIds: readonly string[]): Prom
   if (error !== null) {
     throw dbFailed("avg_score_agg_failed");
   }
+  // fail-closed ของ container (gate p1-r1 MINOR-3) — เหตุผลเดียวกับ aggregate ข้างบน
+  if (!Array.isArray(data)) {
+    throw dbFailed("avg_score_agg_container_drift");
+  }
   const map = new Map<string, number>();
-  for (const row of data ?? []) {
+  for (const row of data) {
     const parsed: AvgScoreRowParsed = parseAggRow(AvgScoreRow, row, "avg_score_agg_row_drift");
     if (parsed.avgScore !== null) {
       map.set(parsed.assessmentId, parsed.avgScore);

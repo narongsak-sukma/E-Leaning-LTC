@@ -33,9 +33,17 @@ const A2 = "a2000000-0000-4000-8000-000000000002";
 const E1 = "e1000000-0000-4000-8000-000000000001";
 const U1 = "f1000000-0000-4000-8000-000000000001";
 const C1 = "c1000000-0000-4000-8000-000000000001";
+/** id ของแถว report_exports — ต้องเป็น uuid จริง (MINOR-4 ตรวจ strict) */
+const X1 = "7e000000-0000-4000-8000-000000000001";
+const X2 = "7e000000-0000-4000-8000-000000000002";
+const X3 = "7e000000-0000-4000-8000-000000000003";
+const X4 = "7e000000-0000-4000-8000-000000000004";
 
-/** builder จำลอง PostgREST (chainable + awaitable) */
+/** builder จำลอง PostgREST (chainable + awaitable) — .range() ตัดข้อมูลตามหน้า
+ *  เหมือน PostgREST จริง (MAJOR-2) · .single() คืนผล insert ทั้งชุด */
 function makeBuilder(result: { data: unknown; error: unknown }) {
+  let rangeFrom = 0;
+  let rangeTo = Number.POSITIVE_INFINITY;
   const b = {
     insert: vi.fn((payload: Record<string, unknown>) => { void payload; return singleOf(b); }),
     select: vi.fn(() => b),
@@ -46,12 +54,21 @@ function makeBuilder(result: { data: unknown; error: unknown }) {
     in: vi.fn(() => b),
     not: vi.fn(() => b),
     order: vi.fn(() => b),
+    range: vi.fn((from: number, to: number) => {
+      rangeFrom = from;
+      rangeTo = to;
+      return b;
+    }),
     limit: vi.fn(() => b),
     rpc: vi.fn(async () => ({ data: null, error: null })),
     single: vi.fn(async () => result),
-    then: vi.fn((onFulfilled: (v: unknown) => unknown) =>
-      Promise.resolve(result).then(onFulfilled as never, undefined as never),
-    ),
+    then: vi.fn((onFulfilled: (v: unknown) => unknown) => {
+      const data =
+        Array.isArray(result.data) && rangeTo !== Number.POSITIVE_INFINITY
+          ? result.data.slice(rangeFrom, rangeTo + 1)
+          : result.data;
+      return Promise.resolve({ ...result, data }).then(onFulfilled as never, undefined as never);
+    }),
   };
   return b;
 }
@@ -145,7 +162,7 @@ describe("runExport — enrollments (CSV)", () => {
       },
     });
     const { builder, client } = setupService({
-      insertResult: { data: { id: "exp-1" }, error: null },
+      insertResult: { data: { id: X1 }, error: null },
     });
     const result = await runExport({
       type: "enrollments",
@@ -173,7 +190,7 @@ describe("runExport — enrollments (CSV)", () => {
     expect(client.rpc).toHaveBeenCalledWith("append_audit_event", expect.objectContaining({
       p_action: "ADMIN_EXPORT",
       p_entity_type: "report_export",
-      p_entity_id: "exp-1",
+      p_entity_id: X1,
       // 0025 lead fix: actor ต้องอยู่ใน context.user_id — RPC ยกเป็น p_actor_id
       // แล้ว strip (ไม่ใส่ = แถว audit ไร้ "ใคร" ผิด 5W §1.2)
       p_context: expect.objectContaining({ user_id: "staff-1" }),
@@ -190,7 +207,7 @@ describe("runExport — JSON + truncated + fail-closed", () => {
       attempt_passed: 6,
       pass_rate_pct: 75,
     }], error: null } });
-    setupService({ insertResult: { data: { id: "exp-2" }, error: null } });
+    setupService({ insertResult: { data: { id: X2 }, error: null } });
     const result = await runExport({
       type: "assessments",
       format: "json",
@@ -218,7 +235,7 @@ describe("runExport — JSON + truncated + fail-closed", () => {
       pass_rate_pct: 50,
     }));
     setupSsr({ v_assessment_statistics: { data: rows, error: null } });
-    setupService({ insertResult: { data: { id: "exp-3" }, error: null } });
+    setupService({ insertResult: { data: { id: X3 }, error: null } });
     const result = await runExport({
       type: "assessments",
       format: "csv",
@@ -227,6 +244,16 @@ describe("runExport — JSON + truncated + fail-closed", () => {
     });
     expect(result.truncated).toBe(true);
     expect(result.rowCount).toBe(EXPORT_ROW_CAP);
+  });
+  it("report_exports คืน id ไม่ใช่ uuid → ERR-SYS-002 report_exports_row_drift (MINOR-4 — ไม่เอา id เพี้ยนไปเป็น entity_id ของ audit)", async () => {
+    setupSsr({ v_assessment_statistics: { data: [], error: null } });
+    setupService({ insertResult: { data: { id: "not-an-uuid" }, error: null } });
+    await expect(runExport({
+      type: "assessments",
+      format: "csv",
+      requestedBy: "staff-1",
+      requestId: null,
+    })).rejects.toMatchObject({ code: "ERR-SYS-002", details: { reason: "report_exports_row_drift" } });
   });
   it("report_exports เขียนไม่ได้ → ERR-SYS-002 (fail-closed — ไม่ส่งข้อมูลออก)", async () => {
     setupSsr({ v_assessment_statistics: { data: [], error: null } });
@@ -241,7 +268,7 @@ describe("runExport — JSON + truncated + fail-closed", () => {
   it("audit โดน allowlist ปฏิเสธ (42501) → written:false + ไม่ล้ม export (best-effort)", async () => {
     setupSsr({ v_assessment_statistics: { data: [], error: null } });
     const { client } = setupService({
-      insertResult: { data: { id: "exp-4" }, error: null },
+      insertResult: { data: { id: X4 }, error: null },
       rpcError: { code: "42501", message: "action not allowed" },
     });
     const result = await runExport({
@@ -250,7 +277,7 @@ describe("runExport — JSON + truncated + fail-closed", () => {
       requestedBy: "staff-1",
       requestId: null,
     });
-    expect(result.exportId).toBe("exp-4");
+    expect(result.exportId).toBe(X4);
     expect(client.rpc).toHaveBeenCalledTimes(1);
   });
 });

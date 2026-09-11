@@ -18,8 +18,12 @@ vi.mock("@/lib/supabase/ssr", () => ({ createSupabaseSsrClient: vi.fn() }));
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { getExamMonitoring, getExamStatistics } from "./monitoring";
 
-/** builder จำลอง PostgREST (chainable + awaitable — บันทึกการเรียกทุก method) */
+/** builder จำลอง PostgREST (chainable + awaitable — บันทึกการเรียกทุก method) ·
+ *  .range() ตัดข้อมูลตามหน้าเหมือน PostgREST จริง (getExamStatistics เรียกผ่าน
+ *  listAssessmentStatistics ของ views ซึ่งเป็น batch loop — gate p1-r1 MAJOR-2) */
 function makeBuilder(result: { data: unknown; error: unknown }) {
+  let rangeFrom = 0;
+  let rangeTo = Number.POSITIVE_INFINITY;
   const b = {
     select: vi.fn(() => b),
     eq: vi.fn(() => b),
@@ -29,10 +33,19 @@ function makeBuilder(result: { data: unknown; error: unknown }) {
     in: vi.fn(() => b),
     not: vi.fn(() => b),
     order: vi.fn(() => b),
+    range: vi.fn((from: number, to: number) => {
+      rangeFrom = from;
+      rangeTo = to;
+      return b;
+    }),
     limit: vi.fn(() => b),
-    then: vi.fn((onFulfilled: (v: unknown) => unknown) =>
-      Promise.resolve(result).then(onFulfilled as never, undefined as never),
-    ),
+    then: vi.fn((onFulfilled: (v: unknown) => unknown) => {
+      const data =
+        Array.isArray(result.data) && rangeTo !== Number.POSITIVE_INFINITY
+          ? result.data.slice(rangeFrom, rangeTo + 1)
+          : result.data;
+      return Promise.resolve({ ...result, data }).then(onFulfilled as never, undefined as never);
+    }),
   };
   return b;
 }

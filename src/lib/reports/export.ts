@@ -27,6 +27,9 @@ import {
   listEnrollmentProgress,
 } from "@/lib/reports/views";
 import {
+  AssessmentStatisticsResource,
+  CreditBalanceResource,
+  EnrollmentProgressResource,
   ExportFormat,
   IsoTimestamp,
   parseReportQuery,
@@ -63,6 +66,18 @@ const EXPORT_QUERY_SCHEMAS: Record<ReportType, z.ZodType> = {
     .object({ format: ExportFormat.default("csv"), from: Iso.optional(), to: Iso.optional() })
     .strict(),
 };
+
+/** สัญญาขาออกต่อประเภท (gate p1-r1 MINOR-4) — แถว resource ต้องผ่าน strict ก่อน
+ *  serialize เป็น CSV/JSON · export ไม่ได้ตอบผ่าน jsonPageOk/parseOutgoingView ของ route
+ *  จึงต้องตรวจขาออกที่นี่แทน */
+const OUTBOUND_SCHEMAS: Record<ReportType, z.ZodType> = {
+  enrollments: EnrollmentProgressResource,
+  assessments: AssessmentStatisticsResource,
+  credits: CreditBalanceResource,
+};
+
+/** แถวที่ INSERT .select("id").single() ต้องคืน — id เป็น uuid จริงเท่านั้น */
+const REPORT_EXPORT_ROW = z.object({ id: z.string().uuid() }).strict();
 
 /** query ของ export → { format, filters } — ผิดรูป/คีย์แปลกปลอม → ERR-VAL-001 (400) */
 export function parseExportQuery(
@@ -191,11 +206,16 @@ async function writeExportRecord(options: {
     })
     .select("id")
     .single();
-  if (error !== null || data === null) {
-    throw new AppError("ERR-SYS-002", { details: { reason: "report_exports_write_failed" } }
-    );
+  if (error !== null) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "report_exports_write_failed" } });
   }
-  return (data as { id: unknown }).id as string;
+  // ขากลับของ INSERT ต้องผ่าน strict เหมือนแถวที่อ่านมา (gate p1-r1 MINOR-4) —
+  // id ไม่ใช่ uuid = drift ของแถวที่เขียนไว้ ใช้ต่อเป็น entity_id ของ audit ไม่ได้
+  const parsed = REPORT_EXPORT_ROW.safeParse(data);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "report_exports_row_drift" } });
+  }
+  return parsed.data.id;
 }
 
 /**
@@ -276,6 +296,16 @@ export async function runExport(options: {
   const rows = read.rows as Array<
     EnrollmentProgressResourceParsed | AssessmentStatisticsResourceParsed | CreditBalanceResourceParsed
   >;
+  // ขาออกต้องผ่านสัญญา strict ก่อน serialize (gate p1-r1 MINOR-4) — export ตอบเอง
+  // ไม่ผ่าน parseOutgoingView ของ route จึงตรวจที่นี่: แถวเดียว drift = 503 fail-closed
+  const outboundSchema = OUTBOUND_SCHEMAS[options.type]!;
+  for (const row of rows) {
+    if (!outboundSchema.safeParse(row).success) {
+      throw new AppError("ERR-SYS-002", {
+        details: { reason: `${options.type}_outbound_row_drift` },
+      });
+    }
+  }
   const rowCount = rows.length;
   const truncated = read.truncated;
   const exportId = await writeExportRecord({
