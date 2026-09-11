@@ -20,17 +20,24 @@ import { getExamMonitoring, getExamStatistics } from "./monitoring";
 
 /** builder จำลอง PostgREST (chainable + awaitable — บันทึกการเรียกทุก method) ·
  *  .range() ตัดข้อมูลตามหน้าเหมือน PostgREST จริง (getExamStatistics เรียกผ่าน
- *  listAssessmentStatistics ของ views ซึ่งเป็น batch loop — gate p1-r1 MAJOR-2) */
+ *  listAssessmentStatistics ของ views ซึ่งเป็น batch loop — gate p1-r1 MAJOR-2) ·
+ *  .in() กรองแถวจริงก่อนตัดหน้า (gate r3 MINOR — lookup ต้องพิสูจน์ว่าแบ่งชุดถูก
+ *  ไม่ใช่ส่งชุดเดิมซ้ำแล้วผ่านเพราะ mock คืนทุกแถว) · column ตรงทั้ง snake_case
+ *  ของแถว view และ camelCase alias ของ aggregate */
 function makeBuilder(result: { data: unknown; error: unknown }) {
   let rangeFrom = 0;
   let rangeTo = Number.POSITIVE_INFINITY;
+  const inFilters: Array<{ column: string; values: readonly unknown[] }> = [];
   const b = {
     select: vi.fn(() => b),
     eq: vi.fn(() => b),
     gte: vi.fn(() => b),
     lte: vi.fn(() => b),
     lt: vi.fn(() => b),
-    in: vi.fn(() => b),
+    in: vi.fn((column: string, values: readonly unknown[]) => {
+      inFilters.push({ column, values });
+      return b;
+    }),
     not: vi.fn(() => b),
     order: vi.fn(() => b),
     range: vi.fn((from: number, to: number) => {
@@ -40,10 +47,23 @@ function makeBuilder(result: { data: unknown; error: unknown }) {
     }),
     limit: vi.fn(() => b),
     then: vi.fn((onFulfilled: (v: unknown) => unknown) => {
-      const data =
-        Array.isArray(result.data) && rangeTo !== Number.POSITIVE_INFINITY
-          ? result.data.slice(rangeFrom, rangeTo + 1)
-          : result.data;
+      let data: unknown = result.data;
+      if (Array.isArray(data) && inFilters.length > 0) {
+        data = data.filter((row) => {
+          if (typeof row !== "object" || row === null) {
+            return false;
+          }
+          return inFilters.every(({ column, values }) => {
+            const camel = column.replace(/_([a-z])/g, (_m, c: string) => c.toUpperCase());
+            const record = row as Record<string, unknown>;
+            const value = record[column] ?? record[camel];
+            return values.includes(value);
+          });
+        });
+      }
+      if (Array.isArray(data) && rangeTo !== Number.POSITIVE_INFINITY) {
+        data = data.slice(rangeFrom, rangeTo + 1);
+      }
       return Promise.resolve({ ...result, data }).then(onFulfilled as never, undefined as never);
     }),
   };
@@ -164,6 +184,12 @@ describe("getExamMonitoring — คิวสอบ (aggregate ฝั่ง DB)",
     const [page0, page1] = buildersFor("assessment_attempts");
     expect(page0!.range).toHaveBeenCalledWith(0, 999);
     expect(page1!.range).toHaveBeenCalledWith(1000, 1999);
+    // ชุด id ของ lookup ทั้ง 6 ไม่ซ้ำกันเลย — เรียงต่อเนื่อง ชุดสุดท้าย id เดียว
+    // (mock กรองตาม .in() จริง → ถ้าส่งชุดเดิมซ้ำ แถวจะหายและ byCourse ไม่ครบ 1,001)
+    const lookups = buildersFor("assessments");
+    expect(lookups[0]!.in).toHaveBeenCalledWith("id", ids.slice(0, 200));
+    expect(lookups[4]!.in).toHaveBeenCalledWith("id", ids.slice(800, 1000));
+    expect(lookups[5]!.in).toHaveBeenCalledWith("id", ids.slice(1000));
   });
 
   it("data:null ไม่มี error ที่ agg คิว → attempts_agg_container_drift (fail-closed)", async () => {
@@ -256,5 +282,36 @@ describe("getExamStatistics — view + avg (merge)", () => {
       code: "ERR-SYS-002",
       details: { reason: "avg_score_agg_container_drift" },
     });
+  });
+
+  it("avg lookup ข้ามชุด 200 — 201 assessment แบ่ง 2 ชุดต่อเนื่อง ชุดสุดท้าย id เดียว (gate r3 MINOR)", async () => {
+    const ids = Array.from(
+      { length: 201 },
+      (_, i) => `b0000000-0000-4000-8000-${(i + 0x1000000).toString(16).padStart(12, "0")}`,
+    );
+    const statRows = ids.map((assessment_id) => ({
+      assessment_id,
+      attempt_total: 2,
+      attempt_passed: 1,
+      pass_rate_pct: 50,
+    }));
+    const avgRows = ids.map((assessmentId) => ({ assessmentId, avgScore: 66.5 }));
+    const { buildersFor } = setupClient((table) => {
+      if (table === "v_assessment_statistics") {
+        return { data: statRows, error: null };
+      }
+      if (table === "assessment_attempts") {
+        return { data: avgRows, error: null };
+      }
+      return { data: [], error: null };
+    });
+    const out = await getExamStatistics({ limit: 250 });
+    expect(out.rows).toHaveLength(201);
+    // mock กรองตาม .in() จริง — แถวไหนตกนอกชุดจะหายไป ค่าเฉลี่ยไม่ครบทั้ง 201
+    expect(out.rows.every((row) => row.avgScorePct === 66.5)).toBe(true);
+    const chunks = buildersFor("assessment_attempts");
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.in).toHaveBeenCalledWith("assessment_id", ids.slice(0, 200));
+    expect(chunks[1]!.in).toHaveBeenCalledWith("assessment_id", ids.slice(200));
   });
 });
