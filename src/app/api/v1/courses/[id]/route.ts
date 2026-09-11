@@ -10,13 +10,27 @@
  * - shape ตรง CourseDetail ที่ UI ใช้ (CAT-004) — รวมฟิลด์ DCR-4: level + outcomes
  *   (courses.outcome_highlights — NULL → []) + credits/learnerCount (view course_public_stats)
  *   + instructors (view course_instructors_public — เฉพาะ display_name/title/bio ห้าม PII อื่น)
- *   + exam (view course_exam_summary — NULL เมื่อไม่มี assessment ปลายหลักสูตรที่ active)
+ *   + exam (view course_exam_summary — NULL เมื่อไม่มี assessment ปลายหลักสูตรที่ active;
+ *     DCR-7/PB-17: ฟิลด์ assessmentId — uuid ของข้อสอบปลายหลักสูตร published+is_final
+ *     ล่าสุด, null เมื่อไม่มี — API-SPECIFICATION v1.0.4 §3.3; แถวดิบผ่าน
+ *     parseCourseExamSummaryRow (.strict()) ก่อน map และ object exam ผ่าน
+ *     CourseExamSummaryView .strict() ก่อนตอบ — drift → ERR-SYS-002 ไม่ strip เงียบ)
  */
 import { NextResponse } from "next/server";
-import { jsonErrorResponse, jsonOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { AppError } from "@/lib/errors";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { parseCourseIdParam } from "@/lib/schemas/v1/catalog";
+import {
+  CourseExamSummaryView,
+  parseCourseExamSummaryRow,
+  parseCourseIdParam,
+  type CourseExamSummaryRowParsed,
+} from "@/lib/schemas/v1/catalog";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
 /** client ของ request ปัจจุบัน (อนุมานชนิดจาก factory — untyped schema จึง from() ได้ทุกตาราง/view) */
@@ -33,7 +47,7 @@ const COURSE_DETAIL_SELECT =
 /** select ของ views สาธารณะ (DCR-4) — เปิดเฉพาะคอลัมน์ display ตาม DD §3.2 views */
 const COURSE_STATS_SELECT = "course_id,learner_count,credits";
 const COURSE_INSTRUCTORS_SELECT = "display_name,title,bio";
-const COURSE_EXAM_SELECT = "question_count,time_limit_minutes,pass_score_pct,max_attempts";
+const COURSE_EXAM_SELECT = "question_count,time_limit_minutes,pass_score_pct,max_attempts,assessment_id";
 
 interface CourseDetailRow {
   readonly id: string;
@@ -105,6 +119,8 @@ interface CourseDetailItem {
         readonly timeLimitMinutes: number;
         readonly passScorePct: number;
         readonly maxAttempts: number;
+        /** uuid ของข้อสอบปลายหลักสูตร (course_exam_summary.assessment_id) — null เมื่อไม่มี (DCR-7/PB-17) */
+        readonly assessmentId: string | null;
       }
     | null;
   readonly modules: {
@@ -132,12 +148,6 @@ interface PublicInstructorRow {
   readonly display_name: string;
   readonly title: string | null;
   readonly bio: string | null;
-}
-interface PublicExamRow {
-  readonly question_count: number;
-  readonly time_limit_minutes: number;
-  readonly pass_score_pct: number;
-  readonly max_attempts: number;
 }
 
 function optionsOf(request: Request): JsonResponseOptions {
@@ -187,13 +197,14 @@ function instructorOf(row: PublicInstructorRow): CourseDetailItem["instructors"]
   return { nameTh: row.display_name, titleTh: row.title ?? null, bio: row.bio ?? null };
 }
 
-/** แถว view course_exam_summary → เงื่อนไขสอบ (CAT-004 AC) — null เมื่อไม่มี assessment active */
-function examOf(row: PublicExamRow): NonNullable<CourseDetailItem["exam"]> {
+/** แถว view course_exam_summary (ตรวจแล้ว) → เงื่อนไขสอบ (CAT-004 AC) — null เมื่อไม่มี assessment active */
+function examOf(row: CourseExamSummaryRowParsed): NonNullable<CourseDetailItem["exam"]> {
   return {
     questionCount: row.question_count,
     timeLimitMinutes: row.time_limit_minutes,
     passScorePct: row.pass_score_pct,
     maxAttempts: row.max_attempts,
+    assessmentId: row.assessment_id,
   };
 }
 
@@ -237,7 +248,14 @@ async function publicExtrasOf(
   return {
     stats: stats.data === null ? null : statsItemOf(stats.data as unknown as PublicStatsRow),
     instructors: ((instructors.data ?? []) as unknown as readonly PublicInstructorRow[]).map(instructorOf),
-    exam: exam.data === null ? null : examOf(exam.data as unknown as PublicExamRow),
+    exam:
+      exam.data === null
+        ? null
+        : parseOutgoingView(
+            CourseExamSummaryView,
+            examOf(parseCourseExamSummaryRow(exam.data)),
+            "course_exam_summary_contract_drift",
+          ),
   };
 }
 

@@ -39,6 +39,8 @@ export interface CourseExam {
   timeLimitMinutes: number;
   passScorePct: number;
   maxAttempts: number;
+  /** uuid ของข้อสอบปลายหลักสูตร published+is_final ล่าสุด (DCR-7/PB-17) — null = หลักสูตรไม่มีข้อสอบ */
+  assessmentId: string | null;
 }
 
 /** บทเรียน — DD §3.2 lessons (type เป็น enum ของ DD) */

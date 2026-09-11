@@ -108,6 +108,8 @@ beforeEach(() => {
 });
 
 const COURSE_ID = "11111111-1111-4111-8111-111111111101";
+/** uuid ข้อสอบปลายหลักสูตร (course_exam_summary.assessment_id — 0021/DCR-7) */
+const ASSESSMENT_ID = "a0000000-0000-4000-8000-000000000001";
 
 function makeRequest(id: string): Request {
   return new Request(`http://localhost:3000/api/v1/courses/${id}`);
@@ -173,7 +175,13 @@ describe("GET /api/v1/courses/{id}", () => {
         ],
       },
       course_exam_summary: {
-        data: { question_count: 30, time_limit_minutes: 60, pass_score_pct: 70, max_attempts: 3 },
+        data: {
+          question_count: 30,
+          time_limit_minutes: 60,
+          pass_score_pct: 70,
+          max_attempts: 3,
+          assessment_id: ASSESSMENT_ID,
+        },
       },
     });
 
@@ -216,6 +224,7 @@ describe("GET /api/v1/courses/{id}", () => {
       timeLimitMinutes: 60,
       passScorePct: 70,
       maxAttempts: 3,
+      assessmentId: ASSESSMENT_ID,
     });
     expect(enforceRateLimitMock).toHaveBeenCalledWith(expect.anything(), { group: "PUBLIC_READ" });
   });
@@ -242,6 +251,9 @@ describe("GET /api/v1/courses/{id}", () => {
     );
     expect(client.spyOf("course_exam_summary").select).toHaveBeenCalledWith(
       expect.stringContaining("max_attempts"),
+    );
+    expect(client.spyOf("course_exam_summary").select).toHaveBeenCalledWith(
+      expect.stringContaining("assessment_id"),
     );
     expect(client.spyOf("course_exam_summary").maybeSingle).toHaveBeenCalledTimes(1);
   });
@@ -316,6 +328,60 @@ describe("GET /api/v1/courses/{id}", () => {
     expect(body.data.outcomes).toEqual([]);
     expect(body.data.instructors).toEqual([]);
     expect(body.data.exam).toBeNull();
+  });
+
+  it("exam มีแถวแต่ assessment_id = null → exam ครบ 4 ฟิลด์เดิม + assessmentId null (200)", async () => {
+    makeClient({
+      courses: { data: publishedRow() },
+      course_public_stats: { data: null },
+      course_instructors_public: { data: [] },
+      course_exam_summary: {
+        data: {
+          question_count: 10,
+          time_limit_minutes: 45,
+          pass_score_pct: 60,
+          max_attempts: 2,
+          assessment_id: null,
+        },
+      },
+    });
+
+    const response = await callRoute(COURSE_ID);
+    const body = (await response.json()) as { data: { exam: { assessmentId: string | null } | null } };
+
+    expect(response.status).toBe(200);
+    expect(body.data.exam).toEqual({
+      questionCount: 10,
+      timeLimitMinutes: 45,
+      passScorePct: 60,
+      maxAttempts: 2,
+      assessmentId: null,
+    });
+  });
+
+  it("แถว exam drift (คีย์เกิน) → 503 ERR-SYS-002 แบบ opaque (CourseExamSummaryView .strict() — ไม่ strip เงียบ)", async () => {
+    makeClient({
+      courses: { data: publishedRow() },
+      course_public_stats: { data: null },
+      course_instructors_public: { data: [] },
+      course_exam_summary: {
+        data: {
+          question_count: 10,
+          time_limit_minutes: 45,
+          pass_score_pct: 60,
+          max_attempts: 2,
+          assessment_id: null,
+          extra_column: "drift",
+        },
+      },
+    });
+
+    const response = await callRoute(COURSE_ID);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.message).toBe(errorDefinition("ERR-SYS-002").message);
   });
 
   it("สะท้อน x-request-id กลับทุก response (SDS §5.4)", async () => {

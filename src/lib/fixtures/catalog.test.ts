@@ -198,6 +198,61 @@ describe("findPublishedCourse — fetch BFF GET /api/v1/courses/{id}", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("exam object ส่งต่อ assessmentId ตรงตาม BFF — uuid และ null (DCR-7/PB-17)", async () => {
+    const assessmentId = "a0000000-0000-4000-8000-000000000001";
+    stubFetch((url) =>
+      url === `${ORIGIN}/api/v1/courses/${LIST_BODY.data[0]?.id}`
+        ? {
+            status: 200,
+            body: {
+              data: {
+                ...DETAIL_BODY,
+                exam: {
+                  questionCount: 30,
+                  timeLimitMinutes: 60,
+                  passScorePct: 70,
+                  maxAttempts: 3,
+                  assessmentId,
+                },
+              },
+            },
+          }
+        : { status: 404 },
+    );
+
+    const course = await findPublishedCourse(LIST_BODY.data[0]?.id ?? "", { origin: ORIGIN });
+    expect(course?.exam).toEqual({
+      questionCount: 30,
+      timeLimitMinutes: 60,
+      passScorePct: 70,
+      maxAttempts: 3,
+      assessmentId,
+    });
+
+    stubFetch((url) =>
+      url === `${ORIGIN}/api/v1/courses/${LIST_BODY.data[0]?.id}`
+        ? {
+            status: 200,
+            body: {
+              data: {
+                ...DETAIL_BODY,
+                exam: {
+                  questionCount: 30,
+                  timeLimitMinutes: 60,
+                  passScorePct: 70,
+                  maxAttempts: 3,
+                  assessmentId: null,
+                },
+              },
+            },
+          }
+        : { status: 404 },
+    );
+
+    const courseNull = await findPublishedCourse(LIST_BODY.data[0]?.id ?? "", { origin: ORIGIN });
+    expect(courseNull?.exam?.assessmentId).toBeNull();
+  });
+
   it("5xx → throw Error ภาษาไทย", async () => {
     stubFetch(() => ({ status: 500 }));
 
