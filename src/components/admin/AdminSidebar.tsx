@@ -4,15 +4,16 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const READY_ITEMS = [
-  { href: "/admin/courses", label: "หลักสูตร" },
-  { href: "/admin/categories", label: "หมวดหลักสูตร" },
+  { href: "/admin/courses", label: "หลักสูตร", icon: "book" },
+  { href: "/admin/categories", label: "หมวดหลักสูตร", icon: "folder" },
+  { href: "/admin/assessments", label: "ข้อสอบและการประเมิน", icon: "clipboard" },
+  { href: "/admin/question-banks", label: "คลังข้อสอบ", icon: "stack" },
+  { href: "/admin/certificates", label: "ประกาศนียบัตร", icon: "award" },
 ] as const;
 
 const SOON_ITEMS = [
   "แดชบอร์ด",
   "ผู้ใช้และบทบาท",
-  "ข้อสอบและการประเมิน",
-  "ประกาศนียบัตร",
   "หน่วยกิต (Credit Bank)",
   "บันทึกการตรวจสอบ",
 ] as const;
@@ -38,6 +39,45 @@ function FolderIcon() {
   );
 }
 
+function ClipboardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <rect x="5" y="4" width="14" height="17" rx="2" strokeLinejoin="round" />
+      <path d="M9 4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1H9V4Z" strokeLinejoin="round" />
+      <path d="M9 11h6M9 15h4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function StackIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <path d="M12 3l9 5-9 5-9-5 9-5Z" strokeLinejoin="round" />
+      <path d="M3 13l9 5 9-5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function AwardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <circle cx="12" cy="9" r="5.5" strokeLinejoin="round" />
+      <path d="M8.5 13.5L7 21l5-2.5L17 21l-1.5-7.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+const ICONS = {
+  book: BookIcon,
+  folder: FolderIcon,
+  clipboard: ClipboardIcon,
+  stack: StackIcon,
+  award: AwardIcon,
+} as const;
+
 export function AdminSidebar() {
   const pathname = usePathname();
   const isActive = (href: string) =>
@@ -49,21 +89,24 @@ export function AdminSidebar() {
         <p className="hidden px-3 pb-2 pt-1 text-xs font-semibold text-brand-200 lg:block">
           จัดการเนื้อหา
         </p>
-        {READY_ITEMS.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            aria-current={isActive(item.href) ? "page" : undefined}
-            className={`flex items-center gap-2 whitespace-nowrap rounded-[10px] px-3 py-2.5 text-sm font-semibold ${
-              isActive(item.href)
-                ? "bg-brand-600 text-white shadow-[inset_3px_0_0_0_var(--color-gold-300)]"
-                : "text-brand-200 hover:bg-brand-800"
-            }`}
-          >
-            {item.href === "/admin/courses" ? <BookIcon /> : <FolderIcon />}
-            {item.label}
-          </Link>
-        ))}
+        {READY_ITEMS.map((item) => {
+          const Icon = ICONS[item.icon];
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              aria-current={isActive(item.href) ? "page" : undefined}
+              className={`flex items-center gap-2 whitespace-nowrap rounded-[10px] px-3 py-2.5 text-sm font-semibold ${
+                isActive(item.href)
+                  ? "bg-brand-600 text-white shadow-[inset_3px_0_0_0_var(--color-gold-300)]"
+                  : "text-brand-200 hover:bg-brand-800"
+              }`}
+            >
+              <Icon />
+              {item.label}
+            </Link>
+          );
+        })}
       </div>
       <div className="mt-2 flex gap-1 overflow-x-auto rounded-[14px] bg-brand-900 p-2 lg:mt-3 lg:flex-col lg:overflow-visible lg:p-3">
         <p className="hidden px-3 pb-2 pt-1 text-xs font-semibold text-brand-200 lg:block">
