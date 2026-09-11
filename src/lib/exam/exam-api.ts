@@ -2,15 +2,16 @@
  * exam-api - ชั้นข้อมูลฝั่ง client (client-safe) ของ UI การสอบ
  *
  * - เรียก BFF เส้นการสอบ: start/answers/submit (ขาขึ้น) + ใช้ร่วมกับ exam.server
- *   (ขาอ่าน RSC) ผ่าน transport เดียวกัน - แนบ cookie ตอนเรียกจาก RSC และประกาศ
- *   x-ltc-bff-internal ตอนเรียกจากฝั่ง server (gate-cleanup r1 M1 - กัน rotation
- *   กลางอากาศ) แบบเดียวกับ src/lib/fixtures/learning.ts
+ *   (ขาอ่าน RSC) ผ่าน transport กลาง src/lib/api/transport.ts (PB-19) - แนบ cookie
+ *   ตอนเรียกจาก RSC และประกาศ x-ltc-bff-internal ตอนเรียกจากฝั่ง server (gate-cleanup
+ *   r1 M1 - กัน rotation กลางอากาศ) แบบเดียวกับ learning.ts/certificates.ts
  * - ตรวจข้อมูลขาเข้าแบบ strict fail-closed ด้วย validator ที่เขียนมือ (ไม่ import
  *   schemas/v1/exam เข้า client bundle - กันชื่อคอลัมน์ฝั่งเฉลย/คะแนนรายข้อหลุดเข้า
  *   หลุดเข้า bundle ของห้องสอบ ตามธง lead ข้อ 3)
  * - error = ExamApiError { code, status } อ้างทะเบียน ERR-* ของ src/lib/errors
  *   (ข้อความไทยแสดงที่ชั้น UI - โมดูลนี้ไม่แตะ DOM)
  */
+import { ApiError, fetchJson, type TransportCallOptions } from "@/lib/api/transport";
 
 // ─── URL builders (เส้นการสอบตาม API-SPECIFICATION 3.5) ───
 
@@ -42,11 +43,8 @@ export function myAttemptsUrl(cursor: string | undefined): string {
 
 // ─── transport ───
 
-/** ตัวเลือกการเรียก - ฝั่ง browser ไม่ต้องส่ง; ฝั่ง RSC ต้องส่ง origin + cookieHeader */
-export interface ExamCallOptions {
-  readonly origin?: string;
-  readonly cookieHeader?: string;
-}
+/** ตัวเลือกการเรียก - alias ของ TransportCallOptions ใน transport กลาง (PB-19) - ฝั่ง browser ไม่ต้องส่ง; ฝั่ง RSC ต้องส่ง origin + cookieHeader */
+export type ExamCallOptions = TransportCallOptions;
 
 /** error ฝั่ง client - code อ้างทะเบียน src/lib/errors (API-SPEC 1.3) */
 export class ExamApiError extends Error {
@@ -61,8 +59,6 @@ export class ExamApiError extends Error {
   }
 }
 
-const TRANSPORT_FALLBACK_MESSAGE = "ไม่สามารถติดต่อระบบได้ กรุณาลองใหม่อีกครั้ง";
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -73,71 +69,22 @@ function contractViolation(): ExamApiError {
 }
 
 /**
- * เรียก BFF แบบ JSON - คืน body ดิบ · non-2xx / parse ไม่ได้ / network fail =
- * ExamApiError (code/ข้อความจาก error envelope 1.3 ถ้ามี)
+ * เรียก BFF แบบ JSON - ตัวห่อบาง ๆ ของ transport กลาง src/lib/api/transport.ts (PB-19) -
+ * คืน body ดิบ · non-2xx / parse ไม่ได้ / network fail = ExamApiError
+ * (code/ข้อความจาก error envelope 1.3 ถ้ามี - map จาก ApiError ของ transport)
  */
 export async function examRequest(
   path: string,
   init: { readonly method: "GET" | "POST"; readonly body?: unknown; readonly headers?: Record<string, string> },
   options?: ExamCallOptions,
 ): Promise<unknown> {
-  const origin = resolveOrigin(options);
-  const headers: Record<string, string> = { accept: "application/json" };
-  if (init.method === "POST") {
-    headers["content-type"] = "application/json; charset=utf-8";
-  }
-  if (options?.cookieHeader !== undefined && options.cookieHeader.length > 1) {
-    headers.cookie = options.cookieHeader;
-  }
-  // gate-cleanup r1 M1: ขาเรียกจาก server (RSC) ประกาศตัวเป็นขาใน - middleware จะไม่
-  // หมุน token (Set-Cookie ของขาในไม่มีทางถึง browser) แบบเดียวกับ learning.ts
-  if (typeof window === "undefined") {
-    headers["x-ltc-bff-internal"] = "1";
-  }
-  if (init.headers !== undefined) {
-    Object.assign(headers, init.headers);
-  }
-  const requestInit: RequestInit = { method: init.method, headers, credentials: "same-origin", cache: "no-store" };
-  if (init.method === "POST" && init.body !== undefined) {
-    requestInit.body = JSON.stringify(init.body);
-  }
-  let response: Response;
   try {
-    response = await fetch(new URL(path, origin), requestInit);
-  } catch {
-    throw new ExamApiError("ERR-SYS-001", 0, TRANSPORT_FALLBACK_MESSAGE);
+    return (await fetchJson(path, init, options)).body;
+  } catch (error) {
+    throw error instanceof ApiError
+      ? new ExamApiError(error.code, error.status, error.message)
+      : error;
   }
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
-  if (!response.ok) {
-    const envelope = isRecord(body) && isRecord(body["error"]) ? body["error"] : null;
-    const code =
-      envelope !== null && typeof envelope["code"] === "string" && envelope["code"].length > 0
-        ? envelope["code"]
-        : `HTTP_${response.status}`;
-    const message =
-      envelope !== null &&
-      typeof envelope["message"] === "string" &&
-      envelope["message"].length > 0
-        ? envelope["message"]
-        : TRANSPORT_FALLBACK_MESSAGE;
-    throw new ExamApiError(code, response.status, message);
-  }
-  return body;
-}
-
-function resolveOrigin(options?: ExamCallOptions): string {
-  if (options?.origin !== undefined && options.origin.length > 0) {
-    return options.origin;
-  }
-  if (typeof window !== "undefined") {
-    return window.location.origin;
-  }
-  throw new Error("ต้องระบุ origin ใน ExamCallOptions เมื่อเรียก API จากฝั่ง server (RSC)");
 }
 
 // ─── view types ของห้องสอบ (mirror AttemptStartView ของ BFF - ไร้เฉลยทุกทาง) ───
@@ -146,6 +93,9 @@ export interface ExamPaperOption {
   readonly id: string;
   readonly text: string;
 }
+
+/** ชนิดข้อสอบตาม questions.type (PB-18/DCR-7 — snapshot ตอน start, migration 0022) */
+export type ExamPaperQuestionType = "single_choice" | "multiple_choice" | "true_false";
 
 export interface ExamPaperQuestion {
   readonly questionId: string;
@@ -157,6 +107,12 @@ export interface ExamPaperQuestion {
     readonly version: number;
     readonly text: string;
     readonly options: readonly ExamPaperOption[];
+    /**
+     * ชนิดข้อจาก snapshot (0022/D55-1) - ตอบได้ข้อเดียว = single_choice/true_false,
+     * หลายข้อ = multiple_choice · ข้อมูลเก่าที่ wire ไม่มีคีย์ type = default
+     * "multiple_choice" (fail-safe มุมเดียวกับ learner_attempt_paper_view)
+     */
+    readonly type: ExamPaperQuestionType;
   };
 }
 
@@ -184,6 +140,15 @@ function isIsoOffset(value: unknown): value is string {
   return typeof value === "string" && ISO_OFFSET_RE.test(value);
 }
 
+/** ชนิดข้อที่ยอมรับ - enum 3 ค่า exact ตาม questions.type (DATA-DICTIONARY) - ค่าอื่น = contract ผิด fail-closed */
+function isExamPaperQuestionType(value: unknown): value is ExamPaperQuestionType {
+  return (
+    value === "single_choice" ||
+    value === "multiple_choice" ||
+    value === "true_false"
+  );
+}
+
 function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
   const seen = Object.keys(record);
   return (
@@ -194,6 +159,9 @@ function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]):
 
 const SESSION_KEYS = ["attemptId", "status", "deadlineAt", "serverTime", "questionCount", "questions"] as const;
 const SESSION_KEYS_WITH_TAKEOVER = [...SESSION_KEYS, "takeover"];
+/** คีย์ content ตามสัญญา D37 {version,text,options} + คีย์ type ของ PB-18 (0022/D55-1 — เสริมได้ ห้ามขาดตัวอื่น) */
+const CONTENT_KEYS = ["version", "text", "options"] as const;
+const CONTENT_KEYS_WITH_TYPE = [...CONTENT_KEYS, "type"] as const;
 
 /** ตรวจ 201 view ของ POST /attempts start - ผิดสัญญาแม้แต่คีย์เดียว = throw fail-closed */
 export function parseExamPaperSession(raw: unknown): ExamPaperSession {
@@ -259,7 +227,10 @@ function parseExamPaperQuestion(raw: unknown): ExamPaperQuestion {
     throw contractViolation();
   }
   const content = raw["content"];
-  if (!isRecord(content) || hasExactKeys(content, ["version", "text", "options"]) === false) {
+  if (
+    !isRecord(content) ||
+    hasExactKeys(content, content["type"] === undefined ? CONTENT_KEYS : CONTENT_KEYS_WITH_TYPE) === false
+  ) {
     throw contractViolation();
   }
   const version = content["version"];
@@ -282,12 +253,21 @@ function parseExamPaperQuestion(raw: unknown): ExamPaperQuestion {
     }
     return { id: rawOption["id"], text: rawOption["text"] };
   });
+  const rawType = content["type"];
+  if (rawType !== undefined && isExamPaperQuestionType(rawType) === false) {
+    throw contractViolation();
+  }
   return {
     questionId: raw["questionId"],
     seq,
     selectedOptionIds: selected === null ? null : [...selected],
     answeredAt,
-    content: { version, text: content["text"], options },
+    content: {
+      version,
+      text: content["text"],
+      options,
+      type: rawType === undefined ? ("multiple_choice" as const) : rawType,
+    },
   };
 }
 

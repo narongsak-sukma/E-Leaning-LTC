@@ -9,6 +9,9 @@
  *   นาฬิกา client ใช้วัดช่วงเวลาที่ผ่านไปเท่านั้น (ธง lead: timer จาก server เท่านั้น)
  * - autosave ต่อข้อผ่าน exam-answers (ทันทีครั้งแรก + ห่างขั้นต่ำ 10 วิ/ข้อ) และ
  *   flush ทุกข้อก่อนกดส่ง
+ * - ชนิดข้อ (PB-18 — content.type จาก snapshot 0022): single_choice/true_false =
+ *   input radio ตอบได้ข้อเดียว (เลือกใหม่ = แทนที่ตัวเดิม) · multiple_choice =
+ *   checkbox หลายอันเหมือนเดิม — โครง state คำตอบ (selected ids) คงเดิมทั้งสองชนิด
  * - ส่งข้อสอบ: flushAll → submitAttempt (Idempotency-Key ต่อ mount) → เคลียร์แคชชุดข้อ
  *   → ไปหน้าผลสอบ — คะแนน/ผ่าน-ไม่ผ่านไม่ parse ที่ client (ธง lead ข้อ 4)
  * - ไม่มีเฉลยในไฟล์นี้ทุกทาง (ธง lead ข้อ 3)
@@ -92,6 +95,37 @@ function initialSnapshotOf(
     };
   }
   return snapshot;
+}
+
+/**
+ * PB-18: ข้อเลือกเดียว (single_choice/true_false) — เลือกตัวใหม่ = แทนที่ตัวเดิม
+ * (replace แทน append) แต่โครง state ต่อข้อ (selected ids) คงเดิม — ทำผ่าน toggle
+ * ของเอนจิ้น autosave เดิม: เลือกตัวใหม่ก่อน (จำนวนยังไม่ลด — เอนจิ้นห้าม state
+ * ว่างต่อข้อ) แล้วจึงถอดตัวเก่าทีละตัว ผลสุทธิ์คือเหลือตัวที่เพิ่งเลือกตัวเดียว
+ * (คลิกตัวที่เลือกอยู่ซ้ำ browser ไม่ยิง change อยู่แล้ว · ถ้า seed จาก takeover
+ * ทิ้งไว้หลายตัว การคลิกตัวใดตัวหนึ่งจะถอดตัวอื่นจนเหลือตัวนั้น)
+ */
+export function selectSingleChoice(
+  saver: ExamAnswerSaver,
+  questionId: string,
+  optionId: string,
+  currentChoiceIds: readonly string[],
+): void {
+  if (currentChoiceIds.includes(optionId)) {
+    // คลิกตัวที่เลือกอยู่แล้ว: ถอดเฉพาะตัวอื่น (เช่น seed หลายตัว) — ตัวนี้คงอยู่
+    for (const otherId of currentChoiceIds) {
+      if (otherId !== optionId) {
+        saver.toggle(questionId, otherId);
+      }
+    }
+    return;
+  }
+  saver.toggle(questionId, optionId);
+  for (const otherId of currentChoiceIds) {
+    if (otherId !== optionId) {
+      saver.toggle(questionId, otherId);
+    }
+  }
 }
 
 
@@ -294,6 +328,10 @@ export function ExamRoom({
 
   const questions = session?.questions ?? [];
   const currentQuestion = questions[currentIdx] ?? null;
+  // PB-18: ชนิดของข้อปัจจุบัน — single_choice/true_false = ตอบได้ข้อเดียว (radio)
+  const currentIsSingleSelect =
+    currentQuestion?.content.type === "single_choice" ||
+    currentQuestion?.content.type === "true_false";
   const answeredCount = questions.filter(
     (question) => (answers[question.questionId]?.choiceIds.length ?? 0) > 0,
   ).length;
@@ -478,6 +516,9 @@ export function ExamRoom({
             ข้อ {currentQuestion.seq} จาก {questions.length}
           </legend>
           <p className="whitespace-pre-line text-base text-ink-900">{currentQuestion.content.text}</p>
+          {currentIsSingleSelect ? (
+            <p className="mt-1 text-xs text-ink-500">เลือกได้ข้อเดียว</p>
+          ) : null}
           <div className="mt-4 space-y-2">
             {currentQuestion.content.options.map((option) => {
               const checked = (answers[currentQuestion.questionId]?.choiceIds ?? []).includes(option.id);
@@ -487,11 +528,24 @@ export function ExamRoom({
               return (
                 <label key={option.id} className={optionClass}>
                   <input
-                    type="checkbox"
+                    type={currentIsSingleSelect ? "radio" : "checkbox"}
+                    name={currentIsSingleSelect ? "exam-choice-" + currentQuestion.questionId : undefined}
                     className="mt-1 accent-brand-600"
                     checked={checked}
                     disabled={phase.kind === "submitting" || timeup}
                     onChange={() => {
+                      if (currentIsSingleSelect) {
+                        const saver = saverRef.current;
+                        if (saver !== null) {
+                          selectSingleChoice(
+                            saver,
+                            currentQuestion.questionId,
+                            option.id,
+                            answers[currentQuestion.questionId]?.choiceIds ?? [],
+                          );
+                        }
+                        return;
+                      }
                       saverRef.current?.toggle(currentQuestion.questionId, option.id);
                     }}
                   />

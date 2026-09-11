@@ -31,7 +31,12 @@ function sessionOf(attemptId: string): ExamPaperSession {
         seq: 1,
         selectedOptionIds: null,
         answeredAt: null,
-        content: { version: 1, text: "โจทย์", options: [{ id: OPT, text: "ตัวเลือก" }] },
+        content: {
+          version: 1,
+          text: "โจทย์",
+          options: [{ id: OPT, text: "ตัวเลือก" }],
+          type: "multiple_choice",
+        },
       },
     ],
   };

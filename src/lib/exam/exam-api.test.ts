@@ -77,6 +77,92 @@ describe("URL builders", () => {
   });
 });
 
+/** payload ที่ content ของข้อกำหนดเองได้ (ทดสอบคีย์ type ของ PB-18) */
+function sessionPayloadWithContent(content: Record<string, unknown>): unknown {
+  return {
+    data: {
+      attemptId: ATT,
+      status: "in_progress",
+      deadlineAt: "2026-09-10T09:00:00+07:00",
+      serverTime: "2026-09-10T08:00:00+07:00",
+      questionCount: 1,
+      questions: [
+        {
+          questionId: Q1,
+          seq: 1,
+          selectedOptionIds: null,
+          answeredAt: null,
+          content,
+        },
+      ],
+    },
+  };
+}
+
+describe("ชนิดข้อในชุดข้อ (PB-18 — content.type)", () => {
+  it("content.type = single_choice / true_false / multiple_choice = parse ผ่านตรงค่า", async () => {
+    for (const questionType of ["single_choice", "true_false", "multiple_choice"] as const) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          jsonResponse(201, sessionPayloadWithContent({
+            version: 1,
+            text: "ข้อที่ 1",
+            type: questionType,
+            options: [
+              { id: OPT_A, text: "ก" },
+              { id: OPT_B, text: "ข" },
+            ],
+          })),
+        ),
+      );
+      const session = await startAttempt(ASMT, { origin: "http://test.local" });
+      expect(session.questions[0]?.content.type).toBe(questionType);
+    }
+  });
+
+  it("wire ไม่มีคีย์ type (ชุดข้อเก่าก่อน 0022) = default multiple_choice (D55-1)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(201, sessionPayload())));
+    const session = await startAttempt(ASMT, { origin: "http://test.local" });
+    expect(session.questions[0]?.content.type).toBe("multiple_choice");
+  });
+
+  it("type ผิดค่า (essay) = fail-closed เป็น ERR-SYS-001 (enum 3 ค่า exact)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(201, sessionPayloadWithContent({
+          version: 1,
+          text: "ข้อที่ 1",
+          type: "essay",
+          options: [{ id: OPT_A, text: "ก" }],
+        })),
+      ),
+    );
+    await expect(startAttempt(ASMT, { origin: "http://test.local" })).rejects.toMatchObject({
+      code: "ERR-SYS-001",
+    });
+  });
+
+  it("คีย์แปลกปลอมใน content = fail-closed ตามแบบแผน exact-keys เดิม", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(201, sessionPayloadWithContent({
+          version: 1,
+          text: "ข้อที่ 1",
+          type: "single_choice",
+          options: [{ id: OPT_A, text: "ก" }],
+          hacky: 1,
+        })),
+      ),
+    );
+    await expect(startAttempt(ASMT, { origin: "http://test.local" })).rejects.toMatchObject({
+      code: "ERR-SYS-001",
+    });
+  });
+});
+
 describe("startAttempt", () => {
   it("201 ตามสัญญา = ได้หน้าต่างสอบ (ไร้เฉลย)", async () => {
     const fetchMock = vi.fn(async () => jsonResponse(201, sessionPayload()));

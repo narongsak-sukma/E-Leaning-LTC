@@ -87,6 +87,8 @@ export const ExamPaperContent = z
     options: z
       .array(z.object({ id: z.string().uuid(), text: z.string().min(1) }).strict())
       .min(1),
+    // PB-18/DCR-7 (0022): ชนิดข้อจาก snapshot — single/true_false = ตอบข้อเดียว
+    type: z.enum(["single_choice", "multiple_choice", "true_false"]),
   })
   .strict();
 
@@ -492,6 +494,9 @@ const ExamPaperJsonb = z
     options: z
       .array(z.object({ id: z.string().uuid(), text: z.string().min(1) }).strict())
       .min(1),
+    // 0022: paper view coalesce ค่าเสมอ (snapshot เก่า → 'multiple_choice') — ขาด/ค่านอก
+    // enum = drift ของ view → fail-closed (ERR-SYS-002)
+    type: z.enum(["single_choice", "multiple_choice", "true_false"]),
   })
   .strict();
 
@@ -514,8 +519,9 @@ export type AttemptPaperRowParsed = z.infer<typeof AttemptPaperRowSchema>;
 /**
  * โจทย์ระหว่างสอบจาก paper view (0019) — validate question_paper แบบ fail-closed
  * (ผิด contract / question_id ไม่ตรงแถว → ERR-SYS-002) แล้ว whitelist
- * {version,text,options[{id,text}]} — options เรียง display order อยู่แล้ว
- * (snapshot สร้างตามลำดับแสดงผล) ไม่ต้องเรียงซ้ำฝั่ง BFF
+ * {version,text,options[{id,text}],type} — options เรียง display order อยู่แล้ว
+ * (snapshot สร้างตามลำดับแสดงผล) ไม่ต้องเรียงซ้ำฝั่ง BFF · type ส่งต่อจาก view
+ * 0022 (single/true_false = ตอบข้อเดียวฝั่งห้องสอบ)
  */
 export function toExamPaperQuestion(row: LearnerAttemptPaperViewRow): AttemptQuestionViewParsed {
   const parsed = ExamPaperJsonb.safeParse(row.question_paper);
@@ -531,6 +537,7 @@ export function toExamPaperQuestion(row: LearnerAttemptPaperViewRow): AttemptQue
       version: parsed.data.version,
       text: parsed.data.text,
       options: parsed.data.options.map((o) => ({ id: o.id, text: o.text })),
+      type: parsed.data.type,
     },
   };
 }
