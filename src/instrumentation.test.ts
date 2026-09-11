@@ -19,6 +19,7 @@ const TOUCHED_KEYS = [
   ...Object.keys(REQUIRED_STUBS),
   "APP_ENV",
   "CURSOR_HMAC_SECRET",
+  "IP_HASH_SALT",
   "NEXT_RUNTIME",
 ];
 
@@ -38,7 +39,7 @@ function withStubs(extra: Record<string, string | undefined>): void {
   }
 }
 
-describe("instrumentation.register — ตรวจ config ตอน boot (PB-9 / SDS §7.1)", () => {
+describe("instrumentation.register — ตรวจ config ตอน boot (PB-9/PB-13 / SDS §7.1)", () => {
   beforeEach(() => {
     vi.resetModules();
   });
@@ -61,11 +62,24 @@ describe("instrumentation.register — ตรวจ config ตอน boot (PB-9 
     await expect(register()).rejects.toBeInstanceOf(ConfigError);
   });
 
+  it("nodejs runtime + APP_ENV=prod ขาด IP_HASH_SALT → reject ด้วย ConfigError (PB-13)", async () => {
+    process.env.NEXT_RUNTIME = "nodejs";
+    withStubs({
+      APP_ENV: "prod",
+      CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod",
+      IP_HASH_SALT: undefined,
+    });
+    const { register } = await import("./instrumentation");
+    const { ConfigError } = await import("./lib/config");
+    await expect(register()).rejects.toBeInstanceOf(ConfigError);
+  });
+
   it("nodejs runtime + env ครบ → resolve (bootstrap ผ่าน)", async () => {
     process.env.NEXT_RUNTIME = "nodejs";
     withStubs({
       APP_ENV: "prod",
       CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod",
+      IP_HASH_SALT: "ip-hash-salt-prod",
     });
     const { register } = await import("./instrumentation");
     await expect(register()).resolves.toBeUndefined();

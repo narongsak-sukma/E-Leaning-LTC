@@ -17,8 +17,8 @@
  * - **ตอบ 200 เสมอ (D8/D11-14)**: เจอ → 4 ฟิลด์ snake_case {code, course_title,
  *   issued_at, status} · ไม่เจอ → 200 + status "not_found" หน้าตาเหมือนกันทุกกรณี
  *   กัน enumeration · ไม่มี holder_name/revoked_at (PII) ใน response เด็ดขาด
- * - ip_hash = sha256(ip + salt) ห้ามเก็บ IP ตรง · ธง dev-grade: config ยังไม่มีคีย์
- *   salt เฉพาะของ ip_hash จึงใช้ SUPABASE_ANON_KEY แทนชั่วคราว (PB-13 ตามหลัง)
+ * - ip_hash = sha256(ip + salt) ห้ามเก็บ IP ตรง · salt = IP_HASH_SALT (PB-13) ไม่ตั้ง
+ *   → fallback SUPABASE_ANON_KEY เฉพาะ dev (prod โดน superRefine กั้นตอน boot)
  * - RPC ล้ม/สัญญาเพี้ยน → 503 ERR-SYS-002 opaque — log/audit ไม่เกิดเพราะอยู่ใน TX
  *   เดียวกับ RPC ที่ล้ม (ไม่มี "ผลตรวจเพี้ยน" ถูกบันทึกแยก)
  */
@@ -45,24 +45,26 @@ function optionsOf(request: Request): JsonResponseOptions {
 
 /**
  * ip_hash = sha256(ip + salt) — ห้ามเก็บ IP ตรง (DD §3.4) ·
- * ธง dev-grade: config.ts ยังไม่มีคีย์ salt ของ ip_hash → ใช้ SUPABASE_ANON_KEY แทน
- * (anon key เป็นค่าสาธารณะ ใช้เป็น salt ไม่ปลอดภัยจริง — รอ DCR เพิ่ม IP_HASH_SALT)
+ * salt = IP_HASH_SALT (PB-13) ไม่ตั้ง → fallback SUPABASE_ANON_KEY (ค่าสาธารณะ —
+ * dev-grade ยอมรับได้เฉพาะ dev; prod ไม่ตั้งถูก superRefine กั้นตอน boot แล้ว)
  */
 function ipHashOf(ip: string): string {
-  const { supabaseAnonKey } = getConfig();
-  return createHash("sha256").update(ip + supabaseAnonKey).digest("hex");
+  const { ipHashSalt, supabaseAnonKey } = getConfig();
+  const salt = ipHashSalt ?? supabaseAnonKey;
+  return createHash("sha256").update(ip + salt).digest("hex");
 }
 
 /** user_agent_hash = sha256(ua + salt) — r9-O1: header เป็นค่าอิสระของ anon
  *  (ใส่อีเมล/เบอร์โทรได้) จึงห้ามเก็บข้อความดิบลงตาราง append-only · ใช้ salt
- *  ชุดเดียวกับ ipHashOf (ธง dev-grade เดียวกัน — PB-13 ตามหลังครอบทั้งสองค่า) */
+ *  ชุดเดียวกับ ipHashOf (PB-13 ครอบทั้งสองค่า) */
 function userAgentHashOf(request: Request): string | null {
   const raw = request.headers.get("user-agent");
   if (raw === null) return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
-  const { supabaseAnonKey } = getConfig();
-  return createHash("sha256").update(trimmed + supabaseAnonKey).digest("hex");
+  const { ipHashSalt, supabaseAnonKey } = getConfig();
+  const salt = ipHashSalt ?? supabaseAnonKey;
+  return createHash("sha256").update(trimmed + salt).digest("hex");
 }
 
 /** {code} ดิบ → ค่าที่ใช้ค้น (trim + จำกัดความยาว — ตัดเศษเกินทิ้ง ไม่ error) */
