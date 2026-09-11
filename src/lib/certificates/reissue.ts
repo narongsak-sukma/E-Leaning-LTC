@@ -14,11 +14,12 @@ import "server-only";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import {
   attachCertificatePdf,
-  parseCertCore,
   toIssuedCertificate,
+  type CertCoreRow,
   type IssuedCertificate,
 } from "./issue";
-import { certRpcError, dbFailed, rowString, type Row } from "./shared";
+import { certRpcError, dbFailed } from "./shared";
+import { ReissueRowSchema } from "@/lib/schemas/v1/certificate";
 
 export interface ReissueCertificateInput {
   readonly actorId: string;
@@ -46,13 +47,27 @@ export async function reissueCertificate(
   if (rpc.error !== null) {
     throw certRpcError(rpc.error, "cert_reissue_rpc_failed");
   }
-  // คืน core ของใบใหม่ + superseded_cert_id (ใบเดิม) ใน jsonb เดียว
-  const row = (Array.isArray(rpc.data) ? rpc.data[0] : rpc.data) as Row | null;
-  if (row === null) {
-    throw dbFailed("cert_reissue_rpc_failed");
+  // คืน core ของใบใหม่ + superseded_cert_id (ใบเดิม) ใน jsonb เดียว — r7-M2:
+  // ตรวจ strict ผ่าน ReissueRowSchema (mirror 10 คีย์ exact = 9 คีย์ของ
+  // cert_issue_core + superseded_cert_id) — drift ใด ๆ รวม data null ไม่ใช่ object
+  // = ERR-SYS-002 · ห้ามส่งแถว 10 คีย์นี้เข้า parseCertCore (strict 9 คีย์จะเพี้ยนเอง)
+  const parsed = ReissueRowSchema.safeParse(Array.isArray(rpc.data) ? rpc.data[0] : rpc.data);
+  if (!parsed.success) {
+    throw dbFailed("reissue_row_drift");
   }
-  const oldCertificateId = rowString(row, "superseded_cert_id");
-  const core = parseCertCore(row);
+  const row = parsed.data;
+  const oldCertificateId = row.superseded_cert_id;
+  const core: CertCoreRow = {
+    id: row.id,
+    certNo: row.cert_no,
+    verifyCode: row.verify_code,
+    enrollmentId: row.enrollment_id,
+    userId: row.user_id,
+    courseId: row.course_id,
+    holderName: row.holder_name,
+    courseTitle: row.course_title,
+    issuedAt: row.issued_at,
+  };
   // PDF ของใบใหม่ — พัง = คงใบ (pdf_media_id null) ตาม D36-O6 เหมือน issue
   // (attach RPC รับ requestId ด้วย — audit CERT_PDF_ATTACH ผูกกับคำขอเดียวกัน)
   const pdfMediaId = await attachCertificatePdf(client, core, input.actorId, input.requestId);

@@ -169,8 +169,9 @@ export function isUniqueViolation(error: unknown): boolean {
 
 /**
  * ชื่อ-นามสกุลจริงก่อน ถ้าไม่มีใช้ display_name (snapshot ณ วันออก — SDS §3.4a)
- * r4-H6: trim ทีละส่วนก่อน join — mirror SQL canonical ของ 0019 (btrim ต่อ
- * first/last แล้ว concat_ws) เดิม join สตริงดิบทำ "Alice " + " Smith" → double space
+ * r4-H6: trim ทีละส่วนก่อน join — mirror SQL canonical ของ 0019 (holder_name_trim
+ * ต่อ first/last แล้ว concat_ws — ครบชุด [[:space:]] เท่า .trim() ฝั่ง JS ตาม r7-m3)
+ * เดิม join สตริงดิบทำ "Alice " + " Smith" → double space
  */
 export function holderNameOf(profile: Row): string {
   const first = rowStringOrNull(profile, "first_name");

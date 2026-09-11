@@ -210,13 +210,48 @@ describe("issueCertificate — RPC admin_issue_certificate + admin_attach_certif
     expect((error as AppError).details).toEqual({ reason: "cert_issue_rpc_failed" });
   });
 
-  it("RPC สำเร็จแต่ data null → ERR-SYS-002 (contract mismatch)", async () => {
+  it("RPC สำเร็จแต่ data null → ERR-SYS-002 (schema ไม่ผ่าน = drift — r7-M2)", async () => {
     serviceClient({ rpc: () => ({ data: null, error: null }) });
     const error = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID }).catch(
       (e: unknown) => e,
     );
     expect((error as AppError).code).toBe("ERR-SYS-002");
-    expect((error as AppError).details).toEqual({ reason: "cert_rpc_contract_mismatch" });
+    expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
+  });
+});
+
+describe("r7-M2 — issue RPC row drift → ERR-SYS-002 ที่ขาเข้า (ไม่ strip/fabricate เงียบ)", () => {
+  it("core jsonb มีคีย์เกิน → cert_core_row_drift", async () => {
+    serviceClient({ rpc: () => ({ data: { ...coreRow(), extra_key: "x" }, error: null }) });
+    const error = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
+  });
+
+  it("core jsonb ขาด verify_code → cert_core_row_drift (ไม่ fabricate ค่าว่าง)", async () => {
+    const row = coreRow();
+    delete row.verify_code;
+    serviceClient({ rpc: () => ({ data: row, error: null }) });
+    const error = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
+  });
+
+  it.each([
+    ["holder_name ว่าง (RPC ปฏิเสธก่อน mutation แล้วตาม r7-M1 — ถ้าถึงมือ BFF = drift)", { holder_name: "" }],
+    ["cert_no ผิดรูปแบบ LTC-YYYY-<6 หลัก>", { cert_no: "not-a-cert-no" }],
+    ["issued_at ไม่ใช่ ISO datetime", { issued_at: "not-a-time" }],
+  ])("ค่าผิดสัญญา: %s → cert_core_row_drift", async (_label, patch) => {
+    serviceClient({ rpc: () => ({ data: { ...coreRow(), ...patch }, error: null }) });
+    const error = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
   });
 });
 
@@ -374,5 +409,48 @@ describe("listEligibleAttempts — RPC admin_eligible_certificates (F6: filter �
     const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
     expect((error as AppError).code).toBe("ERR-SYS-002");
     expect((error as AppError).details).toEqual({ reason: "cert_eligible_query_failed" });
+  });
+
+  describe("r7-M2 — container/แถว drift → ERR-SYS-002 (ไม่ใช่ 200 หน้าว่าง/ค่า fabricated)", () => {
+    it("container ไม่ใช่ array (object) → cert_eligible_rows_not_array — เดิม `?? []` กลืนเป็นหน้าว่าง", async () => {
+      serviceClient({ rpc: () => ({ data: { rows: [eligibleRow(1)] }, error: null }) });
+      const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
+      expect((error as AppError).code).toBe("ERR-SYS-002");
+      expect((error as AppError).details).toEqual({ reason: "cert_eligible_rows_not_array" });
+    });
+
+    it("container เป็น null → cert_eligible_rows_not_array (null ≠ array ว่าง)", async () => {
+      serviceClient({ rpc: () => ({ data: null, error: null }) });
+      const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
+      expect((error as AppError).details).toEqual({ reason: "cert_eligible_rows_not_array" });
+    });
+
+    it("แถวขาดคีย์ score_pct (ไม่ใช่ null จริง) → eligible_row_drift ไม่ fabricate null", async () => {
+      const row = eligibleRow(1);
+      delete row.score_pct;
+      serviceClient(eligibleSpec([row]));
+      const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
+      expect((error as AppError).code).toBe("ERR-SYS-002");
+      expect((error as AppError).details).toEqual({ reason: "eligible_row_drift" });
+    });
+
+    it("แถวมีคีย์เกิน → eligible_row_drift", async () => {
+      serviceClient(eligibleSpec([{ ...eligibleRow(1), extra_key: 1 }]));
+      const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
+      expect((error as AppError).code).toBe("ERR-SYS-002");
+      expect((error as AppError).details).toEqual({ reason: "eligible_row_drift" });
+    });
+
+    it("score_pct: null จริง → ผ่าน schema เป็น scorePct null (missing ≠ null ตาม r7-M2)", async () => {
+      serviceClient(eligibleSpec([{ ...eligibleRow(1), score_pct: null }]));
+      const page = await listEligibleAttempts({ limit: 20 });
+      expect(page.data[0]?.scorePct).toBeNull();
+    });
+
+    it("holder_name '' (โปรไฟล์ยังไม่กรอกชื่อ) → ผ่าน — คิวยังแสดงให้ registrar เห็น (r7-M1)", async () => {
+      serviceClient(eligibleSpec([{ ...eligibleRow(1), holder_name: "" }]));
+      const page = await listEligibleAttempts({ limit: 20 });
+      expect(page.data[0]?.holderName).toBe("");
+    });
   });
 });

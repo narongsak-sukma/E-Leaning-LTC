@@ -13,7 +13,8 @@
 import "server-only";
 import { AppError } from "@/lib/errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
-import { certRpcError, dbFailed, rowString, type Row } from "./shared";
+import { certRpcError, dbFailed } from "./shared";
+import { RevokedRowSchema } from "@/lib/schemas/v1/certificate";
 
 /** เพดานความยาวเหตุผล (API-SPECIFICATION §3.8 — บังคับ reason) */
 export const MIN_REASON_LENGTH = 10;
@@ -53,15 +54,18 @@ export async function revokeCertificate(input: RevokeCertificateInput): Promise<
     // ป้าย (ERR-XXX-NNN|reason) ของ RPC → map ตรง; ไม่มีป้าย = ERR-SYS-002 opaque
     throw certRpcError(rpc.error, "cert_revoke_rpc_failed");
   }
-  const row = (Array.isArray(rpc.data) ? rpc.data[0] : rpc.data) as Row | null;
-  if (row === null) {
-    throw dbFailed("cert_revoke_rpc_failed");
+  // r7-M2: ตรวจ strict ตาม jsonb_build_object 3 คีย์ exact ของ RPC (id/cert_no/
+  // revoked_at) — คีย์หาย/คีย์เกิน/ค่าผิดชนิด = drift → ERR-SYS-002 (รวมกรณี data
+  // null หรือไม่ใช่ object — รูปใด ๆ ที่ schema ไม่ผ่านคือ drift ทั้งหมด)
+  const parsed = RevokedRowSchema.safeParse(Array.isArray(rpc.data) ? rpc.data[0] : rpc.data);
+  if (!parsed.success) {
+    throw dbFailed("revoked_row_drift");
   }
   return {
-    id: rowString(row, "id"),
-    certNo: rowString(row, "cert_no"),
+    id: parsed.data.id,
+    certNo: parsed.data.cert_no,
     status: "revoked",
-    revokedAt: rowString(row, "revoked_at"),
+    revokedAt: parsed.data.revoked_at,
     revokedReason: reason,
   };
 }

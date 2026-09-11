@@ -186,12 +186,33 @@ describe("reissueCertificate — RPC TX เดียว (B7) + attach RPC ขอ
     expect((error as AppError).details).toEqual({ reason: "cert_reissue_rpc_failed" });
   });
 
-  it("RPC สำเร็จแต่ data null → ERR-SYS-002 (contract mismatch)", async () => {
+  it("RPC สำเร็จแต่ data null → ERR-SYS-002 reissue_row_drift (schema ไม่ผ่าน = drift — r7-M2)", async () => {
     reissueClient({ rpc: () => ({ data: null, error: null }) });
     const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
       (e: unknown) => e,
     );
     expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "reissue_row_drift" });
+  });
+
+  it("แถว RPC มีคีย์เกิน → reissue_row_drift (ไม่ strip เงียบ ๆ — r7-M2)", async () => {
+    reissueClient({ rpc: () => ({ data: { ...reissueRow(), extra_key: "x" }, error: null }) });
+    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "reissue_row_drift" });
+  });
+
+  it("แถว RPC ขาด superseded_cert_id → reissue_row_drift (ไม่ fabricate lineage)", async () => {
+    const row = reissueRow();
+    delete row.superseded_cert_id;
+    reissueClient({ rpc: () => ({ data: row, error: null }) });
+    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "reissue_row_drift" });
   });
 
   it("PDF upload ล้ม → ใบใหม่ยังครบ (pdfMediaId null) + WARN — ไม่ย้อนกลับใบเดิม (D36-O6)", async () => {

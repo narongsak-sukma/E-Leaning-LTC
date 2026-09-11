@@ -35,10 +35,14 @@ import {
   certLogger,
   certRpcError,
   dbFailed,
-  rowNumberOrNull,
   rowString,
   type Row,
 } from "./shared";
+import {
+  CertCoreRowSchema,
+  EligibleAttemptRowSchema,
+  type EligibleAttemptRowParsed,
+} from "@/lib/schemas/v1/certificate";
 
 /** ข้อมูลที่ต้องระบุเพื่อออกใบ — actorId มาจาก requirePermission ที่ route ตรวจแล้ว */
 export interface IssueCertificateInput {
@@ -79,22 +83,30 @@ export interface CertCoreRow {
   readonly issuedAt: string;
 }
 
-/** RPC jsonb → CertCoreRow (PostgREST อาจ wrap scalar เป็น array — รองรับทั้งสองรูป) */
+/**
+ * RPC jsonb → CertCoreRow — r7-M2: ตรวจ strict ผ่าน CertCoreRowSchema (mirror
+ * exact 9 คีย์ของ jsonb_build_object ท้าย cert_issue_core) ก่อน map: คีย์หาย/
+ * คีย์เกิน/ค่าผิดชนิด = สัญญา DB เพี้ยน → ERR-SYS-002 ที่ขาเข้า ไม่ใช่ fabricated
+ * ค่าว่างหรือตัดคีย์เกินทิ้งเงียบ ๆ · PostgREST อาจ wrap scalar เป็น array —
+ * รองรับทั้งสองรูป (รูปอื่น รวม null → schema fail = drift)
+ */
 export function parseCertCore(data: unknown): CertCoreRow {
-  const row = (Array.isArray(data) ? data[0] : data) as Row | null;
-  if (row === null) {
-    throw dbFailed("cert_rpc_contract_mismatch");
+  const raw = Array.isArray(data) ? data[0] : data;
+  const parsed = CertCoreRowSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw dbFailed("cert_core_row_drift");
   }
+  const row = parsed.data;
   return {
-    id: rowString(row, "id"),
-    certNo: rowString(row, "cert_no"),
-    verifyCode: rowString(row, "verify_code"),
-    enrollmentId: rowString(row, "enrollment_id"),
-    userId: rowString(row, "user_id"),
-    courseId: rowString(row, "course_id"),
-    holderName: rowString(row, "holder_name"),
-    courseTitle: rowString(row, "course_title"),
-    issuedAt: rowString(row, "issued_at"),
+    id: row.id,
+    certNo: row.cert_no,
+    verifyCode: row.verify_code,
+    enrollmentId: row.enrollment_id,
+    userId: row.user_id,
+    courseId: row.course_id,
+    holderName: row.holder_name,
+    courseTitle: row.course_title,
+    issuedAt: row.issued_at,
   };
 }
 
@@ -257,12 +269,25 @@ export async function listEligibleAttempts(query: EligibleQuery): Promise<Eligib
   if (rpc.error !== null) {
     throw dbFailed("cert_eligible_query_failed");
   }
-  const rows = (Array.isArray(rpc.data) ? rpc.data : []) as unknown as Row[];
+  // r7-M2: container ต้องเป็น array จริง — รูปอื่น (object/null) = สัญญา DB เพี้ยน
+  // → ERR-SYS-002 ไม่ใช่ 200 หน้าว่าง (เดิม `?? []` กลืน drift เงียบ ๆ)
+  if (!Array.isArray(rpc.data)) {
+    throw dbFailed("cert_eligible_rows_not_array");
+  }
+  // r7-M2: ตรวจทุกแถว strict ตาม returns table 7 คอลัมน์ก่อนตัดหน้า — required
+  // + .nullable() จำแนก "ไม่มีคีย์ score_pct" (drift) ออกจาก null จริง (ผ่าน)
+  const rows = rpc.data.map((raw) => {
+    const parsed = EligibleAttemptRowSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw dbFailed("eligible_row_drift");
+    }
+    return parsed.data;
+  });
   const built = buildPage({
     rows,
     limit: query.limit,
-    sortKeyOf: (row) => rowString(row, "submitted_at"),
-    idOf: (row) => rowString(row, "attempt_id"),
+    sortKeyOf: (row) => row.submitted_at,
+    idOf: (row) => row.attempt_id,
   });
   return {
     data: built.data.map(toEligibleAttempt),
@@ -270,15 +295,16 @@ export async function listEligibleAttempts(query: EligibleQuery): Promise<Eligib
   };
 }
 
-/** แถว RPC (snake_case) → resource ของคิวงาน (holder_name คำนวณฝั่ง SQL แล้ว) */
-function toEligibleAttempt(row: Row): EligibleAttempt {
+/** แถว RPC ที่ผ่าน EligibleAttemptRowSchema แล้ว (r7-M2) → resource ของคิวงาน —
+ *  ตรวจชนิดครบที่ schema แล้ว (missing ≠ null) map ตรง ๆ ไม่ fabricate ค่า */
+function toEligibleAttempt(row: EligibleAttemptRowParsed): EligibleAttempt {
   return {
-    attemptId: rowString(row, "attempt_id"),
-    enrollmentId: rowString(row, "enrollment_id"),
-    userId: rowString(row, "user_id"),
-    courseId: rowString(row, "course_id"),
-    holderName: rowString(row, "holder_name"),
-    scorePct: rowNumberOrNull(row, "score_pct"),
-    submittedAt: rowString(row, "submitted_at"),
+    attemptId: row.attempt_id,
+    enrollmentId: row.enrollment_id,
+    userId: row.user_id,
+    courseId: row.course_id,
+    holderName: row.holder_name,
+    scorePct: row.score_pct,
+    submittedAt: row.submitted_at,
   };
 }

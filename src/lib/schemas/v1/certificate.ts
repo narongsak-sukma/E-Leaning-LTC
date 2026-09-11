@@ -169,20 +169,85 @@ export const ReissuedCertificateResource = z
 
 export type ReissuedCertificateResourceParsed = z.infer<typeof ReissuedCertificateResource>;
 
-/** แถวคิวงานออกใบ (GET /admin/certificates/eligible) — holder_name คำนวณฝั่ง SQL */
+/** แถวคิวงานออกใบ (GET /admin/certificates/eligible) — holder_name คำนวณฝั่ง SQL
+ *  r7-M1: holderName เป็น z.string() (ไม่ .min(1)) — คิวคือข้อมูลให้ registrar เห็น
+ *  ว่า profile ผู้เรียนคนไหนยังไม่มีชื่อ (display_name='' ได้ตาม DDL 0003); การออกใบ
+ *  จริงถูกปฏิเสธที่ cert_issue_core (ERR-VAL-001|holder_name_missing) ก่อน mutation
+ *  แล้ว — ห้าม .min(1) ตรงนี้เพราะจะทำทั้งหน้า 503 เพราะคนเดียวที่ยังไม่กรอกชื่อ */
 export const EligibleAttemptResource = z
   .object({
     attemptId: z.string().uuid(),
     enrollmentId: z.string().uuid(),
     userId: z.string().uuid(),
     courseId: z.string().uuid(),
-    holderName: z.string().min(1),
+    holderName: z.string(),
     scorePct: z.number().int().min(0).max(100).nullable(),
     submittedAt: IsoTimestamp,
   })
   .strict();
 
 export type EligibleAttemptResourceParsed = z.infer<typeof EligibleAttemptResource>;
+
+// ─── r7-M2: ขาเข้าของ RPC certificates — mirror ผลตอบกลับจริงของ 0019 exact-key ───
+//     (.strict() จับทั้งคีย์หาย คีย์เกิน และค่าผิดชนิด — drift = ERR-SYS-002 ที่ขาเข้า
+//     ไม่ใช่ 200 หน้าว่าง/ค่า fabricated) · zod v4: required + .nullable() แยก
+//     "ไม่มีคีย์" (fail) จาก null จริง (pass) — ตรงข้อ M2 เรื่อง missing vs null
+
+/** cert_no = LTC-<ปี ค.ศ.>-<6 หลัก> (cert_issue_core สร้างเสมอ) — literal ซ้ำของ
+ *  shared.ts เพราะไฟล์นั้น import "server-only" (lib schema ต้อง import ได้ทุกที่) */
+const CERT_NO_PATTERN = /^LTC-\d{4}-\d{6}$/;
+
+/** แถวของ cert_issue_core (9 คีย์ exact — jsonb_build_object ท้ายฟังก์ชัน) */
+export const CertCoreRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    cert_no: z.string().regex(CERT_NO_PATTERN),
+    verify_code: z.string().min(1),
+    enrollment_id: z.string().uuid(),
+    user_id: z.string().uuid(),
+    course_id: z.string().uuid(),
+    holder_name: z.string().min(1),
+    course_title: z.string().min(1),
+    issued_at: IsoTimestamp,
+  })
+  .strict();
+
+/** แถวของ admin_reissue_certificate = core 9 คีย์ + superseded_cert_id (10 exact) */
+export const ReissueRowSchema = z
+  .object({
+    ...CertCoreRowSchema.shape,
+    superseded_cert_id: z.string().uuid(),
+  })
+  .strict();
+
+/** แถวของ admin_revoke_certificate (3 คีย์ exact) */
+export const RevokedRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    cert_no: z.string().regex(CERT_NO_PATTERN),
+    revoked_at: IsoTimestamp,
+  })
+  .strict();
+
+/** แถวของ admin_eligible_certificates (returns table 7 คอลัมน์ exact) —
+ *  holder_name ไม่ nullable (fallback display_name NOT NULL ตาม DDL) แต่เป็น ''
+ *  ได้ (คิว informational) · score_pct nullable จริง (smallint ของ attempt) */
+export const EligibleAttemptRowSchema = z
+  .object({
+    attempt_id: z.string().uuid(),
+    enrollment_id: z.string().uuid(),
+    user_id: z.string().uuid(),
+    course_id: z.string().uuid(),
+    holder_name: z.string(),
+    score_pct: z.number().int().min(0).max(100).nullable(),
+    submitted_at: IsoTimestamp,
+  })
+  .strict();
+
+export type CertCoreRowParsed = z.infer<typeof CertCoreRowSchema>;
+export type ReissueRowParsed = z.infer<typeof ReissueRowSchema>;
+export type RevokedRowParsed = z.infer<typeof RevokedRowSchema>;
+export type EligibleAttemptRowParsed = z.infer<typeof EligibleAttemptRowSchema>;
 
 export type CertificateIdParamsParsed = z.infer<typeof CertificateIdParams>;
 

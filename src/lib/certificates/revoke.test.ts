@@ -144,12 +144,41 @@ describe("revokeCertificate", () => {
     expect((error as AppError).details).toEqual({ reason: "cert_revoke_rpc_failed" });
   });
 
-  it("RPC สำเร็จแต่ data null → ERR-SYS-002 (contract mismatch)", async () => {
+  it("RPC สำเร็จแต่ data null → ERR-SYS-002 revoked_row_drift (schema ไม่ผ่าน = drift — r7-M2)", async () => {
     revokeClient({ data: null, error: null });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
       (e: unknown) => e,
     );
     expect((error as AppError).code).toBe("ERR-SYS-002");
-    expect((error as AppError).details).toEqual({ reason: "cert_revoke_rpc_failed" });
+    expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
+  });
+
+  it("แถว RPC มีคีย์เกิน → revoked_row_drift (ไม่ strip เงียว ๆ — r7-M2)", async () => {
+    revokeClient({ data: { ...revokedRow(), extra_key: "x" }, error: null });
+    const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
+  });
+
+  it("แถว RPC cert_no ผิดรูปแบบ LTC-YYYY-<6 หลัก> → revoked_row_drift", async () => {
+    revokeClient({ data: { ...revokedRow(), cert_no: "not-a-cert-no" }, error: null });
+    const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
+  });
+
+  it("แถว RPC ขาด revoked_at → revoked_row_drift (ไม่ fabricate เวลา)", async () => {
+    const row = revokedRow();
+    delete row.revoked_at;
+    revokeClient({ data: row, error: null });
+    const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
   });
 });

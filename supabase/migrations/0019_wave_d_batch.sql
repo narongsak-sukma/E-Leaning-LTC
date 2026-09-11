@@ -458,6 +458,22 @@ begin
 end
 $storage$;
 
+-- ═══ (g) r7-m3 — helper ตัด whitespace ครบชุดของ holder_name ═══
+-- PostgreSQL btrim() ตัดเฉพาะช่องว่าง (แท็บ/newline รอด) ต่างจาก .trim() ของ JS —
+-- ใช้ regexp แบบ ^\s+ และ \s+$ โดย \s = [[:space:]] (space, tab, newline, vertical
+-- tab, formfeed, CR — ชุดเดียวกับ String.prototype.trim ฝั่ง ASCII) ให้ทั้ง
+-- cert_issue_core และ admin_eligible_certificates เรียกใช้จุดเดียว
+create or replace function public.holder_name_trim(p_name text)
+returns text
+language sql
+immutable
+as $fn$
+  select regexp_replace(coalesce(p_name, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g');
+$fn$;
+alter function public.holder_name_trim(text) owner to app_owner;
+-- internal helper — เรียกเฉพาะใน body ของ RPCs (SECDEF รันใต้ app_owner = เจ้าของ)
+revoke execute on function public.holder_name_trim(text) from public, anon, authenticated;
+
 -- ═══ (f) 0019-r1 — certificate business functions (B2/B7) + verify atomic (B5) ═══
 -- ═══         + admin_update_question TX เดียว (B6)                              ═══
 -- เหตุผลของโครงนี้ (gate r1 B2/B7): การทำ mutation กับ audit เป็นสอง PostgREST call
@@ -531,17 +547,33 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: ไม่พบผลสอบที่ผ่านเกณฑ์ของหลักสูตรนี้ (ERR-VAL-001|no_passed_attempt)';
   end if;
   -- snapshot ชื่อผู้ถือใบ + ชื่อหลักสูตร (holderNameOf: ชื่อ-นามสกุล ไม่มีคือ display_name)
-  select coalesce(nullif(btrim(concat_ws(' ',
-           nullif(btrim(pr.first_name), ''), nullif(btrim(pr.last_name), ''))), ''),
-         pr.display_name, '')
+  -- r7-m3: holder_name_trim ทุกชั้น (แทน btrim) ให้ตรง .trim() ของ JS เป๊ะ —
+  -- btrim ตัดช่องว่างเท่านั้น แท็บ/newline รอด ทำ holder_name ต่างจาก holderNameOf
+  select coalesce(nullif(holder_name_trim(concat_ws(' ',
+           nullif(holder_name_trim(pr.first_name), ''), nullif(holder_name_trim(pr.last_name), ''))), ''),
+         nullif(holder_name_trim(pr.display_name), ''), '')
     into v_holder
   from public.profiles pr where pr.id = v_user;
   if not found then
     raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cert_profile_lookup_failed)';
   end if;
+  -- r7-M1: ชื่อผู้ถือใบว่าง (display_name='' และไม่มี first/last) = ข้อมูลไม่พร้อมออกใบ —
+  -- ปฏิเสธก่อนสุ่มรหัส/INSERT/audit ให้ BFF ตอบ 400 (ERR-VAL-001) ตามสัญญา ไม่ใช่
+  -- commit ใบแล้วให้ outbound .min(1) ตาย 503 กลางทาง (retry จะเจอ
+  -- valid_certificate_exists — แก้ไม่ได้อีก) คิว eligible ยังเห็นแถวนี้อยู่ (holder_name='')
+  if v_holder = '' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ผู้ถือใบยังไม่มีชื่อสำหรับออกประกาศนียบัตร กรุณาให้ผู้เรียนกรอกชื่อก่อน (ERR-VAL-001|holder_name_missing)'
+      using errcode = '22023';
+  end if;
   select title_th into v_title from public.courses where id = v_course;
   if not found then
     raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cert_course_lookup_failed)';
+  end if;
+  -- r7-M1: ชื่อหลักสูตรว่าง/ช่องว่างล้วน = สัญญาเดียวกัน — ปฏิเสธก่อน mutation
+  v_title := nullif(holder_name_trim(v_title), '');
+  if v_title is null then
+    raise exception 'ข้อมูลไม่ถูกต้อง: หลักสูตรนี้ยังไม่มีชื่อสำหรับออกประกาศนียบัตร (ERR-VAL-001|course_title_missing)'
+      using errcode = '22023';
   end if;
   -- สุ่มรหัส CSPRNG (mirror shared.ts ของ D-4): cert_no = LTC-<ปี ค.ศ. Asia/Bangkok>-<6 หลัก>
   -- verify_code = 43 อักขระจาก alphabet เดียวกับ BFF (63 อักขระ — ตรวจนับจริงจาก literal
@@ -1100,12 +1132,15 @@ as $fn$
          a.enrollment_id,
          a.user_id,
          e.course_id,
+         -- r7-m3: holder_name_trim (ครบชุด [[:space:]]) แทน btrim ทุกชั้น — mirror
+         -- holderNameOf ของ JS; fallback สุดท้ายคือ display_name ดิบ (NOT NULL ตาม
+         -- DDL 0003) คิวยังแสดงแถวชื่อว่างให้ registrar เห็นว่าต้องแก้ profile ก่อน
          coalesce(
            nullif(
-             btrim(
+             holder_name_trim(
                concat_ws(' ',
-                 nullif(btrim(coalesce(p.first_name, '')), ''),
-                 nullif(btrim(coalesce(p.last_name, '')), ''))),
+                 nullif(holder_name_trim(coalesce(p.first_name, '')), ''),
+                 nullif(holder_name_trim(coalesce(p.last_name, '')), ''))),
              ''),
            p.display_name),
          a.score_pct,
