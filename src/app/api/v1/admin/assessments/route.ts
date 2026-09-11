@@ -217,27 +217,31 @@ export async function POST(
       throw mapAdminExamDbError(error);
     }
     if (created === null || typeof created !== "object") {
-      throw new AppError("ERR-SYS-001", { details: { reason: "assessment_create_bad_contract" } });
+      throw new AppError("ERR-SYS-002", { details: { reason: "assessment_create_bad_contract" } });
     }
+    // zod-ตรวจแถวที่ INSERT คืนขาเข้าก่อนหยิบ id ใช้ (0019-r3 G3) — drift
+    // (id หาย/ผิดชนิด) ต้องตายที่นี่ 503 ERR-SYS-002 ก่อนแตะ rules
+    // insert/reload ด้วย id ที่ไม่ผ่าน validation
+    const createdRow = parseAdminAssessmentRow(created);
     // 6) insert กติกา v1 (เฉพาะเมื่อแนบ rules มา — staff:exam/super_admin เท่านั้น ข้อ 4)
     if (body.rules !== undefined) {
       const { error: ruleError } = await supabase
         .from("assessment_rules")
-        .insert(ruleInsertPayloadOf((created as { id?: unknown }).id as string, body.rules));
+        .insert(ruleInsertPayloadOf(createdRow.id, body.rules));
       if (ruleError !== null) {
         throw mapAdminExamDbError(ruleError);
       }
     }
     // 7) ตอบด้วยแถวที่สร้าง (RLS asm_read ให้อ่านกลับเอง) — rules ที่เพิ่ง insert ยังไม่ติด
     //    ในแถวที่ returning คืน จึง reload เพื่อให้ summary ตรงกับที่เพิ่งเขียน
-    const assessmentId = (created as { id?: unknown }).id as string;
+    const assessmentId = createdRow.id;
     const { data: reloaded, error: reloadError } = await supabase
       .from("assessments")
       .select(ADMIN_ASSESSMENT_SELECT)
       .eq("id", assessmentId)
       .maybeSingle();
     if (reloadError !== null || reloaded === null) {
-      throw new AppError("ERR-SYS-001", {
+      throw new AppError("ERR-SYS-002", {
         details: { reason: "assessment_reload_failed" },
       });
     }

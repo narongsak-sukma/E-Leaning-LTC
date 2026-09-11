@@ -371,7 +371,7 @@ export const AdminAssessmentRowSchema = z
     is_final: z.boolean(),
     status: z.enum(ADMIN_ASSESSMENT_STATUSES),
     created_at: IsoTimestamp,
-    course: z.object({ id: z.uuid(), created_by: z.uuid() }).nullable(),
+    course: z.object({ id: z.uuid(), created_by: z.uuid() }).strict().nullable(),
     assessment_rules: z.array(AssessmentRuleRowSchema).nullable(),
   })
   .strict();

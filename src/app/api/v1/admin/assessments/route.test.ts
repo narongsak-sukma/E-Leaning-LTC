@@ -338,4 +338,43 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
   });
+
+  it("r3-G3: INSERT คืนแถวที่ id หาย (created drift) → 503 ERR-SYS-002 ก่อนแตะ rules/reload ด้วย id ที่ไม่ผ่าน validation", async () => {
+    const { calls } = mockClient({
+      assessments: [{ data: assessmentRow({ id: null }) }],
+      assessment_rules: [{ data: null }],
+    });
+    const res = await POST(postRequest(VALID_BODY));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessment_row_drift");
+    // ห้ามนำ id ที่ไม่ผ่าน validation ไปใช้ต่อ: ไม่มี rules insert · ไม่มี reload (select ครั้งที่สอง)
+    expect(calls.some((call) => call.table === "assessment_rules")).toBe(false);
+    expect(calls.filter((call) => call.table === "assessments")).toHaveLength(1);
+  });
+
+  it("r3-G4: INSERT คืน course ที่มีคีย์เกิน (nested strict) → 503 ERR-SYS-002 ไม่ strip เงียบแล้วตอบ 201", async () => {
+    mockClient({
+      assessments: [{ data: assessmentRow({ course: { id: COURSE_ID, created_by: USER_ID, email: "person@example.com" } }) }],
+      assessment_rules: [{ data: null }],
+    });
+    const res = await POST(postRequest({ courseId: COURSE_ID, code: "QUIZ-03", title: "แบบทดสอบ" }));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessment_row_drift");
+  });
+
+  it("r3-G3: reload พัง (DB error) → 503 ERR-SYS-002 assessment_reload_failed ตาม invariant 5 (ไม่ใช่ 500)", async () => {
+    mockClient({
+      assessments: [{ data: assessmentRow() }, { error: { code: "PGRST116", message: "JSON object requested" } }],
+      assessment_rules: [{ data: null }],
+    });
+    const res = await POST(postRequest(VALID_BODY));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("assessment_reload_failed");
+  });
 });

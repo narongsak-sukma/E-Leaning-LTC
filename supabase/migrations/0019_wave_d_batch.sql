@@ -741,6 +741,20 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: แหล่งการตรวจสอบไม่ถูกต้อง (ERR-VAL-001|source_invalid)'
       using errcode = '22023';
   end if;
+  -- 0019-r3 (G1): RPC นี้ anon เรียกตรงได้ — ค่าที่ persist ลง
+  -- certificate_verifications + audit ต้องตรงรูปที่ BFF สร้างเท่านั้น
+  -- (ip_hash = sha256 hex 64 ตัวพิมพ์เล็ก · request_id = uuid จาก middleware
+  -- crypto.randomUUID) กันค่าอิสระของผู้ใช้ (เช่น อีเมล = PII) เข้า log
+  -- แบบ append-only ผ่าน parameter สองตัวนี้
+  if p_ip_hash is not null and p_ip_hash !~ '^[0-9a-f]{64}$' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ip_hash ไม่ถูกรูปแบบ (ERR-VAL-001|ip_hash_invalid)'
+      using errcode = '22023';
+  end if;
+  if p_request_id is not null
+     and p_request_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: request_id ไม่ถูกรูปแบบ (ERR-VAL-001|request_id_invalid)'
+      using errcode = '22023';
+  end if;
   -- 0019-r2 (F4): รหัสที่ผิดรูปแบบทั้ง cert_no และ verify_code ชัดเจน → ตอบ
   -- not_found ทันทีโดยไม่ persist และไม่ audit — กันค่าอิสระของผู้ใช้
   -- (เช่น อีเมล) ลง certificate_verifications.verify_code และ audit
@@ -981,10 +995,15 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: ขนาดไฟล์ไม่ถูกต้อง (ERR-VAL-001|size_invalid)'
       using errcode = '22023';
   end if;
+  -- 0019-r3 (G2): ล็อกแถวก่อนตรวจสถานะ — concurrent retry สอง TX อ่าน
+  -- pdf_media_id=null พร้อมกันไม่ได้อีก (TX ที่สองรอจน TX แรก commit แล้วเห็น
+  -- pdf_media_id ใหม่ → ตอบ attached:false idempotent แทน error) · revoke ที่
+  -- commit หลังล็อกนี้เห็นสถานะใหม่หลังปลดล็อก → แนบบนใบ revoked ไม่ได้
   select status::text, pdf_media_id
     into v_status, v_existing
   from public.certificates
-  where id = p_certificate_id;
+  where id = p_certificate_id
+  for update;
   if not found then
     raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)';
   end if;
