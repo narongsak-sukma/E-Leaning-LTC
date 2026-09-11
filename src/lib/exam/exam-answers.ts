@@ -140,6 +140,11 @@ export function createExamAnswerSaver(
   };
 
   const attemptSave = (questionId: string): void => {
+    if (terminal !== null) {
+      // attempt ปิดแล้วฝั่ง server — บันทึกเพิ่มไร้ความหมาย (กันทุกทางเข้า:
+      // timer ค้าง / toggle หลังเกิดเหตุ / รอบของ flush)
+      return;
+    }
     const item = runtime.get(questionId);
     if (item === undefined || item.saving || item.dirty === false) {
       return;
@@ -169,6 +174,15 @@ export function createExamAnswerSaver(
           item.dirty = false;
           if (terminal === null) {
             terminal = code;
+            // ยกเลิก timer + dirty ของทุกข้อทันที — ห้ามยิงเพิ่มอีกแม้ข้ออื่นกำลัง
+            // รอ throttle อยู่ (attempt ปิดแล้วสำหรับทุกข้อ ไม่ใช่ข้อเดียว)
+            for (const other of runtime.values()) {
+              other.dirty = false;
+              if (other.timer !== null) {
+                clearTimeout(other.timer);
+                other.timer = null;
+              }
+            }
           }
         } else {
           item.dirty = true;
@@ -210,6 +224,13 @@ export function createExamAnswerSaver(
       // การเลือกตัวใหม่ก่อนแล้วจึงถอดตัวเดิม
       return;
     }
+    if (terminal !== null) {
+      // หลังเกิดเหตุ terminal ห้องสอบกำลังปิด — อัปเดตคำตอบในหน้าได้ แต่
+      // ห้ามตั้งรอบันทึก/ตั้ง timer เพิ่ม (attempt ปิดแล้วฝั่ง server)
+      item.choiceIds = next;
+      emit();
+      return;
+    }
     item.choiceIds = next;
     item.error = false;
     markDirtyAndSchedule(item, questionId);
@@ -232,10 +253,6 @@ export function createExamAnswerSaver(
     if (disposed) {
       return { ok: true };
     }
-    // terminal ที่เจอไปแล้ว (แม้รอบก่อน flush) = attempt ปิดแล้ว ห้ามยิงเพิ่ม
-    if (terminal !== null) {
-      return { ok: false, terminalCode: terminal };
-    }
     const clearTimers = (): void => {
       for (const item of runtime.values()) {
         if (item.timer !== null) {
@@ -244,6 +261,12 @@ export function createExamAnswerSaver(
         }
       }
     };
+    // terminal ที่เจอไปแล้ว (แม้รอบก่อน flush) = attempt ปิดแล้ว ห้ามยิงเพิ่ม
+    // (เคลียร์ timer ที่อาจติดค้างให้เสร็จสรรก่อนคืนค่า)
+    if (terminal !== null) {
+      clearTimers();
+      return { ok: false, terminalCode: terminal };
+    }
     clearTimers();
     for (let pass = 0; pass < 5; pass += 1) {
       // เตะบันทึกทุกข้อ dirty ที่ไม่มี request ค้างทุกรอบ — รวมข้อที่เพิ่งกลายเป็น

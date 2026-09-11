@@ -292,6 +292,39 @@ describe("createExamAnswerSaver", () => {
     },
   );
 
+  it("terminal ที่ข้อหนึ่ง = ยกเลิก timer ของทุกข้อ + toggle/flush หลังจากนั้นห้ามยิงเพิ่ม", async () => {
+    let saveCalls = 0;
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [], [Q2]: [] },
+      makeDeps(async (q) => {
+        saveCalls += 1;
+        if (q === Q2) {
+          throw new ExamApiError("ERR-ASM-004", 409, "หมดเวลาสอบ");
+        }
+        return { savedAt: "2026-09-10T08:00:11+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A); // save#1 สำเร็จทันที
+    await vi.advanceTimersByTimeAsync(0);
+    saver.toggle(Q1, B); // ในหน้าต่าง throttle → ติดตั้ง timer 10 วิค้างไว้
+    saver.toggle(Q2, A); // save#2 → terminal 004
+    await vi.advanceTimersByTimeAsync(0);
+    const flush = await saver.flushAll();
+    expect(flush).toEqual({ ok: false, terminalCode: "ERR-ASM-004" });
+    expect(saveCalls).toBe(2);
+    // timer ของ Q1 ต้องถูกยกเลิกไปแล้ว — ปล่อยเวลาผ่านไป 60 วิ ห้ามมี request ใหม่
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(saveCalls).toBe(2);
+    // toggle หลัง terminal: อัปเดตคำตอบในหน้าได้ แต่ห้ามยิงบันทึก
+    saver.toggle(Q1, A); // [A, B] → [B]
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(saveCalls).toBe(2);
+    expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([B]);
+    expect(saver.hasUnsaved()).toBe(false);
+    saver.dispose();
+  });
+
   it("dispose: ยกเลิก timer ค้าง ไม่ emit ต่อ", async () => {
     const saves: Array<[string, readonly string[]]> = [];
     const state = { snapshots: [] as ExamAnswerSnapshot[] };
