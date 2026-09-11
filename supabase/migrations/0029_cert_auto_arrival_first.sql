@@ -1,4 +1,13 @@
 -- 0029_cert_auto_arrival_first — แก้ codex gate r3 (Wave E Phase 2) MAJOR-1 ฝั่ง auto tick
+-- ⚠️ SUPERSEDED (ส่วน tick + fresh picker) โดย 0030_cert_auto_walked_markers.sql —
+--    codex gate r4 (2026-09-12 · /tmp/codex-gate-e-p2-r4.txt) พบ MAJOR-1: แถวที่ commit ช้า
+--    (submitted_at = now() ตอน*เริ่ม* TX ของ 0020 — visibility สลับลำดับกับเวลาได้) ตกช่วง
+--    (cursor, sweep_top) = ล่องหนจน sweep จบ และ MAJOR-2: สถานะ 0028 ค้าง (คู่เดียว null)
+--    ไม่ถูก 0029 normalize → 0030 แทนที่ cert_auto_issue_tick (marker ต่อแถวใน cert_auto_walked ·
+--    picker admin_cert_auto_unmarked_pick) และ drop admin_cert_auto_fresh_pick ·
+--    สิ่งที่ยัง canonical จากไฟล์นี้: คอลัมน์ sweep_top_* ของ cert_auto_cursor (0030 เหลือเป็น
+--    ข้อมูลชี้แจง — หัวของ sweep) · คู่ cursor ยังเป็นของ 0028
+--
 --
 -- สิ่งที่ gate ตัดสิน (2026-09-12 · /tmp/codex-gate-e-p2-r3.txt):
 --   MAJOR-1 cursor ของ auto tick (0028) ทำให้ "แถวใหม่" (submitted_at ใหม่กว่า cursor)
