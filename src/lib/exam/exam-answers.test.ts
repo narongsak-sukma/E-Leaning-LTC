@@ -14,6 +14,7 @@ import {
   type ExamAnswerSaverDeps,
   type ExamAnswerSnapshot,
 } from "./exam-answers";
+import { ExamApiError } from "./exam-api";
 
 const Q1 = "30000000-0000-4000-8000-000000000001";
 const Q2 = "30000000-0000-4000-8000-000000000002";
@@ -212,7 +213,7 @@ describe("createExamAnswerSaver", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(saves).toHaveLength(2);
     const clean = await saver.flushAll();
-    expect(clean).toBe(true);
+    expect(clean).toEqual({ ok: true });
     // Q1 ถูกบันทึกซ้ำอีกครั้งหลัง flush (Q2 สะอาดแล้วจึงไม่บันทึกซ้ำ)
     expect(saves).toHaveLength(3);
     expect(saves.some(([q, c]) => q === Q1 && c.length === 2 && c[1] === B)).toBe(true);
@@ -231,7 +232,7 @@ describe("createExamAnswerSaver", () => {
     saver.toggle(Q1, A);
     await vi.advanceTimersByTimeAsync(0);
     const clean = await saver.flushAll();
-    expect(clean).toBe(false);
+    expect(clean).toEqual({ ok: false, terminalCode: null });
     saver.dispose();
   });
 
@@ -259,11 +260,37 @@ describe("createExamAnswerSaver", () => {
     const getRelease = (): ((v: { savedAt: string }) => void) | null => releaseFirst;
     getRelease()?.({ savedAt: "2026-09-10T08:00:09+07:00" });
     const clean = await flushPromise;
-    expect(clean).toBe(true);
+    expect(clean).toEqual({ ok: true });
     expect(saves[1]).toEqual([Q1, [A, B]]);
     expect(saver.hasUnsaved()).toBe(false);
     saver.dispose();
   });
+
+  it.each(["ERR-ASM-004", "ERR-ASM-005"] as const)(
+    "terminal %s จากการบันทึก = flushAll ส่งรหัสต่อทันที ไม่ลองซ้ำ ไม่ติด dirty",
+    async (code) => {
+      let saveCalls = 0;
+      const state = { snapshots: [] as ExamAnswerSnapshot[] };
+      const saver = createExamAnswerSaver(
+        { [Q1]: [] },
+        makeDeps(async () => {
+          saveCalls += 1;
+          throw new ExamApiError(code, 409, "จำลอง terminal จาก BFF");
+        }, state),
+      );
+      saver.toggle(Q1, A);
+      await vi.advanceTimersByTimeAsync(0);
+      const first = await saver.flushAll();
+      expect(first).toEqual({ ok: false, terminalCode: code });
+      // flush ซ้ำ = short-circuit ด้วย terminal เดิม ห้ามยิงเพิ่ม
+      const second = await saver.flushAll();
+      expect(second).toEqual({ ok: false, terminalCode: code });
+      expect(saveCalls).toBeLessThanOrEqual(2);
+      expect(saver.hasUnsaved()).toBe(false);
+      expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([A]);
+      saver.dispose();
+    },
+  );
 
   it("dispose: ยกเลิก timer ค้าง ไม่ emit ต่อ", async () => {
     const saves: Array<[string, readonly string[]]> = [];

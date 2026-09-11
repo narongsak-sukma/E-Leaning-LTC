@@ -9,8 +9,32 @@
  * state คำตอบอยู่ในหน้า (in-page) เท่านั้น - ไม่มี localStorage/sessionStorage และไม่มี
  * คิวข้าม reload ตามธง D37-6 (ก): reload กลางสอบ = ไม่มีทางเปิดกระดาษคืน
  *
+ * terminal error (ERR-ASM-004 หมดเวลา / ERR-ASM-005 ถูกส่งแล้ว) จากการบันทึก =
+ * attempt ปิดแล้วฝั่ง server บันทึกซ้ำไร้ความหมาย — เครื่องยนต์หยุดลองซ้ำแล้ว
+ * ส่งรหัสต่อให้ห้องสอบ (flushAll) จัดการตามแต่ละรหัส ส่วน error อื่น (เช่น เน็ต
+ * ขาด) ยังเป็นแบบชั่วคราว: dirty ค้าง รอบันทึกซ้ำ
+ *
  * ไม่มีเฉลยในโมดูลนี้ทุกทาง - มีแต่ choiceIds ที่ผู้เรียนเลือก (ขาขึ้นอย่างเดียว)
  */
+import { ExamApiError } from "./exam-api";
+
+/** รหัส error ที่แปลว่า attempt จบแล้วฝั่ง server — บันทึกซ้ำไม่ได้ผล */
+export type ExamTerminalCode = "ERR-ASM-004" | "ERR-ASM-005";
+
+/** ผล flushAll ก่อนส่งข้อสอบ */
+export type ExamFlushOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly terminalCode: ExamTerminalCode | null };
+
+/** รหัสนี้เป็น terminal หรือไม่ (narrowing helper) */
+function terminalCodeOf(error: unknown): ExamTerminalCode | null {
+  if (error instanceof ExamApiError) {
+    if (error.code === "ERR-ASM-004" || error.code === "ERR-ASM-005") {
+      return error.code;
+    }
+  }
+  return null;
+}
 
 /** ช่วงห่างขั้นต่ำของการ autosave ต่อข้อ (API-SPECIFICATION 5 หมายเหตุ 3) */
 export const ANSWER_SAVE_MIN_INTERVAL_MS = 10_000;
@@ -46,8 +70,12 @@ export interface ExamAnswerSaverDeps {
 export interface ExamAnswerSaver {
   /** ผู้เรียนเปลี่ยนคำตอบ - เพิ่ม/ถอด choiceId (ข้อละ 1-10 ตัวเลือกตาม API-SPEC 4 #7) */
   toggle(questionId: string, choiceId: string): void;
-  /** บังคับบันทึกทุกข้อที่ยังไม่ถูกบันทึก (ก่อน submit) - ข้าม throttle เสมอ */
-  flushAll(): Promise<boolean>;
+  /**
+   * บังคับบันทึกทุกข้อที่ยังไม่ถูกบันทึก (ก่อน submit) - ข้าม throttle เสมอ
+   * ok=false + terminalCode = server ปิด attempt แล้ว (004/005) ให้ห้องสอบจัดการ
+   * ok=false + terminalCode=null = ยังมีข้อบันทึกไม่สำเร็จแบบชั่วคราว (เช่น เน็ต)
+   */
+  flushAll(): Promise<ExamFlushOutcome>;
   /** มีข้อใดที่ยังมีการเปลี่ยนแปลงรอบันทึก */
   hasUnsaved(): boolean;
   /** ยกเลิก timer ทั้งหมด - เรียกตอน unmount */
@@ -92,6 +120,8 @@ export function createExamAnswerSaver(
   }
   const inflight = new Map<string, Promise<void>>();
   let disposed = false;
+  /** terminal แรกที่เจอ (ครั้งเดียวพอ) — ให้ flushAll ส่งต่อให้ห้องสอบทันที */
+  let terminal: ExamTerminalCode | null = null;
 
   const emit = (): void => {
     if (disposed) {
@@ -129,10 +159,20 @@ export function createExamAnswerSaver(
         }
         emit();
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         item.saving = false;
-        item.dirty = true;
         item.error = true;
+        const code = terminalCodeOf(error);
+        if (code !== null) {
+          // terminal: attempt ปิดแล้วฝั่ง server (หมดเวลา/ถูกส่งแล้ว) — บันทึกซ้ำ
+          // ไร้ความหมาย จึงไม่ตั้ง dirty ให้วงรอบ retry ไปเอง (คำตอบยังอยู่ในหน้า)
+          item.dirty = false;
+          if (terminal === null) {
+            terminal = code;
+          }
+        } else {
+          item.dirty = true;
+        }
         emit();
       });
     inflight.set(questionId, promise);
@@ -188,9 +228,13 @@ export function createExamAnswerSaver(
     return false;
   };
 
-  const flushAll = async (): Promise<boolean> => {
+  const flushAll = async (): Promise<ExamFlushOutcome> => {
     if (disposed) {
-      return true;
+      return { ok: true };
+    }
+    // terminal ที่เจอไปแล้ว (แม้รอบก่อน flush) = attempt ปิดแล้ว ห้ามยิงเพิ่ม
+    if (terminal !== null) {
+      return { ok: false, terminalCode: terminal };
     }
     const clearTimers = (): void => {
       for (const item of runtime.values()) {
@@ -216,9 +260,16 @@ export function createExamAnswerSaver(
         break;
       }
       await Promise.allSettled([...inflight.values()]);
+      if (terminal !== null) {
+        // เจอ terminal กลาง flush (เช่น หมดเวลาตอนบันทึกข้อท้าย) — หยุดทันที
+        break;
+      }
       clearTimers();
     }
-    return hasUnsaved() === false;
+    if (terminal !== null) {
+      return { ok: false, terminalCode: terminal };
+    }
+    return hasUnsaved() === false ? { ok: true } : { ok: false, terminalCode: null };
   };
 
   const dispose = (): void => {

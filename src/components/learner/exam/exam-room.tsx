@@ -221,11 +221,27 @@ export function ExamRoom({
     setDialogOpen(false);
     setPhase({ kind: "submitting" });
     const saver = saverRef.current;
-    let flushOk = true;
-    if (saver !== null) {
-      flushOk = await saver.flushAll();
-    }
-    if (flushOk === false) {
+    const outcome = saver !== null ? await saver.flushAll() : ({ ok: true } as const);
+    if (!outcome.ok) {
+      if (outcome.terminalCode === "ERR-ASM-004") {
+        // หมดเวลาฝั่ง server แล้ว (ตรวจพบตอนบันทึกคำตอบ) — จัดการเหมือนส่งแล้วติด 004
+        setPhase({
+          kind: "submit_failed",
+          title: "หมดเวลาสอบแล้ว",
+          message:
+            "หมดเวลาสอบตามที่ระบบกำหนด ระบบจะสรุปผลการสอบครั้งนี้เป็นการสอบที่ไม่ผ่านเงื่อนไขเวลา " +
+            "กรุณาติดต่อเจ้าหน้าที่สภาทนายความแห่งประเทศไทย โทร 0 2351 1128 หากต้องการขอความช่วยเหลือ",
+          canRetry: false,
+        });
+        return;
+      }
+      if (outcome.terminalCode === "ERR-ASM-005") {
+        // ถูกส่งไปแล้วก่อนหน้า (เช่น ระบบส่งอัตโนมัติ/อุปกรณ์อื่น) — ถือว่าสำเร็จ ไปหน้าผลต่อ
+        clearExamPaper(session.attemptId);
+        setPhase({ kind: "leaving" });
+        router.replace(`/my/exams/${session.attemptId}`);
+        return;
+      }
       // fail-closed: บันทึกคำตอบล่าสุดยังไม่สำเร็จ = ห้ามส่ง เพราะการตัดสินจะใช้เฉพาะ
       // คำตอบที่เซิร์ฟเวอร์มีอยู่จริง (ส่งไป = ตัดสินจากคำตอบเก่า/ไม่ครบโดยผู้เรียนไม่รู้)
       setPhase({
