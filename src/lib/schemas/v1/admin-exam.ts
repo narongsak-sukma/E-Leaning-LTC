@@ -445,6 +445,86 @@ export function toQuestionBankResource(row: QuestionBankRow): QuestionBankResour
   };
 }
 
+/**
+ * r4-H2a: แถว question_banks ดิบจาก DB → ตรวจก่อน map (แบบเดียวกับ parseAdminAssessmentRow
+ * ของ G3) — drift ของ select/view (คอลัมน์หาย/ชนิดเปลี่ยน/คีย์เกิน) = ERR-SYS-002 503 fail-closed
+ */
+export const QuestionBankRowSchema = z
+  .object({
+    id: z.uuid(),
+    code: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().nullable(),
+    course_id: z.uuid().nullable(),
+    category_id: z.uuid().nullable(),
+    is_active: z.boolean(),
+    created_at: IsoTimestamp,
+    questions: z.array(z.object({ count: z.number().int().min(0) }).strict()).nullable(),
+  })
+  .strict();
+
+export function parseQuestionBankRow(row: unknown): QuestionBankRow {
+  const parsed = QuestionBankRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "question_bank_row_drift" } });
+  }
+  return parsed.data;
+}
+
+/** r4-H2a: แถว questions ที่ POST สร้างใหม่ (select id,type,question_text,points) — ตรวจก่อนใช้ id ผูก options */
+export const QuestionCreatedRowSchema = z
+  .object({
+    id: z.uuid(),
+    type: z.enum(ADMIN_QUESTION_TYPES),
+    question_text: z.string().min(1),
+    points: z.number().int().min(1),
+  })
+  .strict();
+
+export function parseQuestionCreatedRow(row: unknown): {
+  id: string;
+  type: QuestionCreatedRefParsed["type"];
+  question_text: string;
+  points: number;
+} {
+  const parsed = QuestionCreatedRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "question_created_row_drift" } });
+  }
+  return parsed.data;
+}
+
+/**
+ * r4-H2b: แถว questions + embed options ดิบ (select ตัด is_correct) → ตรวจก่อน map —
+ * drift (เช่น tags null ที่ mapper เดิมอ่าน .filter ตรง ๆ → TypeError 500) = ERR-SYS-002 503
+ */
+export const QuestionRowSchema = z
+  .object({
+    id: z.uuid(),
+    bank_id: z.uuid(),
+    type: z.enum(ADMIN_QUESTION_TYPES),
+    difficulty: z.enum(ADMIN_QUESTION_DIFFICULTIES),
+    question_text: z.string().min(1),
+    explanation: z.string().nullable(),
+    points: z.number().int().min(1),
+    status: z.enum(ADMIN_QUESTION_STATUSES),
+    tags: z.array(z.string()),
+    version: z.number().int().min(1),
+    created_at: IsoTimestamp,
+    question_options: z
+      .array(z.object({ id: z.uuid(), option_text: z.string().min(1), sort_order: z.number().int() }).strict())
+      .nullable(),
+  })
+  .strict();
+
+export function parseQuestionRow(row: unknown): QuestionRow {
+  const parsed = QuestionRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "question_row_drift" } });
+  }
+  return parsed.data;
+}
+
 /** แถว questions + embed options (ไม่มี is_correct ใน select — ตัดตั้งแต่ query) */
 export interface QuestionRow {
   readonly id: string;

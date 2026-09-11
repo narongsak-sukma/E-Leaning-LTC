@@ -345,15 +345,26 @@ describe("PATCH — RPC infra path", () => {
     expect(body.error.message.includes("SQLSTATE")).toBe(false);
   });
 
-  it("RPC สำเร็จแต่ reload ไม่เจอแถว → 500 ERR-SYS-001 question_reload_failed", async () => {
+  it("RPC สำเร็จแต่ reload ไม่เจอแถว → 503 ERR-SYS-002 question_reload_failed (r4-H2b: ไม่ใช่ ERR-SYS-001 500)", async () => {
     mockClient({ questions: [{ data: null }] });
     const res = await PATCH(patchRequest({ questionText: "x" }), {
       params: Promise.resolve({ id: BANK_ID, qid: QUESTION_ID }),
     });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
-    expect(body.error.code).toBe("ERR-SYS-001");
+    expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("question_reload_failed");
+  });
+
+  it("r4-H2b: reload ได้แถว drift (tags เป็น null) → 503 ERR-SYS-002 question_row_drift ไม่ใช่ TypeError → 500", async () => {
+    mockClient({ questions: [{ data: questionRow({ tags: null }) }] });
+    const res = await PATCH(patchRequest({ questionText: "x" }), {
+      params: Promise.resolve({ id: BANK_ID, qid: QUESTION_ID }),
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("question_row_drift");
   });
 
   it("reload query ล้ม → 503 ERR-SYS-002", async () => {

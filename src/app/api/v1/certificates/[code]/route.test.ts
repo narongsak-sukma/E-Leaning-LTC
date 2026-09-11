@@ -56,15 +56,13 @@ function ctx(code: string): { params: Promise<{ code: string }> } {
   return { params: Promise.resolve({ code }) };
 }
 
-/** แถว 4 ฟิลด์ที่ RPC คืน (จำลองเผื่อฟิลด์เกินหลุดมา — route ต้องตัดทิ้ง) */
+/** แถว 4 ฟิลด์ที่ RPC คืนตาม contract เป๊ะ (r4-H2c: เกิน/ขาด/ค่าผิด enum = drift → 503 ไม่ใช่ตัดเงียบ) */
 function foundRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     code: "LTC-2026-000001",
     course_title: "หลักสูตรทดสอบ",
     issued_at: "2026-09-01T00:00:00+00:00",
     status: "valid",
-    holder_name: "นายทดสอบ ใจดี",
-    revoked_at: "2026-09-02T00:00:00+00:00",
     ...overrides,
   };
 }
@@ -74,7 +72,7 @@ beforeEach(() => {
 });
 
 describe("GET /api/v1/certificates/{code} — 200 เสมอ (D8/D11-14)", () => {
-  it("เจอด้วย cert_no → 200 + 4 ฟิลด์ snake_case — ฟิลด์เกิน/PII ในแถว RPC ถูกตัดทิ้ง", async () => {
+  it("เจอด้วย cert_no → 200 + 4 ฟิลด์ snake_case — แถว RPC ตรง contract พอดี", async () => {
     const rpc = makeSsrClient({ data: foundRow(), error: null });
 
     const response = await GET(verifyUrl("LTC-2026-000001"), ctx("LTC-2026-000001"));
@@ -204,6 +202,36 @@ describe("GET /api/v1/certificates/{code} — RPC contract + rate + headers", ()
     expect(response.status).toBe(503);
     const body = (await response.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-SYS-002");
+  });
+
+  it("r4-H2c: RPC คืนฟิลด์เกิน (เช่น holder_name รั่ว) → 503 ไม่ใช่ตัดเงียบแล้วตอบ 200 — ฟิลด์เกินอาจเป็น PII", async () => {
+    makeSsrClient({ data: foundRow({ holder_name: "นายทดสอบ ใจดี" }), error: null });
+    const response = await GET(verifyUrl("LTC-2026-000001"), ctx("LTC-2026-000001"));
+    const raw = JSON.stringify(await response.json());
+    expect(response.status).toBe(503);
+    const body = JSON.parse(raw) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("cert_verify_rpc_contract_mismatch");
+    expect(raw).not.toContain("นายทดสอบ");
+  });
+
+  it("r4-H2c: RPC ขาดฟิลด์ (ไม่มี issued_at) → 503 ERR-SYS-002", async () => {
+    const partial = foundRow();
+    delete partial["issued_at"];
+    makeSsrClient({ data: partial, error: null });
+    const response = await GET(verifyUrl("LTC-2026-000001"), ctx("LTC-2026-000001"));
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { details?: { reason?: string } } };
+    expect(body.error.details?.reason).toBe("cert_verify_rpc_contract_mismatch");
+  });
+
+  it("r4-H2c: status นอก enum → 503 ERR-SYS-002 ไม่ใช่ ZodError → 500", async () => {
+    makeSsrClient({ data: foundRow({ status: "unknown" }), error: null });
+    const response = await GET(verifyUrl("LTC-2026-000001"), ctx("LTC-2026-000001"));
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.message).toBe(errorDefinition("ERR-SYS-002").message);
   });
 
   it("rate PUBLIC_READ เรียกด้วย ip เท่านั้น — ไม่มี secondaryKey (§5)", async () => {

@@ -26,6 +26,7 @@ import {
   jsonCreated,
   jsonErrorResponse,
   jsonPageOk,
+  parseOutgoingView,
   type JsonResponseOptions,
 } from "@/lib/api/response";
 import { AppError } from "@/lib/errors";
@@ -34,10 +35,12 @@ import { requirePermission } from "@/lib/rbac";
 import {
   mapAdminExamDbError,
   parseAdminExam,
+  parseQuestionBankRow,
+  parseQuestionCreatedRow,
   QuestionBankCreateBody,
   type QuestionBankCreateBodyParsed,
   QuestionBankCreateResult,
-  type QuestionBankRow,
+  QuestionBankResource,
   type QuestionCreatedRefParsed,
   type QuestionCreateInputParsed,
   type QuestionOptionInputParsed,
@@ -90,7 +93,9 @@ export async function GET(request: Request): Promise<NextResponse> {
         details: { reason: "admin_question_banks_query_failed" },
       });
     }
-    const rows = (data ?? []) as unknown as readonly QuestionBankRow[];
+    // r4-H2a: ตรวจแถว DB ขาเข้าก่อน map (drift → ERR-SYS-002 503) + ขาออกผ่าน zod อีกชั้น
+    // (parseOutgoingView — drift ของ mapper เองก็ 503 ไม่ใช่ 200 ที่ payload เพี้ยน)
+    const rows = (data ?? []).map(parseQuestionBankRow);
     const page = buildPage({
       rows,
       limit: query.limit,
@@ -98,7 +103,12 @@ export async function GET(request: Request): Promise<NextResponse> {
       idOf: (row) => row.id,
     });
     return jsonPageOk(
-      { data: page.data.map(toQuestionBankResource), page: page.page },
+      {
+        data: page.data.map((row) =>
+          parseOutgoingView(QuestionBankResource, toQuestionBankResource(row), "question_bank_resource_drift"),
+        ),
+        page: page.page,
+      },
       options,
     );
   } catch (error: unknown) {
@@ -180,10 +190,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (bankError !== null) {
       throw mapAdminExamDbError(bankError);
     }
-    if (bankRow === null || typeof bankRow !== "object") {
-      throw new AppError("ERR-SYS-001", { details: { reason: "bank_create_bad_contract" } });
-    }
-    const bank = bankRow as unknown as QuestionBankRow;
+    // r4-H2a: null/รูปไม่ตรง contract ขาเข้า = ERR-SYS-002 503 (เดิม cast ตรง + ERR-SYS-001)
+    const bank = parseQuestionBankRow(bankRow);
     // 5) ข้อสอบเริ่มต้น (ถ้ากำหนด) — insert ข้อ + ตัวเลือกทีละข้อ (มี id กลับมาเพื่อผูก options)
     const createdQuestions: QuestionCreatedRefParsed[] = [];
     if (body.questions !== undefined) {
@@ -196,12 +204,8 @@ export async function POST(request: Request): Promise<NextResponse> {
         if (questionError !== null) {
           throw mapAdminExamDbError(questionError);
         }
-        const created = questionRow as unknown as {
-          id: string;
-          type: string;
-          question_text: string;
-          points: number;
-        };
+        // r4-H2a: ตรวจแถวข้อใหม่ก่อนหยิบ id ไปผูก options (drift → 503 ไม่ insert option ให้ข้อหลอก)
+        const created = parseQuestionCreatedRow(questionRow);
         const { error: optionsError } = await supabase
           .from("question_options")
           .insert(optionInsertRowsOf(created.id, input.options));
@@ -216,12 +220,16 @@ export async function POST(request: Request): Promise<NextResponse> {
         });
       }
     }
-    // 6) 201 — resource ผ่าน zod contract ก่อนตอบ (ไม่มี is_correct ทุกฟิลด์)
+    // 6) 201 — resource ผ่าน zod contract ก่อนตอบ (ไม่มี is_correct ทุกฟิลด์; drift → 503 ไม่ใช่ 500)
     return jsonCreated(
-      QuestionBankCreateResult.parse({
-        ...toQuestionBankResource(bank),
-        questions: createdQuestions,
-      }),
+      parseOutgoingView(
+        QuestionBankCreateResult,
+        {
+          ...toQuestionBankResource(bank),
+          questions: createdQuestions,
+        },
+        "question_bank_create_drift",
+      ),
       options,
     );
   } catch (error: unknown) {

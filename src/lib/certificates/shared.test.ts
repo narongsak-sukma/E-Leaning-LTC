@@ -103,6 +103,11 @@ describe("row helpers + isUniqueViolation", () => {
   it("holderNameOf: ชื่อ+นามสกุลก่อน, ว่าง → display_name", () => {
     expect(holderNameOf({ first_name: "สมชาย", last_name: "ใจดี", display_name: "x" })).toBe("สมชาย ใจดี");
     expect(holderNameOf({ first_name: null, last_name: null, display_name: "นายสมชาย" })).toBe("นายสมชาย");
+    // r4-H6: trim ทีละส่วนก่อน join — mirror SQL btrim + concat_ws ของ 0019 (ไม่เกิด double space)
+    expect(holderNameOf({ first_name: "Alice ", last_name: " Smith", display_name: "x" })).toBe("Alice Smith");
+    expect(holderNameOf({ first_name: "  สมชาย  ", last_name: "ใจดี ", display_name: "x" })).toBe("สมชาย ใจดี");
+    // ชื่อจริงเป็นช่องว่างล้วน → ว่างเหมือน null → ใช้ display_name (SQL: btrim คืน '' → concat_ws ข้าม)
+    expect(holderNameOf({ first_name: "   ", last_name: null, display_name: "นายสมชาย" })).toBe("นายสมชาย");
   });
 });
 

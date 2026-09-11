@@ -750,8 +750,11 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: ip_hash ไม่ถูกรูปแบบ (ERR-VAL-001|ip_hash_invalid)'
       using errcode = '22023';
   end if;
+  -- 0019-r4 (H5): uuid v4 เท่านั้น — แหล่งสร้างเดียวของ header คือ middleware
+  -- (crypto.randomUUID → เวอร์ชัน 4 + variant [89ab] เสมอ); uuid รุ่นอื่น/ค่ากลาง
+  -- (เช่น all-zero) = ค่าที่ BFF ของเราไม่มีทางสร้าง → ปฏิเสธ ไม่ persist ไม่ audit
   if p_request_id is not null
-     and p_request_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+     and p_request_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
     raise exception 'ข้อมูลไม่ถูกต้อง: request_id ไม่ถูกรูปแบบ (ERR-VAL-001|request_id_invalid)'
       using errcode = '22023';
   end if;
@@ -860,27 +863,15 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: tags ต้องเป็น array (ERR-VAL-001|tags_not_array)'
       using errcode = '22023';
   end if;
-  -- โจทย์ + version bump (DD §3.4 L391 — bump ในแถวเดิม; explanation null-clearing
-  -- ด้วย ? operator: มีคีย์ = เซ็ตค่า (รวม null) / ไม่มีคีย์ = คงเดิม)
-  -- 0019-r2 (F7): tags แยก null-clearing ออกจาก "ไม่มีคีย์" — `[]` ล้างเป็น '{}'
-  -- ได้จริง (array_agg บน array ว่าง = NULL เดิมโดน coalesce คงค่าเก่า) และ
-  -- ใช้ e #>> '{}' (scalar text) แทน t.value::text ที่คงอัญประกาศ JSON รอบสตริง
-  update public.questions q
-  set type          = coalesce((v_patch->>'type')::public.question_type, q.type),
-      difficulty    = coalesce((v_patch->>'difficulty')::public.question_difficulty, q.difficulty),
-      question_text = coalesce(v_patch->>'question_text', q.question_text),
-      explanation   = case when v_patch ? 'explanation' then v_patch->>'explanation' else q.explanation end,
-      points        = coalesce((v_patch->>'points')::smallint, q.points),
-      tags          = case
-                         when v_patch ? 'tags' and jsonb_typeof(v_patch->'tags') = 'array'
-                         then coalesce((select array_agg(e #>> '{}')
-                                        from jsonb_array_elements(v_patch->'tags') e), '{}')
-                         else q.tags
-                       end,
-      version       = q.version + 1
-  where q.id = p_question_id;
-  -- ตัวเลือก (ถ้าแนบมา): เลื่อน sort_order ของ option ที่จะแก้ออกจากช่วงจริงก่อน
-  -- (- 1000000 กันชน uq_question_options_sort ระหว่างสลับ) แล้วตั้งค่าจริงทีละตัว
+  -- 0019-r4 (H4): ตัวเลือกก่อนโจทย์ — trg_questions_type_change (0005) เป็น
+  -- AFTER UPDATE IMMEDIATE บน questions: เปลี่ยน type ไป single_choice/true_false
+  -- ต้องเห็น is_correct=true เป็น 1 เดียว "ณ ตอนนั้น" → ถ้า UPDATE type ก่อน
+  -- โดย option เดิมยัง 2 เฉลย (mc→sc) trigger ยิงทันที = ล้มทั้ง TX;
+  -- ส่วน trg_question_options_correctness เป็น CONSTRAINT TRIGGER DEFERRABLE
+  -- INITIALLY DEFERRED บน question_options → ตรวจที่ COMMIT โดยอ่าน type "สุดท้าย"
+  -- ของแถว questions (ตามที่ UPDATE ทีหลัง) — ลำดับนี้จึงผ่านทั้งสองทิศ
+  -- (mc→sc: ลดเหลือ 1 เฉลยก่อน แล้วเปลี่ยน type · sc→mc: เพิ่มเป็น 2 เฉลย
+  -- ก่อน แล้วเปลี่ยน type — trigger type-change ไม่ยิงเพราะปลายทางคือ mc)
   if p_options is not null then
     v_ids := array(select (o2->>'id')::uuid
                    from jsonb_array_elements(p_options) o2
@@ -915,6 +906,32 @@ begin
       end if;
     end loop;
   end if;
+  -- โจทย์ + version bump (DD §3.4 L391 — bump ในแถวเดิม; explanation null-clearing
+  -- ด้วย ? operator: มีคีย์ = เซ็ตค่า (รวม null) / ไม่มีคีย์ = คงเดิม)
+  -- 0019-r2 (F7): tags แยก null-clearing ออกจาก "ไม่มีคีย์" — `[]` ล้างเป็น '{}'
+  -- ได้จริง (array_agg บน array ว่าง = NULL เดิมโดน coalesce คงค่าเก่า) และ
+  -- ใช้ e #>> '{}' (scalar text) แทน t.value::text ที่คงอัญประกาศ JSON รอบสตริง
+  update public.questions q
+  set type          = coalesce((v_patch->>'type')::public.question_type, q.type),
+      difficulty    = coalesce((v_patch->>'difficulty')::public.question_difficulty, q.difficulty),
+      question_text = coalesce(v_patch->>'question_text', q.question_text),
+      explanation   = case when v_patch ? 'explanation' then v_patch->>'explanation' else q.explanation end,
+      points        = coalesce((v_patch->>'points')::smallint, q.points),
+      tags          = case
+                         when v_patch ? 'tags' and jsonb_typeof(v_patch->'tags') = 'array'
+                         then coalesce((select array_agg(e #>> '{}')
+                                        from jsonb_array_elements(v_patch->'tags') e), '{}')
+                         else q.tags
+                       end,
+      version       = q.version + 1
+  where q.id = p_question_id;
+  -- 0019-r4 (H1): audit คู่ mutation ใน TX เดียว (D12-8) — QB_QUESTION_UPDATE ตาม
+  -- registry AUDIT §2.1 L67 (context = question_id, version) · actor derive จาก
+  -- auth.uid() ภายใน internal fn (แบบเดียวกับ EXAM_SUBMIT ของ submit_attempt)
+  perform public.append_audit_event_internal(
+    'QB_QUESTION_UPDATE', 'question', p_question_id::text, null, null,
+    jsonb_build_object('question_id', p_question_id, 'version', v_version + 1),
+    null, null, null);
   return jsonb_build_object('question_id', p_question_id, 'version', v_version + 1);
 end;
 $fn$;

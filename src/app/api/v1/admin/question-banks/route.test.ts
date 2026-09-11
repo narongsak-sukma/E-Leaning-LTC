@@ -277,3 +277,54 @@ describe("POST /admin/question-banks — สร้าง bank + ข้อสอ�
     expect(calls.some((call) => call.table === "question_banks")).toBe(false);
   });
 });
+
+describe("r4-H2a: แถว DB ขาเข้า drift → 503 ERR-SYS-002 fail-closed (ตรวจก่อน map)", () => {
+  it("GET — ชนิดคอลัมน์เพี้ยน (name เป็นตัวเลข) → 503 question_bank_row_drift", async () => {
+    mockClient({ question_banks: [{ data: [bankRow({ name: 42 })] }] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("question_bank_row_drift");
+  });
+
+  it("GET — แถวมีคีย์เกิน (คอลัมน์รั่วจาก select/view) → 503 question_bank_row_drift ไม่ใช่ 200 แบบตัดเงียบ", async () => {
+    mockClient({ question_banks: [{ data: [bankRow({ owner_email: "x@y.z" })] }] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { details?: { reason?: string } } };
+    expect(body.error.details?.reason).toBe("question_bank_row_drift");
+  });
+
+  it("GET — embed นับข้อเพี้ยน (count เป็น string) → 503 question_bank_row_drift", async () => {
+    mockClient({ question_banks: [{ data: [bankRow({ questions: [{ count: "5" }] })] }] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+  });
+
+  it("POST — แถวข้อใหม่ drift (type นอก enum) → 503 question_created_row_drift + ไม่เอา id ไป insert options", async () => {
+    const { calls } = mockClient(
+      {
+        question_banks: [{ data: bankRow() }],
+        questions: [
+          {
+            data: {
+              id: "d0000000-0000-4000-8000-000000000001",
+              type: "essay",
+              question_text: "โจทย์",
+              points: 1,
+            },
+          },
+        ],
+        question_options: [{ data: null }],
+      },
+      ["instructor"],
+    );
+    const res = await POST(postRequest(VALID_BANK));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("question_created_row_drift");
+    expect(calls.some((call) => call.table === "question_options")).toBe(false);
+  });
+});

@@ -22,19 +22,24 @@
  * jsonb แล้ว reload อ่านผลจริงตอบกลับ
  */
 import { NextResponse } from "next/server";
-import { jsonErrorResponse, jsonOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { parseRpcErrorCodeDetailed, type RpcErrorLike } from "@/lib/api/rpc-errors";
 import { AppError } from "@/lib/errors";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { requirePermission } from "@/lib/rbac";
 import {
   parseAdminExam,
+  parseQuestionRow,
   QuestionPatchBody,
   type QuestionPatchBodyParsed,
   QuestionPatchParams,
   QuestionResource,
   toQuestionResource,
-  type QuestionRow,
 } from "@/lib/schemas/v1/admin-exam";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
@@ -149,12 +154,15 @@ export async function PATCH(
       throw mapQuestionRpcError(rpc.error);
     }
     // 6) reload แล้วตอบ 200 — select ไม่รวม is_correct (ตัดตั้งแต่ query)
+    // r4-H2b: reload fail → ERR-SYS-002 503 (ไม่ใช่ ERR-SYS-001 500 — G3 แบบเดียวกัน)
+    // และตรวจแถวขาเข้าก่อน map — drift (เช่น tags null) เคยโดน mapper TypeError → 500
     const reloaded = await selectQuestion(supabase, bankId, questionId);
     if (reloaded === null) {
-      throw new AppError("ERR-SYS-001", { details: { reason: "question_reload_failed" } });
+      throw new AppError("ERR-SYS-002", { details: { reason: "question_reload_failed" } });
     }
+    const row = parseQuestionRow(reloaded);
     return jsonOk(
-      QuestionResource.parse(toQuestionResource(reloaded as unknown as QuestionRow)),
+      parseOutgoingView(QuestionResource, toQuestionResource(row), "question_resource_drift"),
       options,
     );
   } catch (error: unknown) {

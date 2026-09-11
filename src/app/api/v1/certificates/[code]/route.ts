@@ -70,26 +70,31 @@ function normalizeCode(raw: string): string {
   return raw.trim().slice(0, CODE_MAX_LENGTH);
 }
 
-/** jsonb ของ RPC → 4 ฟิลด์ตามสัญญา (ตรวจชนิด fail-closed ก่อน parse — ฟิลด์เกินถูกตัดทิ้ง) */
+/**
+ * jsonb ของ RPC → 4 ฟิลด์ตามสัญญา — fail-closed ทั้งสองทิศ (r4-H2c):
+ * - คีย์ต้องเป็น 4 ฟิลด์พอดี (เกิน/ขาด = drift ของ RPC → 503 ไม่ใช่ตัดเงียบแล้วตอบ 200 —
+ *   ฟิลด์เกินอาจเป็น PII ที่ view/RPC รั่วมา)
+ * - ค่าต้องผ่าน CertificatePublicView.safeParse (enum/refine ผิด → 503 ไม่ใช่ ZodError → 500)
+ */
 function verifyResultOf(data: unknown): CertificatePublicViewParsed {
   const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | null;
-  if (row === null) {
+  if (row === null || typeof row !== "object") {
     throw new AppError("ERR-SYS-002", { details: { reason: "cert_verify_rpc_contract_mismatch" } });
   }
-  const code = row["code"];
-  const courseTitle = row["course_title"];
-  const issuedAt = row["issued_at"];
-  const status = row["status"];
-  if (
-    typeof code !== "string" ||
-    (courseTitle !== null && typeof courseTitle !== "string") ||
-    (issuedAt !== null && typeof issuedAt !== "string") ||
-    typeof status !== "string"
-  ) {
+  const keys = Object.keys(row).sort().join(",");
+  if (keys !== "code,course_title,issued_at,status") {
     throw new AppError("ERR-SYS-002", { details: { reason: "cert_verify_rpc_contract_mismatch" } });
   }
-  // contract-first: ตรวจ 4 ฟิลด์ + refine ก่อนส่ง — ป้องกัน PII/ฟิลด์แปลกหลุดออกไป
-  return CertificatePublicView.parse({ code, course_title: courseTitle, issued_at: issuedAt, status });
+  const parsed = CertificatePublicView.safeParse({
+    code: row["code"],
+    course_title: row["course_title"],
+    issued_at: row["issued_at"],
+    status: row["status"],
+  });
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "cert_verify_rpc_contract_mismatch" } });
+  }
+  return parsed.data;
 }
 
 /** GET — 200 เสมอ (ยกเว้น infra error → 503, rate เกิน → 429 ตาม §5) */

@@ -167,14 +167,18 @@ export function isUniqueViolation(error: unknown): boolean {
   return typeof message === "string" && message.includes("duplicate key value violates unique constraint");
 }
 
-/** ชื่อ-นามสกุลจริงก่อน ถ้าไม่มีใช้ display_name (snapshot ณ วันออก — SDS §3.4a) */
+/**
+ * ชื่อ-นามสกุลจริงก่อน ถ้าไม่มีใช้ display_name (snapshot ณ วันออก — SDS §3.4a)
+ * r4-H6: trim ทีละส่วนก่อน join — mirror SQL canonical ของ 0019 (btrim ต่อ
+ * first/last แล้ว concat_ws) เดิม join สตริงดิบทำ "Alice " + " Smith" → double space
+ */
 export function holderNameOf(profile: Row): string {
   const first = rowStringOrNull(profile, "first_name");
   const last = rowStringOrNull(profile, "last_name");
   const full = [first, last]
-    .filter((part) => part !== null && part.trim().length > 0)
-    .join(" ")
-    .trim();
+    .map((part) => (part === null ? "" : part.trim()))
+    .filter((part) => part.length > 0)
+    .join(" ");
   return full.length > 0 ? full : rowString(profile, "display_name");
 }
 
