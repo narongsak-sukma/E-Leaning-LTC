@@ -61,7 +61,7 @@ interface Spec {
   userId: string | null;
   aal: "aal1" | "aal2";
   roles: readonly string[];
-  rows: unknown[];
+  rows: unknown[] | null;
   error: { message: string } | null;
 }
 
@@ -104,7 +104,7 @@ function makeClient(spec: Partial<Spec> = {}) {
       rec.or.push(filter);
       return builder;
     }),
-    then(res: (v: { data: unknown[]; error: { message: string } | null }) => unknown) {
+    then(res: (v: { data: unknown[] | null; error: { message: string } | null }) => unknown) {
       rec.executed = true;
       return res({ data: full.rows, error: full.error });
     },
@@ -294,8 +294,29 @@ describe("GET /me/attempts — denial ตามทะเบียน error", () 
     expect(res.status).toBe(503);
     const body = (await res.json()) as ErrorBody;
     expect(body.error.code).toBe("ERR-SYS-002");
+    // r8-N1: ตายที่ขาเข้า (AttemptHistoryRowSchema strict 11 คีย์) ก่อนถึง mapper/outbound
     expect((body.error.details as { reason?: string } | undefined)?.reason).toBe(
-      "attempt_history_contract_drift",
+      "attempt_row_drift",
+    );
+  });
+
+  it("r8-N1: สำเร็จแต่ data null → 503 attempts_rows_not_array ไม่ใช่ 200 หน้าว่าง", async () => {
+    const { res } = await get("", { rows: null });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect((body.error.details as { reason?: string } | undefined)?.reason).toBe(
+      "attempts_rows_not_array",
+    );
+  });
+
+  it("r8-N1: แถวมีคีย์เกินนอก select 11 คอลัมน์ → 503 attempt_row_drift ไม่ strip เงียบ", async () => {
+    const { res } = await get("", { rows: [{ ...row(1, T3), user_id: USER_ID }] });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect((body.error.details as { reason?: string } | undefined)?.reason).toBe(
+      "attempt_row_drift",
     );
   });
 });

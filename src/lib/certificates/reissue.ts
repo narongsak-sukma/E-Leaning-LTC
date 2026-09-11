@@ -18,7 +18,7 @@ import {
   type CertCoreRow,
   type IssuedCertificate,
 } from "./issue";
-import { certRpcError, dbFailed } from "./shared";
+import { certRpcError, dbFailed, unwrapScalarRow } from "./shared";
 import { ReissueRowSchema } from "@/lib/schemas/v1/certificate";
 
 export interface ReissueCertificateInput {
@@ -51,7 +51,8 @@ export async function reissueCertificate(
   // ตรวจ strict ผ่าน ReissueRowSchema (mirror 10 คีย์ exact = 9 คีย์ของ
   // cert_issue_core + superseded_cert_id) — drift ใด ๆ รวม data null ไม่ใช่ object
   // = ERR-SYS-002 · ห้ามส่งแถว 10 คีย์นี้เข้า parseCertCore (strict 9 คีย์จะเพี้ยนเอง)
-  const parsed = ReissueRowSchema.safeParse(Array.isArray(rpc.data) ? rpc.data[0] : rpc.data);
+  // r8-N2: แกะ array เฉพาะความยาว 1 พอดี — แถวที่สองหายเงียบไม่ได้ (schema ตีตกเอง)
+  const parsed = ReissueRowSchema.safeParse(unwrapScalarRow(rpc.data));
   if (!parsed.success) {
     throw dbFailed("reissue_row_drift");
   }

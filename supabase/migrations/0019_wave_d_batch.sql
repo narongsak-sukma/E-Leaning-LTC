@@ -1133,8 +1133,11 @@ as $fn$
          a.user_id,
          e.course_id,
          -- r7-m3: holder_name_trim (ครบชุด [[:space:]]) แทน btrim ทุกชั้น — mirror
-         -- holderNameOf ของ JS; fallback สุดท้ายคือ display_name ดิบ (NOT NULL ตาม
-         -- DDL 0003) คิวยังแสดงแถวชื่อว่างให้ registrar เห็นว่าต้องแก้ profile ก่อน
+         -- holderNameOf ของ JS; fallback สุดท้ายคือ display_name (NOT NULL ตาม DDL
+         -- 0003) · r8-n3: ตัด [[:space:]] ของ display_name ด้วยเหมือน issuance
+         -- (0019 cert_issue_core) — ชื่อที่ไม่ว่างได้ค่าเดียวกันทุกทาง · whitespace
+         -- ล้วนกลายเป็น '' (nullif) แล้วตกสาขา '' ปลายทาง — คิวยังแสดงแถวชื่อว่าง
+         -- ให้ registrar เห็นว่าต้องแก้ profile ก่อน
          coalesce(
            nullif(
              holder_name_trim(
@@ -1142,7 +1145,8 @@ as $fn$
                  nullif(holder_name_trim(coalesce(p.first_name, '')), ''),
                  nullif(holder_name_trim(coalesce(p.last_name, '')), ''))),
              ''),
-           p.display_name),
+           nullif(holder_name_trim(p.display_name), ''),
+           ''),
          a.score_pct,
          a.submitted_at
   from public.assessment_attempts a

@@ -24,10 +24,11 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import {
   AssessmentDetailView,
+  AssessmentRowSchema,
+  AssessmentRulesRowSchema,
   parseAssessmentIdParams,
+  parseInboundRow,
   toAssessmentDetail,
-  type AssessmentRow,
-  type AssessmentRulesRow,
 } from "@/lib/schemas/v1/exam";
 
 /** x-request-id (SDS §5.4) → envelope options (exactOptionalPropertyTypes-safe) */
@@ -65,7 +66,9 @@ export async function GET(
     if (assessment === null) {
       throw new AppError("ERR-ASM-003");
     }
-    const row = assessment as unknown as AssessmentRow;
+    // r8-N1: ตรวจแถว DB ขาเข้าก่อนใช้ — คีย์เกิน/หาย/ค่าผิดชนิด = drift → 503
+    // (แถวเกินจาก select ต้องไม่ถูก mapper ตัดทิ้งเงียบ ๆ แล้วตอบ 200)
+    const row = parseInboundRow(AssessmentRowSchema, assessment, "assessment_row_drift");
     if (row.status !== "published") {
       // staff เห็น draft/closed/archived ได้ตาม RLS แต่ endpoint ผู้เรียนอ่านเฉพาะ published
       throw new AppError("ERR-ASM-003");
@@ -92,11 +95,13 @@ export async function GET(
     if (rules === null) {
       throw new AppError("ERR-NF-001", { details: { fields: ["rules"] } });
     }
+    // r8-N1: กติกาก็ strict ขาเข้าเหมือนแถวหลัก (13 คีย์ตาม select) — drift → 503
+    const rulesRow = parseInboundRow(AssessmentRulesRowSchema, rules, "assessment_rules_row_drift");
     // zod-ตรวจ view ขาออก (B4) — แถว/กติกา drift จาก DB → 503 ERR-SYS-002 fail-closed
     return jsonOk(
       parseOutgoingView(
         AssessmentDetailView,
-        toAssessmentDetail(row, rules as unknown as AssessmentRulesRow),
+        toAssessmentDetail(row, rulesRow),
         "assessment_detail_contract_drift",
       ),
       options,

@@ -56,7 +56,8 @@ const SNAPSHOT = {
 function viewRow(overrides: Record<string, unknown> = {}) {
   return {
     attempt_id: ATTEMPT_ID,
-    user_id: "u0000000-0000-4000-8000-000000000001",
+    // r8-N1: แถวผ่าน AttemptResultRowSchema strict — user_id ต้องเป็น uuid จริง (hex)
+    user_id: "10000000-0000-4000-8000-000000000001",
     assessment_id: ASSESSMENT_ID,
     attempt_no: 1,
     status: "passed",
@@ -67,7 +68,6 @@ function viewRow(overrides: Record<string, unknown> = {}) {
     passed: true,
     question_id: Q1,
     seq: 1,
-    option_order: null,
     selected_option_ids: [OPT1],
     answered_at: T,
     is_correct: true,
@@ -259,6 +259,32 @@ describe("GET /attempts/{id}/result — map ข้อผิดพลาด", () 
     expect(res.status).toBe(503);
     const body = (await res.json()) as ErrorBody;
     expect(body.error.code).toBe("ERR-SYS-002");
+  });
+
+  it("r8-N1: สำเร็จแต่ data null → 503 attempt_result_rows_not_array ไม่ใช่ 200 หน้าว่าง/เฉลย null", async () => {
+    const { res } = await get(ATTEMPT_ID, { rows: null });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.["reason"]).toBe("attempt_result_rows_not_array");
+  });
+
+  it("r8-N1: แถวขาดคีย์ question_snapshot ไปเลย → 503 attempt_result_row_drift (คีย์หาย ≠ null จริงตาม view)", async () => {
+    const missing = { ...viewRow() } as Record<string, unknown>;
+    delete missing["question_snapshot"];
+    const { res } = await get(ATTEMPT_ID, { rows: [missing] });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.["reason"]).toBe("attempt_result_row_drift");
+  });
+
+  it("r8-N1: แถวมีคีย์เกินนอก select 18 คอลัมน์ (เช่น option_order รั่ว) → 503 attempt_result_row_drift", async () => {
+    const { res } = await get(ATTEMPT_ID, { rows: [{ ...viewRow(), option_order: null }] });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.["reason"]).toBe("attempt_result_row_drift");
   });
 
   it("สถานะแปลกปลอมในแถว → 503 ERR-SYS-002 (view zod ไม่ผ่าน ไม่ส่งข้อมูลดิบออก)", async () => {

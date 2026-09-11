@@ -13,7 +13,7 @@
 import "server-only";
 import { AppError } from "@/lib/errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
-import { certRpcError, dbFailed } from "./shared";
+import { certRpcError, dbFailed, unwrapScalarRow } from "./shared";
 import { RevokedRowSchema } from "@/lib/schemas/v1/certificate";
 
 /** เพดานความยาวเหตุผล (API-SPECIFICATION §3.8 — บังคับ reason) */
@@ -57,7 +57,8 @@ export async function revokeCertificate(input: RevokeCertificateInput): Promise<
   // r7-M2: ตรวจ strict ตาม jsonb_build_object 3 คีย์ exact ของ RPC (id/cert_no/
   // revoked_at) — คีย์หาย/คีย์เกิน/ค่าผิดชนิด = drift → ERR-SYS-002 (รวมกรณี data
   // null หรือไม่ใช่ object — รูปใด ๆ ที่ schema ไม่ผ่านคือ drift ทั้งหมด)
-  const parsed = RevokedRowSchema.safeParse(Array.isArray(rpc.data) ? rpc.data[0] : rpc.data);
+  // r8-N2: แกะ array เฉพาะความยาว 1 พอดี — แถวที่สองหายเงียบไม่ได้ (schema ตีตกเอง)
+  const parsed = RevokedRowSchema.safeParse(unwrapScalarRow(rpc.data));
   if (!parsed.success) {
     throw dbFailed("revoked_row_drift");
   }

@@ -154,7 +154,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (error !== null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "admin_assessments_query_failed" } });
     }
-    const rows = ((data ?? []) as unknown[]).map(parseAdminAssessmentRow);
+    // r8-N1: success แต่ data ไม่ใช่ array = drift (ไม่ใช่ `?? []` กลืนเป็นหน้าว่าง) —
+    // แต่ละแถว strict ต่อ AdminAssessmentRowSchema อยู่แล้วที่ parseAdminAssessmentRow
+    if (!Array.isArray(data)) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "admin_assessments_rows_not_array" } });
+    }
+    const rows = data.map(parseAdminAssessmentRow);
     const page = buildPage({
       rows,
       limit: query.limit,

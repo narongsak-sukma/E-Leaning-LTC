@@ -51,7 +51,8 @@ const ASSESSMENT_ROW = {
 };
 
 const RULES_ROW = {
-  id: "r0000000-0000-4000-8000-000000000004",
+  // r8-N1: id ต้องเป็น uuid จริง (hex) — แถวผ่าน AssessmentRulesRowSchema strict ขาเข้า
+  id: "50000000-0000-4000-8000-000000000004",
   assessment_id: ASSESSMENT_ID,
   version: 2,
   pass_pct: 70,
@@ -264,6 +265,27 @@ describe("GET /assessments/{id} — denial ทุก error code ของเส�
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("assessment_detail_contract_drift");
+    // r8-N1: ตายที่ขาเข้า (AssessmentRulesRowSchema strict 13 คีย์) ก่อนถึง mapper
+    expect(body.error.details?.reason).toBe("assessment_rules_row_drift");
+  });
+
+  it("r8-N1: แถว assessment มีคีย์เกินนอก select 8 คอลัมน์ → 503 assessment_row_drift ไม่ strip เงียบ", async () => {
+    const { res } = await get(ASSESSMENT_ID, {
+      assessment: { data: { ...ASSESSMENT_ROW, selection: { mode: "fixed" } }, error: null },
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("assessment_row_drift");
+  });
+
+  it("r8-N1: แถวกติกามีคีย์เกินนอก select 13 คอลัมน์ → 503 assessment_rules_row_drift", async () => {
+    const { res } = await get(ASSESSMENT_ID, {
+      rules: { data: { ...RULES_ROW, selection: { mode: "fixed" } }, error: null },
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("assessment_rules_row_drift");
   });
 });

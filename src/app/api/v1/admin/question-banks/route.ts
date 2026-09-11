@@ -95,7 +95,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
     // r4-H2a: ตรวจแถว DB ขาเข้าก่อน map (drift → ERR-SYS-002 503) + ขาออกผ่าน zod อีกชั้น
     // (parseOutgoingView — drift ของ mapper เองก็ 503 ไม่ใช่ 200 ที่ payload เพี้ยน)
-    const rows = (data ?? []).map(parseQuestionBankRow);
+    // r8-N1: success แต่ data ไม่ใช่ array = drift (ไม่ใช่ `?? []` กลืนเป็นหน้าว่าง) —
+    // แต่ละแถว strict ต่อ QuestionBankRowSchema อยู่แล้วที่ parseQuestionBankRow
+    if (!Array.isArray(data)) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "question_banks_rows_not_array" } });
+    }
+    const rows = data.map(parseQuestionBankRow);
     const page = buildPage({
       rows,
       limit: query.limit,

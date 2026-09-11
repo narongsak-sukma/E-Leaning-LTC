@@ -204,6 +204,15 @@ describe("GET /api/v1/certificates/{code} — RPC contract + rate + headers", ()
     expect(body.error.code).toBe("ERR-SYS-002");
   });
 
+  it("r8-N2: RPC คืน array ยาว 2 (แถวที่สองต้องหายเงียบไม่ได้) → 503 cert_verify_rpc_contract_mismatch", async () => {
+    makeSsrClient({ data: [foundRow(), { junk: true }], error: null });
+    const response = await GET(verifyUrl("LTC-2026-000001"), ctx("LTC-2026-000001"));
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("cert_verify_rpc_contract_mismatch");
+  });
+
   it("r4-H2c: RPC คืนฟิลด์เกิน (เช่น holder_name รั่ว) → 503 ไม่ใช่ตัดเงียบแล้วตอบ 200 — ฟิลด์เกินอาจเป็น PII", async () => {
     makeSsrClient({ data: foundRow({ holder_name: "นายทดสอบ ใจดี" }), error: null });
     const response = await GET(verifyUrl("LTC-2026-000001"), ctx("LTC-2026-000001"));

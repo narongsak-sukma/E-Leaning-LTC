@@ -180,7 +180,22 @@ export function holderNameOf(profile: Row): string {
     .map((part) => (part === null ? "" : part.trim()))
     .filter((part) => part.length > 0)
     .join(" ");
-  return full.length > 0 ? full : rowString(profile, "display_name");
+  // r8-n3: fallback display_name ตัด [[:space:]] ทั้งสองข้างเหมือน issuance ฝั่ง SQL
+  // (0019: nullif(holder_name_trim(display_name),'')) — ชื่อที่ไม่ว่างต้องได้ค่า
+  // เดียวกันทุกทาง · whitespace ล้วนกลายเป็น '' (แถวคิวยังแสดง ไม่ใช่หาย)
+  return full.length > 0 ? full : rowString(profile, "display_name").trim();
+}
+
+/**
+ * r8-N2: jsonb scalar ของ RPC — ยอมรับ object ตรง ๆ หรือ array ความยาว 1 พอดี
+ * (PostgREST อาจ wrap scalar เป็น array หลักเดียว) · ความยาวอื่น (0, 2+) คืนของ
+ * เดิมให้ schema ขาเข้าตีตก = drift — แถวที่สอง ([validRow, junk]) หายเงียบไม่ได้
+ */
+export function unwrapScalarRow(data: unknown): unknown {
+  if (Array.isArray(data) && data.length === 1) {
+    return data[0];
+  }
+  return data;
 }
 
 /**

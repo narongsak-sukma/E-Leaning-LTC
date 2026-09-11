@@ -77,8 +77,11 @@ function normalizeCode(raw: string): string {
  * - ค่าต้องผ่าน CertificatePublicView.safeParse (enum/refine ผิด → 503 ไม่ใช่ ZodError → 500)
  */
 function verifyResultOf(data: unknown): CertificatePublicViewParsed {
-  const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | null;
-  if (row === null || typeof row !== "object") {
+  // r8-N2: แกะ array เฉพาะความยาว 1 พอดี (PostgREST wrap) — ความยาวอื่นคงเป็น array
+  // ให้ guard/keys ตีตกเอง: แถวที่สอง ([validRow, junk]) หายเงียบไม่ได้
+  const raw = Array.isArray(data) && data.length === 1 ? data[0] : data;
+  const row = raw as Record<string, unknown> | null;
+  if (row === null || Array.isArray(row) || typeof row !== "object") {
     throw new AppError("ERR-SYS-002", { details: { reason: "cert_verify_rpc_contract_mismatch" } });
   }
   const keys = Object.keys(row).sort().join(",");

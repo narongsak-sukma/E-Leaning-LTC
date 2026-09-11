@@ -81,7 +81,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (error !== null) {
       throw new AppError("ERR-SYS-002"); // opaque — ไม่ leak SQL (SDS §6.1)
     }
-    const rows = ((data ?? []) as unknown[]).map(parseMyCertificateRow);
+    // r8-N1: success แต่ data ไม่ใช่ array = drift (ไม่ใช่ `?? []` กลืนเป็นหน้าว่าง) —
+    // แต่ละแถว strict ต่อ MyCertificateRowSchema อยู่แล้วที่ parseMyCertificateRow
+    if (!Array.isArray(data)) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "my_certificates_rows_not_array" } });
+    }
+    const rows = data.map(parseMyCertificateRow);
     // zod-ตรวจทุกแถวขาออก (B4) — แถวไหน drift → 503 ERR-SYS-002 fail-closed ทั้งหน้า
     const resources = rows.map((row) =>
       parseOutgoingView(MyCertificateResource, toMyCertificateResource(row), "my_certificate_contract_drift"),

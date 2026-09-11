@@ -22,10 +22,11 @@ import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import {
+  AttemptResultRowSchema,
   AttemptResultView,
   parseAttemptIdParams,
+  parseInboundRow,
   toAttemptResultView,
-  type LearnerAttemptViewRow,
 } from "@/lib/schemas/v1/exam";
 
 /** x-request-id (SDS §5.4) → envelope options (exactOptionalPropertyTypes-safe) */
@@ -62,7 +63,15 @@ export async function GET(
     if (error !== null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "attempt_result_read_failed" } });
     }
-    const rows = (data ?? []) as unknown as LearnerAttemptViewRow[];
+    // r8-N1: container + แถวต้องตรงสัญญา — success แต่ data ไม่ใช่ array = drift
+    // (ไม่ใช่ `?? []` กลืนเป็น 404) · แต่ละแถว strict 18 คีย์ก่อน mapper
+    // (คีย์ question_snapshot หาย = drift ไม่ใช่ content:null เงียบ ๆ)
+    if (!Array.isArray(data)) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "attempt_result_rows_not_array" } });
+    }
+    const rows = data.map((raw) =>
+      parseInboundRow(AttemptResultRowSchema, raw, "attempt_result_row_drift"),
+    );
     if (rows.length === 0) {
       // ไม่พบ หรือ ไม่ใช่เจ้าของ (view กรองเอง) — ตอบเหมือนกัน ไม่เปิดเผยความมีอยู่
       throw new AppError("ERR-NF-001");

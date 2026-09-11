@@ -20,7 +20,12 @@ import { parsePageQuery } from "@/lib/schemas/v1/common";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
-import { MyAttemptView, toMyAttemptResource, type AttemptHistoryRow } from "@/lib/schemas/v1/exam";
+import {
+  AttemptHistoryRowSchema,
+  MyAttemptView,
+  parseInboundRow,
+  toMyAttemptResource,
+} from "@/lib/schemas/v1/exam";
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -66,7 +71,14 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (error !== null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "attempts_read_failed" } });
     }
-    const rows = (data ?? []) as unknown as AttemptHistoryRow[];
+    // r8-N1: success แต่ data ไม่ใช่ array = drift (ไม่ใช่ `?? []` กลืนเป็นหน้าว่าง) ·
+    // แต่ละแถว strict 11 คีย์ตาม select ก่อน mapper (คีย์เกิน/หาย = 503 ไม่ strip เงียบ)
+    if (!Array.isArray(data)) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "attempts_rows_not_array" } });
+    }
+    const rows = data.map((raw) =>
+      parseInboundRow(AttemptHistoryRowSchema, raw, "attempt_row_drift"),
+    );
     const page = buildPage({
       // zod-ตรวจทุกแถวขาออก (B4) — แถวไหน drift → 503 ERR-SYS-002 fail-closed ทั้งหน้า
       rows: rows.map((row) =>

@@ -45,7 +45,7 @@ function row(index: number, issuedAt: string, status = "valid"): MyCertificateRo
 }
 
 /** thenable builder — select/eq/or/order/limit + await ได้เหมือน PostgrestBuilder จริง */
-function makeBuilder(rows: MyCertificateRow[], dbError: { message: string } | null = null) {
+function makeBuilder(rows: MyCertificateRow[] | null, dbError: { message: string } | null = null) {
   const calls = {
     select: [] as string[],
     eq: [] as Array<{ column: string; value: unknown }>,
@@ -74,7 +74,7 @@ function makeBuilder(rows: MyCertificateRow[], dbError: { message: string } | nu
       calls.limit.push(count);
       return builder;
     }),
-    then(res: (v: { data: MyCertificateRow[]; error: { message: string } | null }) => unknown) {
+    then(res: (v: { data: MyCertificateRow[] | null; error: { message: string } | null }) => unknown) {
       return res({ data: rows, error: dbError });
     },
   };
@@ -88,7 +88,7 @@ beforeEach(() => {
 
 /** client จำลอง: session + บทบาท + ตาราง profiles/certificates */
 function mockClient(
-  rows: MyCertificateRow[],
+  rows: MyCertificateRow[] | null,
   options: {
     roles?: readonly string[];
     aal?: "aal1" | "aal2";
@@ -275,5 +275,14 @@ describe("GET /me/certificates — B4 fail-closed view", () => {
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("my_certificate_row_drift"); // F5: ตายที่ขาเข้าก่อน map
+  });
+
+  it("r8-N1: สำเร็จแต่ data null → 503 my_certificates_rows_not_array ไม่ใช่ 200 หน้าว่าง", async () => {
+    mockClient(null);
+    const res = await GET(meUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("my_certificates_rows_not_array");
   });
 });

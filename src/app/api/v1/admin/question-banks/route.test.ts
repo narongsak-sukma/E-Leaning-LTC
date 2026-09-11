@@ -175,12 +175,15 @@ describe("GET /admin/question-banks — สิทธิ์ + จำนวนข�
   });
 
   it("select รวม questions(count) แต่ไม่มี is_correct/options · resource ไม่มี is_correct", async () => {
-    const { calls } = mockClient({ question_banks: [{ data: [bankRow()] }] });
+    // r8-N1: คิว 2 รายการ — เดิมเรียก GET สองครั้งกับคิวเดียว ครั้งที่สองได้ data:null
+    // ที่ `?? []` กลืนเป็น 200 หน้าว่าง (assert is_correct เป็นจริงเปล่า) — ตอนนี้ null = 503
+    const { calls } = mockClient({ question_banks: [{ data: [bankRow()] }, { data: [bankRow()] }] });
     await GET(adminUrl());
     const call = calls.find((item) => item.table === "question_banks");
     expect(call?.select).toContain("questions(count)");
     expect(call?.select?.includes("is_correct")).toBe(false);
     const res = await GET(adminUrl());
+    expect(res.status).toBe(200);
     const body = (await res.json()) as { data: Array<Record<string, unknown>> };
     expect(JSON.stringify(body.data).includes("is_correct")).toBe(false);
   });
@@ -286,6 +289,15 @@ describe("r4-H2a: แถว DB ขาเข้า drift → 503 ERR-SYS-002 fail
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("question_bank_row_drift");
+  });
+
+  it("r8-N1: GET — สำเร็จแต่ data null → 503 question_banks_rows_not_array ไม่ใช่ 200 หน้าว่าง", async () => {
+    mockClient({ question_banks: [{ data: null }] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("question_banks_rows_not_array");
   });
 
   it("GET — แถวมีคีย์เกิน (คอลัมน์รั่วจาก select/view) → 503 question_bank_row_drift ไม่ใช่ 200 แบบตัดเงียบ", async () => {

@@ -27,6 +27,11 @@ import {
   toExamPaperQuestion,
   toMyAttemptResource,
   toSubmitView,
+  AttemptResultRowSchema,
+  AttemptHistoryRowSchema,
+  AssessmentRowSchema,
+  AssessmentRulesRowSchema,
+  parseInboundRow,
   type AssessmentRow,
   type AttemptHistoryRow,
   type LearnerAttemptPaperViewRow,
@@ -51,7 +56,6 @@ function viewRow(overrides: Partial<LearnerAttemptViewRow> = {}): LearnerAttempt
     passed: null,
     question_id: UUID(100),
     seq: 1,
-    option_order: [2, 1],
     selected_option_ids: [UUID(200)],
     answered_at: T,
     is_correct: true,
@@ -589,5 +593,95 @@ describe("r6-L1 — strict matrix ของ outbound views", () => {
         options: [{ ...snapOpt0, leak: 1 }],
       }).success,
     ).toBe(false);
+  });
+});
+
+// ─── r8-N1: แถว DB ขาเข้า strict exact-key ตาม select จริงของ route —
+//     missing ≠ null (required+.nullable() แยกสองกรณี) · คีย์เกิน = drift ───
+describe("r8-N1 — inbound row schemas ของแถว DB ตาม select จริง", () => {
+  const historyRow: AttemptHistoryRow = {
+    id: UUID(1),
+    assessment_id: UUID(2),
+    attempt_no: 2,
+    status: "passed",
+    started_at: T,
+    expires_at: "2026-09-10T02:02:03+00:00",
+    submitted_at: T,
+    score_pct: 80,
+    passed: true,
+    question_count: 30,
+    correct_count: 24,
+  };
+
+  const assessmentRow: AssessmentRow = {
+    id: UUID(2),
+    course_id: UUID(3),
+    code: "FINAL-01",
+    title: "สอบปลายทาง",
+    description: null,
+    is_final: true,
+    status: "published",
+    published_at: T,
+  };
+
+  const rulesRow = {
+    id: UUID(4),
+    assessment_id: UUID(2),
+    version: 2,
+    pass_pct: 70,
+    time_limit_minutes: 60,
+    question_count: 30,
+    max_attempts: 3,
+    attempt_cooldown_minutes: 1440,
+    shuffle_questions: true,
+    shuffle_options: true,
+    require_course_complete: true,
+    proctoring_mode: "basic",
+    effective_from: T,
+  };
+
+  it("positive control — แถวครบตาม select จริงผ่านทั้ง 4 schema (18/11/8/13 คอลัมน์)", () => {
+    expect(AttemptResultRowSchema.safeParse(viewRow()).success).toBe(true);
+    expect(AttemptHistoryRowSchema.safeParse(historyRow).success).toBe(true);
+    expect(AssessmentRowSchema.safeParse(assessmentRow).success).toBe(true);
+    expect(AssessmentRulesRowSchema.safeParse(rulesRow).success).toBe(true);
+  });
+
+  it("AttemptResultRowSchema: question_snapshot คีย์หายเลย → fail (drift) · null จริง → ผ่าน · คีย์เกิน → fail", () => {
+    const missing = { ...viewRow() } as Record<string, unknown>;
+    delete missing["question_snapshot"];
+    expect(AttemptResultRowSchema.safeParse(missing).success).toBe(false);
+    // null จริง = view ยังไม่เปิดเฉลย (after_final_attempt) — ต้องผ่านตาม view
+    expect(
+      AttemptResultRowSchema.safeParse(viewRow({ question_snapshot: null })).success,
+    ).toBe(true);
+    expect(
+      AttemptResultRowSchema.safeParse({ ...viewRow(), option_order: [2, 1] }).success,
+    ).toBe(false);
+  });
+
+  it("คีย์เกิน/ค่าผิด enum → fail ทุก schema (history/assessment/rules)", () => {
+    expect(AttemptHistoryRowSchema.safeParse({ ...historyRow, leak: 1 }).success).toBe(false);
+    expect(
+      AssessmentRowSchema.safeParse({ ...assessmentRow, status: "unknown" }).success,
+    ).toBe(false);
+    expect(AssessmentRowSchema.safeParse({ ...assessmentRow, leak: 1 }).success).toBe(false);
+    expect(AssessmentRulesRowSchema.safeParse({ ...rulesRow, leak: 1 }).success).toBe(false);
+    expect(
+      AssessmentRulesRowSchema.safeParse({ ...rulesRow, time_limit_minutes: 1 }).success,
+    ).toBe(false);
+  });
+
+  it("parseInboundRow: fail → AppError ERR-SYS-002 พร้อม reason · ผ่าน → คืนค่า parsed", () => {
+    try {
+      parseInboundRow(AssessmentRowSchema, { ...assessmentRow, leak: 1 }, "assessment_row_drift");
+      throw new Error("must throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AppError);
+      expect((err as AppError).code).toBe("ERR-SYS-002");
+      expect((err as AppError).details?.["reason"]).toBe("assessment_row_drift");
+    }
+    const parsed = parseInboundRow(AssessmentRowSchema, assessmentRow, "assessment_row_drift");
+    expect(parsed.id).toBe(UUID(2));
   });
 });

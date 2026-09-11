@@ -253,6 +253,15 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
   });
+
+  it("r8-N1: สำเร็จแต่ data null → 503 admin_assessments_rows_not_array ไม่ใช่ 200 หน้าว่าง", async () => {
+    mockClient({ assessments: [{ data: null }] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rows_not_array");
+  });
 });
 
 describe("POST /admin/assessments — สร้าง draft + กติกา", () => {

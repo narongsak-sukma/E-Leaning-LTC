@@ -195,6 +195,15 @@ describe("reissueCertificate — RPC TX เดียว (B7) + attach RPC ขอ
     expect((error as AppError).details).toEqual({ reason: "reissue_row_drift" });
   });
 
+  it("r8-N2: RPC คืน array ยาว 2 (แถวที่สองต้องหายเงียบไม่ได้) → reissue_row_drift", async () => {
+    reissueClient({ rpc: () => ({ data: [reissueRow(), { junk: true }], error: null }) });
+    const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "reissue_row_drift" });
+  });
+
   it("แถว RPC มีคีย์เกิน → reissue_row_drift (ไม่ strip เงียบ ๆ — r7-M2)", async () => {
     reissueClient({ rpc: () => ({ data: { ...reissueRow(), extra_key: "x" }, error: null }) });
     const error = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID }).catch(

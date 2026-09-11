@@ -230,6 +230,24 @@ describe("r7-M2 — issue RPC row drift → ERR-SYS-002 ที่ขาเข้
     expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
   });
 
+  it("r8-N2: RPC คืน array ยาว 2 (แถวที่สองต้องหายเงียบไม่ได้) → cert_core_row_drift", async () => {
+    serviceClient({ rpc: () => ({ data: [coreRow(), { junk: true }], error: null }) });
+    const error = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
+  });
+
+  it("r8-N2: RPC คืน array เปล่า → cert_core_row_drift (ไม่ fabricate แถวจากค่าว่าง)", async () => {
+    serviceClient({ rpc: () => ({ data: [], error: null }) });
+    const error = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "cert_core_row_drift" });
+  });
+
   it("core jsonb ขาด verify_code → cert_core_row_drift (ไม่ fabricate ค่าว่าง)", async () => {
     const row = coreRow();
     delete row.verify_code;

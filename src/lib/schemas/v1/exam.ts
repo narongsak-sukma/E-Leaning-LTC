@@ -290,7 +290,9 @@ export type AttemptResultViewParsed = z.infer<typeof AttemptResultView>;
 
 // ─── แถว DB (snake_case) ที่ routes อ่าน ───
 
-/** แถว learner_attempt_view (0009_views.sql L23-77) — คอลัมน์เฉลยเปิดตามเงื่อนไขฝั่ง view */
+/** แถว learner_attempt_view (0009_views.sql L23-77) — คอลัมน์เฉลยเปิดตามเงื่อนไขฝั่ง view
+ *  · mirror คอลัมน์ 18 ตัวที่ GET /attempts/{id}/result เรียกจริง (ไม่มี option_order —
+ *    result route ไม่ select และ mapper ไม่ใช้ — r8-N1) */
 export interface LearnerAttemptViewRow {
   readonly attempt_id: string;
   readonly user_id: string;
@@ -304,7 +306,6 @@ export interface LearnerAttemptViewRow {
   readonly passed: boolean | null;
   readonly question_id: string;
   readonly seq: number;
-  readonly option_order: number[] | null;
   readonly selected_option_ids: string[] | null;
   readonly answered_at: string | null;
   readonly is_correct: boolean | null;
@@ -379,6 +380,108 @@ export interface AssessmentRulesRow {
   readonly require_course_complete: boolean;
   readonly proctoring_mode: string;
   readonly effective_from: string;
+}
+
+// ─── r8-N1: แถว DB ขาเข้า — strict exact-key ตาม select จริงของ route (ไม่ใช่ทั้ง
+//     ตาราง) — คีย์หาย/คีย์เกิน/ค่าผิดชนิด = drift → ERR-SYS-002 ที่ขาเข้า ก่อนถึง
+//     mapper ไม่ใช่ strip เงียบ/fabricate null (missing ≠ null: required+.nullable()
+//     แยก "คีย์ไม่มี" ออกจาก "มีคีย์เป็น null จริงตาม view/DDL") ───
+
+/** แถว learner_attempt_view ตาม select ของ GET /attempts/{id}/result (18 คอลัมน์) */
+export const AttemptResultRowSchema = z
+  .object({
+    attempt_id: z.string().uuid(),
+    user_id: z.string().uuid(),
+    assessment_id: z.string().uuid(),
+    attempt_no: z.number().int().min(1),
+    status: z.enum(ATTEMPT_STATUSES),
+    started_at: z.iso.datetime({ offset: true }),
+    expires_at: z.iso.datetime({ offset: true }),
+    submitted_at: z.iso.datetime({ offset: true }).nullable(),
+    score_pct: z.number().int().min(0).max(100).nullable(),
+    passed: z.boolean().nullable(),
+    question_id: z.string().uuid(),
+    seq: z.number().int().min(1),
+    selected_option_ids: z.array(z.string().uuid()).nullable(),
+    answered_at: z.iso.datetime({ offset: true }).nullable(),
+    is_correct: z.boolean().nullable(),
+    points_earned: z.number().int().min(0).nullable(),
+    // คีย์ต้องมี: null = view ยังไม่เปิดเฉลย (after_final_attempt) · มีค่า = snapshot
+    // เต็มตาม AttemptQuestionSnapshot — คีย์หายเลย = drift ไม่ใช่ content:null เงียบ ๆ
+    question_snapshot: AttemptQuestionSnapshot.nullable(),
+    explanation: z.string().nullable(),
+  })
+  .strict();
+
+/** แถว assessment_attempts ตาม select ของ GET /me/attempts (11 คอลัมน์) */
+export const AttemptHistoryRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    assessment_id: z.string().uuid(),
+    attempt_no: z.number().int().min(1),
+    status: z.enum(ATTEMPT_STATUSES),
+    started_at: z.iso.datetime({ offset: true }),
+    expires_at: z.iso.datetime({ offset: true }),
+    submitted_at: z.iso.datetime({ offset: true }).nullable(),
+    score_pct: z.number().int().min(0).max(100).nullable(),
+    passed: z.boolean().nullable(),
+    question_count: z.number().int().min(0),
+    correct_count: z.number().int().min(0).nullable(),
+  })
+  .strict();
+
+/** แถว assessments ตาม select ของ GET /assessments/{id} (8 คอลัมน์) */
+export const AssessmentRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    course_id: z.string().uuid(),
+    code: z.string().min(1),
+    title: z.string().min(1),
+    description: z.string().nullable(),
+    is_final: z.boolean(),
+    status: z.enum(["draft", "published", "closed", "archived"]),
+    published_at: z.iso.datetime({ offset: true }).nullable(),
+  })
+  .strict();
+
+/** แถว assessment_rules ตาม select ของ GET /assessments/{id} (13 คอลัมน์) */
+export const AssessmentRulesRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    assessment_id: z.string().uuid(),
+    version: z.number().int().min(1),
+    pass_pct: z.number().int().min(1).max(100),
+    time_limit_minutes: z.number().int().min(5).max(480),
+    question_count: z.number().int().min(1),
+    max_attempts: z.number().int().min(1),
+    attempt_cooldown_minutes: z.number().int().min(0),
+    shuffle_questions: z.boolean(),
+    shuffle_options: z.boolean(),
+    require_course_complete: z.boolean(),
+    proctoring_mode: z.enum(["none", "basic"]),
+    effective_from: z.iso.datetime({ offset: true }),
+  })
+  .strict();
+
+export type AttemptResultRowParsed = z.infer<typeof AttemptResultRowSchema>;
+export type AttemptHistoryRowParsed = z.infer<typeof AttemptHistoryRowSchema>;
+export type AssessmentRowParsed = z.infer<typeof AssessmentRowSchema>;
+export type AssessmentRulesRowParsed = z.infer<typeof AssessmentRulesRowSchema>;
+
+/**
+ * r8-N1: ตรวจแถว DB ขาเข้าแบบ fail-closed — safeParse ไม่ผ่าน = ERR-SYS-002
+ * (reason ประจำทางเรียก) ไม่ใช่ cast ผ่านแล้วให้ mapper strip/fabricate เงียบ
+ */
+export function parseInboundRow<S extends z.ZodType>(
+  schema: S,
+  raw: unknown,
+  reason: string,
+): z.output<S> {
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason } });
+  }
+  return parsed.data;
 }
 
 // ─── mappers — whitelist เสมอ (แถว DB → resource camelCase; ไม่มีการ spread ทั้งแถว) ───
@@ -492,8 +595,10 @@ export function toAttemptResultView(
 function toAttemptResultQuestion(
   row: LearnerAttemptViewRow,
 ): AttemptResultQuestionViewParsed {
-  if (row.question_snapshot === null || row.question_snapshot === undefined) {
+  if (row.question_snapshot === null) {
     // view ยังไม่เปิดเฉลย (after_final_attempt) — ส่งตาม view เป๊ะ ไม่ filter/เปิดเอง
+    // (r8-N1: คีย์หายไปเลยตายที่ AttemptResultRowSchema ขาเข้าแล้ว — null จริงตาม
+    // view เท่านั้นที่มาถึงสาขานี้ ไม่ใช่ undefined ที่ถูกมองเป็น null เงียบ ๆ)
     return {
       questionId: row.question_id,
       seq: row.seq,

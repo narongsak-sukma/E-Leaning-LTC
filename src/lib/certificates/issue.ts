@@ -36,6 +36,7 @@ import {
   certRpcError,
   dbFailed,
   rowString,
+  unwrapScalarRow,
   type Row,
 } from "./shared";
 import {
@@ -91,7 +92,8 @@ export interface CertCoreRow {
  * รองรับทั้งสองรูป (รูปอื่น รวม null → schema fail = drift)
  */
 export function parseCertCore(data: unknown): CertCoreRow {
-  const raw = Array.isArray(data) ? data[0] : data;
+  // r8-N2: แกะ array เฉพาะความยาว 1 พอดี — แถวที่สองหายเงียบไม่ได้ (ให้ schema ตีตก)
+  const raw = unwrapScalarRow(data);
   const parsed = CertCoreRowSchema.safeParse(raw);
   if (!parsed.success) {
     throw dbFailed("cert_core_row_drift");

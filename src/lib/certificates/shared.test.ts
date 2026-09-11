@@ -33,6 +33,7 @@ import {
   rowNumberOrNull,
   rowString,
   rowStringOrNull,
+  unwrapScalarRow,
 } from "./shared";
 
 beforeEach(() => {
@@ -108,6 +109,23 @@ describe("row helpers + isUniqueViolation", () => {
     expect(holderNameOf({ first_name: "  สมชาย  ", last_name: "ใจดี ", display_name: "x" })).toBe("สมชาย ใจดี");
     // ชื่อจริงเป็นช่องว่างล้วน → ว่างเหมือน null → ใช้ display_name (SQL: btrim คืน '' → concat_ws ข้าม)
     expect(holderNameOf({ first_name: "   ", last_name: null, display_name: "นายสมชาย" })).toBe("นายสมชาย");
+    // r8-n3: fallback display_name ก็ trim ครบชุด ([[:space:]] เดียวกับ holder_name_trim ของ 0019)
+    // — ชื่อที่ไม่ว่างได้ค่าเดียวกันทุกทาง (คิว eligible / issuance / holderNameOf)
+    expect(holderNameOf({ first_name: null, last_name: null, display_name: "\tนายสมชาย\t" })).toBe("นายสมชาย");
+    expect(holderNameOf({ first_name: null, last_name: " ", display_name: "  นายสมชาย  " })).toBe("นายสมชาย");
+    // whitespace ล้วน → '' (คิว eligible ยังแสดงแถวชื่อว่างให้ registrar เห็น)
+    expect(holderNameOf({ first_name: null, last_name: null, display_name: "   " })).toBe("");
+    expect(holderNameOf({ first_name: null, last_name: null, display_name: "\t\n" })).toBe("");
+  });
+
+  it("unwrapScalarRow: แกะเฉพาะ array ยาว 1 พอดี — ความยาวอื่น/ไม่ใช่ array คืนตัวเดิม (r8-N2)", () => {
+    const row = { id: "x" };
+    expect(unwrapScalarRow([row])).toBe(row); // PostgREST wrap ปกติ → แกะได้
+    // แถวที่สองต้องหายเงียบไม่ได้ — คงเป็น array ให้ schema ตีตกเอง
+    expect(unwrapScalarRow([row, { junk: true }])).toEqual([row, { junk: true }]);
+    expect(unwrapScalarRow([])).toEqual([]);
+    expect(unwrapScalarRow(row)).toBe(row);
+    expect(unwrapScalarRow(null)).toBe(null);
   });
 });
 

@@ -153,6 +153,15 @@ describe("revokeCertificate", () => {
     expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
   });
 
+  it("r8-N2: RPC คืน array ยาว 2 (แถวที่สองต้องหายเงียบไม่ได้) → revoked_row_drift", async () => {
+    revokeClient({ data: [revokedRow(), { junk: true }], error: null });
+    const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
+  });
+
   it("แถว RPC มีคีย์เกิน → revoked_row_drift (ไม่ strip เงียว ๆ — r7-M2)", async () => {
     revokeClient({ data: { ...revokedRow(), extra_key: "x" }, error: null });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
