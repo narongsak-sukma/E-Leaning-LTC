@@ -165,6 +165,10 @@ export function createExamAnswerSaver(
     item.choiceIds = applyToggle(item.choiceIds, choiceId);
     item.error = false;
     markDirtyAndSchedule(item, questionId);
+    // emit ทุกคลิกเสมอ — แม้ยังอยู่ในช่วง throttle/saving ที่ markDirtyAndSchedule
+    // ไม่ได้เรียก attemptSave (ซึ่ง emit เอง) เพราะ checkbox เป็น controlled state
+    // ถ้าไม่ emit เดี๋ยวนี้ UI จะค้างคำตอบเดิม และคลิกซ้ำจะกลายเป็นถอดคำตอบโดยไม่ตั้งใจ
+    emit();
   };
 
   const hasUnsaved = (): boolean => {
@@ -180,23 +184,31 @@ export function createExamAnswerSaver(
     if (disposed) {
       return true;
     }
-    for (const item of runtime.values()) {
-      if (item.timer !== null) {
-        clearTimeout(item.timer);
-        item.timer = null;
+    const clearTimers = (): void => {
+      for (const item of runtime.values()) {
+        if (item.timer !== null) {
+          clearTimeout(item.timer);
+          item.timer = null;
+        }
       }
-    }
-    for (const [questionId, item] of runtime.entries()) {
-      if (item.dirty && item.saving === false) {
-        attemptSave(questionId);
-      }
-    }
+    };
+    clearTimers();
     for (let pass = 0; pass < 5; pass += 1) {
+      // เตะบันทึกทุกข้อ dirty ที่ไม่มี request ค้างทุกรอบ — รวมข้อที่เพิ่งกลายเป็น
+      // dirty หลัง request เดิมจบแล้วถูก markDirtyAndSchedule ตั้ง timer ไว้
+      // (เราเคลียร์ timer ทิ้งแล้ว จึงบันทึกทันทีแทนการรอ 10 วิ) — ห้ามรอแต่ promise
+      // เดิมเพราะ promise นั้นไม่มีคำตอบล่าสุดของข้อนั้นอยู่ด้วย
+      for (const [questionId, item] of runtime.entries()) {
+        if (item.dirty && item.saving === false) {
+          attemptSave(questionId);
+        }
+      }
       const pending = [...runtime.values()].filter((item) => item.dirty || item.saving);
       if (pending.length === 0) {
         break;
       }
       await Promise.allSettled([...inflight.values()]);
+      clearTimers();
     }
     return hasUnsaved() === false;
   };

@@ -199,16 +199,21 @@ export function ExamRulesStart({
       ) : null}
 
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={() => {
-            void handleStart();
-          }}
-          disabled={phase.kind === "starting"}
-          className="rounded-[10px] bg-brand-600 px-6 py-3 font-heading text-sm font-semibold text-white shadow-card hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-mist-300 disabled:text-ink-500"
-        >
-          {phase.kind === "starting" ? "กำลังเตรียมชุดข้อสอบ..." : "เริ่มสอบ"}
-        </button>
+        {/* ธง D37-6 ค: attempt ค้าง (contact_staff) = ซ่อนปุ่มเริ่มสอบเด็ดขาด
+            ห้ามให้ผู้เรียนยิง start ซ้ำได้ — บล็อก (กติกา) ยังแสดงได้เพราะผู้เรียน
+            อาจกลับมามีสิทธิ์ใหม่หลังเรียนจบ/พ้น cooldown โดยไม่ต้องรีเฟรชหน้า */}
+        {phase.kind === "error" && phase.tone === "contact_staff" ? null : (
+          <button
+            type="button"
+            onClick={() => {
+              void handleStart();
+            }}
+            disabled={phase.kind === "starting"}
+            className="rounded-[10px] bg-brand-600 px-6 py-3 font-heading text-sm font-semibold text-white shadow-card hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-mist-300 disabled:text-ink-500"
+          >
+            {phase.kind === "starting" ? "กำลังเตรียมชุดข้อสอบ..." : "เริ่มสอบ"}
+          </button>
+        )}
         <Link
           href={`/courses/${courseId}`}
           className="text-sm font-semibold text-brand-600 hover:text-brand-700"

@@ -214,8 +214,22 @@ function parseAssessment(raw: unknown): ExamAdminAssessment | null {
   const statusValue = raw["status"];
   const status = isExamAdminAssessmentStatus(statusValue) ? statusValue : null;
   const rulesRaw = raw["rules"];
-  const rules =
-    rulesRaw === null ? null : rulesRaw === undefined ? undefined : parseRuleSummary(rulesRaw);
+  // null = ยังไม่กำหนดกติกา (ค่าที่ถูกต้อง) · undefined = ฟิลด์หาย · object ผิดรูป = parse ไม่ผ่าน
+  // สองแบบหลังคือ contract drift — ต้อง fail-closed ทั้งแถว ห้ามแปลงเป็น "ยังไม่กำหนดกติกา"
+  let rules: ExamAdminAssessmentRuleSummary | null = null;
+  let rulesDrift = false;
+  if (rulesRaw === null) {
+    rules = null;
+  } else if (rulesRaw === undefined) {
+    rulesDrift = true;
+  } else {
+    const parsedRules = parseRuleSummary(rulesRaw);
+    if (parsedRules === null) {
+      rulesDrift = true;
+    } else {
+      rules = parsedRules;
+    }
+  }
   if (
     id === null ||
     code === null ||
@@ -226,7 +240,7 @@ function parseAssessment(raw: unknown): ExamAdminAssessment | null {
     status === null ||
     createdAt === null ||
     createdBy === undefined ||
-    rules === undefined
+    rulesDrift
   ) {
     return null;
   }

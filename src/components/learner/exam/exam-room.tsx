@@ -221,8 +221,24 @@ export function ExamRoom({
     setDialogOpen(false);
     setPhase({ kind: "submitting" });
     const saver = saverRef.current;
+    let flushOk = true;
     if (saver !== null) {
-      await saver.flushAll();
+      flushOk = await saver.flushAll();
+    }
+    if (flushOk === false) {
+      // fail-closed: บันทึกคำตอบล่าสุดยังไม่สำเร็จ = ห้ามส่ง เพราะการตัดสินจะใช้เฉพาะ
+      // คำตอบที่เซิร์ฟเวอร์มีอยู่จริง (ส่งไป = ตัดสินจากคำตอบเก่า/ไม่ครบโดยผู้เรียนไม่รู้)
+      setPhase({
+        kind: "submit_failed",
+        title: "บันทึกคำตอบยังไม่สำเร็จ",
+        message:
+          "ระบบยังบันทึกคำตอบล่าสุดของท่านไม่สำเร็จ จึงยังไม่ส่งข้อสอบในตอนนี้ " +
+          "กรุณาตรวจการเชื่อมต่ออินเทอร์เน็ตแล้วกดลองส่งอีกครั้ง (คำตอบที่ทำไว้ยังอยู่ครบในหน้านี้) " +
+          "หากลองแล้วยังไม่สำเร็จ อย่าปิดหน้านี้ ให้ติดต่อเจ้าหน้าที่สภาทนายความแห่งประเทศไทย " +
+          "โทร 0 2351 1128",
+        canRetry: true,
+      });
+      return;
     }
     const snapshot = answersRef.current;
     const unansweredQuestionIds = session.questions

@@ -143,6 +143,44 @@ describe("getAdminAssessments", () => {
     expect(result).toEqual({ ok: false, kind: "server" });
   });
 
+  it("rules เป็น object ผิดรูป → ทั้งหน้า fail-closed (ห้ามแปลงเป็น 'ยังไม่กำหนดกติกา')", async () => {
+    stubFetchOnce(200, {
+      data: [makeAssessment({ rules: { version: 1, passPct: " seventies" } })],
+      page: { nextCursor: null, hasMore: false },
+    });
+    const result = await getAdminAssessments();
+    expect(result).toEqual({ ok: false, kind: "server" });
+  });
+
+  it("rules ครบถ้วนตาม contract → ผ่านพร้อมกติกาจริง (null = ยังไม่กำหนด ยังผ่าน)", async () => {
+    stubFetchOnce(200, {
+      data: [
+        makeAssessment({ rules: null }),
+        makeAssessment({
+          rules: {
+            version: 1,
+            passPct: 70,
+            timeLimitMinutes: 90,
+            questionCount: 5,
+            maxAttempts: 3,
+            cooldownMinutes: 1440,
+            shuffleQuestions: true,
+            shuffleOptions: true,
+            proctoringMode: "basic",
+            effectiveFrom: "2026-09-01T00:00:00+07:00",
+          },
+        }),
+      ],
+      page: { nextCursor: null, hasMore: false },
+    });
+    const result = await getAdminAssessments();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.data[0]?.rules).toBeNull();
+      expect(result.data.data[1]?.rules?.passPct).toBe(70);
+    }
+  });
+
   it("envelope ไม่มี page → fail-closed (contract ผิดรูป)", async () => {
     stubFetchOnce(200, { data: [makeAssessment()] });
     const result = await getAdminAssessments();

@@ -275,13 +275,15 @@ export type CertManageEvent =
   | { type: "REJECT"; message: string }
   | { type: "CLOSE" };
 
-/** แก้ input ได้เฉพาะตอน idle — กันแก้กลางคันขณะกำลังส่ง */
+/** แก้ input ได้ตอน idle และ revoking (กรอกเหตุผลในโมดัล) — กันแก้กลางคันขณะกำลังส่ง */
 export function certManageReducer(state: CertManageState, event: CertManageEvent): CertManageState {
   switch (event.type) {
     case "TYPE_CERT_ID":
       return state.phase === "idle" ? { ...state, certIdInput: event.value } : state;
     case "TYPE_REASON":
-      return state.phase === "idle" ? { ...state, reasonInput: event.value } : state;
+      return state.phase === "idle" || state.phase === "revoking"
+        ? { ...state, reasonInput: event.value }
+        : state;
     case "REQUEST_REVOKE":
       return state.phase === "idle"
         ? { ...state, phase: "revoking", actionKind: "revoke", message: null, issuedView: null }
@@ -502,6 +504,9 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
   const router = useRouter();
   const [state, dispatch] = useReducer(certManageReducer, CERT_MANAGE_DEFAULT);
   const [inputError, setInputError] = useState<string | null>(null);
+  // ข้อความตรวจเหตุผลเพิกถอนในโมดัล (แยกจาก inputError ที่อยู่นอกโมดัล —
+  // ผู้ใช้มองไม่เห็น inputError ขณะโมดัลเปิดอยู่)
+  const [reasonError, setReasonError] = useState<string | null>(null);
 
   const describeError = (error: unknown): string => {
     if (error instanceof AdminApiError && error.status === 403) {
@@ -522,19 +527,14 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
     return TRANSPORT_FALLBACK_MESSAGE;
   };
 
-  /** เริ่มเพิกถอน — ตรวจ uuid + เหตุผลก่อนเปิดโมดัลยืนยัน */
+  /** เริ่มเพิกถอน — ตรวจ uuid ก่อนเปิดโมดัลยืนยัน (เหตุผลกรอก/ตรวจในโมดัลตอนส่งจริง) */
   const requestRevoke = () => {
     if (!isUuid(state.certIdInput)) {
       setInputError("รหัสอ้างอิงต้องเป็น uuid ที่ถูกต้อง");
       return;
     }
-    if (!revokeReasonValid(state.reasonInput)) {
-      setInputError(
-        `กรุณาระบุเหตุผลอย่างน้อย ${REVOKE_REASON_MIN_LENGTH} ตัวอักษรก่อนเพิกถอน`,
-      );
-      return;
-    }
     setInputError(null);
+    setReasonError(null);
     dispatch({ type: "REQUEST_REVOKE" });
   };
 
@@ -550,6 +550,15 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
 
   /** เพิกถอนจริง — POST .../{id}/revoke body {reason} → 200 RevokedCertificateResource */
   const performRevoke = async () => {
+    // ตรวจเหตุผลตรงนี้ (ในโมดัล) เพราะช่องกรอกอยู่ในโมดัล — ห้ามตรวจก่อนเปิดโมดัล
+    // ไม่งั้นผู้ใช้ไม่มีทางกรอกได้เลย (วงจรตาย)
+    if (!revokeReasonValid(state.reasonInput)) {
+      setReasonError(
+        `กรุณาระบุเหตุผลอย่างน้อย ${REVOKE_REASON_MIN_LENGTH} ตัวอักษรก่อนยืนยันการเพิกถอน`,
+      );
+      return;
+    }
+    setReasonError(null);
     const certId = state.certIdInput.trim();
     dispatch({ type: "SUBMIT" });
     try {
@@ -592,6 +601,7 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
   };
 
   const handleClose = () => {
+    setReasonError(null);
     dispatch({ type: "CLOSE" });
   };
 
@@ -680,6 +690,11 @@ export function CertificateManagePanel({ canRevoke }: CertificateManagePanelProp
               rows={3}
               onChange={(event) => dispatch({ type: "TYPE_REASON", value: event.target.value })}
             />
+            {reasonError !== null ? (
+              <span className="mt-1 block text-sm text-red-600" role="alert">
+                {reasonError}
+              </span>
+            ) : null}
           </label>
         ) : null}
         {state.phase === "error" && state.message !== null ? (

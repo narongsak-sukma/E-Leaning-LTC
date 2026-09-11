@@ -80,6 +80,27 @@ describe("createExamAnswerSaver", () => {
     saver.dispose();
   });
 
+  it("toggle ระหว่างช่วง throttle = emit snapshot ทันทีที่คลิก (UI controlled ห้ามค้าง)", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:07+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A);
+    await vi.advanceTimersByTimeAsync(0);
+    const emitsBefore = state.snapshots.length;
+    saver.toggle(Q1, B); // ยังอยู่ในหน้าต่าง 10 วิ — ต้องเห็น [A, B] ทันที ไม่รอ timer
+    expect(state.snapshots.length).toBe(emitsBefore + 1);
+    expect(state.snapshots.at(-1)?.[Q1]?.choiceIds).toEqual([A, B]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(saves[1]).toEqual([Q1, [A, B]]);
+    saver.dispose();
+  });
+
   it("ข้อต่างกัน throttle แยกกัน (คลิกแรกของ Q2 ก็ทันที)", async () => {
     const saves: Array<[string, readonly string[]]> = [];
     const state = { snapshots: [] as ExamAnswerSnapshot[] };
@@ -190,6 +211,36 @@ describe("createExamAnswerSaver", () => {
     await vi.advanceTimersByTimeAsync(0);
     const clean = await saver.flushAll();
     expect(clean).toBe(false);
+    saver.dispose();
+  });
+
+  it("flushAll ระหว่างมี request ค้าง + คำตอบใหม่ = บันทึกค่าล่าสุดทันที คืน true (ไม่รอ timer)", async () => {
+    const saves: Array<[string, readonly string[]]> = [];
+    let releaseFirst: ((v: { savedAt: string }) => void) | null = null;
+    const state = { snapshots: [] as ExamAnswerSnapshot[] };
+    const saver = createExamAnswerSaver(
+      { [Q1]: [] },
+      makeDeps(async (q, c) => {
+        if (saves.length === 0) {
+          saves.push([q, c]);
+          return new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        saves.push([q, c]);
+        return { savedAt: "2026-09-10T08:00:08+07:00" };
+      }, state),
+    );
+    saver.toggle(Q1, A); // รอบแรกค้าง (inflight)
+    await vi.advanceTimersByTimeAsync(0);
+    saver.toggle(Q1, B); // dirty ระหว่าง inflight
+    const flushPromise = saver.flushAll();
+    const getRelease = (): ((v: { savedAt: string }) => void) | null => releaseFirst;
+    getRelease()?.({ savedAt: "2026-09-10T08:00:09+07:00" });
+    const clean = await flushPromise;
+    expect(clean).toBe(true);
+    expect(saves[1]).toEqual([Q1, [A, B]]);
+    expect(saver.hasUnsaved()).toBe(false);
     saver.dispose();
   });
 

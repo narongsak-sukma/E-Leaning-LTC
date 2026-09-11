@@ -177,6 +177,21 @@ describe("certManageReducer", () => {
     expect(state.actionKind).toBe("revoke");
   });
 
+  it("TYPE_REASON แก่ได้ทั้ง idle และ revoking (กรอกเหตุผลในโมดัล) แต่ห้ามช่วงส่ง", () => {
+    let state = certManageReducer(CERT_MANAGE_DEFAULT, {
+      type: "TYPE_REASON",
+      value: "เหตุผลเบื้องต้น",
+    });
+    expect(state.reasonInput).toBe("เหตุผลเบื้องต้น");
+    state = certManageReducer(state, { type: "REQUEST_REVOKE" });
+    state = certManageReducer(state, { type: "TYPE_REASON", value: "เหตุผลฉบับแก้ไขในโมดัล" });
+    expect(state.phase).toBe("revoking");
+    expect(state.reasonInput).toBe("เหตุผลฉบับแก้ไขในโมดัล");
+    state = certManageReducer(state, { type: "SUBMIT" });
+    const frozen = certManageReducer(state, { type: "TYPE_REASON", value: "แอบแก้กลางคัน" });
+    expect(frozen.reasonInput).toBe("เหตุผลฉบับแก้ไขในโมดัล");
+  });
+
   it("REQUEST_REISSUE ตั้ง actionKind reissue และล้างข้อความ/ผลลัพธ์เดิม", () => {
     const state = certManageReducer(CERT_MANAGE_DEFAULT, { type: "REQUEST_REISSUE" });
     expect(state.phase).toBe("reissuing");
