@@ -239,7 +239,10 @@ begin
         v_round_issued := v_round_issued + 1;
       exception when others then
         v_failed := v_failed + 1;
-        v_last_error := left(sqlerrm(), 500);
+        -- SQLERRM เป็นตัวแปรพิเศษของบล็อก exception ไม่ใช่ฟังก์ชัน —
+        -- sqlerrm() พร้อมวงเล็บ = 42883 ทำ handler พังเอง กลายเป็น rollback ทั้ง TX
+        -- (E-9 จับได้จาก integration: เส้นทางใบล้มเฉพาะใบตายทั้งชุด)
+        v_last_error := left(sqlerrm, 500);
       end;
     end loop;
     -- ความคืบหน้าค้างจริงระหว่างทาง (job ล้มกลางคัน = เริ่มใหม่จากสิ่งที่เหลือ ไม่เสความนับ)
