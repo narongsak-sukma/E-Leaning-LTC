@@ -20,7 +20,8 @@ import { NextResponse } from "next/server";
 import { requirePermission } from "@/lib/rbac";
 import { AppError } from "@/lib/errors";
 import { jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
-import { parseCertificateIdParam } from "@/lib/schemas/v1/certificate";
+import { parseCertificateIdParam, CertPdfRowSchema, MediaAssetRowSchema } from "@/lib/schemas/v1/certificate";
+import { parseInboundRow } from "@/lib/schemas/v1/exam";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
@@ -29,13 +30,6 @@ const CERT_PDF_SELECT = "pdf_media_id";
 
 /** select ของ media_assets — คอลัมน์จริงที่ใช้ download (0004_catalog.sql L145-152) */
 const MEDIA_SELECT = "bucket,storage_path,mime_type";
-
-/** แถว media_assets ที่ route อ่าน (snake_case ตามคอลัมน์จริง — 0004 L145-152) */
-interface MediaRow {
-  readonly bucket: string;
-  readonly storage_path: string;
-  readonly mime_type: string;
-}
 
 function optionsOf(request: Request): JsonResponseOptions {
   const requestId = request.headers.get("x-request-id");
@@ -78,7 +72,9 @@ export async function GET(
     if (cert.data === null) {
       throw new AppError("ERR-NF-001");
     }
-    const mediaId = (cert.data as unknown as { readonly pdf_media_id: string | null }).pdf_media_id;
+    // r10-P1: ตรวจแถวขาเข้าก่อนหยิบค่า — คีย์หาย/คีย์เกิน = drift 503 (แทน cast ผ่าน)
+    const certRow = parseInboundRow(CertPdfRowSchema, cert.data, "cert_pdf_row_drift");
+    const mediaId = certRow.pdf_media_id;
     // ธง D-4: ยังไม่มีการ render/อัปโหลด PDF จริง — pdf_media_id ว่าง = ยังไม่มีไฟล์ (404)
     if (mediaId === null) {
       throw new AppError("ERR-NF-001");
@@ -91,7 +87,9 @@ export async function GET(
     if (media.data === null) {
       throw new AppError("ERR-NF-001");
     }
-    const mediaRow = media.data as unknown as MediaRow;
+    // r10-P1: ตรวจแถว media ก่อน download/header — mime_type หาย/null = drift 503
+    // (กัน Content-Type: undefined) · "" ยังผ่านเพื่อคง fallback application/pdf
+    const mediaRow = parseInboundRow(MediaAssetRowSchema, media.data, "cert_pdf_media_row_drift");
     // 6) ดาวน์โหลดด้วย user-JWT (storage.objects RLS ยังไม่มีนโยบายสำหรับใบประกาศ — ธง D-8)
     const { data, error } = await supabase.storage.from(mediaRow.bucket).download(mediaRow.storage_path);
     if (error !== null || data === null) {

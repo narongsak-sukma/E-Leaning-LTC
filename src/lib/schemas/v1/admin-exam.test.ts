@@ -15,6 +15,9 @@ import {
   mapAdminExamDbError,
   parseAdminAssessmentsQuery,
   parseAdminExam,
+  AdminAssessmentRowSchema,
+  QuestionBankRowSchema,
+  QuestionRowSchema,
   QuestionBankCreateBody,
   QuestionBankCreateResult,
   QuestionBankResource,
@@ -234,7 +237,7 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
     expect(() => AdminAssessmentResource.parse(resource)).not.toThrow();
   });
 
-  it("toQuestionBankResource — นับจำนวนข้อจาก embed count (embed ว่าง = 0)", () => {
+  it("toQuestionBankResource — นับจำนวนข้อจาก aggregate row เดียว ([{count:n}] เสมอ)", () => {
     const row = {
       id: "b0000000-0000-4000-8000-000000000001",
       code: "BANK-01",
@@ -369,5 +372,98 @@ describe("r5-K1: resource ขาออก strict ทุกชั้น — ฟ�
         questions: [{ ...validCreatedRef, isCorrect: true }],
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("r10-P2: embed ขาเข้าตรงรูป PostgREST จริง — null/empty ปลอม = drift ไม่ fabricate", () => {
+  const bankRowBase = {
+    id: "b0000000-0000-4000-8000-000000000001",
+    code: "BANK-01",
+    name: "ธนาคารข้อสอบ",
+    description: null,
+    course_id: null,
+    category_id: null,
+    is_active: true,
+    created_at: "2026-09-01T00:00:00+00:00",
+  };
+  const bankRow = { ...bankRowBase, questions: [{ count: 6 }] };
+  const assessmentRowBase = {
+    id: "d0000000-0000-4000-8000-000000000001",
+    code: "FIN-01",
+    title: "สอบจบ",
+    description: null,
+    course_id: "c0000000-0000-4000-8000-000000000001",
+    is_final: true,
+    status: "draft",
+    created_at: "2026-09-01T00:00:00+00:00",
+    course: { id: "c0000000-0000-4000-8000-000000000001", created_by: "a0000000-0000-4000-8000-000000000009" },
+  };
+  const questionRow = {
+    id: "d0000000-0000-4000-8000-000000000001",
+    bank_id: "b0000000-0000-4000-8000-000000000001",
+    type: "single_choice",
+    difficulty: "medium",
+    question_text: "โจทย์",
+    explanation: null,
+    points: 1,
+    status: "draft",
+    tags: [],
+    version: 3,
+    created_at: "2026-09-01T00:00:00+00:00",
+    question_options: [
+      { id: "e0000000-0000-4000-8000-000000000001", option_text: "ตัวเลือกก", sort_order: 0 },
+    ],
+  };
+
+  it("questions(count) = [{count:0}] (ธนาคารไม่มีข้อเลย — probe dev stack จริง) → ผ่าน + map เป็น 0", () => {
+    const parsed = QuestionBankRowSchema.safeParse({ ...bankRow, questions: [{ count: 0 }] });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(toQuestionBankResource(parsed.data).questionCount).toBe(0);
+    }
+  });
+
+  it("questions: null → drift (เคย fabricate 0 ผ่าน ?. ?? 0)", () => {
+    expect(QuestionBankRowSchema.safeParse({ ...bankRow, questions: null }).success).toBe(false);
+  });
+
+  it("questions: [] → drift (aggregate คืน row เดียวเสมอ — หาย = contract เปลี่ยน)", () => {
+    expect(QuestionBankRowSchema.safeParse({ ...bankRow, questions: [] }).success).toBe(false);
+  });
+
+  it("questions สองแถว ([{count:2},{count:99}]) → drift ไม่เลือกแถวแรกเงียบ ๆ", () => {
+    expect(
+      QuestionBankRowSchema.safeParse({ ...bankRow, questions: [{ count: 2 }, { count: 99 }] }).success,
+    ).toBe(false);
+  });
+
+  it("ขาดคีย์ questions → drift (แยก missing จาก null จริง)", () => {
+    expect(QuestionBankRowSchema.safeParse(bankRowBase).success).toBe(false);
+  });
+
+  it("assessment_rules: [] (draft ยังไม่มีกติกา — to-many embed คืน array เสมอ) → ผ่าน + rules null", () => {
+    const parsed = AdminAssessmentRowSchema.safeParse({ ...assessmentRowBase, assessment_rules: [] });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(toAdminAssessmentResource(parsed.data).rules).toBeNull();
+    }
+  });
+
+  it("assessment_rules: null → drift (เคย fabricate กติกาหายผ่าน ?.)", () => {
+    expect(AdminAssessmentRowSchema.safeParse({ ...assessmentRowBase, assessment_rules: null }).success).toBe(
+      false,
+    );
+  });
+
+  it("question_options: [] (ข้อยังไม่มีตัวเลือก) → ผ่าน + options ว่าง", () => {
+    const parsed = QuestionRowSchema.safeParse({ ...questionRow, question_options: [] });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(toQuestionResource(parsed.data).options).toHaveLength(0);
+    }
+  });
+
+  it("question_options: null → drift (เคย ?? [] กลืนเป็น options ว่างเงียบ ๆ)", () => {
+    expect(QuestionRowSchema.safeParse({ ...questionRow, question_options: null }).success).toBe(false);
   });
 });

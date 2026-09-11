@@ -251,3 +251,62 @@ describe("GET /certificates/{code}/pdf — resolve media + ตอบไฟล์
     expect(body.error.code).toBe("ERR-SYS-002");
   });
 });
+
+describe("GET /certificates/{code}/pdf — r10-P1 inbound row drift (แทน cast ผ่าน)", () => {
+  it("แถว certificates มีคีย์เกิน (status) → 503 cert_pdf_row_drift ไม่ strip เงียบแล้วตอบ 200", async () => {
+    const client = makeClient({ certs: { data: { pdf_media_id: MEDIA_ID, status: "valid" } } });
+    const response = await GET(pdfUrl(), ctx(CERT_ID));
+    const body = (await response.json()) as { error: { details?: { reason?: string } } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.details?.reason).toBe("cert_pdf_row_drift");
+    expect(client.from).not.toHaveBeenCalledWith("media_assets");
+  });
+
+  it("แถว certificates ขาดคีย์ pdf_media_id → 503 drift ไม่ fabricate เป็น null แล้วตอบ 404", async () => {
+    makeClient({ certs: { data: { holder_name: "ไม่เกี่ยว" } } });
+    const response = await GET(pdfUrl(), ctx(CERT_ID));
+    const body = (await response.json()) as { error: { code: string; details?: { reason?: string } } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("cert_pdf_row_drift");
+  });
+
+  it("แถว media_assets มีคีย์เกิน (size_bytes) → 503 cert_pdf_media_row_drift ก่อนแตะ storage", async () => {
+    const client = makeClient({
+      certs: { data: { pdf_media_id: MEDIA_ID } },
+      media: { data: { bucket: "certificates", storage_path: "pdf/x.pdf", mime_type: "application/pdf", size_bytes: 1024 } },
+    });
+    const response = await GET(pdfUrl(), ctx(CERT_ID));
+    const body = (await response.json()) as { error: { details?: { reason?: string } } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.details?.reason).toBe("cert_pdf_media_row_drift");
+    expect(client._download).not.toHaveBeenCalled();
+  });
+
+  it("แถว media_assets ขาด mime_type → 503 cert_pdf_media_row_drift (กัน Content-Type: undefined)", async () => {
+    const client = makeClient({
+      certs: { data: { pdf_media_id: MEDIA_ID } },
+      media: { data: { bucket: "certificates", storage_path: "pdf/x.pdf" } },
+    });
+    const response = await GET(pdfUrl(), ctx(CERT_ID));
+    const body = (await response.json()) as { error: { details?: { reason?: string } } };
+
+    expect(response.status).toBe(503);
+    expect(body.error.details?.reason).toBe("cert_pdf_media_row_drift");
+    expect(client._download).not.toHaveBeenCalled();
+  });
+
+  it("mime_type เป็น \"\" → 200 application/pdf (fallback คงเดิม — positive control ไม่ over-block)", async () => {
+    makeClient({
+      certs: { data: { pdf_media_id: MEDIA_ID } },
+      media: { data: { bucket: "certificates", storage_path: "pdf/x.pdf", mime_type: "" } },
+    });
+    const response = await GET(pdfUrl(), ctx(CERT_ID));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/pdf");
+  });
+});

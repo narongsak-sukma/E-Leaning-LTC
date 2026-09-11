@@ -340,7 +340,7 @@ export interface AdminAssessmentRow {
   readonly status: string;
   readonly created_at: string;
   readonly course: { readonly id: string; readonly created_by: string } | null;
-  readonly assessment_rules: readonly AssessmentRuleRow[] | null;
+  readonly assessment_rules: readonly AssessmentRuleRow[];
 }
 
 /**
@@ -348,7 +348,8 @@ export interface AdminAssessmentRow {
  * cast ตรง ๆ เชื่อสัญญา DB มากเกินไป — แถว drift (คอลัมน์เปลี่ยน/embed เพี้ยน/RLS
  * ตัดฟิลด์) ไหลเข้า mapper เป็น undefined/ค่าผิดชนิดแล้วไปตายที่ view ขาออก
  * (หรือผ่านซึมถ้า view กว้างกว่า) — ตรวจที่ขาเข้าเป็นชั้นแรก fail-closed เลย
- * · course/rules เป็น null ได้ตามจริง (!left embed / draft ยังไม่มี rules)
+ * · course เป็น null ได้ตามจริง (!left embed) · rules = array เสมอ — PostgREST to-many
+ *   embed คืน [] เมื่อ draft ยังไม่มี rules (พิสูจน์กับ dev stack จริง r10-P2) → null = drift
  */
 export const AssessmentRuleRowSchema = z
   .object({
@@ -376,7 +377,7 @@ export const AdminAssessmentRowSchema = z
     status: z.enum(ADMIN_ASSESSMENT_STATUSES),
     created_at: IsoTimestamp,
     course: z.object({ id: z.uuid(), created_by: z.uuid() }).strict().nullable(),
-    assessment_rules: z.array(AssessmentRuleRowSchema).nullable(),
+    assessment_rules: z.array(AssessmentRuleRowSchema),
   })
   .strict();
 
@@ -391,7 +392,7 @@ export function parseAdminAssessmentRow(row: unknown): AdminAssessmentRow {
 
 /** map แถว assessments → resource — เลือกกติกา effective ล่าสุด (effective_from มากสุด — handler เรียงให้) */
 export function toAdminAssessmentResource(row: AdminAssessmentRow): AdminAssessmentResourceParsed {
-  const latestRule = row.assessment_rules?.[0];
+  const latestRule = row.assessment_rules[0];
   const rules: AssessmentRuleSummaryParsed | null =
     latestRule === undefined
       ? null
@@ -431,10 +432,11 @@ export interface QuestionBankRow {
   readonly category_id: string | null;
   readonly is_active: boolean;
   readonly created_at: string;
-  readonly questions: readonly { readonly count: number }[] | null;
+  readonly questions: readonly { readonly count: number }[];
 }
 
-/** map แถว question_banks → resource — count = 0 เมื่อ embed ว่าง/ถูก RLS กรอง */
+/** map แถว question_banks → resource — count จาก aggregate row เดียวของ PostgREST
+ *  (`questions(count)` คืน [{count:n}] เสมอแม้ n=0 — พิสูจน์กับ dev stack จริง r10-P2) */
 export function toQuestionBankResource(row: QuestionBankRow): QuestionBankResourceParsed {
   return {
     id: row.id,
@@ -444,7 +446,8 @@ export function toQuestionBankResource(row: QuestionBankRow): QuestionBankResour
     courseId: row.course_id,
     categoryId: row.category_id,
     isActive: row.is_active,
-    questionCount: row.questions?.[0]?.count ?? 0,
+    // min(1)/max(1) ของ schema การันต์ [0] มีเสมอ — ?? 0 เหลือเพื่อ type (noUncheckedIndexedAccess)
+    questionCount: row.questions[0]?.count ?? 0,
     createdAt: row.created_at,
   };
 }
@@ -463,7 +466,10 @@ export const QuestionBankRowSchema = z
     category_id: z.uuid().nullable(),
     is_active: z.boolean(),
     created_at: IsoTimestamp,
-    questions: z.array(z.object({ count: z.number().int().min(0) }).strict()).nullable(),
+    // r10-P2: aggregate `questions(count)` ของ PostgREST คืน aggregate row เดียวเสมอ —
+    // [{count:0}] แม้ธนาคารไม่มีข้อเลย (probe dev stack จริง) → exact-one non-nullable
+    // null / [] / 2 แถว = drift 503 ไม่ fabricate 0 จากแถวที่ไม่มี
+    questions: z.array(z.object({ count: z.number().int().min(0) }).strict()).min(1).max(1),
   })
   .strict();
 
@@ -515,9 +521,9 @@ export const QuestionRowSchema = z
     tags: z.array(z.string()),
     version: z.number().int().min(1),
     created_at: IsoTimestamp,
+    // r10-P2: to-many embed คืน array เสมอ ( [] เมื่อไม่มีตัวเลือก) → null = drift ไม่ fabricate []
     question_options: z
-      .array(z.object({ id: z.uuid(), option_text: z.string().min(1), sort_order: z.number().int() }).strict())
-      .nullable(),
+      .array(z.object({ id: z.uuid(), option_text: z.string().min(1), sort_order: z.number().int() }).strict()),
   })
   .strict();
 
@@ -543,8 +549,7 @@ export interface QuestionRow {
   readonly version: number;
   readonly created_at: string;
   readonly question_options:
-    | readonly { readonly id: string; readonly option_text: string; readonly sort_order: number }[]
-    | null;
+    readonly { readonly id: string; readonly option_text: string; readonly sort_order: number }[];
 }
 
 /** map แถว questions → resource แบบอ่าน (ไม่มี is_correct เด็ดขาด) */
@@ -561,7 +566,7 @@ export function toQuestionResource(row: QuestionRow): QuestionResourceParsed {
     tags: [...row.tags],
     version: row.version,
     createdAt: row.created_at,
-    options: (row.question_options ?? []).map((option) => ({
+    options: row.question_options.map((option) => ({
       id: option.id,
       optionText: option.option_text,
       sortOrder: option.sort_order,

@@ -256,11 +256,39 @@ export const PdfAttachRowSchema = z
   })
   .strict();
 
+/**
+ * r10-P1: แถว certificates ที่ pdf route อ่าน — select 1 คอลัมน์ exact
+ * (CERT_PDF_SELECT = "pdf_media_id"): pdf_media_id nullable จริง (ยังไม่ render/
+ * อัปโหลด → 404 ตามธง D-4) แต่คีย์ต้องมี — คีย์หาย/คีย์เกิน = drift 503 แทนที่
+ * cast ผ่านแล้ว undefined ไหลไปเทียบ === null ไม่เคยเท่ากัน
+ */
+export const CertPdfRowSchema = z
+  .object({
+    pdf_media_id: z.string().uuid().nullable(),
+  })
+  .strict();
+
+/**
+ * r10-P1: แถว media_assets ที่ pdf route อ่าน — select 3 คอลัมน์ exact
+ * (MEDIA_SELECT = "bucket,storage_path,mime_type"): mime_type เป็น string ใดก็ได้
+ * รวม "" (route มี fallback application/pdf อยู่แล้ว) · คีย์หาย/null = drift 503
+ * กัน Content-Type: undefined ออกไปหา client
+ */
+export const MediaAssetRowSchema = z
+  .object({
+    bucket: z.string().min(1),
+    storage_path: z.string().min(1),
+    mime_type: z.string(),
+  })
+  .strict();
+
 export type CertCoreRowParsed = z.infer<typeof CertCoreRowSchema>;
 export type ReissueRowParsed = z.infer<typeof ReissueRowSchema>;
 export type RevokedRowParsed = z.infer<typeof RevokedRowSchema>;
 export type EligibleAttemptRowParsed = z.infer<typeof EligibleAttemptRowSchema>;
 export type PdfAttachRowParsed = z.infer<typeof PdfAttachRowSchema>;
+export type CertPdfRowParsed = z.infer<typeof CertPdfRowSchema>;
+export type MediaAssetRowParsed = z.infer<typeof MediaAssetRowSchema>;
 
 export type CertificateIdParamsParsed = z.infer<typeof CertificateIdParams>;
 
