@@ -56,8 +56,12 @@ begin
   end if;
 
   if v_role = 'authenticated' then
-    -- class (ข) ผ่าน user-JWT RPC — 4 event เท่านั้น (D16-N1 + D18-B1)
-    if p_action not in ('CERT_VERIFY_PUBLIC','AUDIT_READ','RATE_LIMIT_HIT','PII_ACCESS') then
+    -- class (ข) ผ่าน user-JWT RPC — 3 event เท่านั้น (D16-N1 + D18-B1)
+    -- 0019-r2 (F3): CERT_VERIFY_PUBLIC ถูกถอนจาก allowlist นี้ — producer
+    -- เดียว = record_certificate_verification (เขียนผ่าน
+    -- append_audit_event_internal ภายใน TX ของ RPC เอง); ปล่อยไว้ตรงนี้ =
+    -- ผู้ใช้ authenticated ปลอม event ผลการตรวจสอบ ({code,result:"valid"}) ได้
+    if p_action not in ('AUDIT_READ','RATE_LIMIT_HIT','PII_ACCESS') then
       raise exception 'append_audit_event: event % ไม่อยู่ใน allowlist ของ RPC class ข (AUTH_*/mutation = server path เท่านั้น — AUDIT §4)', p_action
         using errcode = '42501';
     end if;
@@ -65,7 +69,6 @@ begin
       raise exception 'append_audit_event: ต้องมี user JWT (ERR-AUTH-001)' using errcode = '42501';
     end if;
     v_keys := case p_action
-      when 'CERT_VERIFY_PUBLIC' then array['code','result']
       when 'AUDIT_READ'         then array['filters','row_count']
       when 'RATE_LIMIT_HIT'     then array['group','endpoint']
       when 'PII_ACCESS'         then array['endpoint','target_user_id','purpose']
@@ -196,7 +199,7 @@ grant select (pass_pct) on public.assessment_rules to authenticated;
 -- learner_attempt_view ซึ่งเปิดเฉลยตาม after_final_attempt เหมือนเดิม)
 -- snapshot ตัดเฉลยทุกชั้นตามแบบแผน DCR-5: ตัด 'points' ระดับบน + ตัด
 -- 'is_correct'/'points' ในทุก option (ตัวเลือกเหลือ {id,text} เท่านั้น)
-create view public.learner_attempt_paper_view
+create or replace view public.learner_attempt_paper_view
   with (security_invoker = false) as
 select
   at.id as attempt_id,
@@ -391,11 +394,15 @@ create policy media_read on public.media_assets for select to authenticated
                  and c.user_id = auth.uid())
     -- PB-14b: ผู้เรียนที่ลงทะเบียน (active/completed) อ่าน media ของบทเรียนใน
     -- หลักสูตรนั้น (D-0 resolveLessonMediaUrl — video บทเรียน)
+    -- 0019-r2 (F1): จำกัด bucket 'media' — สาขานี้พิสูจน์ความสัมพันธ์ผ่าน
+    -- lessons.media_id เท่านั้น ถ้าไม่กัก bucket ผู้แต่งหลักสูตรชี้ media_id
+    -- ไปที่ PDF ใบประกาศ (bucket certificates) แล้วผู้เรียนรายอื่นอ่านได้
     or exists (select 1
                from public.lessons l
                join public.course_modules m on m.id = l.module_id
                join public.enrollments e on e.course_id = m.course_id
                where l.media_id = media_assets.id
+                 and media_assets.bucket = 'media'
                  and l.deleted_at is null
                  and m.deleted_at is null
                  and e.deleted_at is null
@@ -441,6 +448,7 @@ begin
                      join public.course_modules m on m.id = l.module_id
                      join public.enrollments e on e.course_id = m.course_id
                      where l.media_id = ma.id
+                       and ma.bucket = 'media'      -- 0019-r2 (F1) mirror สาขาบทเรียน
                        and l.deleted_at is null
                        and m.deleted_at is null
                        and e.deleted_at is null
@@ -733,6 +741,15 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: แหล่งการตรวจสอบไม่ถูกต้อง (ERR-VAL-001|source_invalid)'
       using errcode = '22023';
   end if;
+  -- 0019-r2 (F4): รหัสที่ผิดรูปแบบทั้ง cert_no และ verify_code ชัดเจน → ตอบ
+  -- not_found ทันทีโดยไม่ persist และไม่ audit — กันค่าอิสระของผู้ใช้
+  -- (เช่น อีเมล) ลง certificate_verifications.verify_code และ audit
+  -- context.code ทั้งที่ไม่มีทางเป็นรหัสจริง (verify_code = nanoid 43
+  -- อักขระ [0-9A-Za-z_-] · cert_no = LTC-YYYY-<6 หลัก>)
+  if v_code !~ '^LTC-[0-9]{4}-[0-9]{6}$' and v_code !~ '^[0-9A-Za-z_-]{43}$' then
+    return jsonb_build_object('code', v_code, 'course_title', null,
+                              'issued_at', null, 'status', 'not_found');
+  end if;
   -- ค้น cert_no หรือ verify_code · ตอบเฉพาะ 4 ฟิลด์สาธารณะ — ไม่มี holder_name
   -- และไม่มี verify_code ในทางกลับเด็ดขาด (D8/D11-12)
   select cert_no, course_title_snapshot, issued_at, status::text
@@ -825,16 +842,27 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: options ต้องเป็น array (ERR-VAL-001|options_not_array)'
       using errcode = '22023';
   end if;
+  if v_patch ? 'tags' and jsonb_typeof(v_patch->'tags') <> 'array' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: tags ต้องเป็น array (ERR-VAL-001|tags_not_array)'
+      using errcode = '22023';
+  end if;
   -- โจทย์ + version bump (DD §3.4 L391 — bump ในแถวเดิม; explanation null-clearing
   -- ด้วย ? operator: มีคีย์ = เซ็ตค่า (รวม null) / ไม่มีคีย์ = คงเดิม)
+  -- 0019-r2 (F7): tags แยก null-clearing ออกจาก "ไม่มีคีย์" — `[]` ล้างเป็น '{}'
+  -- ได้จริง (array_agg บน array ว่าง = NULL เดิมโดน coalesce คงค่าเก่า) และ
+  -- ใช้ e #>> '{}' (scalar text) แทน t.value::text ที่คงอัญประกาศ JSON รอบสตริง
   update public.questions q
   set type          = coalesce((v_patch->>'type')::public.question_type, q.type),
       difficulty    = coalesce((v_patch->>'difficulty')::public.question_difficulty, q.difficulty),
       question_text = coalesce(v_patch->>'question_text', q.question_text),
       explanation   = case when v_patch ? 'explanation' then v_patch->>'explanation' else q.explanation end,
       points        = coalesce((v_patch->>'points')::smallint, q.points),
-      tags          = coalesce((select array_agg(t.value::text)
-                                from jsonb_array_elements(v_patch->'tags') t), q.tags),
+      tags          = case
+                         when v_patch ? 'tags' and jsonb_typeof(v_patch->'tags') = 'array'
+                         then coalesce((select array_agg(e #>> '{}')
+                                        from jsonb_array_elements(v_patch->'tags') e), '{}')
+                         else q.tags
+                       end,
       version       = q.version + 1
   where q.id = p_question_id;
   -- ตัวเลือก (ถ้าแนบมา): เลื่อน sort_order ของ option ที่จะแก้ออกจากช่วงจริงก่อน
@@ -900,12 +928,166 @@ grant update on public.questions to app_owner;
 grant insert, update on public.question_options to app_owner;
 
 -- (2) RLS UPDATE policies ของ app_owner (คู่ policy INSERT/SELECT ที่มีอยู่แล้ว)
+-- drop-if-exists ก่อนสร้างทุกอัน (แบบแผนเดียวกับ media_read ข้างบน) — replay ได้
+drop policy if exists app_owner_update_certificates on public.certificates;
 create policy app_owner_update_certificates
   on public.certificates for update to app_owner
   using (true) with check (true);
+drop policy if exists app_owner_update_questions on public.questions;
 create policy app_owner_update_questions
   on public.questions for update to app_owner
   using (true) with check (true);
+drop policy if exists app_owner_update_question_options on public.question_options;
 create policy app_owner_update_question_options
   on public.question_options for update to app_owner
   using (true) with check (true);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 0019-r2 (F2): แนบ PDF เข้าใบประกาศ = mutation + audit ใน TX เดียว
+-- เดิม BFF (issue.ts) ทำ media_assets INSERT + certificates UPDATE เป็น
+-- PostgREST call แยกสอง call หลัง RPC issue commit ไปแล้ว = service-role
+-- mutations ที่ไม่มี audit คู่ (crash กลางทาง = ข้อมูล committed ไม่มีร่องรอย)
+-- · idempotent: ใบมี pdf_media_id อยู่แล้ว → คืนค่าเดิม attached=false
+-- · storage_path = certificates-pdf/LTC-<ปี>-<6 หลัก>.pdf (issue.ts render)
+-- ─────────────────────────────────────────────────────────────────────────────
+create or replace function public.admin_attach_certificate_pdf(
+  p_actor_user_id uuid,
+  p_certificate_id uuid,
+  p_storage_path text,
+  p_mime_type text,
+  p_size_bytes bigint,
+  p_request_id text
+) returns jsonb
+language plpgsql security definer
+set search_path = public
+as $fn$
+declare
+  v_path text;
+  v_media_id uuid;
+  v_status text;
+  v_existing uuid;
+begin
+  v_path := btrim(coalesce(p_storage_path, ''));
+  if v_path = '' or length(v_path) > 512
+     or v_path !~ '^certificates-pdf/LTC-[0-9]{4}-[0-9]{6}\.pdf$' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ที่อยู่ไฟล์ PDF ไม่ถูกรูปแบบ (ERR-VAL-001|storage_path_invalid)'
+      using errcode = '22023';
+  end if;
+  if coalesce(p_mime_type, '') <> 'application/pdf' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ประเภทไฟล์ต้องเป็น PDF (ERR-VAL-001|mime_invalid)'
+      using errcode = '22023';
+  end if;
+  if p_size_bytes is null or p_size_bytes <= 0 then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ขนาดไฟล์ไม่ถูกต้อง (ERR-VAL-001|size_invalid)'
+      using errcode = '22023';
+  end if;
+  select status::text, pdf_media_id
+    into v_status, v_existing
+  from public.certificates
+  where id = p_certificate_id;
+  if not found then
+    raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)';
+  end if;
+  if v_status <> 'valid' then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ใบประกาศไม่ได้อยู่ในสถานะ valid (ERR-VAL-001|not_valid)'
+      using errcode = '22023';
+  end if;
+  if v_existing is not null then
+    return jsonb_build_object('pdf_media_id', v_existing, 'attached', false);
+  end if;
+  insert into public.media_assets
+    (provider, media_type, bucket, storage_path, mime_type, size_bytes, status, uploaded_by)
+  values ('supabase_storage', 'document', 'certificates', v_path,
+          'application/pdf', p_size_bytes, 'ready', p_actor_user_id)
+  returning id into v_media_id;
+  update public.certificates
+  set pdf_media_id = v_media_id
+  where id = p_certificate_id and pdf_media_id is null;
+  if not found then
+    raise exception 'ข้อผิดพลาดของระบบ: ใบประกาศถูกแนบไฟล์ไปแล้ว (ERR-SYS-001|pdf_already_attached)'
+      using errcode = '23505';
+  end if;
+  perform public.append_audit_event_internal(
+    'CERT_PDF_ATTACH', 'certificate', p_certificate_id::text, null, null,
+    jsonb_build_object('pdf_media_id', v_media_id),
+    null, null, p_request_id, p_actor_user_id);
+  return jsonb_build_object('pdf_media_id', v_media_id, 'attached', true);
+end;
+$fn$;
+alter function public.admin_attach_certificate_pdf(uuid, uuid, text, text, bigint, text)
+  owner to app_owner;
+revoke execute on function public.admin_attach_certificate_pdf(uuid, uuid, text, text, bigint, text)
+  from public, anon, authenticated;
+grant execute on function public.admin_attach_certificate_pdf(uuid, uuid, text, text, bigint, text)
+  to service_role;
+
+-- B9 ACL ของ RPC ใหม่: policy app_owner_insert_media_assets มีอยู่แล้วจาก blanket
+-- loop ของ 0010 §6 (app_owner_insert_<ทุกตาราง> with check (true)) — สร้างซ้ำไม่ได้
+-- (ชน ใน transaction เดียว → ทั้งไฟล์ rollback) · ที่ขาดจริงคือ "สิทธิ์" INSERT
+-- (0011:13 ให้แค่ SELECT ทั้ง schema) จึงเติม grant เฉพาะตารางนี้
+grant insert on public.media_assets to app_owner;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 0019-r2 (F6): คิวผู้มีสิทธิ์รับใบประกาศ = filter ใน SQL ก่อนตัดหน้า
+-- เดิม BFF สแกนเป็น chunk (≤ 50 × limit) แล้ว post-filter แถวที่ออกใบแล้ว —
+-- เมื่อแถวที่สแกนทั้งหมดถูกออกใบไปก่อนหน้า หน้ากลับมาว่างพร้อม hasMore=false
+-- ทั้งที่ยังมีรายที่ยังไม่ถูกออกอยู่ไกลกว่าช่วงสแกน · RPC นี้ anti-join ใบ valid
+-- ใน SQL เดียว + keyset (submitted_at, id) desc · holder_name = mirror
+-- ของ holderNameOf (certificates/shared.ts: first+last ไม่มีก็ display_name)
+-- ─────────────────────────────────────────────────────────────────────────────
+create or replace function public.admin_eligible_certificates(
+  p_after_submitted_at timestamptz default null,
+  p_after_id uuid default null,
+  p_course_id uuid default null,
+  p_limit int default 20
+) returns table (
+  attempt_id uuid,
+  enrollment_id uuid,
+  user_id uuid,
+  course_id uuid,
+  holder_name text,
+  score_pct smallint,
+  submitted_at timestamptz
+)
+language sql stable security definer
+set search_path = public
+as $fn$
+  select a.id,
+         a.enrollment_id,
+         a.user_id,
+         e.course_id,
+         coalesce(
+           nullif(
+             btrim(
+               concat_ws(' ',
+                 nullif(btrim(coalesce(p.first_name, '')), ''),
+                 nullif(btrim(coalesce(p.last_name, '')), ''))),
+             ''),
+           p.display_name),
+         a.score_pct,
+         a.submitted_at
+  from public.assessment_attempts a
+  join public.enrollments e on e.id = a.enrollment_id
+  join public.profiles p on p.id = a.user_id
+  where a.passed
+    and a.status = 'passed'
+    and a.submitted_at is not null
+    and e.status = 'completed'
+    and e.deleted_at is null
+    and e.completed_at is not null
+    and not exists (select 1
+                    from public.certificates c
+                    where c.enrollment_id = a.enrollment_id
+                      and c.status = 'valid')
+    and (p_course_id is null or e.course_id = p_course_id)
+    and ((p_after_submitted_at is null and p_after_id is null)
+         or (a.submitted_at, a.id) < (p_after_submitted_at, p_after_id))
+  order by a.submitted_at desc, a.id desc
+  limit least(greatest(coalesce(p_limit, 20), 1), 101);
+$fn$;
+alter function public.admin_eligible_certificates(timestamptz, uuid, uuid, int)
+  owner to app_owner;
+revoke execute on function public.admin_eligible_certificates(timestamptz, uuid, uuid, int)
+  from public, anon, authenticated;
+grant execute on function public.admin_eligible_certificates(timestamptz, uuid, uuid, int)
+  to service_role;

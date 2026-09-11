@@ -257,7 +257,7 @@ export const AssessmentRuleSummary = z.object({
   shuffleOptions: z.boolean(),
   proctoringMode: z.enum(ADMIN_PROCTORING_MODES),
   effectiveFrom: IsoTimestamp,
-});
+}).strict();
 
 export type AssessmentRuleSummaryParsed = z.infer<typeof AssessmentRuleSummary>;
 
@@ -273,7 +273,7 @@ export const AdminAssessmentResource = z.object({
   createdBy: z.uuid().nullable(),
   rules: AssessmentRuleSummary.nullable(),
   createdAt: IsoTimestamp,
-});
+}).strict();
 
 export type AdminAssessmentResourceParsed = z.infer<typeof AdminAssessmentResource>;
 
@@ -337,6 +337,52 @@ export interface AdminAssessmentRow {
   readonly created_at: string;
   readonly course: { readonly id: string; readonly created_by: string } | null;
   readonly assessment_rules: readonly AssessmentRuleRow[] | null;
+}
+
+/**
+ * แถว DB ดิบจาก PostgREST ตรวจก่อน map (0019-r2 F5 — mirror B4 ของฝั่งออก):
+ * cast ตรง ๆ เชื่อสัญญา DB มากเกินไป — แถว drift (คอลัมน์เปลี่ยน/embed เพี้ยน/RLS
+ * ตัดฟิลด์) ไหลเข้า mapper เป็น undefined/ค่าผิดชนิดแล้วไปตายที่ view ขาออก
+ * (หรือผ่านซึมถ้า view กว้างกว่า) — ตรวจที่ขาเข้าเป็นชั้นแรก fail-closed เลย
+ * · course/rules เป็น null ได้ตามจริง (!left embed / draft ยังไม่มี rules)
+ */
+export const AssessmentRuleRowSchema = z
+  .object({
+    version: z.number().int().min(1),
+    pass_pct: z.number().int().min(1).max(100),
+    time_limit_minutes: z.number().int(),
+    question_count: z.number().int(),
+    max_attempts: z.number().int(),
+    attempt_cooldown_minutes: z.number().int(),
+    shuffle_questions: z.boolean(),
+    shuffle_options: z.boolean(),
+    proctoring_mode: z.enum(ADMIN_PROCTORING_MODES),
+    effective_from: IsoTimestamp,
+  })
+  .strict();
+
+export const AdminAssessmentRowSchema = z
+  .object({
+    id: z.uuid(),
+    code: z.string().min(1),
+    title: z.string().min(1),
+    description: z.string().nullable(),
+    course_id: z.uuid(),
+    is_final: z.boolean(),
+    status: z.enum(ADMIN_ASSESSMENT_STATUSES),
+    created_at: IsoTimestamp,
+    course: z.object({ id: z.uuid(), created_by: z.uuid() }).nullable(),
+    assessment_rules: z.array(AssessmentRuleRowSchema).nullable(),
+  })
+  .strict();
+
+/** แถว assessments ดิบ → AdminAssessmentRow ที่ผ่านการตรวจแล้ว — drift → ERR-SYS-002 (503 ไม่ leak รายละเอียด) */
+export function parseAdminAssessmentRow(row: unknown): AdminAssessmentRow {
+  const parsed = AdminAssessmentRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "admin_assessment_row_drift" } });
+  }
+  return parsed.data;
 }
 
 /** map แถว assessments → resource — เลือกกติกา effective ล่าสุด (effective_from มากสุด — handler เรียงให้) */

@@ -251,7 +251,7 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("admin_assessment_contract_drift");
+    expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
   });
 });
 
@@ -336,6 +336,6 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("admin_assessment_contract_drift");
+    expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
   });
 });

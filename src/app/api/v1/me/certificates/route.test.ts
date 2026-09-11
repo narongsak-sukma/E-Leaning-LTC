@@ -274,6 +274,6 @@ describe("GET /me/certificates — B4 fail-closed view", () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("my_certificate_contract_drift");
+    expect(body.error.details?.reason).toBe("my_certificate_row_drift"); // F5: ตายที่ขาเข้าก่อน map
   });
 });

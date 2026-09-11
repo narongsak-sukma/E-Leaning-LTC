@@ -1,11 +1,14 @@
 /**
- * Unit tests: src/lib/certificates/issue.ts — issue + eligible queue (Wave D · 0019-r1)
+ * Unit tests: src/lib/certificates/issue.ts — issue + eligible queue (Wave D · 0019-r1/r2)
  *
  * 0019-r1 (gate r1 B2/B8): issueCertificate = RPC `admin_issue_certificate` เดียว
  * (ตรวจ enrollment/attempt/ซ้ำ + สุ่มรหัส + INSERT + CERT_ISSUE audit ทั้งหมดใน TX
- * ฝั่ง DB) — BFF เหลือ PDF pipeline (พัง = คงใบ + WARN ตาม D36-O6) ·
- * listEligibleAttempts สแกนเป็น chunk: ตัด "ออกใบแล้ว" ก่อนตัดหน้า (B8) — chunk
- * แรกออกใบหมดทั้งก้อนต้องไปต่อได้ ไม่ใช่หน้าว่างเปล่าซ่อนคนเก่ากว่า
+ * ฝั่ง DB) — BFF เหลือ PDF pipeline (พัง = คงใบ + WARN ตาม D36-O6)
+ * 0019-r2 (gate r2 F2/F6): PDF pipeline จบด้วย RPC `admin_attach_certificate_pdf`
+ * (media_assets INSERT + certificates UPDATE + CERT_PDF_ATTACH audit TX เดียว —
+ * mock จึงต้อง dispatch RPC ตามชื่อฟังก์ชัน) · listEligibleAttempts = RPC
+ * `admin_eligible_certificates` เดียว (anti-join ใบ valid + keyset + ตัดหน้าใน
+ * SQL — BFF ขอ limit+1 ให้ buildPage เทียบ hasMore)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -37,84 +40,27 @@ const COURSE_ID = "b0000000-0000-4000-8000-000000000001";
 const CERT_ID = "c0000000-0000-4000-8000-000000000001";
 const MEDIA_ID = "90000000-0000-4000-8000-000000000001";
 const T1 = "2026-09-08T04:00:00+00:00";
-/** ขนาด chunk ของการสแกนคิว — mirror ค่าคงที่ของ issue.ts (ตรวจผ่าน limit ที่จับได้) */
-const CHUNK_SIZE = 200;
-/** เพดาน chunk ต่อคำขอ — mirror ค่าคงที่ของ issue.ts */
-const MAX_CHUNKS = 50;
 
-interface BuilderState {
-  table: string;
-  select?: string;
-  eq: Array<[string, unknown]>;
-  or?: string;
-  limit: unknown[];
-  inserted?: unknown;
-  updated?: unknown;
+/** คำตอบมาตรฐานของ RPC แนบ PDF (idempotent — ใบมีไฟล์อยู่แล้ว) */
+function attachRow(attached: boolean): Row {
+  return { pdf_media_id: MEDIA_ID, attached };
 }
 
+/**
+ * spec ของ fake client — RPC ทั้งหมด dispatch ตามชื่อฟังก์ชัน
+ * (issue.ts เรียกถึงสอง RPC: admin_issue_certificate ตามด้วย admin_attach_certificate_pdf)
+ */
 interface FakeSpec {
-  rpc?: () => RpcResult;
-  read?: (table: string, st: BuilderState) => Resolve;
-  onInsert?: (table: string, payload: Row) => Resolve;
+  rpc?: (fn: string) => RpcResult;
   upload?: () => Resolve;
 }
 
 const OK: Resolve = { data: null, error: null };
 
-function makeBuilder(table: string, spec: FakeSpec, st: BuilderState) {
-  const builder: Record<string, unknown> = {
-    select: vi.fn((s: string) => {
-      st.select = s;
-      return builder;
-    }),
-    eq: vi.fn((column: string, value: unknown) => {
-      st.eq.push([column, value]);
-      return builder;
-    }),
-    not: vi.fn(() => builder),
-    filter: vi.fn(() => builder),
-    or: vi.fn((f: string) => {
-      st.or = f;
-      return builder;
-    }),
-    in: vi.fn(() => builder),
-    order: vi.fn(() => builder),
-    limit: vi.fn((n: unknown) => {
-      st.limit.push(n);
-      return builder;
-    }),
-    update: vi.fn((payload: unknown) => {
-      st.updated = payload;
-      return builder;
-    }),
-    insert: vi.fn((payload: unknown) => {
-      st.inserted = payload;
-      return builder;
-    }),
-    maybeSingle: vi.fn(async () => resolveFor(table, st, spec)),
-    single: vi.fn(async () => resolveFor(table, st, spec)),
-    then: (res: (v: Resolve) => unknown) => res(resolveFor(table, st, spec)),
-  };
-  return builder;
-}
-
-function resolveFor(table: string, st: BuilderState, spec: FakeSpec): Resolve {
-  if (st.inserted !== undefined) {
-    return spec.onInsert?.(table, st.inserted as Row) ?? OK;
-  }
-  return spec.read?.(table, st) ?? OK;
-}
-
 function serviceClient(spec: FakeSpec) {
-  const rpc = vi.fn(async () => spec.rpc?.() ?? { data: null, error: null });
+  const rpc = vi.fn(async (fn: string) => spec.rpc?.(fn) ?? { data: null, error: null });
   const uploads: Array<{ bucket: string; path: string; contentType?: string | undefined }> = [];
-  const builderLog: BuilderState[] = [];
   const client = {
-    from: vi.fn((table: string) => {
-      const st: BuilderState = { table, eq: [], limit: [] };
-      builderLog.push(st);
-      return makeBuilder(table, spec, st);
-    }),
     rpc,
     storage: {
       from: (bucket: string) => ({
@@ -126,7 +72,7 @@ function serviceClient(spec: FakeSpec) {
     },
   };
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
-  return { rpc, uploads, builderLog };
+  return { rpc, uploads };
 }
 
 /** jsonb ที่ cert_issue_core คืน (ผ่าน admin_issue_certificate) */
@@ -144,11 +90,13 @@ function coreRow(): Row {
   };
 }
 
-/** spec มาตรฐาน: RPC สำเร็จ + PDF pipeline สำเร็จตลอด */
+/** spec มาตรฐาน: issue RPC สำเร็จ + attach RPC สำเร็จ + upload สำเร็จ */
 function happySpec(): FakeSpec {
   return {
-    rpc: () => ({ data: coreRow(), error: null }),
-    onInsert: (table) => (table === "media_assets" ? { data: { id: MEDIA_ID }, error: null } : OK),
+    rpc: (fn) =>
+      fn === "admin_attach_certificate_pdf"
+        ? { data: attachRow(true), error: null }
+        : { data: coreRow(), error: null },
     upload: () => OK,
   };
 }
@@ -165,8 +113,8 @@ beforeEach(() => {
   });
 });
 
-describe("issueCertificate — RPC admin_issue_certificate (B2)", () => {
-  it("happy path: map core jsonb → IssuedCertificate ครบ + PDF ผูกสำเร็จ · RPC ครั้งเดียว", async () => {
+describe("issueCertificate — RPC admin_issue_certificate + admin_attach_certificate_pdf", () => {
+  it("happy path: map core jsonb → IssuedCertificate ครบ + PDF ผูกสำเร็จ · RPC สองครั้งตามลำดับ", async () => {
     const ctx = serviceClient(happySpec());
     const cert = await issueCertificate({
       actorId: STAFF_ID,
@@ -187,11 +135,21 @@ describe("issueCertificate — RPC admin_issue_certificate (B2)", () => {
       issuedAt: T1,
       pdfMediaId: MEDIA_ID,
     });
-    // B2: mutation+audit ทั้งหมดใน RPC เดียว — BFF ไม่เขียน append_audit_event เอง
-    expect(ctx.rpc).toHaveBeenCalledTimes(1);
-    expect(ctx.rpc).toHaveBeenCalledWith("admin_issue_certificate", {
+    // B2: mutation+audit ของใบอยู่ใน RPC เดียว — BFF ไม่เขียน append_audit_event เอง
+    expect(ctx.rpc).toHaveBeenCalledTimes(2);
+    expect(ctx.rpc).toHaveBeenNthCalledWith(1, "admin_issue_certificate", {
       p_actor_user_id: STAFF_ID,
       p_enrollment_id: ENROLL_ID,
+      p_request_id: "req-1",
+    });
+    // F2: แนบ PDF = RPC เดียว (media INSERT + cert UPDATE + audit TX เดียว) —
+    // params ครบทุกตัวรวม p_request_id ที่ส่งต่อจากคำขอเดียวกัน
+    expect(ctx.rpc).toHaveBeenNthCalledWith(2, "admin_attach_certificate_pdf", {
+      p_actor_user_id: STAFF_ID,
+      p_certificate_id: CERT_ID,
+      p_storage_path: "certificates-pdf/LTC-2026-000123.pdf",
+      p_mime_type: "application/pdf",
+      p_size_bytes: 4,
       p_request_id: "req-1",
     });
     const upload = ctx.uploads[0];
@@ -200,13 +158,28 @@ describe("issueCertificate — RPC admin_issue_certificate (B2)", () => {
     expect(upload?.contentType).toBe("application/pdf");
   });
 
-  it("requestId ไม่ระบุ → p_request_id เป็น null · PostgREST wrap array → แกะแถวได้", async () => {
-    const ctx = serviceClient({ ...happySpec(), rpc: () => ({ data: [coreRow()], error: null }) });
+  it("requestId ไม่ระบุ → p_request_id เป็น null ทั้งสอง RPC · PostgREST wrap array → แกะแถวได้", async () => {
+    const ctx = serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: [attachRow(true)], error: null }
+          : { data: [coreRow()], error: null },
+    });
     const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
     expect(cert.id).toBe(CERT_ID);
-    expect(ctx.rpc).toHaveBeenCalledWith("admin_issue_certificate", {
+    expect(cert.pdfMediaId).toBe(MEDIA_ID);
+    expect(ctx.rpc).toHaveBeenNthCalledWith(1, "admin_issue_certificate", {
       p_actor_user_id: STAFF_ID,
       p_enrollment_id: ENROLL_ID,
+      p_request_id: null,
+    });
+    expect(ctx.rpc).toHaveBeenNthCalledWith(2, "admin_attach_certificate_pdf", {
+      p_actor_user_id: STAFF_ID,
+      p_certificate_id: CERT_ID,
+      p_storage_path: "certificates-pdf/LTC-2026-000123.pdf",
+      p_mime_type: "application/pdf",
+      p_size_bytes: 4,
       p_request_id: null,
     });
   });
@@ -247,34 +220,54 @@ describe("issueCertificate — RPC admin_issue_certificate (B2)", () => {
   });
 });
 
-describe("issueCertificate — PDF/Storage พัง = คงใบ + pdf_media_id null + WARN (D36-O6)", () => {
-  it("upload ล้มเหลว → pdfMediaId null + WARN certificate_pdf_upload_failed", async () => {
-    serviceClient({ ...happySpec(), upload: () => ({ data: null, error: { message: "bucket not found" } }) });
+describe("issueCertificate — PDF/Storage/attach พัง = คงใบ + pdf_media_id null + WARN (D36-O6)", () => {
+  it("upload ล้มเหลว → pdfMediaId null + WARN certificate_pdf_upload_failed (ไม่ถึง attach RPC)", async () => {
+    const ctx = serviceClient({ ...happySpec(), upload: () => ({ data: null, error: { message: "bucket not found" } }) });
     const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
     expect(cert.status).toBe("valid");
     expect(cert.pdfMediaId).toBeNull();
     expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_upload_failed");
+    expect(ctx.rpc).toHaveBeenCalledTimes(1); // มีแต่ issue — attach ไม่ถูกเรียก
   });
 
-  it("media_assets insert ล้มเหลว → WARN certificate_media_insert_failed", async () => {
+  it("attach RPC ล้มเหลว (F2) → WARN certificate_pdf_attach_failed + คงใบ (ใบ valid ยัง verify ได้)", async () => {
     serviceClient({
       ...happySpec(),
-      onInsert: () => ({ data: null, error: { message: "contract" } }),
-    });
-    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
-    expect(cert.pdfMediaId).toBeNull();
-    expect(warnCalls.map((w) => w.message)).toContain("certificate_media_insert_failed");
-  });
-
-  it("ผูก pdf_media_id ล้มเหลว → WARN certificate_pdf_link_update_failed + คงใบ", async () => {
-    serviceClient({
-      ...happySpec(),
-      read: (table) => (table === "certificates" ? { data: null, error: { message: "rls" } } : OK),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: null, error: { code: "42501", message: "permission denied" } }
+          : { data: coreRow(), error: null },
     });
     const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
     expect(cert.status).toBe("valid");
     expect(cert.pdfMediaId).toBeNull();
-    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_link_update_failed");
+    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+  });
+
+  it("attach RPC สำเร็จแต่ data null (contract drift) → WARN certificate_pdf_attach_failed ไม่เดาค่า", async () => {
+    serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: null, error: null }
+          : { data: coreRow(), error: null },
+    });
+    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
+    expect(cert.pdfMediaId).toBeNull();
+    expect(warnCalls.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+  });
+
+  it("attach idempotent (ใบมี pdf_media_id อยู่แล้ว → attached=false) → คืน id เดิมไม่ throw", async () => {
+    serviceClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: attachRow(false), error: null }
+          : { data: coreRow(), error: null },
+    });
+    const cert = await issueCertificate({ actorId: STAFF_ID, enrollmentId: ENROLL_ID });
+    expect(cert.pdfMediaId).toBe(MEDIA_ID);
+    expect(warnCalls).toEqual([]);
   });
 
   it("render โยน error → WARN certificate_pdf_render_failed + ยังออกใบได้", async () => {
@@ -296,154 +289,90 @@ describe("issueCertificate — PDF/Storage พัง = คงใบ + pdf_media_
   });
 });
 
-describe("listEligibleAttempts — คิวงานแบบ chunk (B8: ตัด 'ออกใบแล้ว' ก่อนตัดหน้า)", () => {
-  /** แถว attempt ผ่านเกณฑ์ seq กำหนด id/enrollment_id และเวลาส่ง (เรียงจากใหม่ไปเก่า) */
-  function attemptRow(seq: number): Row {
+describe("listEligibleAttempts — RPC admin_eligible_certificates (F6: filter ใน SQL ก่อนตัดหน้า)", () => {
+  /** แถว RPC (snake_case) ที่ admin_eligible_certificates คืน — seq กำหนด id + เวลาส่ง (มาก = เก่ากว่า) */
+  function eligibleRow(seq: number): Row {
     const suffix = String(seq).padStart(12, "0");
     return {
-      id: `d0000000-0000-4000-8000-${suffix}`,
+      attempt_id: `d0000000-0000-4000-8000-${suffix}`,
       enrollment_id: `e0000000-0000-4000-8000-${suffix}`,
       user_id: USER_ID,
+      course_id: COURSE_ID,
+      holder_name: "สมชาย ใจดี",
       score_pct: 90,
       submitted_at: new Date(Date.UTC(2026, 8, 1) - seq * 60_000).toISOString(),
-      attempt_no: 1,
-      profiles: { first_name: "สมชาย", last_name: "ใจดี", display_name: "นายสมชาย" },
-      enrollments: { course_id: COURSE_ID, status: "completed", deleted_at: null },
     };
   }
 
-  /** read handler แบบมีหน้า: attempts หน้าที่ n = attemptPages[n] · certificates หน้าที่ n = certPages[n] */
-  function chunkedReader(attemptPages: Row[][], certPages: Row[][]) {
-    let attemptCall = 0;
-    let certCall = 0;
-    return (table: string): Resolve => {
-      if (table === "assessment_attempts") {
-        const page = attemptPages[attemptCall];
-        attemptCall += 1;
-        return { data: page ?? [], error: null };
-      }
-      if (table === "certificates") {
-        const page = certPages[certCall];
-        certCall += 1;
-        return { data: page ?? [], error: null };
-      }
-      return OK;
-    };
+  /** spec ที่ RPC eligible คืนแถวที่กำหนด (RPC อื่นไม่เกี่ยว — ฟังก์ชันนี้ไม่เรียกอะไรอื่น) */
+  function eligibleSpec(rows: Row[]): FakeSpec {
+    return { rpc: () => ({ data: rows, error: null }) };
   }
 
-  it("แถวผ่านเกณฑ์ → map เป็น resource (ชื่อจาก first+last) + ไม่มี valid cert → อยู่ในคิว", async () => {
-    serviceClient({ read: chunkedReader([[attemptRow(1)]], [[]]) });
+  it("แถว snake_case → map เป็น EligibleAttempt ครบ (holder_name คำนวณฝั่ง SQL แล้ว)", async () => {
+    serviceClient(eligibleSpec([eligibleRow(1)]));
     const page = await listEligibleAttempts({ limit: 20 });
     expect(page.page).toEqual({ nextCursor: null, hasMore: false });
     expect(page.data).toHaveLength(1);
     const first = page.data[0];
-    expect(first?.attemptId).toBe("d0000000-0000-4000-8000-000000000001");
-    expect(first?.holderName).toBe("สมชาย ใจดี");
-    expect(first?.courseId).toBe(COURSE_ID);
+    expect(first).toEqual({
+      attemptId: "d0000000-0000-4000-8000-000000000001",
+      enrollmentId: "e0000000-0000-4000-8000-000000000001",
+      userId: USER_ID,
+      courseId: COURSE_ID,
+      holderName: "สมชาย ใจดี",
+      scorePct: 90,
+      submittedAt: new Date(Date.UTC(2026, 8, 1) - 60_000).toISOString(),
+    });
   });
 
-  it("enrollment ที่มีใบ valid แล้ว → ถูก anti-join ตัดออกจากคิว", async () => {
-    const row = attemptRow(1);
-    serviceClient({
-      read: chunkedReader([[row]], [[{ enrollment_id: row["enrollment_id"] }]]),
-    });
+  it("คิวว่าง → หน้าเปล่า + hasMore false (RPC ตัด 'ออกใบแล้ว' ใน SQL แล้ว)", async () => {
+    serviceClient(eligibleSpec([]));
     const page = await listEligibleAttempts({ limit: 20 });
     expect(page.data).toEqual([]);
     expect(page.page).toEqual({ nextCursor: null, hasMore: false });
   });
 
-  it("ได้เกิน limit → hasMore + nextCursor (extra row สำหรับ buildPage)", async () => {
-    serviceClient({ read: chunkedReader([[attemptRow(1), attemptRow(2), attemptRow(3)]], [[]]) });
+  it("ได้เกิน limit → hasMore + nextCursor (BFF ขอ limit+1 ให้ buildPage เทียบ)", async () => {
+    serviceClient(eligibleSpec([eligibleRow(1), eligibleRow(2), eligibleRow(3)]));
     const page = await listEligibleAttempts({ limit: 2 });
     expect(page.data).toHaveLength(2);
+    expect(page.data[0]?.attemptId).toBe("d0000000-0000-4000-8000-000000000001");
     expect(page.page.hasMore).toBe(true);
     expect(page.page.nextCursor).toBeTruthy();
   });
 
-  it("B8: chunk แรกออกใบหมดทั้ง 200 → ไปต่อถึง chunk สอง ได้คนเก่ากว่า ไม่ใช่หน้าว่าง", async () => {
-    const chunk1 = Array.from({ length: CHUNK_SIZE }, (_, i) => attemptRow(i + 1));
-    const chunk2 = [attemptRow(201), attemptRow(202), attemptRow(203)];
-    const ctx = serviceClient({
-      read: chunkedReader(
-        [chunk1, chunk2],
-        [
-          chunk1.map((r) => ({ enrollment_id: r["enrollment_id"] })), // ทั้ง chunk แรกออกใบแล้ว
-          [], // chunk สองยังไม่มีใบ
-        ],
-      ),
+  it("param-shape: RPC ครั้งเดียวชื่อ admin_eligible_certificates + limit+1 + courseId + cursor แรกเป็น null", async () => {
+    const ctx = serviceClient(eligibleSpec([]));
+    await listEligibleAttempts({ limit: 5, courseId: COURSE_ID });
+    expect(ctx.rpc).toHaveBeenCalledTimes(1);
+    expect(ctx.rpc).toHaveBeenCalledWith("admin_eligible_certificates", {
+      p_after_submitted_at: null,
+      p_after_id: null,
+      p_course_id: COURSE_ID,
+      p_limit: 6,
     });
-    const page = await listEligibleAttempts({ limit: 20 });
-    expect(page.data).toHaveLength(3); // แบบเดิม (limit ก่อน filter) คืน 0 แถว — pin พฤติกรรมใหม่
-    expect(page.page).toEqual({ nextCursor: null, hasMore: false });
-    expect(page.data[0]?.attemptId).toBe("d0000000-0000-4000-8000-000000000201");
-    // สแกน 2 chunk จริง และ chunk สองเลื่อน cursor พ้นแถวสุดท้ายของ chunk แรก (รวมแถวที่ถูกตัด)
-    const attemptBuilders = ctx.builderLog.filter((st) => st.table === "assessment_attempts");
-    expect(attemptBuilders).toHaveLength(2);
-    expect(attemptBuilders[0]?.or).toBeUndefined();
-    expect(attemptBuilders[1]?.or).toContain("submitted_at.lt.");
   });
 
-  it("เพดานการไล่คิว: คิวยาวเป็นใบทั้งหมด → หยุดที่ MAX_CHUNKS (10,000 แถว) ไม่วนไม่รู้จบ", async () => {
-    let rounds = 0;
-    let currentChunk: Row[] = [];
-    serviceClient({
-      read: (table: string): Resolve => {
-        if (table === "assessment_attempts") {
-          rounds += 1;
-          currentChunk = Array.from({ length: CHUNK_SIZE }, (_, i) => attemptRow((rounds - 1) * CHUNK_SIZE + i + 1));
-          return { data: currentChunk, error: null };
-        }
-        if (table === "certificates") {
-          return { data: currentChunk.map((r) => ({ enrollment_id: r["enrollment_id"] })), error: null };
-        }
-        return OK;
-      },
+  it("cursor จากหน้าแรก → หน้าสองส่ง keyset (submitted_at, id) ของแถวสุดท้ายหน้าแรก", async () => {
+    serviceClient(eligibleSpec([eligibleRow(1), eligibleRow(2), eligibleRow(3)]));
+    const first = await listEligibleAttempts({ limit: 2 });
+    expect(first.page.nextCursor).toBeTruthy();
+    // RPC เดียวกันถูกเรียกอีกครั้งด้วย cursor ที่ได้ — p_after_* = แถวที่ 2 (สุดท้ายของหน้า)
+    const ctx = serviceClient(eligibleSpec([eligibleRow(3)]));
+    await listEligibleAttempts({ limit: 2, cursor: first.page.nextCursor });
+    expect(ctx.rpc).toHaveBeenCalledWith("admin_eligible_certificates", {
+      p_after_submitted_at: eligibleRow(2).submitted_at,
+      p_after_id: "d0000000-0000-4000-8000-000000000002",
+      p_course_id: null,
+      p_limit: 3,
     });
-    const page = await listEligibleAttempts({ limit: 20 });
-    expect(page.data).toEqual([]);
-    expect(page.page).toEqual({ nextCursor: null, hasMore: false });
-    expect(rounds).toBe(MAX_CHUNKS);
   });
 
-  it("query ของ eligible ผูก !inner + filter ตาม SDS §3.4a · limit เป็นขนาด chunk ไม่ใช่ limit+1", async () => {
-    const ctx = serviceClient({ read: chunkedReader([[]], []) });
-    await listEligibleAttempts({ limit: 5 });
-    const q = ctx.builderLog.find((st) => st.table === "assessment_attempts");
-    expect(q?.select).toContain("profiles!inner(");
-    expect(q?.select).toContain("enrollments!inner(");
-    expect(q?.limit).toEqual([CHUNK_SIZE]);
-    expect(q?.eq).toEqual(
-      expect.arrayContaining([
-        ["passed", true],
-        ["status", "passed"],
-        ["enrollments.status", "completed"],
-      ]),
-    );
-  });
-
-  it("query คิวล้ม → ERR-SYS-002 cert_eligible_query_failed", async () => {
-    serviceClient({
-      read: (table) =>
-        table === "assessment_attempts"
-          ? { data: null, error: { code: "XX000", message: "boom" } }
-          : OK,
-    });
+  it("RPC คิวล้ม → ERR-SYS-002 cert_eligible_query_failed (ไม่ leak SQL)", async () => {
+    serviceClient({ rpc: () => ({ data: null, error: { code: "XX000", message: "boom" } }) });
     const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
     expect((error as AppError).code).toBe("ERR-SYS-002");
     expect((error as AppError).details).toEqual({ reason: "cert_eligible_query_failed" });
-  });
-
-  it("anti-join lookup ล้ม → ERR-SYS-002 cert_eligible_validcert_lookup_failed", async () => {
-    serviceClient({
-      read: (table) =>
-        table === "certificates"
-          ? { data: null, error: { code: "XX000", message: "boom" } }
-          : table === "assessment_attempts"
-            ? { data: [attemptRow(1)], error: null }
-            : OK,
-    });
-    const error = await listEligibleAttempts({ limit: 20 }).catch((e: unknown) => e);
-    expect((error as AppError).code).toBe("ERR-SYS-002");
-    expect((error as AppError).details).toEqual({ reason: "cert_eligible_validcert_lookup_failed" });
   });
 });

@@ -1,10 +1,12 @@
 /**
- * Unit tests: src/lib/certificates/reissue.ts — ออกใบใหม่แทนใบเดิม (Wave D · 0019-r1)
+ * Unit tests: src/lib/certificates/reissue.ts — ออกใบใหม่แทนใบเดิม (Wave D · 0019-r1/r2)
  *
  * 0019-r1 (gate r1 B7): supersede + issue + lineage + CERT_ISSUE/CERT_REISSUE audit
- * ทั้งหมดอยู่ใน RPC `admin_reissue_certificate` TX เดียว — BFF เรียก RPC ครั้งเดียว
- * แล้ว render PDF ใบใหม่ (พัง = คงใบ pdf_media_id null ตาม D36-O6) · ไม่มี
- * lineage UPDATE หรือ compensating revert ฝั่ง BFF อีกต่อไป
+ * ทั้งหมดอยู่ใน RPC `admin_reissue_certificate` TX เดียว — BFF เรียก RPC แล้ว render
+ * PDF ใบใหม่ (พัง = คงใบ pdf_media_id null ตาม D36-O6) ไม่มี lineage UPDATE หรือ
+ * compensating revert ฝั่ง BFF อีกต่อไป
+ * 0019-r2 (gate r2 F2): PDF ผูกด้วย RPC `admin_attach_certificate_pdf` (mutation +
+ * CERT_PDF_ATTACH audit TX เดียว) พร้อมส่ง requestId ต่อจากคำขอ reissue เดียวกัน
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,7 +27,7 @@ import { reissueCertificate } from "./reissue";
 import { certLogger } from "./shared";
 
 type Row = Record<string, unknown>;
-type Resolve = { data: unknown; error: null } | { data: null; error: Record<string, unknown> };
+type Resolve = { data: unknown; error: null } | { data: null, error: Record<string, unknown> };
 type RpcResult = { data: unknown; error: Record<string, unknown> | null };
 
 const STAFF_ID = "a0000000-0000-4000-8000-000000000001";
@@ -39,17 +41,10 @@ const T1 = "2026-09-08T04:00:00+00:00";
 
 const OK: Resolve = { data: null, error: null };
 
-interface BuilderState {
-  table: string;
-  inserted?: unknown;
-  updated?: unknown;
-}
-
+/** RPC ทั้งหมด dispatch ตามชื่อฟังก์ชัน (reissue RPC ตามด้วย attach RPC ของ PDF) */
 interface Spec {
-  rpc?: () => RpcResult;
-  onInsert?: (table: string, payload: Row) => Resolve;
+  rpc?: (fn: string) => RpcResult;
   upload?: () => Resolve;
-  read?: (table: string) => Resolve;
 }
 
 /** jsonb ที่ admin_reissue_certificate คืน — core ของใบใหม่ + superseded_cert_id (ใบเดิม) */
@@ -69,30 +64,9 @@ function reissueRow(): Row {
 }
 
 function reissueClient(spec: Spec) {
-  const rpc = vi.fn(async () => spec.rpc?.() ?? { data: null, error: null });
+  const rpc = vi.fn(async (fn: string) => spec.rpc?.(fn) ?? { data: null, error: null });
   const uploads: Array<{ bucket: string; path: string }> = [];
-  const builderLog: BuilderState[] = [];
   const client = {
-    from: vi.fn((table: string) => {
-      const st: BuilderState = { table };
-      builderLog.push(st);
-      const builder: Record<string, unknown> = {
-        select: vi.fn(() => builder),
-        eq: vi.fn(() => builder),
-        update: vi.fn((payload: unknown) => {
-          st.updated = payload;
-          return builder;
-        }),
-        insert: vi.fn((payload: unknown) => {
-          st.inserted = payload;
-          return builder;
-        }),
-        maybeSingle: vi.fn(async () => resolveFor(table, st, spec)),
-        single: vi.fn(async () => resolveFor(table, st, spec)),
-        then: (res: (v: Resolve) => unknown) => res(resolveFor(table, st, spec)),
-      };
-      return builder;
-    }),
     rpc,
     storage: {
       from: (bucket: string) => ({
@@ -104,26 +78,21 @@ function reissueClient(spec: Spec) {
     },
   };
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
-  return { rpc, uploads, builderLog };
+  return { rpc, uploads };
 }
 
-function resolveFor(table: string, st: BuilderState, spec: Spec): Resolve {
-  if (st.inserted !== undefined) {
-    return spec.onInsert?.(table, st.inserted as Row) ?? OK;
-  }
-  return spec.read?.(table) ?? OK;
-}
-
-/** spec มาตรฐาน: RPC สำเร็จ + PDF pipeline สำเร็จตลอด */
+/** spec มาตรฐาน: reissue RPC สำเร็จ + attach RPC สำเร็จ + upload สำเร็จ */
 function happySpec(): Spec {
   return {
-    rpc: () => ({ data: reissueRow(), error: null }),
-    onInsert: (table) => (table === "media_assets" ? { data: { id: MEDIA_ID }, error: null } : OK),
+    rpc: (fn) =>
+      fn === "admin_attach_certificate_pdf"
+        ? { data: { pdf_media_id: MEDIA_ID, attached: true }, error: null }
+        : { data: reissueRow(), error: null },
     upload: () => OK,
   };
 }
 
-describe("reissueCertificate — RPC TX เดียว (B7)", () => {
+describe("reissueCertificate — RPC TX เดียว (B7) + attach RPC ของ PDF (F2)", () => {
   let warns: Array<{ message: string; fields: Record<string, unknown> }> = [];
 
   beforeEach(() => {
@@ -135,7 +104,7 @@ describe("reissueCertificate — RPC TX เดียว (B7)", () => {
     });
   });
 
-  it("happy path: ใบใหม่ครบฟิลด์ + lineage จาก RPC + PDF ผูกสำเร็จ · เรียก RPC ครั้งเดียว", async () => {
+  it("happy path: ใบใหม่ครบฟิลด์ + lineage จาก RPC + PDF ผูกสำเร็จ · RPC สองครั้งตามลำดับ", async () => {
     const ctx = reissueClient(happySpec());
     const result = await reissueCertificate({
       actorId: STAFF_ID,
@@ -162,21 +131,34 @@ describe("reissueCertificate — RPC TX เดียว (B7)", () => {
     });
 
     // B7: mutation+audit+lineage ทั้งหมดใน RPC เดียว — BFF ไม่เขียน lineage เอง
-    expect(ctx.rpc).toHaveBeenCalledTimes(1);
-    expect(ctx.rpc).toHaveBeenCalledWith("admin_reissue_certificate", {
+    expect(ctx.rpc).toHaveBeenCalledTimes(2);
+    expect(ctx.rpc).toHaveBeenNthCalledWith(1, "admin_reissue_certificate", {
       p_actor_user_id: STAFF_ID,
       p_certificate_id: OLD_CERT_ID,
       p_request_id: "req-3",
     });
-    const updates = ctx.builderLog.filter((st) => st.updated !== undefined).map((st) => st.updated);
-    expect(updates).toEqual([{ pdf_media_id: MEDIA_ID }]); // มีแค่การผูก PDF — ไม่มี supersede/supersedes/superseded_by
+    // F2: attach RPC ผูก PDF ใบ "ใหม่" พร้อม requestId เดียวกับคำขอ reissue (audit ผูกกัน)
+    expect(ctx.rpc).toHaveBeenNthCalledWith(2, "admin_attach_certificate_pdf", {
+      p_actor_user_id: STAFF_ID,
+      p_certificate_id: NEW_CERT_ID,
+      p_storage_path: "certificates-pdf/LTC-2026-000999.pdf",
+      p_mime_type: "application/pdf",
+      p_size_bytes: 4,
+      p_request_id: "req-3",
+    });
     const upload = ctx.uploads[0];
     expect(upload?.bucket).toBe("certificates");
     expect(upload?.path).toBe("certificates-pdf/LTC-2026-000999.pdf");
   });
 
   it("PostgREST wrap jsonb เป็น array หลักเดียว → แกะแถวได้", async () => {
-    reissueClient({ ...happySpec(), rpc: () => ({ data: [reissueRow()], error: null }) });
+    reissueClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: [{ pdf_media_id: MEDIA_ID, attached: true }], error: null }
+          : { data: [reissueRow()], error: null },
+    });
     const result = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID });
     expect(result.newCertificate.id).toBe(NEW_CERT_ID);
     expect(result.oldCertificateId).toBe(OLD_CERT_ID);
@@ -222,8 +204,21 @@ describe("reissueCertificate — RPC TX เดียว (B7)", () => {
     expect(result.newCertificate.pdfMediaId).toBeNull();
     expect(result.oldStatus).toBe("superseded"); // RPC สำเร็จแล้ว — PDF ไม่พากลับไปแก้สถานะ
     expect(warns.map((w) => w.message)).toContain("certificate_pdf_upload_failed");
-    // BFF ไม่มี update ใดๆ เมื่อ PDF พัง (ไม่มีการ revert lineage ฝั่ง TS)
-    expect(ctx.builderLog.filter((st) => st.updated !== undefined)).toHaveLength(0);
-    expect(ctx.rpc).toHaveBeenCalledTimes(1);
+    expect(ctx.rpc).toHaveBeenCalledTimes(1); // มีแต่ reissue — attach ไม่ถูกเรียก
+  });
+
+  it("attach RPC ล้ม → ใบใหม่ยัง supersede แล้ว (pdfMediaId null) + WARN certificate_pdf_attach_failed", async () => {
+    const ctx = reissueClient({
+      ...happySpec(),
+      rpc: (fn) =>
+        fn === "admin_attach_certificate_pdf"
+          ? { data: null, error: { code: "42501", message: "permission denied" } }
+          : { data: reissueRow(), error: null },
+    });
+    const result = await reissueCertificate({ actorId: STAFF_ID, certificateId: OLD_CERT_ID });
+    expect(result.oldStatus).toBe("superseded");
+    expect(result.newCertificate.pdfMediaId).toBeNull();
+    expect(warns.map((w) => w.message)).toContain("certificate_pdf_attach_failed");
+    expect(ctx.rpc).toHaveBeenCalledTimes(2);
   });
 });

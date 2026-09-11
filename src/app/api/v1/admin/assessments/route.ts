@@ -38,10 +38,10 @@ import {
   type AssessmentCreateBodyParsed,
   type AssessmentRuleInputParsed,
   mapAdminExamDbError,
+  parseAdminAssessmentRow,
   parseAdminAssessmentsQuery,
   parseAdminExam,
   toAdminAssessmentResource,
-  type AdminAssessmentRow,
 } from "@/lib/schemas/v1/admin-exam";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
@@ -154,7 +154,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (error !== null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "admin_assessments_query_failed" } });
     }
-    const rows = (data ?? []) as unknown as readonly AdminAssessmentRow[];
+    const rows = ((data ?? []) as unknown[]).map(parseAdminAssessmentRow);
     const page = buildPage({
       rows,
       limit: query.limit,
@@ -241,11 +241,11 @@ export async function POST(
         details: { reason: "assessment_reload_failed" },
       });
     }
-    // zod-ตรวจ view ขาออก (B4) — drift → 503 ERR-SYS-002 (สร้างสำเร็จแต่ตอบกลับเพี้ยน = ระบบล้ม)
+    // zod-ตรวจแถว DB ขาเข้า (F5) ก่อน map + ตรวจ view ขาออก (B4) — drift → 503 ERR-SYS-002
     return jsonCreated(
       parseOutgoingView(
         AdminAssessmentResource,
-        toAdminAssessmentResource(reloaded as unknown as AdminAssessmentRow),
+        toAdminAssessmentResource(parseAdminAssessmentRow(reloaded)),
         "admin_assessment_contract_drift",
       ),
       options,

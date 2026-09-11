@@ -56,13 +56,15 @@ export type CertificatePublicViewParsed = z.infer<typeof CertificatePublicView>;
  * resource ของ GET /me/certificates — snake_case ตาม lane D-2 · id/cert_no/course_title/
  * issued_at/status เท่านั้น — ห้าม holder_name (PII)
  */
-export const MyCertificateResource = z.object({
-  id: z.string().uuid(),
-  cert_no: z.string().min(1),
-  course_title: z.string().min(1),
-  issued_at: IsoTimestamp,
-  status: CertificateStatus,
-});
+export const MyCertificateResource = z
+  .object({
+    id: z.string().uuid(),
+    cert_no: z.string().min(1),
+    course_title: z.string().min(1),
+    issued_at: IsoTimestamp,
+    status: CertificateStatus,
+  })
+  .strict();
 
 export type MyCertificateResourceParsed = z.infer<typeof MyCertificateResource>;
 
@@ -73,6 +75,30 @@ export interface MyCertificateRow {
   readonly course_title_snapshot: string;
   readonly issued_at: string;
   readonly status: string;
+}
+
+/**
+ * แถว DB ดิบตรวจก่อน map (0019-r2 F5 — mirror ฝั่ง admin-exam): แถว drift
+ * (คอลัมน์เปลี่ยน/ค่าผิดชนิดจาก PostgREST) ต้องตายที่ขาเข้า ไม่ใช่ไหลผ่าน
+ * `as` ลง mapper แล้วเลยไปเชื่อ status เป็นจริง
+ */
+export const MyCertificateRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    cert_no: z.string().min(1),
+    course_title_snapshot: z.string().min(1),
+    issued_at: IsoTimestamp,
+    status: CertificateStatus,
+  })
+  .strict();
+
+/** แถว certificates ดิบ → MyCertificateRow ที่ผ่านการตรวจแล้ว — drift → ERR-SYS-002 (opaque) */
+export function parseMyCertificateRow(row: unknown): MyCertificateRow {
+  const parsed = MyCertificateRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "my_certificate_row_drift" } });
+  }
+  return parsed.data;
 }
 
 /**

@@ -54,7 +54,8 @@ export async function reissueCertificate(
   const oldCertificateId = rowString(row, "superseded_cert_id");
   const core = parseCertCore(row);
   // PDF ของใบใหม่ — พัง = คงใบ (pdf_media_id null) ตาม D36-O6 เหมือน issue
-  const pdfMediaId = await attachCertificatePdf(client, core, input.actorId);
+  // (attach RPC รับ requestId ด้วย — audit CERT_PDF_ATTACH ผูกกับคำขอเดียวกัน)
+  const pdfMediaId = await attachCertificatePdf(client, core, input.actorId, input.requestId);
   return {
     newCertificate: { ...toIssuedCertificate(core), pdfMediaId },
     oldCertificateId,

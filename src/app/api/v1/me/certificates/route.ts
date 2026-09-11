@@ -26,8 +26,8 @@ import { decodeCursor, buildPage } from "@/lib/api/pagination";
 import { parsePageQuery } from "@/lib/schemas/v1/common";
 import {
   MyCertificateResource,
+  parseMyCertificateRow,
   toMyCertificateResource,
-  type MyCertificateRow,
 } from "@/lib/schemas/v1/certificate";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
@@ -81,7 +81,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (error !== null) {
       throw new AppError("ERR-SYS-002"); // opaque — ไม่ leak SQL (SDS §6.1)
     }
-    const rows = (data ?? []) as unknown as readonly MyCertificateRow[];
+    const rows = ((data ?? []) as unknown[]).map(parseMyCertificateRow);
     // zod-ตรวจทุกแถวขาออก (B4) — แถวไหน drift → 503 ERR-SYS-002 fail-closed ทั้งหน้า
     const resources = rows.map((row) =>
       parseOutgoingView(MyCertificateResource, toMyCertificateResource(row), "my_certificate_contract_drift"),

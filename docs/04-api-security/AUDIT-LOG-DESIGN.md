@@ -85,6 +85,7 @@
 | CERT_ISSUE | staff:registrar | certificate_id, code, attempt_id, ผู้ออก | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล |
 | CERT_REVOKE | staff:registrar | certificate_id, reason | CRITICAL | เช่นเดียวกัน |
 | CERT_REISSUE | staff:registrar | certificate_id เดิม → ใหม่, เหตุผล (ใบเดิมกลายเป็น superseded — เติมตาม CRT-007) | CRITICAL | เช่นเดียวกัน |
+| CERT_PDF_ATTACH | staff:registrar | certificate_id, pdf_media_id | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล (แนบไฟล์ PDF เข้าใบ — 0019-r2 F2: mutation+audit TX เดียว) |
 | CERT_VERIFY_PUBLIC | guest | code ที่ค้น, ip_hash, ผล(พบ/ไม่พบ) | INFO | บันทึกการเข้าถึงข้อมูลบุคคลแบบสาธารณะ (จำกัดฟิลด์) |
 
 ### 2.5 Credit Bank
@@ -108,7 +109,7 @@
 | AUDIT_EXPORT | super_admin | ช่วงเวลา, จำนวนแถว, รูปแบบ | CRITICAL | ส่งออกบันทึกที่มีข้อมูลบุคคล |
 | AUDIT_CHAIN_VERIFY | ระบบ (cron) | ผล (ok/broken ที่ id ใด), anchor ที่ใช้ | NOTICE (broken=CRITICAL) | พิสูจน์ความถูกต้องของบันทึก |
 
-รวม **51 event types** (นับจากตาราง §2.1–2.6 — เพิ่ม AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14; AUTH_MFA_BACKUPS_REGENERATED ตาม D11-12; EXAM_SESSION_TAKEOVER ตาม D12-21)
+รวม **52 event types** (นับจากตาราง §2.1–2.6 — เพิ่ม AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14; AUTH_MFA_BACKUPS_REGENERATED ตาม D11-12; EXAM_SESSION_TAKEOVER ตาม D12-21; CERT_PDF_ATTACH ตาม D38)
 
 ---
 
@@ -315,7 +316,7 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 
 ความต้องการ audit ของ SRS ไม่ได้แบ่งตามหมวด event แต่เป็น **คุณสมบัติ 5 ข้อของระบบ audit โดยรวม** — การ map จึงเป็นแบบ property-based ไม่ใช่การจัดกลุ่ม event เข้าหมวด
 
-**AUD-001 — บันทึก audit ทุก action สำคัญ (coverage mandate):** event ทั้ง **51 ชนิดใน catalog §2 (§2.1–§2.6)** ตอบโจทย์นี้ร่วมกันทั้งหมด — ไม่มี event ใดออกนอก mandate และไม่มี action สำคัญใด (ตามนิยาม §2) ที่ไร้ event รองรับ; การเพิ่ม action สำคัญใหม่ = เพิ่ม event type ใน catalog โดยอ้าง AUD-001 ผ่าน DCR
+**AUD-001 — บันทึก audit ทุก action สำคัญ (coverage mandate):** event ทั้ง **52 ชนิดใน catalog §2 (§2.1–§2.6)** ตอบโจทย์นี้ร่วมกันทั้งหมด — ไม่มี event ใดออกนอก mandate และไม่มี action สำคัญใด (ตามนิยาม §2) ที่ไร้ event รองรับ; การเพิ่ม action สำคัญใหม่ = เพิ่ม event type ใน catalog โดยอ้าง AUD-001 ผ่าน DCR
 
 **AUD-002…AUD-005 — คุณสมบัติระดับระบบ พิสูจน์ที่กลไก (ไม่ใช่ที่ตัว event):**
 
