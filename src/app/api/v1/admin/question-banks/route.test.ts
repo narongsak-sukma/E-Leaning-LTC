@@ -218,8 +218,10 @@ describe("POST /admin/question-banks — สร้าง bank + ข้อสอ�
     );
     const res = await POST(postRequest(VALID_BANK));
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { data: { questions: Array<{ id: string }> } };
+    const body = (await res.json()) as { data: { questionCount: number; questions: Array<{ id: string }> } };
     expect(body.data.questions).toHaveLength(1);
+    // r11-Q1: นับจากข้อที่สร้างจริงรอบนี้ — mock embed ของ bankRow บอก 5 ต้องถูก override เป็น 1 (ไม่ใช่ค่า stale)
+    expect(body.data.questionCount).toBe(1);
     expect(() => QuestionBankCreateResult.parse(body.data)).not.toThrow();
     const bankInsert = calls.find((call) => call.table === "question_banks" && call.method === "insert");
     expect((bankInsert?.payload as Record<string, unknown>)?.["created_by"]).toBe(USER_ID);
@@ -231,10 +233,14 @@ describe("POST /admin/question-banks — สร้าง bank + ข้อสอ�
     expect(optionRows?.[0]?.is_correct).toBe(true);
   });
 
-  it("staff:exam สร้าง bank ได้เช่นกัน → 201", async () => {
+  it("staff:exam สร้าง bank ได้เช่นกัน (ไม่มีข้อเริ่มต้น) → 201 · questionCount 0 ตามจริง", async () => {
     mockClient({ question_banks: [{ data: bankRow() }] });
     const res = await POST(postRequest({ code: "BANK-02", name: "ธนาคารวิชาที่สอง" }));
     expect(res.status).toBe(201);
+    const body = (await res.json()) as { data: { questionCount: number; questions: unknown[] } };
+    // r11-Q1: bank เปล่า = 0 (ไม่ใช่ค่า stale จาก aggregate ตอน insert bank)
+    expect(body.data.questionCount).toBe(0);
+    expect(body.data.questions).toHaveLength(0);
   });
 
   it("instructor สร้างแทนคนอื่น (created_by ไม่ตรง) → RLS 42501 → 403 ERR-RBAC-001", async () => {

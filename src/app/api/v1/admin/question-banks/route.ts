@@ -231,6 +231,8 @@ export async function POST(request: Request): Promise<NextResponse> {
         QuestionBankCreateResult,
         {
           ...toQuestionBankResource(bank),
+          // r11-Q1: นับจากข้อที่สร้างจริงรอบนี้ — aggregate ตอน insert bank ยังเป็น 0 เสมอ
+          questionCount: createdQuestions.length,
           questions: createdQuestions,
         },
         "question_bank_create_drift",
