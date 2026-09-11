@@ -10,11 +10,17 @@
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { jsonErrorResponse, jsonOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { AppError } from "@/lib/errors";
 import { MIN_REASON_LENGTH, revokeCertificate } from "@/lib/certificates/revoke";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { RevokedCertificateResource } from "@/lib/schemas/v1/certificate";
 
 /** body ของ POST — strict · reason ≥10 (trim) ตรวจที่นี่และซ้ำใน lib (defense in depth) */
 const RevokeBody = z
@@ -72,7 +78,11 @@ export async function POST(
       reason,
       requestId: options.requestId ?? null,
     });
-    return jsonOk(certificate, options);
+    // r6-L1: ขาออกตรวจ strict ก่อนตอบ — drift → 503 ไม่ strip เงียบ
+    return jsonOk(
+      parseOutgoingView(RevokedCertificateResource, certificate, "revoked_certificate_drift"),
+      options,
+    );
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);
   }

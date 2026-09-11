@@ -159,3 +159,16 @@ describe("POST :id/revoke — contract", () => {
     expect(res.status).toBe(400);
   });
 });
+
+// r6-L1: ขาออกตรวจ strict — resource จาก lib มีคีย์นอกสัญญา = drift → 503 ไม่ strip เงียบ
+describe("POST :id/revoke — outbound drift (r6-L1)", () => {
+  it("lib คืนคีย์แปลกปลอม (เช่น revoked_by_email) → 503 ERR-SYS-002 revoked_certificate_drift", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(revokeCertificate).mockResolvedValue({ ...revoked, revoked_by_email: "x@y.z" } as never);
+    const res = await POST(revokeUrl(), ctx(CERT_ID));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details["reason"]).toBe("revoked_certificate_drift");
+  });
+});

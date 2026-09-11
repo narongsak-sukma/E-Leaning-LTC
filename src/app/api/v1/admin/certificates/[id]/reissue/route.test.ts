@@ -136,3 +136,27 @@ describe("POST :id/reissue — contract", () => {
     expect(res.status).toBe(400);
   });
 });
+
+// r6-L1: ขาออกตรวจ strict ทุกชั้น — resource จาก lib มีคีย์นอกสัญญา (รวมใน newCertificate)
+// = drift → 503 ไม่ strip เงียบ
+describe("POST :id/reissue — outbound drift (r6-L1)", () => {
+  it("newCertificate มีคีย์แปลกปลอม (เช่น is_correct) → 503 ERR-SYS-002 reissued_certificate_drift", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(reissueCertificate).mockResolvedValue({
+      ...reissued,
+      newCertificate: { ...reissued.newCertificate, is_correct: true },
+    } as never);
+    const res = await POST(reissueUrl(), ctx(CERT_ID));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details["reason"]).toBe("reissued_certificate_drift");
+  });
+
+  it("คีย์แปลกปลอมที่ top level (เช่น actor_email) → 503 เช่นกัน", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(reissueCertificate).mockResolvedValue({ ...reissued, actor_email: "x@y.z" } as never);
+    const res = await POST(reissueUrl(), ctx(CERT_ID));
+    expect(res.status).toBe(503);
+  });
+});

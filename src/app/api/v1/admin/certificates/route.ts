@@ -10,11 +10,17 @@
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { jsonCreated, jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonCreated,
+  jsonErrorResponse,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { AppError } from "@/lib/errors";
 import { issueCertificate } from "@/lib/certificates/issue";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { IssuedCertificateResource } from "@/lib/schemas/v1/certificate";
 
 /** body ของ POST — strict ตามสไตล์ schema กลางของ repo */
 const IssueCertificateBody = z.object({ enrollmentId: z.uuid() }).strict();
@@ -57,7 +63,11 @@ export async function POST(request: Request): Promise<NextResponse> {
       enrollmentId,
       requestId: options.requestId ?? null,
     });
-    return jsonCreated(certificate, options);
+    // r6-L1: ขาออกตรวจ strict ก่อนตอบ — drift (คีย์เกิน/ผิดชนิดจาก lib) → 503 ไม่ strip เงียบ
+    return jsonCreated(
+      parseOutgoingView(IssuedCertificateResource, certificate, "issued_certificate_drift"),
+      options,
+    );
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);
   }

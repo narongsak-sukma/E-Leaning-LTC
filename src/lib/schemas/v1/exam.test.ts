@@ -9,10 +9,13 @@
 import { describe, expect, it } from "vitest";
 import { AppError, errorDefinition } from "@/lib/errors";
 import {
+  AssessmentDetailView,
   AttemptQuestionSnapshot,
+  AttemptQuestionView,
   AttemptResultView,
   AttemptStartView,
   AttemptSubmitView,
+  ExamPaperContent,
   SubmitAttemptResult,
   MyAttemptView,
   parseAnswerSaveBody,
@@ -119,16 +122,29 @@ describe("parse helpers", () => {
     }
   });
 
-  it("AnswerSaveRequest §4 #7 ถูกรูป → parsed (unknown key ถูก strip)", () => {
+  it("AnswerSaveRequest §4 #7 ถูกรูป → parsed · unknown key (เช่น session_id ปลอม) → ERR-VAL-001 (r6-L1 strict)", () => {
     const parsed = parseAnswerSaveBody({
       questionId: UUID(100),
       choiceIds: [UUID(200)],
       clientSavedAt: T,
-      session_id: "attacker-session", // ไม่ใช่ field ของ contract — ถูกทิ้ง
     });
     expect(parsed.questionId).toBe(UUID(100));
     expect(parsed.choiceIds).toEqual([UUID(200)]);
     expect(Object.hasOwn(parsed, "session_id")).toBe(false);
+    // r6-L1: ขาเข้า strict ด้วย — session binding มาจาก JWT claim เท่านั้น (D20-B5)
+    // ส่ง session_id แปลกปลอมแอบใน body = ผิดสัญญา → 400 ไม่ใช่ strip เงียบ
+    try {
+      parseAnswerSaveBody({
+        questionId: UUID(100),
+        choiceIds: [UUID(200)],
+        clientSavedAt: T,
+        session_id: "attacker-session",
+      });
+      throw new Error("must throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AppError);
+      expect((err as AppError).code).toBe("ERR-VAL-001");
+    }
   });
 
   it("AnswerSaveRequest ผิดรูป (choiceIds เกิน 10 / clientSavedAt ไม่ใช่ ISO) → ERR-VAL-001", () => {
@@ -436,6 +452,141 @@ describe("AttemptQuestionSnapshot — contract jsonb ของ start_attempt", (
       AttemptStartView.safeParse({
         ...base,
         questions: [{ questionId: UUID(100), seq: 1, selectedOptionIds: null, answeredAt: null }],
+      }).success,
+    ).toBe(false);
+  });
+});
+
+// ─── r6-L1: outbound schemas ต้อง strict ทุกชั้น — คีย์นอกสัญญา (รวม nested
+//     options/content) = safeParse fail ไม่ strip เงียบ · base สร้างจาก mapper
+//     จริงเสมอ (รูปที่ถูกต้องได้โดย construction) แล้วเติมคีย์แปลกปลอมทีละจุด ───
+describe("r6-L1 — strict matrix ของ outbound views", () => {
+  const questionBase = toExamPaperQuestion(paperRow()) as unknown as Record<string, unknown>;
+  const contentBase = questionBase["content"] as Record<string, unknown>;
+  const contentOpts = contentBase["options"] as Array<Record<string, unknown>>;
+
+  const startBase = {
+    attemptId: UUID(1),
+    status: "in_progress" as const,
+    deadlineAt: "2026-09-10T02:02:03+00:00",
+    serverTime: T,
+    questionCount: 1,
+    questions: [questionBase],
+  };
+
+  const submitBase = toSubmitView({
+    attempt_id: UUID(1),
+    status: "passed",
+    score_pct: 90,
+    passed: true,
+    correct_count: 27,
+    question_count: 30,
+    total_points: 40,
+  }) as unknown as Record<string, unknown>;
+
+  const myBase = toMyAttemptResource({
+    id: UUID(1),
+    assessment_id: UUID(2),
+    attempt_no: 1,
+    status: "passed",
+    started_at: T,
+    expires_at: "2026-09-10T02:02:03+00:00",
+    submitted_at: T,
+    score_pct: 80,
+    passed: true,
+    question_count: 30,
+    correct_count: 24,
+  }) as unknown as Record<string, unknown>;
+
+  const resultBase = toAttemptResultView([viewRow()]) as unknown as Record<string, unknown>;
+  const resultQ0 = (resultBase["questions"] as Array<Record<string, unknown>>)[0]!;
+  const resultContent = resultQ0["content"] as Record<string, unknown>;
+  const resultOpts = resultContent["options"] as Array<Record<string, unknown>>;
+
+  const snapBase = viewRow().question_snapshot as Record<string, unknown>;
+  const snapOpt0 = (snapBase["options"] as Array<Record<string, unknown>>)[0]!;
+
+  const detailBase = toAssessmentDetail(
+    {
+      id: UUID(2),
+      course_id: UUID(3),
+      code: "FINAL-01",
+      title: "สอบปลายทาง",
+      description: null,
+      is_final: true,
+      status: "published",
+      published_at: T,
+    },
+    {
+      id: UUID(4),
+      assessment_id: UUID(2),
+      version: 2,
+      pass_pct: 70,
+      time_limit_minutes: 60,
+      question_count: 30,
+      max_attempts: 3,
+      attempt_cooldown_minutes: 1440,
+      shuffle_questions: true,
+      shuffle_options: true,
+      require_course_complete: true,
+      proctoring_mode: "basic",
+      effective_from: T,
+    },
+  ) as unknown as Record<string, unknown>;
+
+  it("positive control — base จาก mapper ผ่านทุก schema", () => {
+    expect(ExamPaperContent.safeParse(contentBase).success).toBe(true);
+    expect(AttemptQuestionView.safeParse(questionBase).success).toBe(true);
+    expect(AttemptStartView.safeParse(startBase).success).toBe(true);
+    expect(AttemptSubmitView.safeParse(submitBase).success).toBe(true);
+    expect(MyAttemptView.safeParse(myBase).success).toBe(true);
+    expect(AttemptResultView.safeParse(resultBase).success).toBe(true);
+    expect(AttemptQuestionSnapshot.safeParse(snapBase).success).toBe(true);
+    expect(AssessmentDetailView.safeParse(detailBase).success).toBe(true);
+  });
+
+  it("คีย์นอกสัญญา top level → safeParse fail ทุก view", () => {
+    expect(ExamPaperContent.safeParse({ ...contentBase, leak: true }).success).toBe(false);
+    expect(AttemptQuestionView.safeParse({ ...questionBase, leak: true }).success).toBe(false);
+    expect(AttemptStartView.safeParse({ ...startBase, leak: true }).success).toBe(false);
+    expect(AttemptSubmitView.safeParse({ ...submitBase, leak: true }).success).toBe(false);
+    expect(MyAttemptView.safeParse({ ...myBase, leak: true }).success).toBe(false);
+    expect(AttemptResultView.safeParse({ ...resultBase, leak: true }).success).toBe(false);
+    expect(AssessmentDetailView.safeParse({ ...detailBase, leak: true }).success).toBe(false);
+  });
+
+  it("คีย์นอกสัญญาในชั้น content/options → fail (parent .strict() ไม่ cascade)", () => {
+    expect(
+      ExamPaperContent.safeParse({
+        ...contentBase,
+        options: [{ ...contentOpts[0]!, isCorrect: true }],
+      }).success,
+    ).toBe(false);
+    expect(
+      AttemptResultView.safeParse({
+        ...resultBase,
+        questions: [{ ...resultQ0, content: { ...resultContent, leak: true } }],
+      }).success,
+    ).toBe(false);
+    expect(
+      AttemptResultView.safeParse({
+        ...resultBase,
+        questions: [
+          {
+            ...resultQ0,
+            content: { ...resultContent, options: [{ ...resultOpts[0]!, leak: 1 }] },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("AttemptQuestionSnapshot (jsonb จาก DB) คีย์นอกสัญญา → fail ทั้ง top และ option", () => {
+    expect(AttemptQuestionSnapshot.safeParse({ ...snapBase, leak: true }).success).toBe(false);
+    expect(
+      AttemptQuestionSnapshot.safeParse({
+        ...snapBase,
+        options: [{ ...snapOpt0, leak: 1 }],
       }).success,
     ).toBe(false);
   });

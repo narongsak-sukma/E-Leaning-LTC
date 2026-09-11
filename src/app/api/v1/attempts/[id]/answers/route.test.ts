@@ -171,20 +171,17 @@ describe("POST /attempts/{id}/answers — happy path", () => {
     });
   });
 
-  it("D20-B5: body แอบแถม session_id/is_correct ก็ต้องไม่ผ่านไปถึง RPC — session_id จาก claim เท่านั้น", async () => {
+  it("D20-B5: body แอบแถม session_id/is_correct → 400 ERR-VAL-001 ไม่ถึง RPC เลย (r6-L1 strict ขาเข้า) — session_id จาก claim เท่านั้น", async () => {
     const { res, client } = await post({}, {
       ...BODY,
       session_id: "attacker-chosen-session",
       is_correct: true,
       points_earned: 5,
     });
-    expect(res.status).toBe(200);
-    const call = client._rpcArgs.find((c) => c.fn === "save_answer");
-    expect(call?.args).toMatchObject({ p_session_id: SESSION_ID });
-    const raw = JSON.stringify(call?.args);
-    expect(raw).not.toContain("attacker-chosen-session");
-    expect(raw).not.toContain("is_correct");
-    expect(raw).not.toContain("points_earned");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(client._rpcArgs.find((c) => c.fn === "save_answer")).toBeUndefined();
   });
 });
 

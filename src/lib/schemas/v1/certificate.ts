@@ -119,6 +119,71 @@ export function toMyCertificateResource(row: MyCertificateRow): MyCertificateRes
 /** path param ของ GET /certificates/{id}/pdf — id = uuid (ต่างจาก public verify ที่ใช้ code) */
 export const CertificateIdParams = z.object({ code: z.uuid() }).strict();
 
+// ─── r6-L1: ขาออกของ admin certificate routes — strict ทุกชั้น (mirror lib/certificates
+//     interfaces: IssuedCertificate/RevokedCertificate/ReissuedCertificate/EligibleAttempt) ·
+//     route ครอบทุกทางออกด้วย parseOutgoingView(schema, …) → drift = 503 ไม่ strip เงียบ ───
+
+/** ใบที่ออกแล้ว (POST /admin/certificates + .reissue → newCertificate) — holder PII เห็นได้
+ *  เฉพาะ registrar/sa ที่ผ่าน requirePermission แล้วเท่านั้น */
+export const IssuedCertificateResource = z
+  .object({
+    id: z.string().uuid(),
+    certNo: z.string().min(1),
+    verifyCode: z.string().min(1),
+    enrollmentId: z.string().uuid(),
+    userId: z.string().uuid(),
+    courseId: z.string().uuid(),
+    holderNameSnapshot: z.string().min(1),
+    courseTitleSnapshot: z.string().min(1),
+    creditSnapshot: z.number().int().min(0).nullable(),
+    status: z.literal("valid"),
+    issuedAt: IsoTimestamp,
+    pdfMediaId: z.string().uuid().nullable(),
+  })
+  .strict();
+
+export type IssuedCertificateResourceParsed = z.infer<typeof IssuedCertificateResource>;
+
+/** ใบที่เพิกถอนแล้ว (POST /admin/certificates/{id}/revoke) */
+export const RevokedCertificateResource = z
+  .object({
+    id: z.string().uuid(),
+    certNo: z.string().min(1),
+    status: z.literal("revoked"),
+    revokedAt: IsoTimestamp,
+    revokedReason: z.string().min(1),
+  })
+  .strict();
+
+export type RevokedCertificateResourceParsed = z.infer<typeof RevokedCertificateResource>;
+
+/** ผล reissue (POST /admin/certificates/{id}/reissue) — ใบใหม่ + lineage ใบเดิม */
+export const ReissuedCertificateResource = z
+  .object({
+    newCertificate: IssuedCertificateResource,
+    oldCertificateId: z.string().uuid(),
+    oldStatus: z.literal("superseded"),
+    oldSupersededBy: z.string().uuid(),
+  })
+  .strict();
+
+export type ReissuedCertificateResourceParsed = z.infer<typeof ReissuedCertificateResource>;
+
+/** แถวคิวงานออกใบ (GET /admin/certificates/eligible) — holder_name คำนวณฝั่ง SQL */
+export const EligibleAttemptResource = z
+  .object({
+    attemptId: z.string().uuid(),
+    enrollmentId: z.string().uuid(),
+    userId: z.string().uuid(),
+    courseId: z.string().uuid(),
+    holderName: z.string().min(1),
+    scorePct: z.number().int().min(0).max(100).nullable(),
+    submittedAt: IsoTimestamp,
+  })
+  .strict();
+
+export type EligibleAttemptResourceParsed = z.infer<typeof EligibleAttemptResource>;
+
 export type CertificateIdParamsParsed = z.infer<typeof CertificateIdParams>;
 
 /**

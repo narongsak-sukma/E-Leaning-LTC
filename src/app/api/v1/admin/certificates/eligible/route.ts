@@ -12,12 +12,18 @@
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { jsonErrorResponse, jsonPageOk, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonErrorResponse,
+  jsonPageOk,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { auditCertificateEvent } from "@/lib/certificates/shared";
 import { AppError } from "@/lib/errors";
 import { listEligibleAttempts } from "@/lib/certificates/issue";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { EligibleAttemptResource } from "@/lib/schemas/v1/certificate";
 import { parsePageQuery } from "@/lib/schemas/v1/common";
 
 /** courseId เป็น optional uuid (filter ตามหลักสูตร) */
@@ -74,7 +80,16 @@ export async function GET(request: Request): Promise<NextResponse> {
       actorId: userId,
       requestId: options.requestId ?? null,
     });
-    return jsonPageOk(page, options);
+    // r6-L1: ขาออกตรวจ strict ทุกแถวก่อนตอบ — drift แถวเดียว = 503 ไม่ strip เงียบ
+    return jsonPageOk(
+      {
+        data: page.data.map((row) =>
+          parseOutgoingView(EligibleAttemptResource, row, "eligible_attempt_drift"),
+        ),
+        page: page.page,
+      },
+      options,
+    );
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);
   }

@@ -17,9 +17,9 @@
 import { z } from "zod";
 import { AppError } from "../../errors";
 
-// ─── path params ───
-export const AssessmentIdParams = z.object({ id: z.string().uuid() });
-export const AttemptIdParams = z.object({ id: z.string().uuid() });
+// ─── path params (r6-L1: strict — คีย์แปลกปลอมจาก Next params = ตกลง ERR-VAL-001) ───
+export const AssessmentIdParams = z.object({ id: z.string().uuid() }).strict();
+export const AttemptIdParams = z.object({ id: z.string().uuid() }).strict();
 
 export type AssessmentIdParamsParsed = z.infer<typeof AssessmentIdParams>;
 export type AttemptIdParamsParsed = z.infer<typeof AttemptIdParams>;
@@ -27,39 +27,49 @@ export type AttemptIdParamsParsed = z.infer<typeof AttemptIdParams>;
 // ─── §4 #7 — บันทึกคำตอบสอบทีละข้อ (autosave) ───
 // clientSavedAt = เวลานาฬิกา client — ใช้บันทึก/เทียบเท่านั้น เกณฑ์ตัดสินหมดเวลาคือ
 // expires_at ฝั่ง RPC save_answer (RPC ไม่รับค่านี้) · ตัวเลือก 1-10 ต่อข้อตาม §4 #7
-export const AnswerSaveRequest = z.object({
-  questionId: z.string().uuid(),
-  choiceIds: z.array(z.string().uuid()).min(1).max(10),
-  clientSavedAt: z.iso.datetime({ offset: true }),
-});
+// r6-L1: strict — คีย์แปลกปลอมใน body (โดยเฉพาะ session_id ที่แอบแถม — D20-B5:
+// session binding มาจาก JWT claim เท่านั้น) ต้อง ERR-VAL-001 ไม่ใช่ strip เงียบ
+export const AnswerSaveRequest = z
+  .object({
+    questionId: z.string().uuid(),
+    choiceIds: z.array(z.string().uuid()).min(1).max(10),
+    clientSavedAt: z.iso.datetime({ offset: true }),
+  })
+  .strict();
 
 export type AnswerSaveRequestParsed = z.infer<typeof AnswerSaveRequest>;
 
 // ─── contract jsonb ของ RPC start_attempt (0011_functions.sql — jsonb_build_object):
-//     {attempt_id, session_id, expires_at, question_count} (+takeover:true เมื่อ takeover) ───
-export const StartAttemptResult = z.object({
-  attempt_id: z.string().uuid(),
-  session_id: z.string().min(1),
-  expires_at: z.iso.datetime({ offset: true }),
-  question_count: z.number().int().min(1),
-  takeover: z.literal(true).optional(),
-});
+//     {attempt_id, session_id, expires_at, question_count} (+takeover:true เมื่อ takeover)
+//     r6-L1: strict — drift ของ jsonb ที่ RPC คืน = สัญญา DB เปลี่ยน ต้อง fail-closed ───
+export const StartAttemptResult = z
+  .object({
+    attempt_id: z.string().uuid(),
+    session_id: z.string().min(1),
+    expires_at: z.iso.datetime({ offset: true }),
+    question_count: z.number().int().min(1),
+    takeover: z.literal(true).optional(),
+  })
+  .strict();
 
 export type StartAttemptResultParsed = z.infer<typeof StartAttemptResult>;
 
 // ─── contract jsonb ของ RPC submit_attempt (0019 — PB-15: question_count = count(*)
 //     จริง + total_points แยก): ส่งซ้ำ = ผลเดิม + already_submitted:true (ไม่มี
-//     correct_count) — ทุกทางมี question_count/total_points ───
-export const SubmitAttemptResult = z.object({
-  attempt_id: z.string().uuid(),
-  status: z.enum(["passed", "failed"]),
-  score_pct: z.number().int().min(0).max(100),
-  passed: z.boolean(),
-  correct_count: z.number().int().min(0).optional(),
-  question_count: z.number().int().min(0),
-  total_points: z.number().int().min(0),
-  already_submitted: z.literal(true).optional(),
-});
+//     correct_count) — ทุกทางมี question_count/total_points
+//     r6-L1: strict — drift ของ jsonb ที่ RPC คืน = fail-closed ไม่ strip เงียบ ───
+export const SubmitAttemptResult = z
+  .object({
+    attempt_id: z.string().uuid(),
+    status: z.enum(["passed", "failed"]),
+    score_pct: z.number().int().min(0).max(100),
+    passed: z.boolean(),
+    correct_count: z.number().int().min(0).optional(),
+    question_count: z.number().int().min(0),
+    total_points: z.number().int().min(0),
+    already_submitted: z.literal(true).optional(),
+  })
+  .strict();
 
 export type SubmitAttemptResultParsed = z.infer<typeof SubmitAttemptResult>;
 
@@ -67,49 +77,64 @@ export type SubmitAttemptResultParsed = z.infer<typeof SubmitAttemptResult>;
 // content = โจทย์จาก learner_attempt_paper_view (0019): snapshot ตัด points/is_correct
 // ทุกชั้นแล้ว เหลือ {version,text,options:[{id,text}]} — options เรียง display order
 // อยู่แล้ว (start_attempt สร้าง snapshot ตามลำดับแสดงผล — 0011 L627-655 ไม่ต้องเรียงซ้ำ)
-export const ExamPaperContent = z.object({
-  version: z.number().int().min(1),
-  text: z.string().min(1),
-  options: z.array(z.object({ id: z.string().uuid(), text: z.string().min(1) })).min(1),
-});
+// r6-L1: strict ทุกชั้น (รวม option object ใน array — zod v4 parent .strict() ไม่ครอบ
+// nested) — mapper แถมฟิลด์แปลกปลอม (เช่น isCorrect ที่ option) ต้องโดน safeParse
+// ขาออกตีตก 503 ไม่ใช่ strip เงียบแล้วตอบ 201
+export const ExamPaperContent = z
+  .object({
+    version: z.number().int().min(1),
+    text: z.string().min(1),
+    options: z
+      .array(z.object({ id: z.string().uuid(), text: z.string().min(1) }).strict())
+      .min(1),
+  })
+  .strict();
 
 export type ExamPaperContentParsed = z.infer<typeof ExamPaperContent>;
 
-export const AttemptQuestionView = z.object({
-  questionId: z.string().uuid(),
-  seq: z.number().int().min(1),
-  selectedOptionIds: z.array(z.string().uuid()).nullable(),
-  answeredAt: z.iso.datetime({ offset: true }).nullable(),
-  content: ExamPaperContent,
-});
+export const AttemptQuestionView = z
+  .object({
+    questionId: z.string().uuid(),
+    seq: z.number().int().min(1),
+    selectedOptionIds: z.array(z.string().uuid()).nullable(),
+    answeredAt: z.iso.datetime({ offset: true }).nullable(),
+    content: ExamPaperContent,
+  })
+  .strict();
 
 export type AttemptQuestionViewParsed = z.infer<typeof AttemptQuestionView>;
 
 // ─── ขาออกของ POST /assessments/{id}/attempts (201 — หน้าต่างสอบ + ชุดข้อไร้เฉลย) ───
-export const AttemptStartView = z.object({
-  attemptId: z.string().uuid(),
-  status: z.literal("in_progress"),
-  deadlineAt: z.iso.datetime({ offset: true }),
-  serverTime: z.iso.datetime({ offset: true }),
-  questionCount: z.number().int().min(1),
-  questions: z.array(AttemptQuestionView).min(1),
-  takeover: z.literal(true).optional(),
-});
+// r6-L1: strict — คีย์เกินที่ top level = drift ของ route → 503 ไม่ strip เงียบ
+export const AttemptStartView = z
+  .object({
+    attemptId: z.string().uuid(),
+    status: z.literal("in_progress"),
+    deadlineAt: z.iso.datetime({ offset: true }),
+    serverTime: z.iso.datetime({ offset: true }),
+    questionCount: z.number().int().min(1),
+    questions: z.array(AttemptQuestionView).min(1),
+    takeover: z.literal(true).optional(),
+  })
+  .strict();
 
 export type AttemptStartViewParsed = z.infer<typeof AttemptStartView>;
 
 // ─── ขาออกของ POST /attempts/{id}/submit (200 — ผลตรวจทันที ตาม DCR-6 · 0019
 //     questionCount/totalPoints มีทุกทาง · correctCount เฉพาะส่งครั้งแรก) ───
-export const AttemptSubmitView = z.object({
-  attemptId: z.string().uuid(),
-  status: z.enum(["passed", "failed"]),
-  scorePct: z.number().int().min(0).max(100),
-  passed: z.boolean(),
-  questionCount: z.number().int().min(0),
-  totalPoints: z.number().int().min(0),
-  correctCount: z.number().int().min(0).optional(),
-  alreadySubmitted: z.literal(true).optional(),
-});
+// r6-L1: strict — drift ของ view ที่ route ประกอบ = 503 ไม่ strip เงียบ
+export const AttemptSubmitView = z
+  .object({
+    attemptId: z.string().uuid(),
+    status: z.enum(["passed", "failed"]),
+    scorePct: z.number().int().min(0).max(100),
+    passed: z.boolean(),
+    questionCount: z.number().int().min(0),
+    totalPoints: z.number().int().min(0),
+    correctCount: z.number().int().min(0).optional(),
+    alreadySubmitted: z.literal(true).optional(),
+  })
+  .strict();
 
 export type AttemptSubmitViewParsed = z.infer<typeof AttemptSubmitView>;
 
@@ -123,19 +148,22 @@ export const ATTEMPT_STATUSES = [
   "voided",
 ] as const;
 
-export const MyAttemptView = z.object({
-  id: z.string().uuid(),
-  assessmentId: z.string().uuid(),
-  attemptNo: z.number().int().min(1),
-  status: z.enum(ATTEMPT_STATUSES),
-  startedAt: z.iso.datetime({ offset: true }),
-  expiresAt: z.iso.datetime({ offset: true }),
-  submittedAt: z.iso.datetime({ offset: true }).nullable(),
-  scorePct: z.number().int().min(0).max(100).nullable(),
-  passed: z.boolean().nullable(),
-  questionCount: z.number().int().min(0),
-  correctCount: z.number().int().min(0).nullable(),
-});
+// r6-L1: strict — คอลัมน์แปลกปลอมจาก DB row = drift → 503 ไม่ strip เงียบ
+export const MyAttemptView = z
+  .object({
+    id: z.string().uuid(),
+    assessmentId: z.string().uuid(),
+    attemptNo: z.number().int().min(1),
+    status: z.enum(ATTEMPT_STATUSES),
+    startedAt: z.iso.datetime({ offset: true }),
+    expiresAt: z.iso.datetime({ offset: true }),
+    submittedAt: z.iso.datetime({ offset: true }).nullable(),
+    scorePct: z.number().int().min(0).max(100).nullable(),
+    passed: z.boolean().nullable(),
+    questionCount: z.number().int().min(0),
+    correctCount: z.number().int().min(0).nullable(),
+  })
+  .strict();
 
 export type MyAttemptViewParsed = z.infer<typeof MyAttemptView>;
 
@@ -143,91 +171,120 @@ export type MyAttemptViewParsed = z.infer<typeof MyAttemptView>;
 // NB: passPct เปิดตั้งแต่ 0019 (grant select (pass_pct) to authenticated — column grant
 // สะสม; selection ยังซ่อนตาม 0010 L709-713) — 0012 course_exam_summary เผย pass_pct
 // สาธารณะอยู่แล้ว จึงไม่ใช่การเปิดเพิ่ม
-export const AssessmentRulesView = z.object({
-  version: z.number().int().min(1),
-  passPct: z.number().int().min(1).max(100),
-  timeLimitMinutes: z.number().int().min(5).max(480),
-  questionCount: z.number().int().min(1),
-  maxAttempts: z.number().int().min(1),
-  attemptCooldownMinutes: z.number().int().min(0),
-  shuffleQuestions: z.boolean(),
-  shuffleOptions: z.boolean(),
-  requireCourseComplete: z.boolean(),
-  proctoringMode: z.enum(["none", "basic"]),
-  effectiveFrom: z.iso.datetime({ offset: true }),
-});
+// r6-L1: strict — คีย์เกินใน rules/detail = drift → 503 ไม่ strip เงียบ
+export const AssessmentRulesView = z
+  .object({
+    version: z.number().int().min(1),
+    passPct: z.number().int().min(1).max(100),
+    timeLimitMinutes: z.number().int().min(5).max(480),
+    questionCount: z.number().int().min(1),
+    maxAttempts: z.number().int().min(1),
+    attemptCooldownMinutes: z.number().int().min(0),
+    shuffleQuestions: z.boolean(),
+    shuffleOptions: z.boolean(),
+    requireCourseComplete: z.boolean(),
+    proctoringMode: z.enum(["none", "basic"]),
+    effectiveFrom: z.iso.datetime({ offset: true }),
+  })
+  .strict();
 
 export type AssessmentRulesViewParsed = z.infer<typeof AssessmentRulesView>;
 
-export const AssessmentDetailView = z.object({
-  id: z.string().uuid(),
-  courseId: z.string().uuid(),
-  code: z.string().min(1),
-  title: z.string().min(1),
-  description: z.string().nullable(),
-  isFinal: z.boolean(),
-  status: z.enum(["draft", "published", "closed", "archived"]),
-  publishedAt: z.iso.datetime({ offset: true }).nullable(),
-  rules: AssessmentRulesView,
-});
+export const AssessmentDetailView = z
+  .object({
+    id: z.string().uuid(),
+    courseId: z.string().uuid(),
+    code: z.string().min(1),
+    title: z.string().min(1),
+    description: z.string().nullable(),
+    isFinal: z.boolean(),
+    status: z.enum(["draft", "published", "closed", "archived"]),
+    publishedAt: z.iso.datetime({ offset: true }).nullable(),
+    rules: AssessmentRulesView,
+  })
+  .strict();
 
 export type AssessmentDetailViewParsed = z.infer<typeof AssessmentDetailView>;
 
 // ─── question_snapshot (jsonb ที่ start_attempt เขียนต่อข้อ — 0011_functions.sql):
 //     {question_id, version, text, options:[{id,text,is_correct,points}], points} ───
-export const AttemptQuestionSnapshot = z.object({
-  question_id: z.string().uuid(),
-  version: z.number().int().min(1),
-  text: z.string().min(1),
-  options: z.array(z.object({
-    id: z.string().uuid(),
+// r6-L1: strict ทุกชั้น — jsonb จาก DB มีคีย์นอกสัญญา = drift → 503 ไม่ strip เงียบ
+export const AttemptQuestionSnapshot = z
+  .object({
+    question_id: z.string().uuid(),
+    version: z.number().int().min(1),
     text: z.string().min(1),
-    is_correct: z.boolean(),
+    options: z
+      .array(
+        z
+          .object({
+            id: z.string().uuid(),
+            text: z.string().min(1),
+            is_correct: z.boolean(),
+            points: z.number().int().min(1),
+          })
+          .strict(),
+      )
+      .min(1),
     points: z.number().int().min(1),
-  })).min(1),
-  points: z.number().int().min(1),
-});
+  })
+  .strict();
 
 export type AttemptQuestionSnapshotParsed = z.infer<typeof AttemptQuestionSnapshot>;
 
 // ─── ขาออกของ GET /attempts/{id}/result — ส่งตาม learner_attempt_view เป๊ะ (BFF ไม่
 //     filter/เปิดเฉลยเอง) — คอลัมน์เฉลยเป็น null เมื่อ view ยังไม่เปิด (after_final_attempt) ───
-export const AttemptResultQuestionView = z.object({
-  questionId: z.string().uuid(),
-  seq: z.number().int().min(1),
-  selectedOptionIds: z.array(z.string().uuid()).nullable(),
-  answeredAt: z.iso.datetime({ offset: true }).nullable(),
-  isCorrect: z.boolean().nullable(),
-  pointsEarned: z.number().int().min(0).nullable(),
-  explanation: z.string().nullable(),
-  content: z.object({
-    version: z.number().int().min(1),
-    text: z.string().min(1),
-    points: z.number().int().min(1),
-    options: z.array(z.object({
-      id: z.string().uuid(),
-      text: z.string().min(1),
-      isCorrect: z.boolean(),
-      points: z.number().int().min(1),
-    })).min(1),
-  }).nullable(),
-});
+// r6-L1: strict ทุกชั้น (nested content + option ใน array) — คีย์เกิน = drift → 503
+export const AttemptResultQuestionView = z
+  .object({
+    questionId: z.string().uuid(),
+    seq: z.number().int().min(1),
+    selectedOptionIds: z.array(z.string().uuid()).nullable(),
+    answeredAt: z.iso.datetime({ offset: true }).nullable(),
+    isCorrect: z.boolean().nullable(),
+    pointsEarned: z.number().int().min(0).nullable(),
+    explanation: z.string().nullable(),
+    content: z
+      .object({
+        version: z.number().int().min(1),
+        text: z.string().min(1),
+        points: z.number().int().min(1),
+        options: z
+          .array(
+            z
+              .object({
+                id: z.string().uuid(),
+                text: z.string().min(1),
+                isCorrect: z.boolean(),
+                points: z.number().int().min(1),
+              })
+              .strict(),
+          )
+          .min(1),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 
 export type AttemptResultQuestionViewParsed = z.infer<typeof AttemptResultQuestionView>;
 
-export const AttemptResultView = z.object({
-  attemptId: z.string().uuid(),
-  assessmentId: z.string().uuid(),
-  attemptNo: z.number().int().min(1),
-  status: z.enum(ATTEMPT_STATUSES),
-  startedAt: z.iso.datetime({ offset: true }),
-  expiresAt: z.iso.datetime({ offset: true }),
-  submittedAt: z.iso.datetime({ offset: true }).nullable(),
-  scorePct: z.number().int().min(0).max(100).nullable(),
-  passed: z.boolean().nullable(),
-  questionCount: z.number().int().min(1),
-  questions: z.array(AttemptResultQuestionView).min(1),
-});
+// r6-L1: strict — คีย์เกินที่ top level = drift → 503 ไม่ strip เงียบ
+export const AttemptResultView = z
+  .object({
+    attemptId: z.string().uuid(),
+    assessmentId: z.string().uuid(),
+    attemptNo: z.number().int().min(1),
+    status: z.enum(ATTEMPT_STATUSES),
+    startedAt: z.iso.datetime({ offset: true }),
+    expiresAt: z.iso.datetime({ offset: true }),
+    submittedAt: z.iso.datetime({ offset: true }).nullable(),
+    scorePct: z.number().int().min(0).max(100).nullable(),
+    passed: z.boolean().nullable(),
+    questionCount: z.number().int().min(1),
+    questions: z.array(AttemptResultQuestionView).min(1),
+  })
+  .strict();
 
 export type AttemptResultViewParsed = z.infer<typeof AttemptResultView>;
 

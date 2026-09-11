@@ -171,3 +171,23 @@ describe("POST /admin/certificates — 201 + envelope", () => {
     expect(body.error.message).toBe(errorDefinition("ERR-NF-001").message);
   });
 });
+
+// r6-L1: ขาออกตรวจ strict — resource จาก lib มีคีย์นอกสัญญา = drift → 503 ไม่ strip เงียบ
+describe("POST /admin/certificates — outbound drift (r6-L1)", () => {
+  it("lib คืนคีย์แปลกปลอม (เช่น holder_email) → 503 ERR-SYS-002 issued_certificate_drift", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(issueCertificate).mockResolvedValue({ ...issued, holder_email: "x@y.z" } as never);
+    const res = await POST(postUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details["reason"]).toBe("issued_certificate_drift");
+  });
+
+  it("pdfMediaId ผิดชนิด (ไม่ใช่ uuid/null) → 503 เช่นกัน", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(issueCertificate).mockResolvedValue({ ...issued, pdfMediaId: "not-a-uuid" } as never);
+    const res = await POST(postUrl());
+    expect(res.status).toBe(503);
+  });
+});

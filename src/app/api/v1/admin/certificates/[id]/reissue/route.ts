@@ -11,11 +11,17 @@
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { jsonCreated, jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
+import {
+  jsonCreated,
+  jsonErrorResponse,
+  parseOutgoingView,
+  type JsonResponseOptions,
+} from "@/lib/api/response";
 import { AppError } from "@/lib/errors";
 import { reissueCertificate } from "@/lib/certificates/reissue";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
+import { ReissuedCertificateResource } from "@/lib/schemas/v1/certificate";
 
 /** :id ต้องเป็น uuid — ผิดรูป → ERR-VAL-001 (ไม่ไล่ DB ด้วย id ที่ไม่มีรูปแบบ) */
 function parseId(raw: string): string {
@@ -50,7 +56,11 @@ export async function POST(
       certificateId,
       requestId: options.requestId ?? null,
     });
-    return jsonCreated(result, options);
+    // r6-L1: ขาออกตรวจ strict ทุกชั้น (รวม newCertificate) ก่อนตอบ — drift → 503
+    return jsonCreated(
+      parseOutgoingView(ReissuedCertificateResource, result, "reissued_certificate_drift"),
+      options,
+    );
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);
   }

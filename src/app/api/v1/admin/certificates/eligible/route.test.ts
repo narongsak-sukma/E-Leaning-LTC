@@ -152,3 +152,29 @@ describe("GET eligible — query contract (§3.8 endpoint 82)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+// r6-L1: ขาออกตรวจ strict ทุกแถว — แถวเดียวมีคีย์นอกสัญญา = drift → 503 ไม่ strip เงียบ
+describe("GET eligible — outbound drift (r6-L1)", () => {
+  it("แถวเดียวมีคีย์แปลกปลอม (เช่น holder_email) → 503 ERR-SYS-002 eligible_attempt_drift", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(listEligibleAttempts).mockResolvedValue({
+      ...page,
+      data: [{ ...page.data[0]!, holder_email: "x@y.z" }],
+    } as never);
+    const res = await GET(getUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details["reason"]).toBe("eligible_attempt_drift");
+  });
+
+  it("scorePct เกิน 100 (ผิด domain) → 503 เช่นกัน", async () => {
+    mockAuth(["staff:registrar"]);
+    vi.mocked(listEligibleAttempts).mockResolvedValue({
+      ...page,
+      data: [{ ...page.data[0]!, scorePct: 150 }],
+    } as never);
+    const res = await GET(getUrl());
+    expect(res.status).toBe(503);
+  });
+});
