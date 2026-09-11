@@ -19,9 +19,12 @@ import { getConfig } from "@/lib/config";
 
 import {
   isExamAdminAssessmentStatus,
+  isExamAdminCertificateStatus,
   type ExamAdminAssessment,
   type ExamAdminAssessmentRuleSummary,
   type ExamAdminAssessmentStatus,
+  type ExamAdminCertificateRow,
+  type ExamAdminCertificateStatus,
   type ExamAdminEligibleAttempt,
   type ExamAdminQuestionBank,
 } from "./exam-admin.view";
@@ -436,4 +439,77 @@ export async function getEligibleAttempts(
   }
   parameters["limit"] = String(query.limit ?? 20);
   return loadPageOf(bffGet("/api/v1/admin/certificates/eligible", parameters), parseEligibleAttempt);
+}
+
+/* ─── ทะเบียนประกาศนียบัตร (Wave E · PB-20 — GET /admin/certificates) ───
+   ส่วนเพิ่มใหม่ล้วน (ไฟล์นี้หน้า admin อื่นใช้ร่วม — ห้ามแก้ของเดิม) */
+
+/** query ของ GET /admin/certificates — ทุกช่องเลือกได้ (undefined = ไม่ส่งพารามิเตอร์) */
+export interface AdminCertificatesQuery {
+  /** เลขที่ใบ (prefix) */
+  readonly certNo?: string | undefined;
+  /** รหัสตรวจสอบ (ตรงตัว) */
+  readonly verifyCode?: string | undefined;
+  readonly status?: ExamAdminCertificateStatus | undefined;
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
+}
+
+/**
+ * ตรวจแถวทะเบียนใบ (CertificateListRowResource ของ BFF) — ผิดรูป → null (fail-closed
+ * เหมือน parser อื่นของไฟล์นี้ · holderName ค่าว่างได้, ชนิดผิด = ทั้งแถวตก)
+ */
+function parseCertificateRow(raw: unknown): ExamAdminCertificateRow | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const id = requiredStringOf(raw, "id");
+  const certNo = requiredStringOf(raw, "certNo");
+  const verifyCode = requiredStringOf(raw, "verifyCode");
+  const status = isExamAdminCertificateStatus(raw["status"]) ? raw["status"] : null;
+  const issuedAtRaw = requiredStringOf(raw, "issuedAt");
+  const issuedAt = issuedAtRaw === null ? null : isoStringOf(issuedAtRaw);
+  const userId = requiredStringOf(raw, "userId");
+  const holderName = typeof raw["holderName"] === "string" ? raw["holderName"] : null;
+  const courseId = requiredStringOf(raw, "courseId");
+  const courseTitle = requiredStringOf(raw, "courseTitle");
+  if (
+    id === null ||
+    certNo === null ||
+    verifyCode === null ||
+    status === null ||
+    issuedAt === null ||
+    userId === null ||
+    holderName === null ||
+    courseId === null ||
+    courseTitle === null
+  ) {
+    return null;
+  }
+  return { id, certNo, verifyCode, status, issuedAt, userId, holderName, courseId, courseTitle };
+}
+
+/**
+ * GET /api/v1/admin/certificates — ทะเบียนใบที่ออกแล้ว + ค้นหา
+ * (สิทธิ์ role-gate ตรง staff:registrar/super_admin — D55-2; BFF บันทึก audit PII_ACCESS
+ * ให้เอง · 401/403 → kind "forbidden")
+ */
+export async function getAdminCertificates(
+  query: AdminCertificatesQuery = {},
+): Promise<ExamAdminResult<ExamAdminPage<ExamAdminCertificateRow>>> {
+  const parameters: Record<string, string> = {};
+  if (query.certNo !== undefined && query.certNo.length > 0) {
+    parameters["cert_no"] = query.certNo;
+  }
+  if (query.verifyCode !== undefined && query.verifyCode.length > 0) {
+    parameters["verify_code"] = query.verifyCode;
+  }
+  if (query.status !== undefined && query.status.length > 0) {
+    parameters["status"] = query.status;
+  }
+  if (query.cursor !== undefined && query.cursor.length > 0) {
+    parameters["cursor"] = query.cursor;
+  }
+  parameters["limit"] = String(query.limit ?? 20);
+  return loadPageOf(bffGet("/api/v1/admin/certificates", parameters), parseCertificateRow);
 }

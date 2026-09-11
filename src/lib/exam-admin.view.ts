@@ -223,3 +223,49 @@ const VALIDATION_FIELD_LABEL_TH: Record<string, string> = {
 export function validationFieldLabels(fields: readonly string[]): string[] {
   return fields.map((field) => VALIDATION_FIELD_LABEL_TH[field] ?? field);
 }
+
+/* ─── ทะเบียนประกาศนียบัตร (Wave E · PB-20 — GET /admin/certificates) ───
+   ส่วนเพิ่มใหม่ล้วน (ไฟล์นี้หน้าอื่นใช้ร่วม — ห้ามแก้ของเดิม) */
+
+/** สถานะประกาศนียบัตร — enum certificate_status (0001_extensions L122) */
+export type ExamAdminCertificateStatus = "valid" | "revoked" | "superseded";
+
+/** ตรวจสถานะจาก BFF — ค่านอก enum = drift (parser ต้อง fail-closed) */
+export function isExamAdminCertificateStatus(value: unknown): value is ExamAdminCertificateStatus {
+  return value === "valid" || value === "revoked" || value === "superseded";
+}
+
+/** แถวทะเบียนใบ (CertificateListRowResource ของ BFF — snapshot ของวันออกใบ ไม่ live-join) */
+export interface ExamAdminCertificateRow {
+  readonly id: string;
+  readonly certNo: string;
+  readonly verifyCode: string;
+  readonly status: ExamAdminCertificateStatus;
+  readonly issuedAt: string;
+  readonly userId: string;
+  readonly holderName: string;
+  readonly courseId: string;
+  readonly courseTitle: string;
+}
+
+/** ป้ายสถานะภาษาไทย (แหล่งเดียว — หน้าอ้างจากที่นี่) */
+export const CERT_STATUS_LABEL_TH: Record<ExamAdminCertificateStatus, string> = {
+  valid: "ใช้งาน",
+  revoked: "เพิกถอนแล้ว",
+  superseded: "ถูกแทนด้วยใบใหม่",
+};
+
+/** โทน badge ต่อสถานะ (คู่กับ StatusBadge — DESIGN-SYSTEM §5.6) */
+export const CERT_STATUS_TONE: Record<ExamAdminCertificateStatus, "success" | "danger" | "neutral"> = {
+  valid: "success",
+  revoked: "danger",
+  superseded: "neutral",
+};
+
+/** ตัวเลือกของ select ค้นหาตามสถานะ (ค่าว่าง = ทุกสถานะ) */
+export const CERT_STATUS_OPTIONS: ReadonlyArray<{ value: ExamAdminCertificateStatus | ""; label: string }> = [
+  { value: "", label: "ทุกสถานะ" },
+  { value: "valid", label: "ใช้งาน" },
+  { value: "revoked", label: "เพิกถอนแล้ว" },
+  { value: "superseded", label: "ถูกแทนด้วยใบใหม่" },
+];

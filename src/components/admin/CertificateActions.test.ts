@@ -1,15 +1,16 @@
 /**
  * unit tests — CertificateActions logic (D-7)
- * ครอบ: parsers fail-closed ทั้ง 3 resource · certIssueReducer · certManageReducer
- * (actionKind กำหนดโมดัลที่เปิด · สถานะ error/success คงอยู่จนกดปิด) ·
- * เกณฑ์เหตุผลเพิกถอน · uuid guard · หัวข้อ/ป้ายปุ่มยืนยันตาม phase
+ * ครอบ: parsers fail-closed ทั้ง 3 resource · certIssueReducer · certRowActionReducer
+ * (Wave E PB-20 — ปุ่มเพิกถอน/ออกใบแทนต่อแถวทะเบียน · actionKind กำหนดโมดัลที่เปิด ·
+ * สถานะ error/success คงอยู่จนกดปิด) · เกณฑ์เหตุผลเพิกถอน · uuid guard ·
+ * หัวข้อ/ป้ายปุ่มยืนยันตาม phase
  */
 import { describe, expect, it } from "vitest";
 
 import {
-  CERT_MANAGE_DEFAULT,
   certIssueReducer,
-  certManageReducer,
+  certRowActionReducer,
+  CERT_ROW_ACTION_DEFAULT,
   isUuid,
   issueConfirmLabelOf,
   issueTitleOf,
@@ -168,71 +169,67 @@ describe("certIssueReducer", () => {
   });
 });
 
-describe("certManageReducer", () => {
-  it("REQUEST_REVOKE ตั้ง actionKind revoke — โมดัลเพิกถอนคือโมดัลเดียวที่เปิด", () => {
-    let state = certManageReducer(CERT_MANAGE_DEFAULT, { type: "TYPE_CERT_ID", value: "x" });
-    state = certManageReducer(state, { type: "TYPE_REASON", value: "เหตุผลเพิกถอนใบนี้" });
-    state = certManageReducer(state, { type: "REQUEST_REVOKE" });
-    expect(state.phase).toBe("revoking");
+describe("certRowActionReducer — ปุ่มเพิกถอน/ออกใบแทนต่อแถว (PB-20)", () => {
+  it("REQUEST_REVOKE ตั้ง phase confirming + actionKind revoke และล้างเหตุผลเดิม", () => {
+    const state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REVOKE" });
+    expect(state.phase).toBe("confirming");
     expect(state.actionKind).toBe("revoke");
+    expect(state.reason).toBe("");
+    expect(state.message).toBeNull();
   });
 
-  it("TYPE_REASON แก่ได้ทั้ง idle และ revoking (กรอกเหตุผลในโมดัล) แต่ห้ามช่วงส่ง", () => {
-    let state = certManageReducer(CERT_MANAGE_DEFAULT, {
-      type: "TYPE_REASON",
-      value: "เหตุผลเบื้องต้น",
-    });
-    expect(state.reasonInput).toBe("เหตุผลเบื้องต้น");
-    state = certManageReducer(state, { type: "REQUEST_REVOKE" });
-    state = certManageReducer(state, { type: "TYPE_REASON", value: "เหตุผลฉบับแก้ไขในโมดัล" });
-    expect(state.phase).toBe("revoking");
-    expect(state.reasonInput).toBe("เหตุผลฉบับแก้ไขในโมดัล");
-    state = certManageReducer(state, { type: "SUBMIT" });
-    const frozen = certManageReducer(state, { type: "TYPE_REASON", value: "แอบแก้กลางคัน" });
-    expect(frozen.reasonInput).toBe("เหตุผลฉบับแก้ไขในโมดัล");
-  });
-
-  it("REQUEST_REISSUE ตั้ง actionKind reissue และล้างข้อความ/ผลลัพธ์เดิม", () => {
-    const state = certManageReducer(CERT_MANAGE_DEFAULT, { type: "REQUEST_REISSUE" });
-    expect(state.phase).toBe("reissuing");
+  it("REQUEST_REISSUE ตั้ง actionKind reissue — ไม่มีช่องเหตุผล", () => {
+    const state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REISSUE" });
+    expect(state.phase).toBe("confirming");
     expect(state.actionKind).toBe("reissue");
   });
 
-  it("TYPE_* แก้ input ได้เฉพาะตอน idle — กันแก้กลางคัน", () => {
-    const busy = certManageReducer(CERT_MANAGE_DEFAULT, { type: "REQUEST_REVOKE" });
-    const frozen = certManageReducer(busy, { type: "TYPE_CERT_ID", value: "เปลี่ยนไม่ได้" });
-    expect(frozen.certIdInput).toBe("");
+  it("REQUEST_* ตอนไม่ idle ไม่เปลี่ยนสถานะ (ปุ่ม disabled กันอยู่แล้ว แต่ reducer กันเองด้วย)", () => {
+    const busy = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REVOKE" });
+    const frozen = certRowActionReducer(busy, { type: "REQUEST_REISSUE" });
+    expect(frozen.actionKind).toBe("revoke");
   });
 
-  it("SUBMIT → submitting; RESOLVE_SUCCESS เก็บใบใหม่เฉพาะผล reissue", () => {
-    const issued = parseIssuedCertificateView(makeIssued());
-    expect(issued).not.toBeNull();
-    if (issued === null) {
-      return;
-    }
-    let state = certManageReducer(CERT_MANAGE_DEFAULT, { type: "REQUEST_REISSUE" });
-    state = certManageReducer(state, { type: "SUBMIT" });
+  it("TYPE_REASON แก้ได้เฉพาะช่วง confirming ของ revoke — ช่วงส่งห้ามแก้กลางคัน", () => {
+    let state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REVOKE" });
+    state = certRowActionReducer(state, { type: "TYPE_REASON", value: "เหตุผลเบื้องต้น" });
+    expect(state.reason).toBe("เหตุผลเบื้องต้น");
+    state = certRowActionReducer(state, { type: "SUBMIT" });
+    const frozen = certRowActionReducer(state, { type: "TYPE_REASON", value: "แอบแก้กลางคัน" });
+    expect(frozen.reason).toBe("เหตุผลเบื้องต้น");
+    const reissueConfirm = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REISSUE" });
+    const untouched = certRowActionReducer(reissueConfirm, { type: "TYPE_REASON", value: "ไม่มีช่องนี้" });
+    expect(untouched.reason).toBe("");
+  });
+
+  it("SUBMIT → submitting; RESOLVE_SUCCESS เก็บ certNo ผลลัพธ์", () => {
+    let state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REISSUE" });
+    state = certRowActionReducer(state, { type: "SUBMIT" });
     expect(state.phase).toBe("submitting");
-    state = certManageReducer(state, {
-      type: "RESOLVE_SUCCESS",
-      view: { newCertificate: issued, oldCertificateId: "x", oldStatus: "superseded", oldSupersededBy: "y" },
-    });
+    state = certRowActionReducer(state, { type: "RESOLVE_SUCCESS", certNo: "CERT-2569-000002" });
     expect(state.phase).toBe("success");
-    expect(state.issuedView?.certNo).toBe("CERT-2569-000001");
-    state = certManageReducer(state, { type: "RESOLVE_SUCCESS", view: null });
-    expect(state.phase).toBe("success");
-    expect(state.issuedView).not.toBeNull();
+    expect(state.resultCertNo).toBe("CERT-2569-000002");
   });
 
-  it("REJECT ต้องมาจาก submitting เท่านั้น และ CLOSE รีเซ็ตทั้งแผง", () => {
-    let state = certManageReducer(CERT_MANAGE_DEFAULT, { type: "REQUEST_REISSUE" });
-    state = certManageReducer(state, { type: "SUBMIT" });
-    state = certManageReducer(state, { type: "REJECT", message: "ล้มเหลว" });
+  it("RESOLVE_SUCCESS ตอนไม่ submitting ไม่ถูกต้อง → สถานะคงเดิม", () => {
+    const state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, {
+      type: "RESOLVE_SUCCESS",
+      certNo: "CERT-2569-000003",
+    });
+    expect(state.phase).toBe("idle");
+    expect(state.resultCertNo).toBeNull();
+  });
+
+  it("REJECT ต้องมาจาก submitting เท่านั้น และ CLOSE รีเซ็ตเต็ม", () => {
+    let state = certRowActionReducer(CERT_ROW_ACTION_DEFAULT, { type: "REQUEST_REVOKE" });
+    state = certRowActionReducer(state, { type: "TYPE_REASON", value: "เหตุผลเพิกถอนครบถ้วน" });
+    state = certRowActionReducer(state, { type: "SUBMIT" });
+    state = certRowActionReducer(state, { type: "REJECT", message: "ล้มเหลว" });
     expect(state.phase).toBe("error");
     expect(state.message).toBe("ล้มเหลว");
-    expect(state.actionKind).toBe("reissue");
-    const reset = certManageReducer(state, { type: "CLOSE" });
-    expect(reset).toEqual(CERT_MANAGE_DEFAULT);
+    expect(state.actionKind).toBe("revoke");
+    const reset = certRowActionReducer(state, { type: "CLOSE" });
+    expect(reset).toEqual(CERT_ROW_ACTION_DEFAULT);
   });
 });
 
@@ -248,8 +245,10 @@ describe("issueTitleOf / issueConfirmLabelOf / manageTitleOf / manageConfirmLabe
 
   it("ป้ายปุ่มยืนยัน: submitting บอกว่ากำลังทำงาน, error/success เป็นปุ่มปิด", () => {
     expect(issueConfirmLabelOf("submitting")).toContain("กำลัง");
-    expect(manageConfirmLabelOf("submitting")).toContain("กำลัง");
+    expect(manageConfirmLabelOf("submitting", "revoke")).toContain("กำลัง");
+    expect(manageConfirmLabelOf("submitting", "reissue")).toContain("กำลัง");
     expect(issueConfirmLabelOf("error")).toBe("ปิด");
-    expect(manageConfirmLabelOf("success")).toBe("ปิด");
+    expect(manageConfirmLabelOf("success", "revoke")).toBe("ปิด");
+    expect(manageConfirmLabelOf("success", "reissue")).toBe("ปิด");
   });
 });
