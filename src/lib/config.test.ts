@@ -1,10 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/supabase/server", () => ({ createSupabaseServiceRoleClient: vi.fn() }));
+
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import {
   loadConfig,
   getConfig,
   ConfigError,
   PUBLIC_SERVICE_ROLE_BAN,
   PENDING_CONFIRMATIONS,
+  FEATURE_FLAG_KEYS,
+  getFeatureFlagEnabled,
+  type FeatureFlagKey,
 } from "./config";
 
 const BASE_ENV: Record<string, string> = {
@@ -252,5 +259,74 @@ describe("getConfig — singleton ต่อ runtime", () => {
         delete process.env[key];
       }
     }
+  });
+});
+
+describe("getFeatureFlagEnabled — อ่าน feature flag จาก DB (0026 · D55-7 · CRT-008)", () => {
+  /**
+   * builder จำลอง service client ตาม chain ที่ getFeatureFlagEnabled ใช้:
+   * from("feature_flags") → select("enabled") → eq("key", key) → maybeSingle()
+   */
+  function flagClient(spec: { data: unknown; error: Record<string, unknown> | null }) {
+    const maybeSingle = vi.fn(async () => ({ data: spec.data, error: spec.error }));
+    const eq = vi.fn(() => ({ maybeSingle }));
+    const select = vi.fn(() => ({ eq }));
+    const from = vi.fn(() => ({ select }));
+    vi.mocked(createSupabaseServiceRoleClient).mockReturnValue({ from } as never);
+    return { from, select, eq, maybeSingle };
+  }
+
+  beforeEach(() => {
+    vi.mocked(createSupabaseServiceRoleClient).mockReset();
+  });
+
+  it("FEATURE_FLAG_KEYS มีคีย์ seed ของ 0026 ครบ ('cert_auto_issue')", () => {
+    expect(FEATURE_FLAG_KEYS).toContain("cert_auto_issue");
+    // key นอก union กันที่ compile-time แล้ว — ยืนยันคีย์ใช้ได้จริงตามชนิด
+    const key: FeatureFlagKey = "cert_auto_issue";
+    expect(FEATURE_FLAG_KEYS).toContain(key);
+  });
+
+  it("enabled=true → true (query ถูกตาราง/คอลัมน์/key)", async () => {
+    const { from, select, eq } = flagClient({ data: { enabled: true }, error: null });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(true);
+    expect(from).toHaveBeenCalledWith("feature_flags");
+    expect(select).toHaveBeenCalledWith("enabled");
+    expect(eq).toHaveBeenCalledWith("key", "cert_auto_issue");
+  });
+
+  it("enabled=false → false", async () => {
+    flagClient({ data: { enabled: false }, error: null });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(false);
+  });
+
+  it("ไม่มีแถว (data null ไม่มี error) → false", async () => {
+    flagClient({ data: null, error: null });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(false);
+  });
+
+  it("client คืน error → false (fail-closed ไม่ throw)", async () => {
+    flagClient({ data: null, error: { message: "rls denied", code: "42501" } });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(false);
+  });
+
+  it("enabled ไม่ใช่ boolean (drift สัญญา DB) → false", async () => {
+    flagClient({ data: { enabled: "true" }, error: null });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(false);
+  });
+
+  it("client throw (เช่น network ล้ม) → false (ไม่ throw ออกนอกฟังก์ชัน)", async () => {
+    vi.mocked(createSupabaseServiceRoleClient).mockImplementation(() => {
+      throw new Error("network down");
+    });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(false);
+  });
+
+  it("เรียกซ้ำไม่ cache — สร้าง client ใหม่ทุกครั้งและได้ค่าสดตาม DB", async () => {
+    flagClient({ data: { enabled: true }, error: null });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(true);
+    flagClient({ data: { enabled: false }, error: null });
+    await expect(getFeatureFlagEnabled("cert_auto_issue")).resolves.toBe(false);
+    expect(createSupabaseServiceRoleClient).toHaveBeenCalledTimes(2);
   });
 });

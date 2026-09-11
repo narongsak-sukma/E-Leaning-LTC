@@ -13,6 +13,7 @@
 // lib/supabase/server.ts / lib/auth/session.ts)
 import "server-only";
 import { z } from "zod";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 
 const requiredString = z.string().trim().min(1);
 const optionalString = z.string().trim().min(1).optional();
@@ -332,4 +333,49 @@ let cachedConfig: AppConfig | null = null;
 export function getConfig(): AppConfig {
   cachedConfig ??= loadConfig();
   return cachedConfig;
+}
+
+// — Feature flags (migration 0026 · D55-7 · CRT-008) ————————————————————————
+
+/**
+ * คีย์ feature flag ที่ BFF รู้จัก — ตรงกับ seed ของ migration 0026
+ * (`cert_auto_issue` — CRT-008: ธงเปิด/ปิดการออกใบอัตโนมัติแบบ async scan โดย
+ * cron ทุก 2 นาที · D55-7 ตัดสินแล้วว่าไม่มี hook หลัง submit) — union นี้บังคับ
+ * ที่ compile-time: ผู้เรียก getFeatureFlagEnabled ใช้ได้เฉพาะคีย์ที่ประกาศไว้
+ */
+export const FEATURE_FLAG_KEYS = ["cert_auto_issue"] as const;
+
+export type FeatureFlagKey = (typeof FEATURE_FLAG_KEYS)[number];
+
+/**
+ * อ่านสถานะ feature flag จากตาราง `feature_flags` (migration 0026 — source of
+ * truth ฝั่ง DB · BFF อ่านอย่างเดียว ไม่มี mutation ตามขอบเขต E-6)
+ *
+ * - อ่านผ่าน service-role client เท่านั้น — RLS ของตารางนี้ fail-closed ต่อ
+ *   anon/authenticated (0026 revoke all + ไม่มี policy ของกลุ่มนั้น) เหลือให้
+ *   service_role ผ่าน BFF และ cron (policy app_owner) เท่านั้น
+ * - **fail-closed คืน false ทุกกรณีผิดปกติ** — ไม่มีแถว (maybeSingle ได้ data
+ *   null โดยไม่มี error), error ใด ๆ, หรือ enabled ไม่ใช่ boolean (สัญญา DB
+ *   เพี้ยน): flag default ปิด และผู้เรียกเป็น surface เสริม (หน้า admin) ต้องไม่
+ *   พัง จึงห้าม throw ออกนอกฟังก์ชัน — false = ไม่ปลุก job ออกใบอัตโนมัติ ปลอดภัยกว่าเสมอ
+ * - ไม่ cache — สร้าง client ใหม่ทุกครั้ง เพื่อให้เห็นค่าสดหลัง admin สลับ flag
+ * - ไม่มี log — lib layer นี้ไม่แนบ logger (ไม่มี PII ใน query นี้อยู่แล้ว)
+ */
+export async function getFeatureFlagEnabled(key: FeatureFlagKey): Promise<boolean> {
+  try {
+    const client = createSupabaseServiceRoleClient();
+    const res = await client.from("feature_flags").select("enabled").eq("key", key).maybeSingle();
+    if (res.error !== null || res.data === null) {
+      return false;
+    }
+    // ชนิดเพี้ยน = drift ของสัญญา DB — ถือว่า flag ปิด ไม่ coerce เงียบ ๆ
+    // (fail-closed แบบเดียวกับการตรวจแถว RPC ใน lib/certificates)
+    if (typeof res.data.enabled !== "boolean") {
+      return false;
+    }
+    return res.data.enabled;
+  } catch {
+    // client/เครือข่ายล้มระหว่างทาง — flag ปิด (fail-closed) ไม่ throw ต่อ
+    return false;
+  }
 }
