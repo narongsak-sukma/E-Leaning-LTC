@@ -17,6 +17,8 @@ import {
   parseAdminExam,
   QuestionBankCreateBody,
   QuestionBankCreateResult,
+  QuestionBankResource,
+  QuestionCreatedRef,
   QuestionOptionInput,
   QuestionPatchBody,
   QuestionPatchParams,
@@ -297,5 +299,75 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
   it("enum ตรง migration จริง — assessment_status ไม่มี 'review' · question_status 3 ค่า", () => {
     expect(ADMIN_ASSESSMENT_STATUSES.includes("review" as never)).toBe(false);
     expect(ADMIN_QUESTION_STATUSES).toEqual(["draft", "active", "retired"]);
+  });
+});
+
+describe("r5-K1: resource ขาออก strict ทุกชั้น — ฟิลด์แปลกปลอม (เช่น is_correct หลุด) ต้อง fail ไม่ใช่ strip เงียบแล้วตอบ 200", () => {
+  const validBank = {
+    id: "b0000000-0000-4000-8000-000000000001",
+    code: "BANK-01",
+    name: "ธนาคารข้อสอบ",
+    description: null,
+    courseId: null,
+    categoryId: null,
+    isActive: true,
+    questionCount: 5,
+    createdAt: "2026-09-01T00:00:00+00:00",
+  };
+  const validOption = {
+    id: "e0000000-0000-4000-8000-000000000001",
+    optionText: "ตัวเลือกก",
+    sortOrder: 0,
+  };
+  const validQuestion = {
+    id: "d0000000-0000-4000-8000-000000000001",
+    bankId: validBank.id,
+    type: "single_choice" as const,
+    difficulty: "medium" as const,
+    questionText: "โจทย์",
+    explanation: null,
+    points: 1,
+    status: "draft" as const,
+    tags: [],
+    version: 1,
+    createdAt: "2026-09-01T00:00:00+00:00",
+    options: [validOption],
+  };
+  const validCreatedRef = {
+    id: "d0000000-0000-4000-8000-000000000001",
+    type: "single_choice" as const,
+    questionText: "โจทย์",
+    points: 1,
+  };
+
+  it("QuestionResource — แถวถูกผ่าน · คีย์เกินระดับบน (is_correct) → fail · nested option มี isCorrect → fail", () => {
+    expect(QuestionResource.safeParse(validQuestion).success).toBe(true);
+    expect(QuestionResource.safeParse({ ...validQuestion, is_correct: true }).success).toBe(false);
+    expect(
+      QuestionResource.safeParse({ ...validQuestion, options: [{ ...validOption, isCorrect: true }] })
+        .success,
+    ).toBe(false);
+  });
+
+  it("QuestionBankResource — แถวถูกผ่าน · คีย์เกิน (เช่น owner_email รั่ว) → fail", () => {
+    expect(QuestionBankResource.safeParse(validBank).success).toBe(true);
+    expect(QuestionBankResource.safeParse({ ...validBank, owner_email: "x@y.z" }).success).toBe(false);
+  });
+
+  it("QuestionCreatedRef — แถวถูกผ่าน · คีย์เกิน isCorrect → fail", () => {
+    expect(QuestionCreatedRef.safeParse(validCreatedRef).success).toBe(true);
+    expect(QuestionCreatedRef.safeParse({ ...validCreatedRef, isCorrect: true }).success).toBe(false);
+  });
+
+  it("QuestionBankCreateResult — ครบถูกผ่าน · คีย์เกินที่ bank หรือที่ questions[i] → fail ทั้งคู่", () => {
+    const valid = { ...validBank, questions: [validCreatedRef] };
+    expect(QuestionBankCreateResult.safeParse(valid).success).toBe(true);
+    expect(QuestionBankCreateResult.safeParse({ ...valid, owner_email: "x@y.z" }).success).toBe(false);
+    expect(
+      QuestionBankCreateResult.safeParse({
+        ...validBank,
+        questions: [{ ...validCreatedRef, isCorrect: true }],
+      }).success,
+    ).toBe(false);
   });
 });

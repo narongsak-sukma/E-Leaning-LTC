@@ -828,11 +828,16 @@ begin
   if auth.uid() is null then
     raise exception 'ต้องเข้าสู่ระบบก่อนใช้บริการนี้ (ERR-AUTH-001|auth_required)';
   end if;
+  -- 0019-r5 (K2): ถือล็อกแถวตั้งแต่อ่าน — เดิมสอง TX แข่งกันอ่าน version เดียวกัน
+  -- (เช่น 7) แล้ว UPDATE อนุกรมเป็น 8/9 แต่ audit/return ทั้งคู่อ้าง v_version+1 = 8
+  -- (snapshot เก่า) → for update ที่ select แรกทำให้ read→bump→audit เป็นอนุกรม
+  -- บนแถวเดียว + ด้านล่างเอาเลขจริงจาก UPDATE ... RETURNING แทนการคำนวณเอง
   select q.status, q.version, qb.created_by
     into v_status, v_version, v_owner
   from public.questions q
   join public.question_banks qb on qb.id = q.bank_id
-  where q.id = p_question_id and q.bank_id = p_bank_id;
+  where q.id = p_question_id and q.bank_id = p_bank_id
+  for update of q;
   if not found then
     raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|question_not_found)';
   end if;
@@ -924,15 +929,18 @@ begin
                          else q.tags
                        end,
       version       = q.version + 1
-  where q.id = p_question_id;
+  where q.id = p_question_id
+  returning q.version into v_version;
   -- 0019-r4 (H1): audit คู่ mutation ใน TX เดียว (D12-8) — QB_QUESTION_UPDATE ตาม
   -- registry AUDIT §2.1 L67 (context = question_id, version) · actor derive จาก
   -- auth.uid() ภายใน internal fn (แบบเดียวกับ EXAM_SUBMIT ของ submit_attempt)
+  -- 0019-r5 (K2): version ใน audit/return = เลขจริงจาก RETURNING (เห็นแถวหลัง
+  -- UPDATE) ไม่ใช่ v_version เดิม + 1 — เท่ากับที่ commit เสมอแม้มีคิวแข่ง
   perform public.append_audit_event_internal(
     'QB_QUESTION_UPDATE', 'question', p_question_id::text, null, null,
-    jsonb_build_object('question_id', p_question_id, 'version', v_version + 1),
+    jsonb_build_object('question_id', p_question_id, 'version', v_version),
     null, null, null);
-  return jsonb_build_object('question_id', p_question_id, 'version', v_version + 1);
+  return jsonb_build_object('question_id', p_question_id, 'version', v_version);
 end;
 $fn$;
 alter function public.admin_update_question(uuid, uuid, jsonb, jsonb) owner to app_owner;

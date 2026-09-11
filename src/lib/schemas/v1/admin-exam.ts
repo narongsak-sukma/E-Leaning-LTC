@@ -216,7 +216,7 @@ export const QuestionOptionView = z.object({
   id: z.uuid(),
   optionText: z.string(),
   sortOrder: z.number().int(),
-});
+}).strict();
 
 export type QuestionOptionViewParsed = z.infer<typeof QuestionOptionView>;
 
@@ -237,7 +237,7 @@ export const QuestionResource = z.object({
   version: z.number().int().min(1),
   createdAt: IsoTimestamp,
   options: z.array(QuestionOptionView),
-});
+}).strict();
 
 export type QuestionResourceParsed = z.infer<typeof QuestionResource>;
 
@@ -288,7 +288,7 @@ export const QuestionBankResource = z.object({
   isActive: z.boolean(),
   questionCount: z.number().int().min(0),
   createdAt: IsoTimestamp,
-});
+}).strict();
 
 export type QuestionBankResourceParsed = z.infer<typeof QuestionBankResource>;
 
@@ -298,14 +298,18 @@ export const QuestionCreatedRef = z.object({
   type: z.enum(ADMIN_QUESTION_TYPES),
   questionText: z.string(),
   points: z.number().int().min(1),
-});
+}).strict();
 
 export type QuestionCreatedRefParsed = z.infer<typeof QuestionCreatedRef>;
 
-/** response ของ POST /admin/question-banks — bank + ข้อสอบเริ่มต้นที่สร้างสำเร็จ */
+/**
+ * response ของ POST /admin/question-banks — bank + ข้อสอบเริ่มต้นที่สร้างสำเร็จ
+ * r5-K1: สืบทอด strict จาก QuestionBankResource (zod extend คง unknown-keys
+ * นโยบายของฐาน) — ขาออกทุกชั้นรวม nested ต้อง strict ไม่ strip ฟิลด์แปลกปลอมเงียบ
+ */
 export const QuestionBankCreateResult = QuestionBankResource.extend({
   questions: z.array(QuestionCreatedRef),
-});
+}).strict();
 
 export type QuestionBankCreateResultParsed = z.infer<typeof QuestionBankCreateResult>;
 
