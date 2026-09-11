@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { AdminApiError } from "@/lib/exam-admin.client";
 import {
   certIssueReducer,
   certRowActionReducer,
@@ -21,6 +22,7 @@ import {
   parseReissuedCertificateView,
   REVOKE_REASON_MIN_LENGTH,
   revokeReasonValid,
+  shouldRefreshAfterError,
   type IssuedCertificateView,
 } from "./CertificateActions";
 
@@ -230,6 +232,20 @@ describe("certRowActionReducer — ปุ่มเพิกถอน/ออก�
     expect(state.actionKind).toBe("revoke");
     const reset = certRowActionReducer(state, { type: "CLOSE" });
     expect(reset).toEqual(CERT_ROW_ACTION_DEFAULT);
+  });
+});
+
+describe("shouldRefreshAfterError — รีเฟรชตอนปิดโมดัล (MINOR-6)", () => {
+  it("409/404 → true — สถานะแถวเปลี่ยนที่เซิร์ฟเวอร์ ข้อความสัญญาว่าจะรีเฟรช", () => {
+    expect(shouldRefreshAfterError(new AdminApiError("ERR-CONFLICT", 409, "สถานะเปลี่ยน"))).toBe(true);
+    expect(shouldRefreshAfterError(new AdminApiError("ERR-NF-001", 404, "ไม่พบ"))).toBe(true);
+  });
+
+  it("403/400/error ทั่วไป/null → false — ไม่สัญญารีเฟรช ไม่ชน rate โดยไม่จำเป็น", () => {
+    expect(shouldRefreshAfterError(new AdminApiError("ERR-RBAC-001", 403, "ไม่มีสิทธิ์"))).toBe(false);
+    expect(shouldRefreshAfterError(new AdminApiError("ERR-VAL-001", 400, "ผิดรูป", ["reason"]))).toBe(false);
+    expect(shouldRefreshAfterError(new Error("network"))).toBe(false);
+    expect(shouldRefreshAfterError(null)).toBe(false);
   });
 });
 

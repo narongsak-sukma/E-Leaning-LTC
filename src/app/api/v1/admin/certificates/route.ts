@@ -13,7 +13,8 @@
  * - role-gate ตรง (D55-2): staff:registrar / super_admin เท่านั้น — ไม่สร้าง permission
  *   ใหม่ ไม่ยืม certificate:issue (requireCertificateRegistryRole — list คือการอ่านทะเบียน)
  * - rate STAFF_WRITE (§5 — กลุ่ม canonical ของ /admin/* · ไม่มีกลุ่ม STAFF_READ ให้ใช้)
- * - query strict-zod: after_issued_at/after_id (keyset ตรง) · cert_no (prefix) ·
+ * - query strict-zod: after_issued_at/after_id (keyset ตรง — ต้องมาเป็นคู่ ครึ่งเดี่ยว
+ *   → 400 ERR-VAL-001) · cert_no (prefix) ·
  *   verify_code (ตรงตัว) · status · holder_user_id · course_id · limit · cursor
  *   — ผิดรูป → 400 ERR-VAL-001 (รูปแบบ fields เดียวกับ parsePageQuery §4 #12)
  * - 200 { data: CertificateListRow[], page: { nextCursor, hasMore } } — keyset
@@ -149,6 +150,13 @@ function parseListQuery(searchParams: URLSearchParams): {
       ),
     ];
     throw new AppError("ERR-VAL-001", { details: { fields } });
+  }
+  // keyset เป็น "คู่" — ครึ่งเดี่ยวทำ tuple comparison ใน SQL ได้คำตอบว่างเงียบ ๆ ไม่ใช่
+  // 400 (gate p1-r1 MINOR-7) จึงตรวจ XOR หลัง parse ก่อนส่งให้ lib
+  if ((parsed.data.after_issued_at !== undefined) !== (parsed.data.after_id !== undefined)) {
+    throw new AppError("ERR-VAL-001", {
+      details: { fields: ["after_issued_at", "after_id"] },
+    });
   }
   return {
     afterIssuedAt: parsed.data.after_issued_at,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useReducer, useState } from "react";
+import { useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -39,6 +39,18 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** รูปแบบ uuid → boolean */
 export function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value.trim());
+}
+
+/**
+ * ตัดสินว่า error ของ action แถวสัญญาว่า "รายการจะรีเฟรชให้อัตโนมัติ" หรือไม่
+ * (gate p1-r1 MINOR-6) — 409 (สถานะใบเปลี่ยน) / 404 (ไม่พบใบ) = ข้อมูลแถวที่เซิร์ฟเวอร์
+ * ถืออยู่ไม่ตรงกับหน้าอีกแล้ว จึงต้อง refresh ตอนปิดโมดัล · error อื่น (403/VAL/
+ * transport) ไม่สัญญา — ปล่อยผู้ใช้กดค้นหาใหม่เอง
+ */
+export function shouldRefreshAfterError(error: unknown): boolean {
+  return (
+    error instanceof AdminApiError && (error.status === 409 || error.status === 404)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -496,6 +508,10 @@ export function CertificateRowActions({
   const [state, dispatch] = useReducer(certRowActionReducer, CERT_ROW_ACTION_DEFAULT);
   /** error ของช่องเหตุผล (ตรวจตอนกดยืนยัน — เคลียร์เมื่อแก้/ปิดโมดัล) */
   const [reasonError, setReasonError] = useState<string | null>(null);
+  /** gate p1-r1 MINOR-6: หน่วง router.refresh() ไว้ตอนปิดโมดัล — สำเร็จแล้ว refresh ทันที
+   *  จะทำให้แถว re-render เป็น null (revoked/superseded ไม่มีปุ่ม) ก่อนผู้ใช้อ่านข้อความ
+   *  "เลขที่ใบใหม่" ทิ้ง · ตั้ง flag ทั้งกรณีสำเร็จและ 409/404 (ข้อความสัญญาว่าจะรีเฟรช) */
+  const refreshOnClose = useRef(false);
 
   /** จุดเดียวที่ map error ของ BFF → ข้อความไทย (แบบ IssueCertificateButton) */
   const describeError = (error: unknown): string => {
@@ -520,6 +536,10 @@ export function CertificateRowActions({
   const handleClose = () => {
     setReasonError(null);
     dispatch({ type: "CLOSE" });
+    if (refreshOnClose.current) {
+      refreshOnClose.current = false;
+      router.refresh();
+    }
   };
 
   /** กดยืนยันในโมดัล — ตรวจเหตุผลของ revoke ที่นี่ (กันยิง BFF ด้วยเหตุผลสั้นเกิน) */
@@ -575,8 +595,13 @@ export function CertificateRowActions({
         }
         dispatch({ type: "RESOLVE_SUCCESS", certNo: view.newCertificate.certNo });
       }
-      router.refresh();
+      // ไม่ refresh ทันที — รอผู้ใช้ปิดโมดัลก่อน (ดู refreshOnClose ประกาศด้านบน)
+      refreshOnClose.current = true;
     } catch (error) {
+      // 409/404 = สถานะแถวเปลี่ยนที่เซิร์ฟเวอร์แล้ว ข้อความสัญญาว่า "จะรีเฟรชให้อัตโนมัติ"
+      if (shouldRefreshAfterError(error)) {
+        refreshOnClose.current = true;
+      }
       dispatch({ type: "REJECT", message: describeError(error) });
     }
   };

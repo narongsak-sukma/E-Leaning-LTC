@@ -323,6 +323,23 @@ describe("GET /admin/certificates — query strict 400", () => {
     expect(vi.mocked(listCertificates).mock.calls).toHaveLength(0);
   });
 
+  it("keyset ครึ่งเดี่ยว (after_issued_at XOR after_id) → 400 ERR-VAL-001 (MINOR-7)", async () => {
+    mockAuth(["staff:registrar"]);
+    const { listCertificates } = await import("@/lib/certificates/list");
+    vi.mocked(listCertificates).mockReset();
+    for (const query of [
+      "?after_id=c0000000-0000-4000-8000-000000000009",
+      "?after_issued_at=2026-09-08T04:00:00%2B00:00",
+    ]) {
+      const res = await GET(listUrl(query));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+      expect(body.error.code).toBe("ERR-VAL-001");
+      expect(body.error.details["fields"]).toEqual(["after_issued_at", "after_id"]);
+    }
+    expect(vi.mocked(listCertificates).mock.calls).toHaveLength(0);
+  });
+
   it("ค่าว่าง = ไม่ระบุ (ฟอร์ม GET) → ผ่านและ lib ไม่รับ filter", async () => {
     mockAuth(["staff:registrar"]);
     const { listCertificates } = await import("@/lib/certificates/list");
