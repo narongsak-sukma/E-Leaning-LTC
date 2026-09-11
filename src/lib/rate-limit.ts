@@ -154,6 +154,9 @@ const ROUTE_RULES: readonly RouteRule[] = [
   { method: "POST", pattern: /^\/api\/v1\/assessments\/[^/]+\/attempts\/?$/, group: "EXAM" },
   { method: "POST", pattern: /^\/api\/v1\/attempts\/[^/]+\/(answers|submit)\/?$/, group: "EXAM" },
   { method: null, pattern: /^\/api\/v1\/(me|profile)\/.*$/, group: "READ" },
+  // PDF ของประกาศนียบัตร = ทรัพย์สินส่วนตัว (auth เจ้าของ/registrar) — จัดกลุ่ม READ
+  // ก่อนถึง pattern PUBLIC_READ ของ /certificates/* (Wave D / D36-O8)
+  { method: "GET", pattern: /^\/api\/v1\/certificates\/[^/]+\/pdf\/?$/, group: "READ" },
   { method: "GET", pattern: /^\/api\/v1\/(categories|courses|certificates)\/?.*$/, group: "PUBLIC_READ" },
 ];
 

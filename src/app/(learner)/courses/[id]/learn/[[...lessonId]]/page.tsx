@@ -118,7 +118,7 @@ export default async function LearnLessonPage({ params }: PageProps) {
             <VideoPlayer
               lessonId={lesson.lessonId}
               title={lesson.title}
-              src={null}
+              src={lesson.src}
               durationSeconds={lesson.durationSeconds}
               initialPositionSeconds={lesson.initialPositionSeconds}
               heartbeatIntervalSec={getConfig().learning.videoHeartbeatSec}

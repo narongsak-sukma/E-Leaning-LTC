@@ -159,7 +159,7 @@
 - **ตอบ 200 เสมอ** ด้วย 4 ฟิลด์คงที่ `{code, course_title, issued_at, status}` โดย status ∈ `valid | revoked | superseded` — **ห้ามแสดงชื่อเจ้าของ** (ชื่ออยู่บน PDF ที่เจ้าของ/นายทะเบียนดาวน์โหลดเท่านั้น — D8)
 - ไม่พบรหัส → ตอบ 200 เช่นกันโดย status = `not_found` (ฟิลด์ที่เหลือว่าง) — รูปแบบคำตอบสม่ำเสมอทุกกรณี กัน enumeration
 - **Enumeration tradeoff ที่ยอมรับ (D11-20)**: manual lookup ด้วย `cert_no` มีพื้นที่เดาแคบ (6 หลัก/ปี) ต่างจาก `verify_code` ที่ entropy สูง (nanoid 43 — ใช้กับ QR ตาม D10) — ยอมรับความเสี่ยงนี้เพราะ (1) rate limit public read 120/min/IP (API-SPECIFICATION), (2) response 4 ฟิลด์ไม่มี PII + ตอบ `not_found` แบบเดียวกันทุกกรณีพลาด, (3) ช่องทาง enumeration หลักคือ QR/`verify_code` ที่เดาไม่ได้ — ทบทวนใหม่ถ้าเปลี่ยนรูปแบบ `cert_no`
-- ทุกครั้งที่ตรวจ log ลง `certificate_verifications` (code ที่ค้น, result, ip_hash, user_agent ตัดทอน) เก็บ 90 วัน
+- ทุกครั้งที่ตรวจ log ลง `certificate_verifications` (code ที่ค้น, result, ip_hash, user_agent_hash — r9-O1: UA ถูก hash sha256 ก่อนเก็บเหมือน ip_hash เพราะ header เป็นค่าอิสระของ anon) เก็บ 90 วัน
 
 **d) เพิกถอน/ออกใหม่แทน**: staff:registrar+ เท่านั้น — `POST /admin/certificates/{id}/revoke` (status = `revoked` + เหตุผล + audit) หรือ `POST /admin/certificates/{id}/reissue` (ใบเดิม status = `superseded` + `superseded_by` ชี้ใบใหม่) — รายการเดิมไม่ถูกลบ
 

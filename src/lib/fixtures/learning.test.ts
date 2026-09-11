@@ -16,6 +16,8 @@ import {
   buildEnrolledCourseCard,
   courseDetailUrl,
   courseProgressUrl,
+  enrollCourse,
+  enrollCourseUrl,
   findLessonNeighbors,
   getCourseDetail,
   getCourseProgress,
@@ -274,6 +276,7 @@ describe("URL builders", () => {
     expect(lessonQuizUrl(LESSON_V)).toBe(`/api/v1/lessons/${LESSON_V}/quiz`);
     expect(lessonQuizSubmitUrl(LESSON_Q)).toBe(`/api/v1/lessons/${LESSON_Q}/quiz/submit`);
     expect(lessonProgressUrl(LESSON_V)).toBe(`/api/v1/lessons/${LESSON_V}/progress`);
+    expect(enrollCourseUrl(COURSE)).toBe(`/api/v1/courses/${COURSE}/enroll`);
     expect(authLogoutUrl()).toBe("/api/v1/auth/logout");
   });
 });
@@ -545,6 +548,47 @@ describe("logout", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).code).toBe("ERR-AUTH-001");
     expect((error as ApiError).status).toBe(401);
+  });
+});
+
+// ——— enrollCourse — ลงทะเบียนเรียน (PB-12): 201 ใหม่ / 200 ซ้ำ idempotent (DCR-3) ———
+describe("enrollCourse", () => {
+  it("POST 201 ใหม่ → resource ตาม contract (EnrollmentResource)", async () => {
+    stubFetch(() => jsonResponse(201, { data: ENROLLMENT_BODY }));
+    const enrollment = await enrollCourse(COURSE, { origin: ORIGIN });
+    expect(enrollment).toEqual(ENROLLMENT_BODY);
+    expect(callAt(0).method).toBe("POST");
+    expect(callAt(0).url).toBe(`${ORIGIN}/api/v1/courses/${COURSE}/enroll`);
+    expect(callAt(0).body).toBeUndefined();
+  });
+
+  it("ลงทะเบียนซ้ำ 200 → resource เดิม (DCR-3 idempotent)", async () => {
+    stubFetch(() => jsonResponse(200, { data: ENROLLMENT_BODY }));
+    const enrollment = await enrollCourse(COURSE, { origin: ORIGIN });
+    expect(enrollment.courseId).toBe(COURSE);
+    expect(enrollment.status).toBe("active");
+  });
+
+  it("resource ผิดรูป (courseId ไม่ใช่ uuid) → contract violation ERR-SYS-001", async () => {
+    stubFetch(okAlways({ data: { ...ENROLLMENT_BODY, courseId: "not-a-uuid" } }));
+    const error = await enrollCourse(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-SYS-001");
+  });
+
+  it("401 → ERR-AUTH-001", async () => {
+    stubFetch(() => jsonResponse(401, { error: { code: "ERR-AUTH-001", message: "กรุณาเข้าสู่ระบบ" } }));
+    const error = await enrollCourse(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-AUTH-001");
+  });
+
+  it("422 → ERR-ENR-002 (หลักสูตรเฉพาะทนายความ)", async () => {
+    stubFetch(() => jsonResponse(422, { error: { code: "ERR-ENR-002", message: "เฉพาะทนายความที่ยืนยันใบอนุญาตแล้ว" } }));
+    const error = await enrollCourse(COURSE, { origin: ORIGIN }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("ERR-ENR-002");
+    expect((error as ApiError).status).toBe(422);
   });
 });
 

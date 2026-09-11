@@ -154,6 +154,16 @@ describe("กติกา specific-wins (D11-13 กติกา 1) — resolveRa
     expect(resolveRateLimitGroup("GET", "/api/v1/courses")).toBe("PUBLIC_READ");
   });
 
+  it("GET /certificates/{code} (public verify) → PUBLIC_READ", () => {
+    expect(resolveRateLimitGroup("GET", "/api/v1/certificates/LTC-2026-123456")).toBe(
+      "PUBLIC_READ",
+    );
+  });
+
+  it("GET /certificates/{id}/pdf → READ (auth ของเจ้าของ — หน้า PUBLIC_READ, D36-O8)", () => {
+    expect(resolveRateLimitGroup("GET", "/api/v1/certificates/abc-uuid/pdf")).toBe("READ");
+  });
+
   it("POST /courses/{id}/enroll ไม่อยู่ในตาราง §5 → default READ (ช่องว่าง doc — รายงาน lead)", () => {
     expect(resolveRateLimitGroup("POST", "/api/v1/courses/abc/enroll")).toBe("READ");
   });

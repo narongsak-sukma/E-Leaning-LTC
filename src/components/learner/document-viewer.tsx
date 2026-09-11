@@ -3,8 +3,8 @@
  *
  * - ปุ่ม "อ่านจบแล้ว" → saveLessonProgress (POST /api/v1/lessons/{id}/progress body { documentRead: true })
  *   (positionSeconds XOR documentRead — D12-12) · ห้ามส่ง flag `completed` (D12-1)
- * - เนื้อหาเอกสารยังไม่มี endpoint ใน §3.4 (media อยู่นอก /api/v1 — SDS §1-1): ถ้าไม่มีเนื้อหา
- *   ส่งมา ให้แสดงสถานะว่างภาษาไทยและยังไม่เปิดให้ยืนยันการอ่าน (DESIGN-SYSTEM §5.12)
+ * - เนื้อหาเอกสารจริงจาก lessons.content_md ผ่านหน้า learn (PB-12): ถ้าไม่มีเนื้อหาส่งมา
+ *   ให้แสดงสถานะว่างภาษาไทยและยังไม่เปิดให้ยืนยันการอ่าน (DESIGN-SYSTEM §5.12)
  */
 "use client";
 

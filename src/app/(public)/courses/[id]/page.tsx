@@ -1,7 +1,8 @@
 /**
  * หน้ารายละเอียดหลักสูตร — CAT-004 (guest เห็นคำอธิบาย โครงสร้างโมดูล/บทเรียน วิทยากร
  * ชั่วโมง credit เงื่อนไขสอบ จำนวนผู้ลงทะเบียน) + CAT-007 (เฉพาะทนายความ: เห็นได้แต่แจ้งเงื่อนไขเป็นไทย)
- * ปุ่ม "ลงทะเบียนเรียน": guest → /login?next=<path ปัจจุบัน> (กลับมาหลักสูตรเดิมหลังเข้าสู่ระบบ)
+ * ปุ่ม "ลงทะเบียนเรียน" (PB-12): guest → /login?next=<path ปัจจุบัน> · login แล้วยังไม่ลงทะเบียน
+ * → POST /courses/{id}/enroll (EnrollButton) · ลงทะเบียนแล้ว → สถานะ + ปุ่ม "เข้าเรียนต่อ"
  */
 
 import type { Metadata } from "next";
@@ -21,6 +22,7 @@ import {
   UsersIcon,
 } from "@/components/course/icons";
 import { SkeletonBlock } from "@/components/course/Skeleton";
+import { EnrollButton } from "@/components/learner/enroll-button";
 import {
   courseLevelLabel,
   formatDuration,
@@ -31,6 +33,7 @@ import {
   type CourseLesson,
 } from "@/lib/fixtures/catalog";
 import { findPublishedCourse } from "@/lib/fixtures/catalog.server";
+import { loadCourseViewerGate } from "@/lib/fixtures/learning.server";
 
 type CoursePageProps = {
   params: Promise<{ id: string }>;
@@ -71,6 +74,8 @@ async function CourseDetailContent({ params }: CoursePageProps) {
 
   const totalLessons = course.modules.reduce((sum, m) => sum + m.lessons.length, 0);
   const enrollHref = `/login?next=${encodeURIComponent(`/courses/${course.id}`)}`;
+  // PB-12: สถานะผู้ชมต่อหลักสูตร — guest / ลงทะเบียนแล้ว (เข้าเรียนต่อ) / login แล้วยังไม่ลงทะเบียน (ปุ่มลงทะเบียน)
+  const viewerGate = await loadCourseViewerGate(course.id);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:py-12">
@@ -283,15 +288,39 @@ async function CourseDetailContent({ params }: CoursePageProps) {
                 </p>
               ) : null}
 
-              <Link
-                className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-[10px] bg-brand-600 px-[26px] py-3.5 font-heading text-base font-semibold text-white shadow-card hover:bg-brand-700"
-                href={enrollHref}
-              >
-                ลงทะเบียนเรียน
-              </Link>
-              <p className="mt-2 text-center text-xs text-ink-500">
-                ผู้ที่ยังไม่ได้เข้าสู่ระบบจะพาไปหน้าเข้าสู่ระบบก่อน แล้วกลับมาที่หลักสูตรนี้
-              </p>
+              {viewerGate.kind === "enrolled" ? (
+                <>
+                  <p className="mt-4 rounded-[10px] bg-success-50 px-3.5 py-2.5 text-sm leading-relaxed text-success-700">
+                    {viewerGate.status === "completed"
+                      ? "ท่านเรียนจบหลักสูตรนี้แล้ว"
+                      : "ท่านลงทะเบียนหลักสูตรนี้แล้ว"}
+                  </p>
+                  <Link
+                    className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-[10px] bg-brand-600 px-[26px] py-3.5 font-heading text-base font-semibold text-white shadow-card hover:bg-brand-700"
+                    href={`/courses/${encodeURIComponent(course.id)}/learn`}
+                  >
+                    เข้าเรียนต่อ
+                  </Link>
+                  <p className="mt-2 text-center text-xs text-ink-500">
+                    หลักสูตรนี้อยู่ในหน้า &quot;หลักสูตรของฉัน&quot; แล้ว
+                  </p>
+                </>
+              ) : viewerGate.kind === "not_enrolled" ? (
+                <>
+                  <EnrollButton courseId={course.id} />
+                  <p className="text-center text-xs text-ink-500">
+                    ระบบจะพาไปหน้าเรียนทันทีหลังลงทะเบียนสำเร็จ
+                    หากเซสชันหมดอายุ ระบบจะพาไปหน้าเข้าสู่ระบบก่อน
+                  </p>
+                </>
+              ) : (
+                <Link
+                  className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-[10px] bg-brand-600 px-[26px] py-3.5 font-heading text-base font-semibold text-white shadow-card hover:bg-brand-700"
+                  href={enrollHref}
+                >
+                  ลงทะเบียนเรียน
+                </Link>
+              )}
             </div>
           </div>
         </aside>
