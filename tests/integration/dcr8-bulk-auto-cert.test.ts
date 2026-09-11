@@ -80,8 +80,19 @@
  *      (หลักสูตร 10: seed cursor 0028-style → tick เดียวต้องออกใบ*ผู้มาใหม่*ด้วย)
  *   MINOR-1 หลักฐาน cursor ครบสองคู่ทุกจุด (course5/course7 tick2) + toHaveLength +
  *      sweep_top หลัง fresh walk ของ tick3 + bulk mid cursor ต้องมีจำนวนแถว
+ *  ชุดแก้ของ gate r5 (MINOR-1/2/3 — 0030 เองผ่าน แต่เสริมความทนทาน/หลักฐาน):
+ *    MINOR-1 held session ที่ psql ตายก่อน sentinel (SQL ผิด/ON_ERROR_STOP) เคย
+ *      ทำให้รอ sentinel ครบ 30 วินาที แล้ว finally ค้างต่อ (on close ลงทะเบียน
+ *      หลังเหตุการณ์ผ่านไปแล้ว = flag ไม่ถูกปิดตาม) → startHeldSession: ติดตาม
+ *      การปิดตั้งแต่ spawn · waitForSentinel reject ทันทีเมื่อ early close · end()
+ *      กลืน stdin error ของ process ตาย + race timeout · + regression จำลอง
+ *      psql ตายก่อน sentinel ต้อง reject เร็วและ teardown จบเองได้
+ *    MINOR-2 tick3 ของ course7: cursor ต้องเป็นแถวของคน 18 เป๊ะ + ใหม่กว่าหัว
+ *      ของ sweep (non-null เฉย ๆ ผ่านแม้ cursor ค้างตำแหน่ง tick2 เดิม)
+ *    MINOR-3 (docs นอกไฟล์นี้): DD sweep_top นิยามผิดรุ่น + คำอ้างเก่าไม่กำกับ
+ *      ว่าถูกหักล้าง · API-SPEC pipe ในตารางไม่ escape ครบ
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { psql, psqlRows, REPO_ROOT } from "./helpers.js";
@@ -330,8 +341,84 @@ async function seedLazyPerson(p: E9Person, minutesAgo: number): Promise<void> {
   `);
 }
 
+/**
+ * r5 MINOR-1: held psql session ที่ติดตามการปิดตั้งแต่ spawn — early close (SQL
+ * ผิดจน ON_ERROR_STOP ฆ่า psql) ต้อง reject ทันที ไม่รอ sentinel timeout · end()
+ * ใช้ได้แม้ process ตายไปแล้ว (กลืน stdin error + race timeout) — teardown ไม่ค้าง
+ */
+type HeldSession = {
+  exitCode: Promise<number | null>;
+  readonly stderrText: string;
+  waitForSentinel(timeoutMs?: number): Promise<void>;
+  end(sql: string): Promise<number | null>;
+};
+
+function startHeldSession(openSql: string, sentinel: string): HeldSession {
+  const proc = spawn("docker",
+    ["compose", "exec", "-T", "db", "sh", "-c",
+     'PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1'],
+    { cwd: REPO_ROOT });
+  let stderrText = "";
+  proc.stderr.on("data", (chunk: Buffer) => { stderrText += String(chunk); });
+  // process/สตรีมตายก่อนเขียน = กลืนไว้ (EPIPE/write-after-end) — จุดตายจริงวัดจาก exitCode
+  proc.stdin.on("error", () => {});
+  proc.on("error", () => {});
+  const exitCode = new Promise<number | null>((resolve) => {
+    proc.once("close", (code: number | null) => { resolve(code); });
+  });
+  proc.stdin.write(openSql);
+  return {
+    exitCode,
+    get stderrText(): string { return stderrText; },
+    waitForSentinel(timeoutMs = 30_000): Promise<void> {
+      return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let buf = "";
+        const handle: { timer?: NodeJS.Timeout } = {};
+        const onData = (chunk: Buffer): void => {
+          buf += String(chunk);
+          if (buf.includes(sentinel)) {
+            finish(() => resolve());
+          }
+        };
+        const finish = (settle: () => void): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (handle.timer !== undefined) {
+            clearTimeout(handle.timer);
+          }
+          proc.stdout.off("data", onData);
+          settle();
+        };
+        handle.timer = setTimeout(
+          () => finish(() => reject(new Error(
+            `held session sentinel timeout (${timeoutMs}ms): ${stderrText}`))),
+          timeoutMs);
+        proc.stdout.on("data", onData);
+        void exitCode.then((code) => finish(() => reject(new Error(
+          `held psql closed before sentinel (exit ${code ?? "?"}): ${stderrText}`))));
+      });
+    },
+    async end(sql: string): Promise<number | null> {
+      try {
+        proc.stdin.write(sql + "\n");
+        proc.stdin.end();
+      } catch {
+        // process ปิดไปก่อนแล้ว — คืน exit จริงด้านล่าง
+      }
+      return Promise.race([
+        exitCode,
+        new Promise<null>((resolve) => { setTimeout(() => { resolve(null); }, 10_000); }),
+      ]);
+    },
+  };
+}
+
 /** ล้างโลกของชุด DCR-8 ทั้งหมด (เรียงตาม FK — RESTRICT) + ปิด flag ทิ้งเป็นสถานะปลอดภัย
  *  ลบแบบครอบทั้งหลักสูตรของชุด (ครอบแถว generate_series ของ M1 ด้วย) */
+
 async function cleanupE9Dcr8World(): Promise<void> {
   const courseList = E9_COURSES.map((c) => `'${c}'`).join(",");
   const profileList = [`'${E9_STAFF_ID}'`, ...PEOPLE.map((p) => `'${p.profile}'`),
@@ -1257,6 +1344,11 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
       expect(cur3[0]?.aid).not.toBeNull();
       expect(cur3[0]?.topTs).toBe(cur1[0]?.topTs ?? null);
       expect(cur3[0]?.topAid).toBe(cur1[0]?.topAid ?? null);
+      // MINOR-2 (r5): cursor ต้องเป็นแถวของคน 18 เป๊ะ — non-null เฉย ๆ ผ่านแม้
+      // cursor ค้างตำแหน่ง tick2 เดิม · และใหม่กว่าหัวของ sweep (แถว commit ใหม่กว่า
+      // เดินทับหัวของรอบ — watermark เป็นข้อมูลชี้แจงของ 0030)
+      expect(cur3[0]?.aid).toBe(E9_P18_ARRIVAL.attempt);
+      expect((cur3[0]?.ts ?? "") > (cur3[0]?.topTs ?? "")).toBe(true);
       const markersT3 = await psqlRows<{ n: number }>(`
         select count(*)::int as n from public.cert_auto_walked
          where scope_key = '${E9_COURSE7_ID}';
@@ -1320,8 +1412,7 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
     // sweep_top) ที่เดินไปแล้ว = ไม่ใช่ fresh ไม่ใช่ backlog ของ 0029 → ล่องหนจน
     // sweep จบ+reset · 0030 วัด "เดินแล้ว" จาก marker ต่อแถว = คน 19 ยังไม่ถูก mark
     // และเป็น unmarked ที่ใหม่สุด → tick2 ต้องออกใบให้ทันที
-    let held: ChildProcessWithoutNullStreams | null = null;
-    let heldErr = "";
+    let held: HeldSession | null = null;
     try {
       await psql(`update public.feature_flags set enabled = true where key = 'cert_auto_issue';`);
 
@@ -1356,23 +1447,8 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
 
       // connection ที่สอง: TX ค้าง — คน 19 (ชื่อครบ eligible) submitted_at = -42 นาที
       // (ตกระหว่าง N3 กับ N2) · ยังไม่ commit = invisible ต่อทุก tick (READ COMMITTED)
-      held = spawn("docker",
-        ["compose", "exec", "-T", "db", "sh", "-c",
-         'PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1'],
-        { cwd: REPO_ROOT });
-      held.stderr.on("data", (chunk: Buffer) => { heldErr += String(chunk); });
       const p19 = E9_P19_LATE_COMMIT;
-      await new Promise<void>((resolve, reject) => {
-        let buf = "";
-        const onData = (chunk: Buffer): void => {
-          buf += String(chunk);
-          if (buf.includes("held-ready")) {
-            held!.stdout.off("data", onData);
-            resolve();
-          }
-        };
-        held!.stdout.on("data", onData);
-        held!.stdin.write(`begin;
+      held = startHeldSession(`begin;
           insert into public.profiles (id, display_name, first_name, last_name, email, preferred_locale)
           values ('${p19.profile}', '${p19.display}', '${p19.firstName}', '${p19.lastName}',
                   '${p19.emailLocal}@ltc.test', 'th')
@@ -1391,9 +1467,10 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
                   now() - interval '42 minutes', 100, true, 5, 5)
           on conflict (id) do nothing;
           select 'held-ready';
-        `);
-        setTimeout(() => reject(new Error(`held session sentinel timeout: ${heldErr}`)), 30_000);
-      });
+        `, "held-ready");
+      // MINOR-1 (r5): ติดตามการปิดตั้งแต่ spawn — early close (SQL ผิด/ON_ERROR_STOP
+      // ฆ่า psql) ต้อง reject ทันที ไม่รอ sentinel timeout 30 วินาที
+      await held.waitForSentinel();
 
       // tick1 (เพดาน 3): เดิน N4/N3/N2 ล้มทั้งสาม (มองไม่เห็นคน 19) → capped → probe
       // ด้วย picker ตัวเองเห็น N1 ยังไม่ mark = คิวยังไม่หมด → คงรอบเดิม (marker 3 แถว)
@@ -1411,19 +1488,10 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
 
       // commit ช้า: คน 19 กลายเป็น visible ตอนนี้ — submitted_at (-42) อยู่*ใน*ช่วง
       // [cursor, sweep_top] ที่เดินไปแล้ว (0029 = ล่องหนจน sweep จบ+reset)
-      await new Promise<void>((resolve, reject) => {
-        held!.stdin.write("commit;\n");
-        held!.stdin.end();
-        held!.on("close", (code: number | null) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`held psql exit ${code ?? "?"}: ${heldErr}`));
-          }
-        });
-      });
+      const commitCode = await held.end("commit;");
+      expect(commitCode).toBe(0);
+      expect(held.stderrText).not.toMatch(/ERROR/);
       held = null;
-      expect(heldErr).not.toMatch(/ERROR/);
 
       // tick2 (เพดาน 1): คน 19 ยังไม่ถูก mark + เป็น unmarked ที่ใหม่สุด → ได้ใบทันที
       const t2 = await callProc<TickResult>(
@@ -1453,15 +1521,32 @@ describe.skipIf(!DB_URL)("DCR-8 ออกใบประกาศนียบั
     } finally {
       // TX ค้างต้องจบเสมอแม้ assert กลางทางพัง (rollback = ไม่มีแถวหลุดเข้าโลกจริง)
       if (held) {
-        await new Promise<void>((resolve) => {
-          held!.stdin.write("rollback;\n");
-          held!.stdin.end();
-          held!.on("close", () => resolve());
-        });
+        // MINOR-1 (r5): end() กลืน stdin error ของ process ตาย + race timeout —
+        // teardown ไม่ค้างเด็ดขาด จะได้ไปปิด flag ตาม
+        await held.end("rollback;");
+        held = null;
       }
       await psql(`update public.feature_flags set enabled = false where key = 'cert_auto_issue';`);
     }
   }, 120_000);
+
+  it("auto MINOR-1 (r5): held session ที่ psql ตายก่อน sentinel (SQL ผิด) ต้อง reject ทันทีไม่ค้างรอ timeout — teardown (end) จบเองได้แม้ process ตายแล้ว", async () => {
+    // ฉาก: harness ของเคส MAJOR-1 เอง — ON_ERROR_STOP + SQL ผิด = psql ปิดทันที
+    // ก่อนพิมพ์ sentinel · แบบเดิม (รอ sentinel อย่างเดียว) = ค้าง 30 วินาที แล้ว
+    // finally ก็ค้างต่อ (on close หลังเหตุการณ์ผ่านไปแล้ว) = flag ไม่ถูกปิด
+    const t0 = Date.now();
+    const broken = startHeldSession(
+      "begin;\nselect definitely_not_a_column from public.profiles;\nselect 'held-ready';\n",
+      "held-ready",
+    );
+    await expect(broken.waitForSentinel(25_000)).rejects.toThrow(/closed before sentinel/);
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    // teardown ต้องคืน control เสมอ: end() บน process ที่ตายแล้ว = กลืน + คืน exit จริง
+    const code = await broken.end("rollback;");
+    expect(code).not.toBe(0);
+    expect(broken.stderrText).toMatch(/ERROR/);
+  }, 60_000);
+
 
   it("auto MAJOR-2 (r4): cursor ค้างแบบ 0028 (cursor ตั้ง · sweep_top null) ต้องถูก normalize เป็น sweep ใหม่ — ผู้มาใหม่ได้ใบใน tick เดียวกัน ไม่ถูกไล่ไปรอ fresh lane รอบถัดไป", async () => {
     try {
@@ -1774,4 +1859,3 @@ describe.skipIf(!DB_URL)("DCR-8 global worker step(null) บน DB แยก (r3
     expect(idle.status).toBe("idle");
   }, 120_000);
 });
-
