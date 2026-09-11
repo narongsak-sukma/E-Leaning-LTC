@@ -2,7 +2,7 @@
 
 |          |                                                    |
 | -------- | -------------------------------------------------- |
-| เวอร์ชัน | 1.0.3 — DCR-6 (D36): submit ข้อสอบตอบผลตรวจทันที (ตาม RPC จริง — idempotency ระดับ RPC ไม่ใช้แคช BFF) · /admin/certificates/bulk + /admin/exams/monitoring|statistics เลื่อน Wave E · เฉลยเปิดตาม baseline `after_final_attempt` (ASM-012 config ต่อหลักสูตร = DCR อนาคต) · 1.0.2 — DCR-4/DCR-5 (D28): catalog fields (level/credits/learnerCount/outcomes/instructors/exam) + GET /lessons/{id}/quiz ไม่มีเฉลย · 1.0.1 DCR-3 (D25): duplicate enroll = 200 idempotent ตาม SRS LRN-001 · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.0.4 — DCR-7 (Wave E): เพิ่ม GET /admin/certificates + assessmentId ใน course exam summary + bulk job spec · 1.0.3 — DCR-6 (D36): submit ข้อสอบตอบผลตรวจทันที (ตาม RPC จริง — idempotency ระดับ RPC ไม่ใช้แคช BFF) · /admin/certificates/bulk + /admin/exams/monitoring|statistics เลื่อน Wave E · เฉลยเปิดตาม baseline `after_final_attempt` (ASM-012 config ต่อหลักสูตร = DCR อนาคต) · 1.0.2 — DCR-4/DCR-5 (D28): catalog fields (level/credits/learnerCount/outcomes/instructors/exam) + GET /lessons/{id}/quiz ไม่มีเฉลย · 1.0.1 DCR-3 (D25): duplicate enroll = 200 idempotent ตาม SRS LRN-001 · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                         |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน), §6 (stack), §8 (security) · RBAC-DESIGN.md · AUDIT-LOG-DESIGN.md · DATA-DICTIONARY.md (canonical schema) · SRS.md (Appendix A) |
 | ขอบเขต  | Next.js Route Handlers ภายใต้ `/api/v1/*` (BFF) — Server Actions ที่ไม่ใช่ REST อยู่นอกเอกสารนี้ |
@@ -148,7 +148,7 @@ PDPA endpoints (สิทธิของเจ้าของข้อมูล 
 | --- | --- | --- | --- | --- | --- |
 | GET | /categories | รายการหมวดหลักสูตร (tree) | guest | 200 | RATE-001 |
 | GET | /courses | ค้นหา/กรองหลักสูตร (หน้า catalog) — guest เห็นเฉพาะ `published` · ฟิลด์รายการ: `level` + `credits` + `learnerCount` (จาก view `course_public_stats` — DCR-4) | guest | 200 + pagination | RATE-001 |
-| GET | /courses/{id} | รายละเอียดหลักสูตร + โครงสร้างโมดูล (สถานะ draft มองเห็นเฉพาะเจ้าของ/staff:content) · เพิ่ม `level`, `outcomes` (จาก `outcome_highlights`), `credits`, `learnerCount`, `instructors` (view `course_instructors_public`), `exam` (view `course_exam_summary` — CAT-004 AC) — DCR-4 | guest, citizen, lawyer, instructor, staff:content | 200 | CRS-001 |
+| GET | /courses/{id} | รายละเอียดหลักสูตร + โครงสร้างโมดูล (สถานะ draft มองเห็นเฉพาะเจ้าของ/staff:content) · เพิ่ม `level`, `outcomes` (จาก `outcome_highlights`), `credits`, `learnerCount`, `instructors` (view `course_instructors_public`), `exam` (view `course_exam_summary` — CAT-004 AC; **DCR-7: เพิ่มฟิลด์ `assessmentId`** = uuid ของข้อสอบปลายหลักสูตร published+is_final ล่าสุด — จาก `course_exam_summary.assessment_id` — PB-17) — DCR-4 | guest, citizen, lawyer, instructor, staff:content | 200 | CRS-001 |
 | POST | /courses/{id}/enroll | ลงทะเบียนเรียน (ซ้ำ = 200 idempotent คืน enrollment เดิม — DCR-3/D25) | citizen, lawyer | 201 (ใหม่) / 200 (ซ้ำ) | ENR-002, RATE-001 |
 | GET | /me/enrollments | รายการที่เรียน/ลงทะเบียนไว้ | citizen, lawyer | 200 + pagination | AUTH-001 |
 
@@ -182,7 +182,8 @@ Flow สอบ (sequence): `GET /assessments/{id}` อ่านกติกา�
 | GET | /me/certificates | ประกาศนียบัตรของตัวเอง (พร้อมลิงก์ PDF) | citizen, lawyer | 200 + pagination | AUTH-001 |
 | GET | /certificates/{id}/pdf | ดาวน์โหลด PDF ตัวจริง (id = uuid ต้อง auth — ต่างจาก public verify ที่ใช้ code) | เจ้าของใบรับรอง, staff:registrar, super_admin | 200 `application/pdf` | NF-001, RBAC-001 |
 | POST | /admin/certificates | ออกประกาศนียบัติรายใบ (จาก attempt ที่ผ่านเกณฑ์) — audit `CERT_ISSUE` | staff:registrar, super_admin | 201 | RBAC-001, VAL-001 |
-| POST | /admin/certificates/bulk | ออกเป็นชุด (รอบเดียวกัน) — **DCR-6: เลื่อน Wave E** (ต้องมี infra สถานะ job — ระหว่างนี้ใช้ออกรายใบ + คิว eligible) | staff:registrar, super_admin | 202 (job) | RBAC-001 |
+| GET | /admin/certificates | รายการ/ค้นหาประกาศนียบัตรที่ออกแล้ว (filter: เลขที่ใบ/verify_code/สถานะ/ชื่อผู้ถือ/หลักสูตร) — keyset pagination แบบเดียวกับ eligible — audit `PII_ACCESS` (D12-23) | staff:registrar, super_admin | 200 + pagination | RBAC-001 |
+| POST | /admin/certificates/bulk | ออกเป็นชุด — job ตาราง `cert_bulk_jobs` (DD §3.7) · RPC batch 200 · TX เดียวต่อใบ + audit `CERT_ISSUE` actor ครบต่อใบ · คิว eligible กรองก่อนตัดหน้า (filter-before-cut) — **DCR-6: เลื่อน Wave E** (ต้องมี infra สถานะ job — ระหว่างนี้ใช้ออกรายใบ + คิว eligible) | staff:registrar, super_admin | 202 (job) | RBAC-001 |
 | GET | /admin/certificates/eligible | รายการ attempt ที่ผ่านเกณฑ์แล้ว**ที่ยังไม่มี certificate สถานะ `valid`** — คิวงานออกประกาศนียบัตร (pagination + filter ตามหลักสูตร/ช่วงเวลา) — audit `PII_ACCESS` (D12-23) | staff:registrar, super_admin | 200 + pagination | RBAC-001 |
 | POST | /admin/certificates/{id}/revoke | เพิกถอน (บังคับ reason) — audit `CERT_REVOKE` | staff:registrar, super_admin | 200 | RBAC-001, VAL-001 |
 | POST | /admin/certificates/{id}/reissue | ออกใหม่แทนใบเดิม (ใบเดิมเปลี่ยน status=superseded + ชี้ `supersedes_cert_id` lineage — DD; **idempotent ต่อ enrollment เพราะ UNIQUE(enrollment_id) เป็น partial `WHERE status='valid'` จึงมี valid ได้ 1 ใบ/คน/หลักสูตร แต่เก็บ superseded ได้หลายใบ**; reissue ไม่กระทบ credit ที่ accrual ไปแล้ว — D12-14/15) — CRT-007, audit `CERT_REISSUE` | staff:registrar, super_admin | 201 (ใบใหม่) | RBAC-001 |

@@ -113,6 +113,10 @@
 
 ข้อสังเกต: ไม่มีบทบาทใด (รวมถึง super_admin) มี `audit_log:update/delete` — ไม่มี permission นี้อยู่ในระบบเลย (BRIEF §8, CTO decision D6)
 
+### 2.5 นโยบาย admin shell (D55-3 · DCR-7)
+
+พื้นที่ `/admin/*` (admin shell ตาม DESIGN-SYSTEM §6.3) = บทบาท `staff:viewer`/`staff:content`/`staff:exam`/`staff:registrar`/`super_admin` เท่านั้น — guard ที่ `src/app/(admin)/layout.tsx` (fail-closed redirect) · บทบาท instructor แม้ RBAC matrix §2.2 ให้สิทธิ์ `question_bank:*/assessment:*` (ใช้ได้ผ่าน BFF endpoints ตาม matrix) แต่ **ไม่เข้า admin shell** — instructor workspace จะเป็น UI แยกในอนาคต (ไม่ใช่ /admin/*) เหตุผล: sidebar ของ shell เป็น static ไม่กรองตามสิทธิ์ (เปิดให้ instructor = เห็นลิงก์ที่กดแล้วโดนปฏิเสธทั้งแถบ) + โครง shell ออกแบบสำหรับเจ้าหน้าที่ — **ห้ามแก้แถว matrix เดิมใด ๆ ตามข้อนี้** (สิทธิ์ instructor ใน matrix §2.1–2.4 คงเดิมทั้งหมด)
+
 ---
 
 ## 3. การบังคับใช้ 3 ชั้น (Defense in Depth)

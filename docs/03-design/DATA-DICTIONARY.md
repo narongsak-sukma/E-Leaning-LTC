@@ -2,7 +2,7 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.1.1 — DCR-7 (Wave E): view `course_exam_summary` เพิ่มคอลัมน์ `assessment_id` (PB-17) · `question_snapshot` เพิ่มคีย์ `type` (PB-18) · ตารางใหม่ `cert_bulk_jobs` (§3.7) · อ่านบทเรียนยอม enrollment active/completed (ปิด D39 — D55-4) · 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-3 (Wave A — deliverable 7)                 |
 | สถานะ    | ผ่าน CTO gate (codex รอบ 5: PASS — D17)           |
@@ -54,7 +54,7 @@
 | `export_status` | queued, processing, completed, failed |
 | `security_event_type` | login_fail, mfa_fail, lockout, rate_limit_hit, session_revoke |
 
-## 3. ตารางตามโดเมน (40 ตาราง)
+## 3. ตารางตามโดเมน (41 ตาราง)
 
 ### 3.1 Identity & License
 
@@ -207,7 +207,7 @@ Retention: ถาวร (ประวัติหลักสูตร/ประ
 
 - `course_public_stats` — ต่อหลักสูตร published: `learner_count` (count enrollments สถานะไม่ใช่ cancelled — ค่ารวม ไม่ใช่ PII) + `credits` (จาก `credit_rules` ที่ `course_id` ตรง + `status='active'` + effective window ครอบ `now()` + `priority` ต่ำสุด — NULL ถ้าไม่มีกฎ) — ทำให้ catalog แสดงยอดผู้เรียน/credit ได้โดยไม่เปิด SELECT บน enrollments/credit_rules (RLS ของตารางฐานคงเดิมทั้งหมด)
 - `course_instructors_public` — `course_id` + display ของผู้สอนหลัก (join `profiles` ผ่าน `courses.created_by`): เปิดเฉพาะ `display_name`, `title` (ถ้ามีคอลัมน์/fallback NULL), `bio` — **ห้ามเปิด email/phone/ชื่อจริง** (ปรับปรุงเป็นตาราง course_instructors หลายคนตอน authoring wave — D25-O3)
-- `course_exam_summary` — `course_id`, `question_count`, `time_limit_minutes`, `pass_score_pct`, `max_attempts` จาก assessments ปลายหลักสูตรที่ active (CAT-004 AC — เงื่อนไขสอบแสดงก่อนลงทะเบียน)
+- `course_exam_summary` — `course_id`, `question_count`, `time_limit_minutes`, `pass_score_pct`, `max_attempts` จาก assessments ปลายหลักสูตรที่ active (CAT-004 AC — เงื่อนไขสอบแสดงก่อนลงทะเบียน) + `assessment_id` (uuid — id ของแถว assessments ที่ view เลือก: published+is_final ล่าสุดต่อหลักสูตร · DCR-7/PB-17) — **ห้ามสลับตำแหน่งคอลัมน์เดิม — คอลัมน์ใหม่ต่อท้ายสุดเสมอ** ตามข้อจำกัด CREATE OR REPLACE ของ PostgreSQL (D55-10)
 
 #### `course_modules` — โมดูลของหลักสูตร
 
@@ -219,7 +219,7 @@ Retention: ถาวร (ประวัติหลักสูตร/ประ
 | is_preview | boolean | NOT NULL DEFAULT false (ดูได้โดยไม่ลงทะเบียน) |
 | deleted_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(course_id, sort_order) WHERE deleted_at IS NULL; INDEX(course_id)
-RLS: สืบตาม courses (เห็นเมื่อเห็นหลักสูตร); **INSERT/UPDATE** instructor เจ้าของ/staff:content/super_admin; **DELETE** ไม่อนุญาต
+RLS: สืบตาม courses (เห็นเมื่อเห็นหลักสูตร); **INSERT/UPDATE** instructor เจ้าของ/staff:content/super_admin; **DELETE** ไม่อนุญาต — **หมายเหตุ (DCR-7 — ปิด D39 · D55-4):** เงื่อนไข enrollment ของ policy อ่าน (`cm_read`) ยอม `e.status in ('active','completed')` ตั้งแต่ DCR-7 (ผู้เรียนที่จบหลักสูตรแล้วยังอ่านบทเรียนทบทวนได้) · `uq_enrollments_user_course_active` **คงเดิม** (1 แถว/คน/หลักสูตรข้ามสถานะ)
 Retention: ถาวร
 
 #### `lessons` — บทเรียน
@@ -238,7 +238,7 @@ Retention: ถาวร
 | is_preview | boolean | NOT NULL DEFAULT false |
 | deleted_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(module_id, sort_order) WHERE deleted_at IS NULL; INDEX(quiz_id); CHECK (type='video' → media_id IS NOT NULL AND duration_sec IS NOT NULL); CHECK (type='quiz' → quiz_id IS NOT NULL)
-RLS: สืบตาม courses; **INSERT/UPDATE** instructor เจ้าของ/staff:content/super_admin; **DELETE** ไม่อนุญาต
+RLS: สืบตาม courses; **INSERT/UPDATE** instructor เจ้าของ/staff:content/super_admin; **DELETE** ไม่อนุญาต — **หมายเหตุ (DCR-7 — ปิด D39 · D55-4):** เงื่อนไข enrollment ของ policy อ่าน (`lessons_read`) ยอม `e.status in ('active','completed')` ตั้งแต่ DCR-7 (ผู้เรียนที่จบหลักสูตรแล้วยังอ่านบทเรียนทบทวนได้) · `uq_enrollments_user_course_active` **คงเดิม** (1 แถว/คน/หลักสูตรข้ามสถานะ)
 Retention: ถาวร
 
 #### `media_assets` — ทรัพยากรสื่อ (ผ่าน storage abstraction)
@@ -475,7 +475,7 @@ Retention: ตามอายุบัญชี (learning records — canonical 
 | seq | int | NOT NULL (ลำดับที่สุ่มได้) |
 | option_order | int[] | NULL (ลำดับตัวเลือกที่สุ่ม ณ ตอน start) |
 | selected_option_ids | uuid[] | NULL (บันทึกทีละข้อ — UPSERT) |
-| question_snapshot | jsonb | NOT NULL — โครง `{question_id, version, text, options:[{id, text, is_correct, points}], points}` (snapshot ณ วินาที start — D11-16/F13/F14: Grader ตรวจจาก snapshot ล้วน การแก้ข้อสอบระหว่างสอบไม่กระทบ attempt ที่กำลังสอบ) |
+| question_snapshot | jsonb | NOT NULL — โครง `{question_id, version, text, type, options:[{id, text, is_correct, points}], points}` (snapshot ณ วินาที start — D11-16/F13/F14: Grader ตรวจจาก snapshot ล้วน การแก้ข้อสอบระหว่างสอบไม่กระทบ attempt ที่กำลังสอบ) · **`type`** (text: single_choice/multiple_choice/true_false — ชนิดข้อ ณ เวลา start attempt · DCR-7/PB-18) — snapshot เดิมก่อน DCR-7 ไม่มี type → projection view ใช้ default `'multiple_choice'` (พฤติกรรม checkbox เดิม · grading set-equality ฝั่ง server เป็นผู้ตัดสินอยู่แล้ว) |
 | is_correct | boolean | NULL (ตั้งตอนตรวจ) |
 | points_earned | smallint | NULL |
 | answered_at | timestamptz | NULL |
@@ -704,6 +704,26 @@ Retention: purge 30 วันหลัง processed (canonical ที่ §4.6)
 คีย์/Index: INDEX(requested_by, requested_at DESC); INDEX(status) WHERE status IN ('queued','processing')
 RLS: **SELECT** ผู้ขอเอง + `has_any_role('staff:viewer','super_admin')` + staff:exam (เฉพาะ report ผลสอบ) / staff:registrar (เฉพาะ report credit) — ตามขอบเขต report:view/export ของ RBAC §2; **INSERT** service_role ผ่าน BFF (บังคับ audit `ADMIN_EXPORT`); **UPDATE** service_role (worker); **DELETE** ไม่อนุญาต (ล้างตาม expires_at ด้วย job ที่มี audit)
 Retention: แถว 12 เดือน (ไฟล์ 7 วันตาม expires_at)
+
+#### `cert_bulk_jobs` — งานออกประกาศนียบัตรเป็นชุด **(DCR-7 · D55-5 · D36-O4)**
+
+วัตถุประสงค์ (ตารางเสริม DCR-7 · D55-5 · D36-O4): งานออกประกาศนียบัตรเป็นชุด (`POST /admin/certificates/bulk` — API-SPEC §3.6) — job async ตารางสถานะ; คิว eligible กรองก่อนตัดหน้า (filter-before-cut); RPC batch 200 · TX เดียวต่อใบ + audit `CERT_ISSUE` actor ครบต่อใบ
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| id | uuid | PK (DEFAULT gen_random_uuid() — แบบแผนกลาง §1) |
+| status | text | NOT NULL DEFAULT 'pending', CHECK IN ('pending','running','completed','failed') |
+| total_attempts | int | NOT NULL (จำนวน attempt ในชุด — กรองจากคิว eligible แล้ว) |
+| issued_count | int | NOT NULL DEFAULT 0 |
+| failed_count | int | NOT NULL DEFAULT 0 |
+| created_by | uuid | NOT NULL FK→profiles |
+| course_id | uuid | NULL FK→courses (ขอบเขตรอบ) |
+| last_error | text | NULL (ตัดทอน — ห้าม PII) |
+| created_at | timestamptz | NOT NULL DEFAULT now() |
+| finished_at | timestamptz | NULL |
+คีย์/Index: PK(id); INDEX(status) WHERE status IN ('pending','running'); INDEX(created_by, created_at DESC)
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ทุกการเข้าถึงผ่าน BFF `service_role` เท่านั้น (บทบาท gate ที่ BFF: staff:registrar + super_admin ตาม D55-2) — **append-only เกี่ยวกับผล: ห้าม UPDATE issued_count/failed_count นอก job path ของ BFF**
+Retention: ถาวร (ประวัติงานออกใบ — ตรวจสอบย้อนหลัง)
 
 Reporting ทั้งหมดอ่านผ่าน view + สิทธิ์ staff เท่านั้น (SDS §2 M7): `v_credit_balance` (ยอด credit ต่อรอบ/ประเภท จาก SUM ledger), `v_enrollment_progress` (สรุปความคืบหน้าจาก lesson_progress), `v_assessment_statistics` (ผลสอบต่อหลักสูตร), `v_certificates_issued` — นิยามใน migration แยก; export CSV ทำที่ BFF โดย stream จาก view
 
