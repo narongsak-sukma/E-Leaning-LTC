@@ -23,9 +23,13 @@
 --       + เพิ่มบล็อก INSERT event_outbox จุดเดียว (แบบเดียวกับที่ 0031 ทำกับ 0020/0019):
 --         submit_attempt_core v4   ← 0031 v3 + event exam.result (ทั้งผ่าน/ไม่ผ่าน ·
 --                                     gate r1 B5: payload มี attempt_no ครั้งที่สอบ)
---         admin_issue_certificate v2 ← 0019 v1 + event certificate.issued (gate r1 B5:
---                                     payload มี verify_code สำหรับลิงก์ verify/PDF)
---         admin_revoke_certificate v3 ← 0031 v2 + event certificate.revoked
+--         admin_issue_certificate v2 ← 0019 v1 + event certificate.issued (gate r1/r2
+--                                     B5: payload มี verify_code + certificate_id ครบ
+--                                     ทั้งคู่ — ตัวระบุสองตัวคนละชนิด สำหรับลิงก์
+--                                     verify/PDF ที่ worker ประกอบจาก config)
+--         admin_revoke_certificate v4 ← 0031 v2 + event certificate.revoked (gate r2
+--                                     B5: payload มี verify_code + certificate_id เหมือน
+--                                     issued — AC ของ NTF-003 ครอบทั้งออกใบและเพิกถอน)
 --         admin_credit_adjust v2   ← 0031 v1 + event credit.adjusted
 --   (6) RPC ผู้ใช้: my_notifications (unreadFirst + keyset) · my_notification_read
 --       (idempotent · NF-001) · my_notification_settings / _update (validate family/boolean
@@ -109,6 +113,9 @@ values
 
 ใบประกาศนียบัตรเลขที่ {{cert_no}} ถูกเพิกถอนแล้ว
 หากมีข้อสงสัยกรุณาติดต่อสภาทนายความแห่งประเทศไทย
+
+ตรวจสอบสถานะใบประกาศนียบัตร: {{verify_url}}
+ดาวน์โหลด PDF: {{pdf_url}}
 
 ด้วยความเคารพ
 สภาทนายความแห่งประเทศไทย — ระบบแจ้งเตือนอัตโนมัติ
@@ -438,8 +445,12 @@ begin
           from public.profiles pr where pr.id = v_user;
 
           -- ตัวแปร render ต่อ topic — ครบตามที่ template อ้าง (render จะ raise ถ้าขาด) ·
-          -- email ใบประกาศฯ ใช้ verify_code ประกอบลิงก์ verify/PDF ที่ worker สร้าง
-          -- (gate r1 B5 — ลิงก์มาจาก config ของแอป ไม่ฝังใน SQL)
+          -- email ใบประกาศฯ ส่งตัวระบุสองตัวให้ worker ประกอบลิงก์ (gate r2 B5 ·
+          -- adjudication-2: SQL ผู้ผลิตไม่รู้ env — ส่ง verify_code + certificate_id
+          -- เท่านั้น): verify_url = base/verify/<verify_code> (หน้า verify สาธารณะ ·
+          -- route ยอมรับ verify_code/cert_no) แต่ pdf_url = base/api/v1/certificates/
+          -- <certificate_id>/pdf เพราะ route PDF บังคับ {code} = UUID ของ certificates.id
+          -- (API-SPEC §3.6) — ใช้ verify_code (nanoid-43) จะได้ 400 เสมอ
           v_vars := jsonb_build_object('full_name', v_full_name);
           if r.topic = 'exam.result' then
             v_vars := v_vars || jsonb_build_object(
@@ -451,9 +462,13 @@ begin
             v_vars := v_vars || jsonb_build_object(
               'course_title', r.payload ->> 'course_title_th',
               'cert_no', r.payload ->> 'cert_no',
-              'verify_code', r.payload ->> 'verify_code');
+              'verify_code', r.payload ->> 'verify_code',
+              'certificate_id', r.payload ->> 'certificate_id');
           elsif r.topic = 'certificate.revoked' then
-            v_vars := v_vars || jsonb_build_object('cert_no', r.payload ->> 'cert_no');
+            v_vars := v_vars || jsonb_build_object(
+              'cert_no', r.payload ->> 'cert_no',
+              'verify_code', r.payload ->> 'verify_code',
+              'certificate_id', r.payload ->> 'certificate_id');
           elsif r.topic = 'credit.adjusted' then
             v_amount := (r.payload ->> 'amount')::numeric;
             v_vars := v_vars || jsonb_build_object('amount',
@@ -665,8 +680,11 @@ grant execute on function public.renewal_reminder_scan() to app_owner, service_r
 -- จากฉบับล่าสุด + เพิ่มบล็อก INSERT event_outbox จุดเดียว — แบบเดียวกับที่ 0031 ทำกับ 0020/0019
 -- (ใช้ sed สกัดเนื้อจาก migration เดิมเป็นไบต์ แล้วแทรกบล็อกเดียว — ห้ามแตะเนื้ออื่น)
 --   submit_attempt_core v4     ← 0031 v3 + event exam.result (NTF-002 · เกิดทั้งผ่าน/ไม่ผ่าน)
---   admin_issue_certificate v2 ← 0019 v1 + event certificate.issued (NTF-003)
---   admin_revoke_certificate v3 ← 0031 v2 + event certificate.revoked (NTF-003 · reason_snippet 120)
+--   admin_issue_certificate v2 ← 0019 v1 + event certificate.issued (NTF-003 ·
+--                               payload verify_code + certificate_id ครบคู่)
+--   admin_revoke_certificate v4 ← 0031 v2 + event certificate.revoked (NTF-003 ·
+--                               reason_snippet 120 · gate r2 B5b: verify_code +
+--                               certificate_id ครบคู่เหมือน issued)
 --   admin_credit_adjust v2     ← 0031 v1 + event credit.adjusted
 -- signature เดิมทุกตัว → create or replace คง ACL/owner เดิม (ระบุซ้ำเพื่อความชัดเจนเท่านั้น)
 
@@ -833,7 +851,7 @@ begin
   end if;
   select public.cert_issue_core(p_actor_user_id, p_enrollment_id, null, p_request_id) into v_cert;
   -- 0034: เพิ่ม event certificate.issued (D-p4-1 · NTF-003) — in-TX เดียวกับการออกใบ ·
-  -- verify_code มาจาก certificates (gate r1 B5 — อีเมลต้องมีลิงก์ verify/PDF ตาม AC
+  -- verify_code + certificate_id ครบคู่ (gate r1/r2 B5 — อีเมลต้องมีลิงก์ verify/PDF ตาม AC
   -- ของ NTF-003; worker เป็นผู้ประกอบ URL จาก config ของแอป)
   insert into public.event_outbox (topic, payload)
   select 'certificate.issued', jsonb_build_object(
@@ -855,7 +873,10 @@ grant execute on function public.admin_issue_certificate(uuid, uuid, text)
   to service_role;
 
 
--- admin_revoke_certificate v3 — เนื้อคัดลอกจาก 0031 v2 + จุดเดียว (event certificate.revoked)
+-- admin_revoke_certificate v4 — เนื้อคัดลอกจาก 0031 v2 + จุดเดียว (event certificate.revoked)
+-- v4 (gate r2 B5b): SELECT เพิ่ม verify_code แล้วใส่ใน event payload คู่กับ
+-- certificate_id ที่มีอยู่เดิม — อีเมลเพิกถอนต้องมีลิงก์ verify/PDF ครบตาม AC ของ
+-- NTF-003 (SRS:353 ครอบทั้งออกใบและเพิกถอน) เหมือนอีเมลออกใบทุกประการ
 
 create or replace function public.admin_revoke_certificate(
   p_actor_user_id uuid,
@@ -868,6 +889,7 @@ set search_path = public
 as $fn$
 declare
   v_cert_no text;
+  v_verify_code text;
   v_revoked_at timestamptz;
   v_enrollment uuid;
   v_user uuid;
@@ -882,9 +904,9 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 ตัวอักษร (ERR-VAL-001|reason_length)'
       using errcode = '22023';
   end if;
-  -- อ่าน cert_no + enrollment + user คืนให้ BFF ใน TX เดียวกัน
-  select cert_no, enrollment_id, user_id
-    into v_cert_no, v_enrollment, v_user
+  -- อ่าน cert_no + verify_code + enrollment + user คืนให้ BFF ใน TX เดียวกัน
+  select cert_no, verify_code, enrollment_id, user_id
+    into v_cert_no, v_verify_code, v_enrollment, v_user
   from public.certificates where id = p_certificate_id;
   if not found then
     raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)';
@@ -909,11 +931,13 @@ begin
     null, null, p_request_id, p_actor_user_id);
 
   -- 0034: เพิ่ม event certificate.revoked (D-p4-1 · NTF-003) — in-TX เดียวกับการเพิกถอน ·
+  -- verify_code + certificate_id ครบคู่ (gate r2 B5b — ลิงก์ของอีเมลเพิกถอนตาม AC) ·
   -- reason_snippet = left(reason,120) — เหตุผลเต็มอยู่ที่ cert row/audit เท่านั้น (แบบแผน PII)
   insert into public.event_outbox (topic, payload)
   values ('certificate.revoked', jsonb_build_object(
     'user_id', v_user,
     'cert_no', v_cert_no,
+    'verify_code', v_verify_code,
     'certificate_id', p_certificate_id,
     'reason_snippet', left(p_reason, 120)));
 

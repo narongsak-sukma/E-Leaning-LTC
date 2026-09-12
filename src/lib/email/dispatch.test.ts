@@ -5,17 +5,23 @@
  * complete ครั้งเดียวต่อ batch · จบเมื่อ claim ว่าง/ครบ maxBatches · fail-loud ของ
  * template/var · drift fail-closed · ห้าม log to_email/payload
  */
-process.env.PUBLIC_BASE_URL = "https://elearning.lawyerthai.test";
-// ลบ CERT_PUBLIC_BASE_URL ของ container ออก (ถ้ามี) — ไม่งั้น certPublicBaseUrl
-// ชนะก่อน publicBaseUrl แล้วลิงก์ใบประกาศฯ (ทดสอบ B5) ได้ base ผิดของ container
-delete process.env.CERT_PUBLIC_BASE_URL;
 process.env.SUPABASE_URL = "https://stub.supabase.co";
 process.env.SUPABASE_ANON_KEY = "stub-anon-key";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub-service-role-key";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { senderStub } = vi.hoisted(() => ({ senderStub: vi.fn() }));
+const { senderStub, getConfigMock } = vi.hoisted(() => ({
+  senderStub: vi.fn(),
+  getConfigMock: vi.fn(),
+}));
+
+// gate r2 B5: getConfig ของจริง cache ค่าแรกที่อ่าน (env แก้ระหว่างไฟล์ไม่มีผล) —
+// mock ที่ตัวฟังก์ชันจึงตั้ง base URL ต่อเคสได้ (fallback publicBaseUrl vs
+// certPublicBaseUrl ที่ตั้งค่าจริง — adjudication-2 บังคับทดสอบทั้งคู่)
+vi.mock("@/lib/config", () => ({
+  getConfig: getConfigMock,
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createSupabaseServiceRoleClient: vi.fn(),
@@ -40,6 +46,10 @@ const ID_B = "a0000000-0000-4000-8000-000000000002";
 const ID_C = "a0000000-0000-4000-8000-000000000003";
 /** user_id ตามสัญญา payload (gate r1 B4 — ต้องเป็น UUID จริงเสมอ) */
 const USER_A = "c0000000-0000-4000-8000-000000000001";
+/** certificate_id ของเคส B5 (UUID ของ certificates.id — route PDF บังคับรูปนี้) */
+const CERT_ID = "d0000000-0000-4000-8000-000000000001";
+/** base URL fallback ของ suite (ไม่ตั้ง certPublicBaseUrl — dev ทำงานแบบนี้) */
+const APP_BASE = "https://elearning.lawyerthai.test";
 
 /** แถวคิวตามสัญญา lane A (แผน §4.7 + 0034 §4a/4b: payload = {notification_id,
  *  user_id, vars} — ตัวแปร render อยู่ใต้ vars ชื่อตามที่ tick ใส่จริง) */
@@ -124,6 +134,9 @@ beforeEach(() => {
   senderStub.mockReset();
   senderStub.mockResolvedValue({ ok: true });
   vi.mocked(createSupabaseServiceRoleClient).mockReset();
+  // default: ไม่ตั้ง certPublicBaseUrl — base ลิงก์ใบประกาศฯ ตกไป publicBaseUrl
+  getConfigMock.mockReset();
+  getConfigMock.mockReturnValue({ publicBaseUrl: APP_BASE, certPublicBaseUrl: null });
 });
 
 describe("runEmailDispatch — flow หลัก claim→render→send→complete", () => {
@@ -153,7 +166,7 @@ describe("runEmailDispatch — flow หลัก claim→render→send→complet
     expect(rpc).toHaveBeenCalledTimes(1);
   });
 
-  it("certificate.issued + verify_code → ฉีดลิงก์ verify/PDF จาก base URL ของแอปก่อน render (gate r1 B5 — NTF-003 AC)", async () => {
+  it("certificate.issued + verify_code + certificate_id → ลิงก์สองเส้นคนละตัวระบุ: verify=verify_code · PDF=UUID (gate r2 B5a — route PDF บังคับ UUID)", async () => {
     const CODE = "LTC-VERIFY-2026-ABCD";
     const { completeCalls } = mockClient({
       batches: [
@@ -168,6 +181,7 @@ describe("runEmailDispatch — flow หลัก claim→render→send→complet
                 course_title: "หลักสูตรทดสอบ",
                 cert_no: "LTC-2569-000123",
                 verify_code: CODE,
+                certificate_id: CERT_ID,
               },
             },
           }),
@@ -187,11 +201,95 @@ describe("runEmailDispatch — flow หลัก claim→render→send→complet
     const firstCall = senderStub.mock.calls[0];
     expect(firstCall).toBeDefined();
     const sentBody = (firstCall?.[0] as { body: string }).body;
-    expect(sentBody).toContain(`https://elearning.lawyerthai.test/verify/${CODE}`);
-    expect(sentBody).toContain(
-      `https://elearning.lawyerthai.test/api/v1/certificates/${CODE}/pdf`,
-    );
+    // verify = หน้าสาธารณะตาม verify_code · PDF = certificates.id (UUID) —
+    // สลับกันไม่ได้: route PDF ตอบ 400 ให้ nanoid ทันที (API-SPEC §3.6)
+    expect(sentBody).toContain(`${APP_BASE}/verify/${CODE}`);
+    expect(sentBody).toContain(`${APP_BASE}/api/v1/certificates/${CERT_ID}/pdf`);
+    expect(sentBody).not.toContain(`${APP_BASE}/api/v1/certificates/${CODE}/pdf`);
     expect(completeCalls).toEqual([[{ id: ID_A, ok: true }]]);
+  });
+
+  it("certificate.revoked + ตัวระบุครบ → ฉีดลิงก์คู่เดียวกันให้อีเมลเพิกถอน (gate r2 B5b — AC ครอบทั้งออกใบ/เพิกถอน)", async () => {
+    const CODE = "LTC-VERIFY-2026-REVK";
+    const { completeCalls } = mockClient({
+      batches: [
+        [
+          row({
+            template_key: "certificate.revoked",
+            payload: {
+              notification_id: "b0000000-0000-4000-8000-000000000009",
+              user_id: USER_A,
+              vars: {
+                full_name: "ทดสอบ ระบบ",
+                cert_no: "LTC-2569-000123",
+                verify_code: CODE,
+                certificate_id: CERT_ID,
+              },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "certificate.revoked|th": tpl(
+          "แจ้งเพิกถอน เลขที่ {{cert_no}}",
+          "ถูกเพิกถอน ตรวจสอบ: {{verify_url}} PDF: {{pdf_url}}",
+        ),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    expect(sentBody).toContain(`${APP_BASE}/verify/${CODE}`);
+    expect(sentBody).toContain(`${APP_BASE}/api/v1/certificates/${CERT_ID}/pdf`);
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: true }]]);
+  });
+
+  it("ตั้ง certPublicBaseUrl จริง → ลิงก์ทั้งสองเส้นใช้โดเมน certificate ไม่ใช่ publicBaseUrl (adjudication-2 — ทดสอบสอง base)", async () => {
+    const CODE = "LTC-VERIFY-2026-CONF";
+    getConfigMock.mockReturnValue({
+      publicBaseUrl: APP_BASE,
+      certPublicBaseUrl: "https://cert.lawyerthai.test",
+    });
+    mockClient({
+      batches: [
+        [
+          row({
+            template_key: "certificate.issued",
+            payload: {
+              notification_id: "b0000000-0000-4000-8000-000000000009",
+              user_id: USER_A,
+              vars: {
+                full_name: "ทดสอบ ระบบ",
+                course_title: "หลักสูตรทดสอบ",
+                cert_no: "LTC-2569-000123",
+                verify_code: CODE,
+                certificate_id: CERT_ID,
+              },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "certificate.issued|th": tpl(
+          "ใบประกาศ {{course_title}}",
+          "ตรวจสอบ: {{verify_url}} PDF: {{pdf_url}}",
+        ),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    expect(sentBody).toContain(`https://cert.lawyerthai.test/verify/${CODE}`);
+    expect(sentBody).toContain(
+      `https://cert.lawyerthai.test/api/v1/certificates/${CERT_ID}/pdf`,
+    );
+    expect(sentBody).not.toContain(APP_BASE);
   });
 
   it("send fail → complete รับ {ok:false,error} + นับ failed", async () => {
@@ -217,6 +315,73 @@ describe("runEmailDispatch — template/var/drift fail-closed", () => {
     const summary = await runEmailDispatch();
     expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
     expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "template_missing" }]]);
+  });
+
+  it("verify_code มีแต่ certificate_id ขาด → ไม่ฉีดลิงก์ → template_var_missing + ห้ามเรียก provider (gate r2 B5a — ไม่มีทางส่งเมล์ลิงก์ PDF ผิดตัวระบุ)", async () => {
+    const { completeCalls } = mockClient({
+      batches: [
+        [
+          row({
+            template_key: "certificate.issued",
+            payload: {
+              notification_id: "b0000000-0000-4000-8000-000000000009",
+              user_id: USER_A,
+              vars: {
+                full_name: "ทดสอบ ระบบ",
+                course_title: "หลักสูตรทดสอบ",
+                cert_no: "LTC-2569-000123",
+                verify_code: "LTC-VERIFY-2026-HALF",
+              },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "certificate.issued|th": tpl(
+          "ใบประกาศ {{course_title}}",
+          "ตรวจสอบ: {{verify_url}} PDF: {{pdf_url}}",
+        ),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "template_var_missing" }]]);
+  });
+
+  it("certificate_id ไม่ใช่ UUID (nanoid หลุดมาแทน — รูปบั๊ก r1 เดิม) → fail เหมือนกัน ไม่ส่งเมล์ PDF ชี้ 400", async () => {
+    const { completeCalls } = mockClient({
+      batches: [
+        [
+          row({
+            template_key: "certificate.issued",
+            payload: {
+              notification_id: "b0000000-0000-4000-8000-000000000009",
+              user_id: USER_A,
+              vars: {
+                full_name: "ทดสอบ ระบบ",
+                course_title: "หลักสูตรทดสอบ",
+                cert_no: "LTC-2569-000123",
+                verify_code: "LTC-VERIFY-2026-ABCD",
+                certificate_id: "LTC-VERIFY-2026-ABCD",
+              },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "certificate.issued|th": tpl(
+          "ใบประกาศ {{course_title}}",
+          "ตรวจสอบ: {{verify_url}} PDF: {{pdf_url}}",
+        ),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "template_var_missing" }]]);
   });
 
   it("var ที่ template ต้องการแต่ payload ไม่มี → template_var_missing (fail-loud)", async () => {

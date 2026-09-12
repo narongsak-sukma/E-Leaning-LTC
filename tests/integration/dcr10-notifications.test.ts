@@ -17,8 +17,11 @@
  *      certificate ไม่มี (family exam.result ยังเข้าคิวตาม default) · รูปทรง
  *      my_notification_settings/_update ครบ 4 family merged defaults · patch กลับ true
  *   5) ออกใบ + เพิกถอน (svcRpc) — tick → สอง notification (certificate.issued +
- *      certificate.revoked) ref_type 'certificate' ทั้งคู่ (นายก fix A-2) · subject อีเมล
- *      เพิกถอน render แล้วมี "เลขที่" + cert_no
+ *      certificate.revoked) ref_type 'certificate' ทั้งคู่ (นายก fix A-2) · vars อีเมล
+ *      ทั้งสองฉบับมี verify_code + certificate_id ครบคู่ (gate r2 B5 — UUID ของใบ
+ *      สำหรับ PDF) · dispatch จริง → Mailpit body มีลิงก์ verify+PDF ครบทั้งสองฉบับ ·
+ *      ปลายทางจริง: GET verify สาธารณะ → 200 status revoked · GET PDF ไร้ session →
+ *      401 (200 เต็มรูปแบบติดธง D-4/D-8 ข้าม wave — ดูคอมเมนต์ในเคส)
  *   6) credit.adjusted — registrar aal2 (mintAal2Token) admin_credit_adjust −1.25 → tick →
  *      notification topic credit.adjusted body มี "-1.25" · ref_type credit_ledger
  *   7) re-delivery — copy event exam.result ที่ processed แล้ว (topic+payload เดิม) → tick →
@@ -903,27 +906,98 @@ describe.skipIf(!DB_URL)(
         expect(row.ref_type).toBe("certificate");
         expect(row.body).toContain(certNo);
       }
-      // อีเมลสองฉบับ (issued + revoked) — subject ฉบับเพิกถอน render แล้วต้องมี เลขที่+cert_no
-      const revokedOutbox = await psqlRows<{
+      // อีเมลสองฉบับ (issued + revoked) — vars ต้องมีตัวระบุครบ "สองตัว" คนละชนิด
+      // (gate r2 B5): verify_code (หน้า verify สาธารณะ) + certificate_id (UUID ที่
+      // route PDF บังคับ — API-SPEC §3.6) · certificate_id ต้องตรง certificates.id
+      const outboxRows = await psqlRows<{
         template_key: string;
-        vars: { cert_no?: string; full_name?: string };
+        verify_code: string;
+        certificate_id: string;
       }>(`
-        select template_key, payload -> 'vars' as vars
+        select template_key, payload -> 'vars' ->> 'verify_code' as verify_code,
+               payload -> 'vars' ->> 'certificate_id' as certificate_id
           from public.email_outbox
-         where recipient_user_id = '${certUser.id}' and template_key = 'certificate.revoked';
+         where recipient_user_id = '${certUser.id}' and template_key like 'certificate.%'
+         order by template_key;
       `);
-      expect(revokedOutbox).toHaveLength(1);
-      expect(revokedOutbox[0]?.vars?.cert_no).toBe(certNo);
+      expect(outboxRows.map((r) => r.template_key)).toEqual([
+        "certificate.issued",
+        "certificate.revoked",
+      ]);
+      const verifyCode = await psqlScalar(
+        `select verify_code from public.certificates where id = '${certId}';`,
+      );
+      for (const r of outboxRows) {
+        expect(r.verify_code).toBe(verifyCode);
+        expect(r.certificate_id).toBe(certId); // UUID ของแถวใบประกาศฯ จริง
+      }
+      // render แบบ "หลัง worker ฉีดลิงก์" (ตัวแปรที่ provider ได้จริง) — subject ต้องมี
+      // เลขที่+cert_no (เนื้อหาเต็มถูกพิสูจน์แล้วที่ Mailpit ด้านล่าง ผ่าน worker จริง)
       const rendered = await svcRpc("render_notification", {
         p_key: "certificate.revoked",
         p_locale: "th",
         p_channel: "email",
-        p_vars: revokedOutbox[0]?.vars ?? {},
+        p_vars: {
+          full_name: "ทดสอบ ระบบ",
+          cert_no: certNo,
+          verify_code: verifyCode,
+          certificate_id: certId,
+          verify_url: `http://localhost:3000/verify/${verifyCode}`,
+          pdf_url: `http://localhost:3000/api/v1/certificates/${certId}/pdf`,
+        },
       });
       expect(rendered.status, rendered.text.slice(0, 300)).toBe(200);
       const subject = (rendered.json as { subject: string }).subject;
       expect(subject).toContain("เลขที่");
       expect(subject).toContain(certNo);
+      // ส่งจริงด้วย worker (ประตู cron ของแอป) — Mailpit ต้องเห็นลิงก์ครบทั้งสองฉบับ
+      const cronSecret = process.env.CRON_SECRET ?? "";
+      expect(cronSecret.length, "CRON_SECRET ไม่พบใน env ของรัน").toBeGreaterThan(0);
+      const dispatch = await fetch(
+        "http://localhost:3000/api/internal/jobs/email-dispatch",
+        { method: "POST", headers: { "x-cron-secret": cronSecret } },
+      );
+      expect(dispatch.status, `dispatch HTTP ${dispatch.status}`).toBe(200);
+      const mailList = (await (await fetch("http://localhost:8025/api/v1/messages?limit=50")).json()) as {
+        messages: readonly { ID: string; To: readonly { Address: string }[]; Subject: string }[];
+      };
+      const mine = mailList.messages.filter(
+        (m) =>
+          m.To.some((to) => to.Address === certUser.email) &&
+          // เฉพาะสองฉบับของใบประกาศฯ (certUser มีอีเมลผลสอบของตัวเองด้วย — ไม่เกี่ยว)
+          m.Subject.includes("ใบประกาศนียบัตร"),
+      );
+      expect(mine.length, "ไม่พบจดหมายใบประกาศฯ ที่ Mailpit ของ certUser").toBeGreaterThanOrEqual(2);
+      const base = "http://localhost:3000";
+      const links = `${base}/verify/${verifyCode} และ ${base}/api/v1/certificates/${certId}/pdf`;
+      for (const m of mine) {
+        const full = (await (await fetch(`http://localhost:8025/api/v1/message/${m.ID}`)).json()) as {
+          Text: string;
+        };
+        expect(
+          full.Text.includes(`${base}/verify/${verifyCode}`),
+          `Mailpit ${m.Subject}: ขาดลิงก์ verify (${links})`,
+        ).toBe(true);
+        expect(
+          full.Text.includes(`${base}/api/v1/certificates/${certId}/pdf`),
+          `Mailpit ${m.Subject}: ขาดลิงก์ PDF แบบ UUID (${links})`,
+        ).toBe(true);
+      }
+      // ปลายทางจริงของลิงก์ verify — BFF สาธารณะ (ไม่ต้อง session): ยืนยันสถานะ
+      // เพิกถอนโผล่ที่หน้าตรวจสอบ (AC ของ NTF-003 — ผู้รับเมล์เพิกถอนกดดูได้)
+      const verifyPage = await fetch(`${base}/api/v1/certificates/${verifyCode}`);
+      expect(verifyPage.status, `verify HTTP ${verifyPage.status}`).toBe(200);
+      const verifyBody = (await verifyPage.json()) as { status: string; code: string };
+      expect(verifyBody.status).toBe("revoked");
+      expect(verifyBody.code).toBe(certNo);
+      // ปลายทางลิงก์ PDF — route BFF มีชีวิตและ auth ก่อนเสมอ: ไม่มี session → 401
+      // ERR-AUTH-001 (ไม่ใช่ 404 เงียบ = เส้นทางถูกต้อง) · การได้ 200 application/pdf
+      // เต็มรูปแบบ "วันนี้" ไม่เป็นไปได้ตามธงข้าม wave ที่บันทึกไว้: D-4 (ตัว render
+      // ไฟล์ยังไม่มี — pdf_media_id เป็น null → 404 แม้เจ้าของ) + D-8 (RLS media_read
+      // ยังเปิดแค่ instructor/staff — ผู้เรียนเจ้าของใบยังโดนปฏิเสธ) — route.test.ts
+      // ของ route ครอบ 400-uuid/401/404-D-4/404-D-8/200 ไว้แล้วที่ระดับ unit
+      const pdfRoute = await fetch(`${base}/api/v1/certificates/${certId}/pdf`);
+      expect(pdfRoute.status, `pdf HTTP ${pdfRoute.status}`).toBe(401);
     }, 60_000);
 
     // ─── เคส 6: credit.adjusted −1.25 (registrar aal2) ──────────────────────────

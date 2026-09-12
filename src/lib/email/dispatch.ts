@@ -193,20 +193,29 @@ async function processEmailRow(
   ) {
     return { item: { id: row.id, ok: false, error: "row_contract_drift" }, sent: false };
   }
-  // gate r1 B5 (NTF-003): template อีเมลใบประกาศฯ อ้าง {{verify_url}}/{{pdf_url}} —
-  // URL ประกอบที่ worker จาก config ของแอป (SQL ผู้ผลิตไม่รู้ env): vars มี
-  // verify_code = แถวใบประกาศฯ → ฉีดลิงก์หน้าตรวจสอบ (/verify/<code>) และ PDF
-  // (/api/v1/certificates/<code>/pdf) · template อื่นไม่อ้างตัวแปรคู่นี้ = ไม่กระทบ
+  // gate r1/r2 B5 (NTF-003): template อีเมลใบประกาศฯ (ออกใบ+เพิกถอน) อ้าง
+  // {{verify_url}}/{{pdf_url}} — URL ประกอบที่ worker จาก config ของแอป (SQL
+  // ผู้ผลิตไม่รู้ env · adjudication-2): vars ต้องมีตัวระบุ "ครบสองตัว" และคนละ
+  // ชนิด — verify_code (nanoid-43 ของหน้า verify สาธารณะ) + certificate_id (UUID
+  // ของ certificates.id ที่ route PDF บังคับ — API-SPEC §3.6) · ขาดตัวใดตัวหนึ่ง =
+  // ไม่ฉีดลิงก์ → render เจอ {{verify_url}} เปล่า → template_var_missing fail-loud
+  // (ไม่มีทางส่งอีเมลที่ลิงก์ PDF ชี้ 400 จากการใส่ verify_code ผิดตำแหน่ง)
   // · certPublicBaseUrl มีที่ตั้ง (prod — โดเมน certificate สาธารณะ) ไม่มี = ใช้
-  // publicBaseUrl ของแอป (dev)
+  // publicBaseUrl ของแอป (dev) · template อื่นไม่อ้างตัวแปรคู่นี้ = ไม่กระทบ
   const verifyCode = vars["verify_code"];
-  if (typeof verifyCode === "string" && verifyCode.length > 0) {
+  const certificateId = vars["certificate_id"];
+  if (
+    typeof verifyCode === "string" &&
+    verifyCode.length > 0 &&
+    typeof certificateId === "string" &&
+    UUID_RE.test(certificateId)
+  ) {
     const config = getConfig();
     const base = config.certPublicBaseUrl ?? config.publicBaseUrl;
     vars = {
       ...vars,
       verify_url: `${base}/verify/${verifyCode}`,
-      pdf_url: `${base}/api/v1/certificates/${verifyCode}/pdf`,
+      pdf_url: `${base}/api/v1/certificates/${certificateId}/pdf`,
     };
   }
   const tpl = await loadEmailTemplate(ctx.client, ctx.cache, row.template_key, row.locale);
