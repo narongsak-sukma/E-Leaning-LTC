@@ -56,6 +56,9 @@ const envSchema = z.object({
   SMTP_PASSWORD: optionalString,
   EMAIL_FROM: optionalString,
   RESEND_API_KEY: optionalString,
+  // secret ของ cron ที่ยิง POST /api/internal/jobs/email-dispatch (header x-cron-secret) —
+  // ไม่ตั้ง = endpoint ตอบ 404 fail-closed เงียบ ๆ (D-p4-8 · Wave E Phase 4)
+  CRON_SECRET: optionalString,
   // — Rate limit (ค่า canonical ชุดเดียวทุก environment — API-SPEC §5 / SRS Appendix A) —
   RATE_LIMIT_AUTH_PER_MIN: intFromEnv(10, 1, 10000),
   RATE_LIMIT_OTP_PER_HOUR: intFromEnv(3, 1, 1000),
@@ -184,6 +187,14 @@ export interface AppConfig {
   smtp: { host: string; port: number; user: string | null; password: string | null } | null;
   emailFrom: string | null;
   resendApiKey: string | null;
+  /**
+   * secret ของ cron email-dispatch (env `CRON_SECRET` — D-p4-8 Wave E Phase 4):
+   * route `/api/internal/jobs/email-dispatch` เทียบ header `x-cron-secret` แบบ
+   * timing-safe · **ไม่ตั้ง = null → route ตอบ 404 ตลอด (fail-closed เงียบ)** —
+   * dev ตั้งอะไรก็ได้ (สุ่ม `openssl rand -hex 16` · compose service `mailer`
+   * อ่านค่านี้จาก .env) · prod = Vercel Cron secret ของ platform
+   */
+  cronSecret: string | null;
   rateLimit: {
     authPerMin: number;
     otpPerHour: number;
@@ -235,6 +246,7 @@ function toConfig(env: EnvRaw): AppConfig {
         : null,
     emailFrom: env.EMAIL_FROM ?? null,
     resendApiKey: env.RESEND_API_KEY ?? null,
+    cronSecret: env.CRON_SECRET ?? null,
     rateLimit: {
       authPerMin: env.RATE_LIMIT_AUTH_PER_MIN,
       otpPerHour: env.RATE_LIMIT_OTP_PER_HOUR,
