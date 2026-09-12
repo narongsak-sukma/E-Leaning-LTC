@@ -429,7 +429,8 @@ describe.skipIf(!DB_URL)(
       // ซึ่งตรวจ token เอง → 200 + JSON ของเจ้าของครบ · gate p5-r2 hostname ruling:
       // ลิงก์ที่อีเมลถือต้องเป็น origin "มุมมองผู้รับ" (SUPABASE_PUBLIC_URL ของ
       // container app = localhost:8000) อยู่แล้ว — ไม่ใช่ kong:8000 ที่ผู้รับเปิด
-      // ไม่ได้ (การเขียนกลับด้านล่างคงไว้เป็น safety ของสแตกที่ไม่ตั้งค่า)
+      // ไม่ได้ · เทสไม่เขียน URL กลับอีก: ถ้า stack ไหนหลุดลิงก์ kong:8000 ออกไป
+      // จะตายที่ assert origin ด้านล่าง ไม่ใช่แอบรอดด้วยการแปลงของเทส
       const linkMatch = mailText?.match(/https?:\/\/[^\s"<>]+\/object\/sign\/[^\s"<>]+/);
       expect(linkMatch, "เนื้อเมล์ไม่มี URL เต็มของ signed link").not.toBeNull();
       const link = new URL(linkMatch?.[0] ?? "");
