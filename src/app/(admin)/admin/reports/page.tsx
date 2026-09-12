@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 };
 
 /** pure — การ์ดที่บทบาทของ session มีสิทธิ์เห็น (สิทธิ์จริงตัดสินที่ BFF เสมอ) */
-export function cardsForRoles(roles: readonly string[]): typeof REPORT_CARDS {
+function cardsForRoles(roles: readonly string[]): typeof REPORT_CARDS {
   return REPORT_CARDS.filter((card) =>
     roles.some((role) => card.roles.includes(role)),
   );
