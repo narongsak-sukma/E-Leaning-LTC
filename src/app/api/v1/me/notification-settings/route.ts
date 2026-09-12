@@ -7,6 +7,8 @@
  *   เข้าไป · เรียก RPC ด้วย user JWT ผ่าน PostgREST เท่านั้น (ห้าม service key)
  * - family ตาม D-p4-5: "exam.result" | "certificate" | "credit" | "renewal" →
  *   { in_app: boolean, email: boolean } — jsonb settings key = family (ไม่ใช่ topic เต็ม)
+ *   (RPC 0035 มี family ภายในเพิ่ม 'license'/'account' แต่สมาชิกทั้งชุดเป็นธุรกรรมบังคับ
+ *    NTF-005 ที่ส่งเสมอ (0036 §12) = ไม่ใช่สวิตช์ผู้ใช้ → BFF กรองออก ตอบเฉพาะ 4 family นี้)
  * - GET: RPC my_notification_settings (คืน default ครบทุก family เมื่อไม่มีแถว) → 200 { settings }
  * - PATCH: body { settings: { family: { in_app?, email? } } } ส่งบางส่วนได้ (ต้องมีอย่างน้อย
  *   1 คีย์ต่อ family ที่ส่ง + อย่างน้อย 1 family) · boolean เท่านั้น · strict — key แปลกปลอม/
@@ -28,6 +30,7 @@ import { requireUser } from "@/lib/auth/session";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import {
+  NOTIFICATION_FAMILIES,
   NotificationSettingsPatchBody,
   NotificationSettingsView,
   type NotificationSettingsPatchBodyParsed,
@@ -67,6 +70,25 @@ function extractSettings(data: unknown): Record<string, unknown> | null {
     return inner as Record<string, unknown>;
   }
   return record;
+}
+
+/**
+ * กรองก้อน settings ของ RPC เหลือเฉพาะ family ที่เป็นสัญญาของ API (4 family) —
+ * 0035 เพิ่ม family ภายใน 'license'/'account' ให้ RPC แต่สมาชิกปัจจุบันทั้งชุดเป็น
+ * ธุรกรรมบังคับ NTF-005 ("ที่ส่งเสมอ" — 0036 §12) จึงไม่ใช่สวิตช์ของผู้ใช้: แสดง
+ * toggle ที่กดแล้วไม่มีผล = โกหกผู้ใช้ → BFF ตัดออกก่อนตอบ (GET/PATCH ใช้จุดเดียวกัน) ·
+ * family ที่เป็นสัญญาหายไป = drift → 503 fail-closed (คืน null ให้ caller โยน)
+ */
+function toContractSettings(raw: Record<string, unknown>): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  for (const family of NOTIFICATION_FAMILIES) {
+    const value = raw[family];
+    if (value === undefined) {
+      return null;
+    }
+    out[family] = value;
+  }
+  return out;
 }
 
 /** x-request-id (SDS §5.4) → envelope options (exactOptionalPropertyTypes-safe) */
@@ -121,7 +143,8 @@ export async function GET(request: Request): Promise<NextResponse> {
       throw new AppError("ERR-SYS-002"); // opaque — ไม่ leak SQL (SDS §6.1)
     }
     // 4) ขาออก zod strict — drift → 503 fail-closed (ไม่ส่ง payload เพี้ยน)
-    const settingsBody = extractSettings(data);
+    //    (กรองเหลือ family ของสัญญาก่อน — ดู toContractSettings)
+    const settingsBody = toContractSettings(extractSettings(data) ?? {});
     if (settingsBody === null) {
       throw new AppError("ERR-SYS-002", {
         details: { reason: "notification_settings_read_drift" },
@@ -153,9 +176,14 @@ export async function PATCH(request: Request): Promise<NextResponse> {
     }
     // 5) PostgREST อาจ wrap scalar/jsonb เป็น array หลักเดียว (r8-N2) — คลี่ก่อนตรวจ strict
     const rawRow: unknown = Array.isArray(rpc.data) && rpc.data.length === 1 ? rpc.data[0] : rpc.data;
-    const settingsBody = extractSettings(rawRow);
-    if (settingsBody === null) {
+    const rawSettings = extractSettings(rawRow);
+    if (rawSettings === null) {
       throw new AppError("ERR-SYS-002", { details: { reason: SETTINGS_UPDATE_FALLBACK } });
+    }
+    // family ของสัญญาขาดหลังกรอง = drift (เหมือนเดิม — ไม่ใช่ fallback ทั่วไป)
+    const settingsBody = toContractSettings(rawSettings);
+    if (settingsBody === null) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "notification_settings_updated_drift" } });
     }
     // 6) ขาออก strict — ตอบค่าใหม่ทั้งก้อน (settings ครบ 4 family)
     const view = parseOutgoingView(NotificationSettingsView, { settings: settingsBody }, "notification_settings_updated_drift");

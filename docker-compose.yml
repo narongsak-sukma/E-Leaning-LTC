@@ -236,8 +236,11 @@ services:
     networks: [ltc-dev]
 
   # ----------------------------------------------------------------- mailer
-  # ทริกเกอร์ email dispatch worker (D-p4-8 dev) — loop ทุก 30 วินาที ยิง POST
-  # /api/internal/jobs/email-dispatch พร้อม header x-cron-secret (prod = Vercel Cron)
+  # ทริกเกอร์ background worker ทั้งสองตัวของ dev (prod = Vercel Cron):
+  #   1) email dispatch (D-p4-8)   → POST /api/internal/jobs/email-dispatch
+  #   2) pdpa export (D-p5-7 #90)  → POST /api/internal/jobs/pdpa-export
+  # loop ทุก 30 วินาที พร้อม header x-cron-secret · endpoint ที่ยังไม่มีไฟล์จริง
+  # ตอบ 404 เงียบ (fail-closed ของ route เอง) — log รหัสแล้วข้ามไปทำงานต่อ
   # CRON_SECRET อ่านจาก .env อัตโนมัติ (compose interpolation) — ค่าว่าง = ยังไม่ตั้ง
   # config → sleep ยาว + log ว่ารอ (fail-closed ไม่ยิง endpoint)
   mailer:
@@ -261,6 +264,8 @@ services:
           else
             code=$$(curl -s -m 25 -o /tmp/resp.txt -w "%{http_code}" -X POST -H "x-cron-secret: $$CRON_SECRET" http://app:3000/api/internal/jobs/email-dispatch) || code=curl_failed
             echo "$$(date +%FT%T%z) mailer: HTTP=$$code body=$$(head -c 200 /tmp/resp.txt 2>/dev/null)"
+            code=$$(curl -s -m 25 -o /tmp/resp.txt -w "%{http_code}" -X POST -H "x-cron-secret: $$CRON_SECRET" http://app:3000/api/internal/jobs/pdpa-export) || code=curl_failed
+            echo "$$(date +%FT%T%z) mailer-pdpa: HTTP=$$code body=$$(head -c 200 /tmp/resp.txt 2>/dev/null)"
             sleep 30
           fi
         done
