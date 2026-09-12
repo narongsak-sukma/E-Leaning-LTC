@@ -208,14 +208,20 @@ export const AssessmentDetailView = z
 
 export type AssessmentDetailViewParsed = z.infer<typeof AssessmentDetailView>;
 
-// ─── question_snapshot (jsonb ที่ start_attempt เขียนต่อข้อ — 0011_functions.sql):
-//     {question_id, version, text, options:[{id,text,is_correct,points}], points} ───
+// ─── question_snapshot (jsonb ที่ start_attempt เขียนต่อข้อ — 0011 + 0022):
+//     {question_id, version, text, type, options:[{id,text,is_correct,points}], points} ───
 // r6-L1: strict ทุกชั้น — jsonb จาก DB มีคีย์นอกสัญญา = drift → 503 ไม่ strip เงียบ
+// `type` เพิ่มโดย 0022 (DCR-7/PB-18 — DD §3.1 attempt_answers.question_snapshot):
+// snapshot ก่อน 0022 ไม่มี type → ใช้ default 'multiple_choice' ตามกติกาเดียวกับ
+// paper view (0022 coalesce) · ค่านอก enum = drift fail-closed ตามเดิม
+export const ATTEMPT_SNAPSHOT_TYPES = ["single_choice", "multiple_choice", "true_false"] as const;
+
 export const AttemptQuestionSnapshot = z
   .object({
     question_id: z.string().uuid(),
     version: z.number().int().min(1),
     text: z.string().min(1),
+    type: z.enum(ATTEMPT_SNAPSHOT_TYPES).default("multiple_choice"),
     options: z
       .array(
         z

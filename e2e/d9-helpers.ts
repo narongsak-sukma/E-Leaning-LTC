@@ -206,7 +206,8 @@ export async function cleanupD9World(): Promise<void> {
     delete from public.lesson_progress
      where enrollment_id in (select id from public.enrollments where user_id in ${d9Users});
     delete from public.enrollments where user_id in ${d9Users};
-    delete from public.role_assignments where user_id in ${d9Users};
+    -- granted_by รวมด้วย — เหตุผลเดียวกับ deleteD9User (FK จากแถวที่ผู้ใช้ d9 เป็นผู้มอบ)
+    delete from public.role_assignments where user_id in ${d9Users} or granted_by in ${d9Users};
     delete from public.profiles where id in ${d9Users};
     delete from auth.users where email like 'd9-%';
   `);
@@ -300,7 +301,10 @@ export async function deleteD9User(userId: string): Promise<void> {
     delete from public.notifications n using mine where n.id = mine.notification_id;
     delete from public.notification_settings where user_id = '${userId}';
     delete from public.renewal_cycles where user_id = '${userId}';
-    delete from public.role_assignments where user_id = '${userId}';
+    -- รวมแถวที่ผู้ใช้เป็น "ผู้มอบ" (granted_by) เช่น instructor/staff:viewer ที่ BFF
+    -- มอบให้ผู้อื่น — เจ้าของแถวยังอยู่ก็ตาม ไม่งั้น profiles delete โดน FK
+    -- role_assignments_granted_by_fkey (แถว revoke แล้วก็ยังอ้างอิงอยู่)
+    delete from public.role_assignments where user_id = '${userId}' or granted_by = '${userId}';
     delete from public.profiles where id = '${userId}';
     delete from auth.users where id = '${userId}';
   `);
@@ -531,11 +535,17 @@ export async function enrollMfaTotp(email: string): Promise<Aal2Session> {
   }
   const accessToken = grantBody.access_token;
   // เส้นทาง MFA จริงของ GoTrue (auth-js: POST /factors, /factors/{id}/challenge, /factors/{id}/verify)
+  // ชื่อ factor ต้องไม่ซ้ำต่อผู้ใช้ — GoTrue ตอบ 422 mfa_factor_name_conflict ("A factor
+  // with the friendly name … for this user already exists") เมื่อ enroll ผู้ใช้เดิมซ้ำ
+  // (พิสูจน์กับ GoTrue จริง: ชื่อใหม่ 200 · ชื่อเดิมซ้ำ 422 · ชื่อใหม่อีก 200) — spec
+  // เดียว enroll ผู้ใช้เดียวกันได้หลายครั้งข้ามเทส เพราะ Playwright ≥1.63 รีสตาร์ท
+  // worker หลังเทสพัง (beforeAll รันใหม่) แต่เทสที่ "ผ่าน" ต่อกันใน worker เดียวยัง
+  // ใช้ผู้ใช้ชุดเดิม — ชื่อคงที่ "e2e-d9" จึงชนกัน
   const enroll = await restCall(
     "POST",
     "/auth/v1/factors",
     { token: accessToken },
-    { factor_type: "totp", friendly_name: "e2e-d9", issuer: "ltc-e2e" },
+    { factor_type: "totp", friendly_name: `e2e-d9-${Date.now().toString(36)}`, issuer: "ltc-e2e" },
   );
   const enrollBody = (enroll.json ?? {}) as {
     id?: string;

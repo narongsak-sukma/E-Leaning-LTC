@@ -423,9 +423,24 @@ begin
     raise notice '0019: storage schema ไม่มี (vanilla image) — ข้าม bucket/นโยบาย storage';
     return;
   end if;
-  insert into storage.buckets (id, name, public)
-  values ('media','media',false), ('certificates','certificates',false)
-  on conflict (id) do nothing;
+  -- gate p5-r3 (พิสูจน์ baseline upgrade): image ปัจจุบัน (storage-api v1) ถอดคอลัมน์
+  -- buckets.public ออก — ไม่มี "public bucket" อีกต่อไป (เข้าถึงผ่าน signed URL/
+  -- นโยบายเท่านั้น ซึ่งเป็นรูปแบบเดิมของเรา: ทุก bucket เป็น private อยู่แล้ว) — เดิม
+  -- insert ระบุคอลัมน์นี้ตายตัวทำให้ DB ใหม่ของ image ปัจจุบัน apply 0019 ไม่ผ่าน
+  -- เลย (latency ของบั๊ก: volume เดิมสร้างตอน image ยังมีคอลัมน์ — พบตอนสร้าง
+  -- baseline DB จริง) — เลือกตาม schema ที่เจอ: image เก่าที่ยังมีคอลัมน์ใส่ false
+  -- เหมือนเดิม · image ใหม่ insert สองคอลัมน์ (ค่าเริ่มต้นของระบบ = private)
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'storage' and table_name = 'buckets'
+                and column_name = 'public') then
+    insert into storage.buckets (id, name, public)
+    values ('media','media',false), ('certificates','certificates',false)
+    on conflict (id) do nothing;
+  else
+    insert into storage.buckets (id, name)
+    values ('media','media'), ('certificates','certificates')
+    on conflict (id) do nothing;
+  end if;
   execute 'drop policy if exists objects_via_media_assets on storage.objects';
   -- 0019-r1 (B1): เงื่อนไข eligibility แบบ inline (mirror สาขาทั้งสามของ media_read)
   -- — defense in depth: แม้ media_assets policy เปลี่ยนในอนาคต storage ก็ไม่เปิดกว้าง

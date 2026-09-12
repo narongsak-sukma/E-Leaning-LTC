@@ -39,6 +39,11 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: requiredString,
   SUPABASE_SERVICE_ROLE_KEY: requiredString,
   SUPABASE_DB_POOLER_URL: optionalString,
+  // origin ของ Supabase gateway "มุมมองผู้รับอีเมล" — dev = http://localhost:8000
+  // ขณะที่ SUPABASE_URL ใน container เห็น http://kong:8000 (ผู้รับเปิดไม่ได้ ·
+  // gate p5-r2 hostname ruling) · ไม่ตั้ง = ใช้ SUPABASE_URL ตรง ๆ (prod ที่ผู้
+  // ใช้เห็นโดเมนเดียวกับ service ไม่ต้องตั้ง)
+  SUPABASE_PUBLIC_URL: optionalString,
   // — สื่อ (storage abstraction — สลับ dev/prod ด้วย MEDIA_PROVIDER) —
   MEDIA_PROVIDER: z.enum(["supabase_storage", "r2", "stream"]).default("supabase_storage"),
   R2_ACCOUNT_ID: optionalString,
@@ -159,6 +164,13 @@ export interface AppConfig {
   supabaseServiceRoleKey: string;
   supabaseDbPoolerUrl: string | null;
   /**
+   * origin ของ Supabase gateway มุมมองผู้รับลิงก์ (env `SUPABASE_PUBLIC_URL`):
+   * email worker เขียนทับ protocol+host ของ signed URL ด้วยค่านี้ก่อนใส่เมล์ —
+   * dev ผู้รับบน host เปิด http://kong:8000 ไม่ได้ · ไม่ตั้ง = null → ใช้ URL
+   * จาก createSignedUrl (SUPABASE_URL) ตรง ๆ — prod โดเมนเดียวไม่ต้องตั้ง
+   */
+  supabasePublicUrl: string | null;
+  /**
    * คีย์ HMAC สำหรับ signed cursor (API-SPECIFICATION §1.2) — optional env
    * `CURSOR_HMAC_SECRET`; ไม่ตั้ง = null → helper ฝั่ง cursor (lib/api/pagination)
    * fallback ใช้ `supabaseServiceRoleKey` เป็น PRF (dev-grade — ความเสี่ยงยอมรับได้เฉพาะ
@@ -222,6 +234,7 @@ function toConfig(env: EnvRaw): AppConfig {
     supabaseAnonKey: env.SUPABASE_ANON_KEY,
     supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
     supabaseDbPoolerUrl: env.SUPABASE_DB_POOLER_URL ?? null,
+    supabasePublicUrl: env.SUPABASE_PUBLIC_URL ?? null,
     cursorHmacSecret: env.CURSOR_HMAC_SECRET ?? null,
     ipHashSalt: env.IP_HASH_SALT ?? null,
     mediaProvider: env.MEDIA_PROVIDER,

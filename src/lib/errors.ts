@@ -56,14 +56,6 @@ export const ERROR_REGISTRY = {
     httpStatus: 503,
     message: "ระบบไม่พร้อมให้บริการชั่วคราว",
   },
-  "ERR-PRF-001": {
-    httpStatus: 422,
-    message: "เลขที่ใบอนุญาตนี้ถูกผูกกับบัญชีอื่นแล้ว",
-  },
-  "ERR-PRF-002": {
-    httpStatus: 422,
-    message: "เลขที่ใบอนุญาตไม่ผ่านการตรวจสอบรูปแบบ",
-  },
   "ERR-CRS-001": {
     httpStatus: 404,
     message: "ไม่พบหลักสูตร หรือหลักสูตรยังไม่เผยแพร่",

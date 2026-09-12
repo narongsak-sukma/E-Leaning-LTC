@@ -81,6 +81,10 @@ function mockClient(spec: {
   templates?: Record<string, unknown>;
   claimError?: { message: string } | null;
   completeError?: { message: string } | null;
+  /** แถว media_assets ที่ lookup file_media_id เจอ (null/ไม่ใส่ = ไม่มีแถว) */
+  media?: { bucket: string; storage_path: string } | null;
+  /** ผล createSignedUrl (default = สำเร็จ URL จำลอง) */
+  signResult?: { data: { signedUrl: string } | null; error: { message: string } | null };
 }) {
   let claimIndex = 0;
   const completeCalls: unknown[] = [];
@@ -104,7 +108,21 @@ function mockClient(spec: {
       return { data: null, error: null };
     },
   );
-  const from = vi.fn(() => {
+  const signCalls: { bucket: string; path: string; ttl: number }[] = [];
+  const from = vi.fn((table: string) => {
+    // gate p5-r1 B3: lookup media_assets ของ file_media_id (bucket+storage_path)
+    if (table === "media_assets") {
+      const mediaFilters: Record<string, unknown> = {};
+      const mediaBuilder = {
+        select: vi.fn(() => mediaBuilder),
+        eq: vi.fn((col: string, value: unknown) => {
+          mediaFilters[col] = value;
+          return mediaBuilder;
+        }),
+        maybeSingle: vi.fn(async () => ({ data: spec.media ?? null, error: null })),
+      };
+      return mediaBuilder;
+    }
     const filters: Record<string, unknown> = {};
     const builder = {
       select: vi.fn(() => builder),
@@ -119,9 +137,22 @@ function mockClient(spec: {
     };
     return builder;
   });
-  const client = { rpc, from };
+  const storage = {
+    from: vi.fn((bucket: string) => ({
+      createSignedUrl: vi.fn(async (path: string, ttl: number) => {
+        signCalls.push({ bucket, path, ttl });
+        return (
+          spec.signResult ?? {
+            data: { signedUrl: `https://storage.ltc.test/sign/${bucket}/${encodeURIComponent(path)}?ttl=${ttl}` },
+            error: null,
+          }
+        );
+      }),
+    })),
+  };
+  const client = { rpc, from, storage };
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(client as never);
-  return { rpc, from, completeCalls };
+  return { rpc, from, completeCalls, signCalls };
 }
 
 /** template row ตามคอลัมน์ notification_templates */
@@ -494,6 +525,164 @@ describe("runEmailDispatch — template/var/drift fail-closed", () => {
     const summary = await runEmailDispatch();
     expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
     expect(completeCalls).toEqual([]);
+  });
+});
+
+describe("download_url — data_export.ready (gate p5-r1 B3: SQL ส่ง file_media_id ผู้กลาง email worker ลงนาม)", () => {
+  /** file_media_id ของเคสนี้ (media_assets.id — UUID จริงเสมอ) */
+  const MEDIA_ID = "e0000000-0000-4000-8000-000000000001";
+  /** path เต็มตามสัญญา media_assets (รวม prefix บักเก็ต) — worker ตัด prefix ก่อนลงนาม */
+  const MEDIA_PATH = "pdpa-exports/b0000000-0000-4000-8000-000000000009/f0000000-0000-4000-8000-000000000001.json";
+  const OBJECT_KEY = "b0000000-0000-4000-8000-000000000009/f0000000-0000-4000-8000-000000000001.json";
+
+  function exportRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return row({
+      template_key: "data_export.ready",
+      payload: {
+        notification_id: "b0000000-0000-4000-8000-000000000009",
+        user_id: USER_A,
+        vars: { full_name: "ทดสอบ ระบบ", job_id: MEDIA_ID, file_media_id: MEDIA_ID },
+      },
+      ...overrides,
+    });
+  }
+
+  it("มี file_media_id → lookup media_assets + ลงนาม 604800s → ฉีด download_url ก่อน render", async () => {
+    const { completeCalls, signCalls } = mockClient({
+      batches: [[exportRow()], []],
+      templates: {
+        "data_export.ready|th": tpl(
+          "ข้อมูลของท่านพร้อมดาวน์โหลด",
+          "คุณ{{full_name}} ดาวน์โหลดได้ (7 วัน): {{download_url}}",
+        ),
+      },
+      media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    // TTL = 7 วันตามสัญญา (API-SPEC §3.2 / DD) — ตรวจที่ตัวเลขจริงที่ส่งเข้า storage
+    expect(signCalls).toEqual([{ bucket: "pdpa-exports", path: OBJECT_KEY, ttl: 604800 }]);
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    expect(sentBody).toContain("https://storage.ltc.test/sign/pdpa-exports/");
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: true }]]);
+  });
+
+  it("ตั้ง supabasePublicUrl → ลิงก์ในเมล์ใช้ origin มุมมองผู้รับ คง path+token เดิม (gate p5-r2 hostname — dev container เห็น kong:8000 ผู้รับเปิดไม่ได้)", async () => {
+    getConfigMock.mockReturnValue({
+      publicBaseUrl: APP_BASE,
+      certPublicBaseUrl: null,
+      supabasePublicUrl: "http://localhost:8000",
+    });
+    const { signCalls } = mockClient({
+      batches: [[exportRow()], []],
+      templates: {
+        "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+      },
+      media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    // origin เขียนทับเป็นมุมมองผู้รับ · path ในบักเก็ต + query (ttl) ครบตามลงนาม
+    expect(sentBody).toContain(
+      `http://localhost:8000/sign/pdpa-exports/${encodeURIComponent(OBJECT_KEY)}?ttl=604800`,
+    );
+    expect(sentBody).not.toContain("storage.ltc.test");
+    // ลงนามด้วย key ในบักเก็ตเหมือนเดิม — การเขียนทับ origin เกิด "หลัง" ลงนาม
+    expect(signCalls).toEqual([{ bucket: "pdpa-exports", path: OBJECT_KEY, ttl: 604800 }]);
+  });
+
+  it("supabasePublicUrl รูปแบบผิด/scheme ไม่ใช่ http(s) → download_url_invalid fail-closed ไม่ส่งเมล์ลิงก์เปิดไม่ได้ (gate p5-r3 MINOR)", async () => {
+    // ครบสามแบบ: parse ไม่ผ่าน · ftp (new URL ผ่านแต่ scheme ผิด) · mailto (ผ่านแต่
+    // ไม่มี hostname — การเขียนทับ host เคยเป็น no-op ให้ลิงก์ kong หลุดออกไป)
+    for (const bad of ["not-a-url", "ftp://localhost:8000", "mailto:ops@example.com"]) {
+      getConfigMock.mockReturnValue({
+        publicBaseUrl: APP_BASE,
+        certPublicBaseUrl: null,
+        supabasePublicUrl: bad,
+      });
+      const { completeCalls } = mockClient({
+        batches: [[exportRow()], []],
+        templates: {
+          "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+        },
+        media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+      });
+      const summary = await runEmailDispatch();
+      expect(summary, `SUPABASE_PUBLIC_URL="${bad}" ต้อง fail แถว`).toEqual({
+        claimed: 1,
+        sent: 0,
+        failed: 1,
+      });
+      expect(senderStub, `"${bad}" ห้ามส่งเมล์`).not.toHaveBeenCalled();
+      expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "download_url_invalid" }]]);
+      senderStub.mockClear();
+      vi.mocked(createSupabaseServiceRoleClient).mockReset();
+    }
+  });
+
+  it("media_assets ไม่มีแถว → media_asset_missing ไม่เรียก provider/ลงนาม (ห้ามส่งเมล์ลิงก์ตาย)", async () => {
+    const { completeCalls, signCalls } = mockClient({
+      batches: [[exportRow()], []],
+      templates: {
+        "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+      },
+      media: null,
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
+    expect(signCalls).toHaveLength(0);
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "media_asset_missing" }]]);
+  });
+
+  it("createSignedUrl ล้ม → signed_url_failed ไม่เรียก provider", async () => {
+    const { completeCalls } = mockClient({
+      batches: [[exportRow()], []],
+      templates: {
+        "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+      },
+      media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+      signResult: { data: null, error: { message: "storage down" } },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "signed_url_failed" }]]);
+  });
+
+  it("vars มี download_url อยู่แล้ว → ใช้ค่าเดิม ไม่แตะ media_assets (idempotent ต่อ retry)", async () => {
+    const rowWithUrl = exportRow({
+      payload: {
+        notification_id: "b0000000-0000-4000-8000-000000000009",
+        user_id: USER_A,
+        vars: {
+          full_name: "ทดสอบ ระบบ",
+          job_id: MEDIA_ID,
+          file_media_id: MEDIA_ID,
+          download_url: "https://storage.ltc.test/sign/pre-signed-existing",
+        },
+      },
+    });
+    const { from, completeCalls } = mockClient({
+      batches: [[rowWithUrl], []],
+      templates: {
+        "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+      },
+      media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    expect(from).not.toHaveBeenCalledWith("media_assets");
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    expect(sentBody).toContain("pre-signed-existing");
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: true }]]);
   });
 });
 

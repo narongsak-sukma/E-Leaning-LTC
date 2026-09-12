@@ -333,6 +333,17 @@ describe("toAttemptResultView — ส่งตาม view เป๊ะ", () => {
       expect((err as AppError).code).toBe("ERR-SYS-002");
     }
   });
+
+  // regression e2e-09: snapshot จริงจาก start_attempt หลัง 0022 มีคีย์ type — เคยทำ
+  // ทุก final attempt 503 attempt_result_row_drift (strict เก่าไม่รู้จักคีย์)
+  it("snapshot as-built 0022 (มี type) → map ผ่านทั้งแถว (เคย 503 บนครั้งสุดท้าย)", () => {
+    const snap = {
+      ...(viewRow().question_snapshot as Record<string, unknown>),
+      type: "single_choice",
+    };
+    const parsed = AttemptResultView.parse(toAttemptResultView([viewRow({ question_snapshot: snap })]));
+    expect(parsed.questions[0]?.content?.options).toHaveLength(2);
+  });
 });
 
 describe("toSubmitView — DCR-6 ผลตรวจทันที (0019: questionCount/totalPoints มีทุกทาง)", () => {
@@ -424,6 +435,21 @@ describe("AttemptQuestionSnapshot — contract jsonb ของ start_attempt", (
     const snap = viewRow().question_snapshot;
     expect(AttemptQuestionSnapshot.parse(snap).options).toHaveLength(2);
     expect(AttemptQuestionSnapshot.safeParse({ broken: true }).success).toBe(false);
+  });
+
+  it("0022 (DCR-7/PB-18): มี type → ผ่าน · ก่อน 0022 ขาด type → default multiple_choice (DD §3.1) · ค่านอก enum → fail", () => {
+    const base = viewRow().question_snapshot as Record<string, unknown>;
+    const withType = AttemptQuestionSnapshot.safeParse({ ...base, type: "true_false" });
+    expect(withType.success).toBe(true);
+    if (withType.success) {
+      expect(withType.data.type).toBe("true_false");
+    }
+    const legacy = AttemptQuestionSnapshot.safeParse(base);
+    expect(legacy.success).toBe(true);
+    if (legacy.success) {
+      expect(legacy.data.type).toBe("multiple_choice");
+    }
+    expect(AttemptQuestionSnapshot.safeParse({ ...base, type: "essay" }).success).toBe(false);
   });
 
   it("AttemptStartView รับ takeover เป็น optional (ข้อสอบต้องมี content ตาม 0019)", () => {

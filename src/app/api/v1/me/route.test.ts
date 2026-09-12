@@ -32,7 +32,7 @@ vi.mock("@/lib/supabase/ssr", () => {
 
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { resetRateLimitStore } from "@/lib/rate-limit";
-import { GET } from "./route";
+import { GET, PATCH } from "./route";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 
@@ -206,6 +206,173 @@ describe("GET /me — โปรไฟล์ + บทบาทของตัว�
     let last = 200;
     for (let i = 0; i < 125; i += 1) {
       const r = await GET(meUrl());
+      last = r.status;
+      if (last === 429) {
+        break;
+      }
+    }
+    expect(last).toBe(429);
+  });
+});
+
+// ==== Wave E Phase 5 — PATCH /me (lane B · IDENT-001 · guard 0010) ====
+
+const PATCH_USER_ID = "b0000000-0000-4000-8000-000000000099";
+
+interface PatchCalls {
+  readonly update: unknown[];
+  readonly eq: Array<{ column: string; value: unknown }>;
+  readonly select: unknown[];
+}
+
+/** client สำหรับ PATCH — profiles builder เดียวรองรับทั้ง requireUser และ update chain */
+function mockPatchClient(options: { readonly row?: unknown; readonly error?: unknown } = {}): PatchCalls {
+  const calls: PatchCalls = { update: [], eq: [], select: [] };
+  const updateResult = { row: options.row ?? null, error: options.error };
+  const profilesBuilder = {
+    // ช่วง requireUser (getUser): select→eq→maybeSingle — อ่านสถานะ active
+    select: vi.fn((s: unknown) => {
+      calls.select.push(s);
+      return profilesBuilder;
+    }),
+    eq: vi.fn((column: string, value: unknown) => {
+      calls.eq.push({ column, value });
+      return profilesBuilder;
+    }),
+    maybeSingle: vi.fn(async () => ({ data: { is_active: true, deleted_at: null }, error: null })),
+    // ช่วง route PATCH: update→eq→select→single — update() คือจุดเริ่ม track ใหม่
+    update: vi.fn((payload: unknown) => {
+      calls.update.push(payload);
+      calls.eq.length = 0;
+      calls.select.length = 0;
+      return profilesBuilder;
+    }),
+    single: vi.fn(async () =>
+      updateResult.error !== undefined
+        ? { data: null, error: updateResult.error }
+        : {
+            data: updateResult.row ?? {
+              id: PATCH_USER_ID,
+              email: "somsri@example.com",
+              display_name: "สมศรี ใจดี",
+              phone: null,
+              preferred_locale: "th",
+            },
+            error: null,
+          },
+    ),
+  };
+  const client = {
+    auth: {
+      getUser: vi.fn(async () => ({ data: { user: { id: PATCH_USER_ID } }, error: null })),
+      mfa: {
+        getAuthenticatorAssuranceLevel: vi.fn(async () => ({ data: { currentLevel: "aal1" }, error: null })),
+      },
+    },
+    rpc: vi.fn(async () => ({ data: [], error: null })),
+    from: vi.fn((table: string) => {
+      if (table !== "profiles") {
+        throw new Error("unexpected table: " + table);
+      }
+      return profilesBuilder;
+    }),
+  };
+  vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
+  return calls;
+}
+
+function patchRequest(body: unknown): Request {
+  return new Request("http://localhost:3000/api/v1/me", {
+    method: "PATCH",
+    headers: { "x-forwarded-for": "10.0.1.9", "x-request-id": "req-me-patch-1" },
+    body: JSON.stringify(body),
+  });
+}
+
+describe("PATCH /me — แก้โปรไฟล์ตนเอง (Wave E Phase 5)", () => {
+  it("200 — displayName/locale → payload ถูกคอลัมน์ + eq ตัวเอง + ขาออก strict", async () => {
+    const calls = mockPatchClient({
+      row: { id: PATCH_USER_ID, email: "somsri@example.com", display_name: "สมศรี ใหม่", phone: null, preferred_locale: "en" },
+    });
+    const res = await PATCH(patchRequest({ displayName: "สมศรี ใหม่", preferredLocale: "en" }));
+    expect(res.status).toBe(200);
+    expect(calls.update).toEqual([{ display_name: "สมศรี ใหม่", preferred_locale: "en" }]);
+    expect(calls.eq).toEqual([{ column: "id", value: PATCH_USER_ID }]);
+    const body = (await res.json()) as { data: Record<string, unknown> };
+    expect(body.data).toEqual({
+      id: PATCH_USER_ID,
+      email: "somsri@example.com",
+      displayName: "สมศรี ใหม่",
+      phone: null,
+      preferredLocale: "en",
+    });
+    expect(res.headers.get("x-request-id")).toBe("req-me-patch-1");
+  });
+
+  it("phone — ตั้งค่า E.164 และเคลียร์ด้วย null", async () => {
+    const calls = mockPatchClient({
+      row: { id: PATCH_USER_ID, email: "somsri@example.com", display_name: "สมศรี ใจดี", phone: "+6681234567", preferred_locale: "th" },
+    });
+    const res = await PATCH(patchRequest({ phone: "+6681234567" }));
+    expect(res.status).toBe(200);
+    expect(calls.update).toEqual([{ phone: "+6681234567" }]);
+    const res2 = await PATCH(patchRequest({ phone: null }));
+    expect(res2.status).toBe(200);
+    expect(calls.update[1]).toEqual({ phone: null });
+    // แถว stub คงค่าเดิม (mock ไม่ stateful) — พฤติกรรม "เคลียร์" ยืนยันที่ payload ข้างบน
+    const body2 = (await res2.json()) as { data: { phone: string | null } };
+    expect(body2.data.phone).toBe("+6681234567");
+  });
+
+  it("400 — body ว่างเปล่า (ไม่มีฟิลด์ให้แก้)", async () => {
+    mockPatchClient();
+    const res = await PATCH(patchRequest({}));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { details: { fields?: string[] } } };
+    expect(body.error.details.fields).toEqual(["body"]);
+  });
+
+  it("400 — strict: first_name/pdpa_consented_at/คีย์แปลกปลอม ห้ามแก้ที่นี่", async () => {
+    mockPatchClient();
+    for (const body of [
+      { displayName: "x", first_name: "แก็บ" },
+      { pdpa_consented_at: "2026-01-01T00:00:00+00:00" },
+      { role: "super_admin" },
+    ]) {
+      const res = await PATCH(patchRequest(body));
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("400 — phone ผิดรูป E.164", async () => {
+    mockPatchClient();
+    const res = await PATCH(patchRequest({ phone: "0812345678" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("update ล้ม → 503 profile_update_failed", async () => {
+    mockPatchClient({ error: { message: "db down" } });
+    const res = await PATCH(patchRequest({ displayName: "ใหม่" }));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { details: { reason?: string } } };
+    expect(body.error.details.reason).toBe("profile_update_failed");
+  });
+
+  it("แถวกลับมาไม่ตรงตัวเอง → 500 profile_update_inconsistent fail-closed", async () => {
+    mockPatchClient({
+      row: { id: "u0000000-0000-4000-8000-000000000001", email: "other@example.com", display_name: "คนอื่น", phone: null, preferred_locale: "th" },
+    });
+    const res = await PATCH(patchRequest({ displayName: "ใหม่" }));
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: { details: { reason?: string } } };
+    expect(body.error.details.reason).toBe("profile_update_inconsistent");
+  });
+
+  it("rate READ — ยิงเกิน 120/min → 429", async () => {
+    mockPatchClient();
+    let last = 200;
+    for (let i = 0; i < 125; i += 1) {
+      const r = await PATCH(patchRequest({ displayName: `ชื่อ ${i}` }));
       last = r.status;
       if (last === 429) {
         break;

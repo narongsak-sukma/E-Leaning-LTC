@@ -3,6 +3,9 @@ import { fileURLToPath } from "node:url";
 import { loadEnv } from "vite";
 import { defineConfig } from "vitest/config";
 
+// alias เดียวกับ vitest.config.ts (unit) — gate p5-r2: integration suite ต้อง import
+// "worker จริง" ได้ (เช่น processDataExportJob ของ dcr12) พร้อม stub server-only
+
 /**
  * vitest — integration tests (C-9) บน dev stack จริง (docker-compose: db + kong/rest + auth)
  *
@@ -37,6 +40,13 @@ try {
 }
 
 export default defineConfig({
+  esbuild: { jsx: "automatic" },
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "server-only": fileURLToPath(new URL("./tests/stubs/server-only.ts", import.meta.url)),
+    },
+  },
   test: {
     environment: "node",
     include: ["tests/integration/**/*.test.ts"],

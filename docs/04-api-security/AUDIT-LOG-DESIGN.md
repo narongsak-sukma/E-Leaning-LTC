@@ -2,7 +2,7 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 1.0.3 — codex gate r1 (feat/wave-e-phase3 **B2**): §2.5 จุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** เปลี่ยนเป็น **atomic RPC** — `admin_create_credit_rule`/`admin_update_credit_rule_status` (0032 ฉบับ atomic) บันทึก audit ผ่าน `append_audit_event_internal` **ใน TX เดียวกับ mutation** (audit ล้ม = rollback ทั้งรายการ) · แบบแผน allowlist best-effort ของ 1.0.2 **ถูกปฏิเสธ**: §1.5 บังคับ event ที่คู่กับ business mutation เขียน atomic — ADMIN_EXPORT (0025) เป็น read-side disclosure ไม่ใช่ mutation จึงตั้งแบบแผนให้ config mutation ไม่ได้ · allowlist ของ wrapper กลับสู่สถานะ 0025 (ไม่มี CREDIT_RULE_*) · RPC ตรวจ roles + aal2 ในตัว (gate r1 B3) · 1.0.2 — DCR-9 r1 (lead · 0032): §2.5 กำกับจุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** = BFF service_role RPC (allowlist 0032 · best-effort ตามแบบแผน ADMIN_EXPORT/0025 — การตัดสิน lead บันทึกในหัวไฟล์ 0032 **— ถูกปฏิเสธใน 1.0.3**) + context keys strict ตาม v_keys จริง · 1.0.1 — DCR-9 (Wave E Phase 3 · D68): §2.5 เพิ่ม **CREDIT_REVERSAL** (reversal อัตโนมัติใน TX เพิกถอนใบ — CRT-006 · 0031) + กำกับ CREDIT_ACCRUAL ว่า**เขียนโดย consumer `credit_accrual_tick` ณ การ INSERT ledger** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — คนละจุดกับ audit) · นับรวม 53 event types · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.0.4 — DCR-11 (Wave E Phase 5 · D-p5-14): เพิ่ม 4 events (รวม **57**) — §2.2 **PROFILE_DELETE** (เจ้าของยืนยันลบบัญชีผ่าน token อีเมล — soft-delete ตาม SEC-012 · 0036) · §2.3 **COURSE_RETURN** (staff:content ส่งกลับให้แก้พร้อมความเห็น — ADM-005) · §2.6 **DATA_EXPORT_REQUEST/DATA_EXPORT_DONE** (PDPA data portability — job ของเจ้าของ + ไฟล์จัดส่ง · 0036) · กำกับจุดเขียน §2.5 ส่วนที่เพิ่ม: PROFILE_DELETE + DATA_EXPORT_* = atomic ใน RPC ของตัวเอง · 1.0.3 — codex gate r1 (feat/wave-e-phase3 **B2**): §2.5 จุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** เปลี่ยนเป็น **atomic RPC** — `admin_create_credit_rule`/`admin_update_credit_rule_status` (0032 ฉบับ atomic) บันทึก audit ผ่าน `append_audit_event_internal` **ใน TX เดียวกับ mutation** (audit ล้ม = rollback ทั้งรายการ) · แบบแผน allowlist best-effort ของ 1.0.2 **ถูกปฏิเสธ**: §1.5 บังคับ event ที่คู่กับ business mutation เขียน atomic — ADMIN_EXPORT (0025) เป็น read-side disclosure ไม่ใช่ mutation จึงตั้งแบบแผนให้ config mutation ไม่ได้ · allowlist ของ wrapper กลับสู่สถานะ 0025 (ไม่มี CREDIT_RULE_*) · RPC ตรวจ roles + aal2 ในตัว (gate r1 B3) · 1.0.2 — DCR-9 r1 (lead · 0032): §2.5 กำกับจุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** = BFF service_role RPC (allowlist 0032 · best-effort ตามแบบแผน ADMIN_EXPORT/0025 — การตัดสิน lead บันทึกในหัวไฟล์ 0032 **— ถูกปฏิเสธใน 1.0.3**) + context keys strict ตาม v_keys จริง · 1.0.1 — DCR-9 (Wave E Phase 3 · D68): §2.5 เพิ่ม **CREDIT_REVERSAL** (reversal อัตโนมัติใน TX เพิกถอนใบ — CRT-006 · 0031) + กำกับ CREDIT_ACCRUAL ว่า**เขียนโดย consumer `credit_accrual_tick` ณ การ INSERT ledger** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — คนละจุดกับ audit) · นับรวม 53 event types · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                      |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน 8), §8 (security), กฎ CTO D6 · RBAC-DESIGN.md (§3.1 canonical helpers) · API-SPECIFICATION.md · SRS.md (AUD-001–005) |
 
@@ -46,13 +46,14 @@
 
 | action (ชื่อ event) | Actor | หัวข้อหลักใน context (jsonb) | ระดับ | PDPA |
 | --- | --- | --- | --- | --- |
-| ROLE_GRANT | super_admin, staff:registrar(บางส่วน) | target_user_id, role, reason, sod_exception | CRITICAL | การกำหนดสิทธิ์เข้าถึงข้อมูลบุคคล |
-| ROLE_REVOKE | super_admin, staff:registrar(lawyer) | target_user_id, role, reason | CRITICAL | เช่นเดียวกัน |
-| USER_CREATE | super_admin | target_user_id, บทบาทเริ่มต้น | NOTICE | การจัดเก็บข้อมูลสมาชิก/เจ้าหน้าที่ |
-| USER_UPDATE | staff:registrar, super_admin | target_user_id, ฟิลด์ที่เปลี่ยน (ชื่อฟิลด์เท่านั้น ไม่ใส่ค่า PII เดิม/ใหม่) | NOTICE | สิทธิ์แก้ไขข้อมูลส่วนบุคคล |
-| USER_DISABLE | super_admin | target_user_id, reason | WARN | จำกัดการเข้าถึง |
-| LICENSE_BIND | citizen, lawyer | target_user_id, license_hash (hash เท่านั้น), สถานะ=pending | NOTICE | ข้อมูลส่วนบุคคล (วิชาชีพ) |
-| LICENSE_VERIFY | staff:registrar | target_user_id, ผล(อนุมัติ/ปฏิเสธ), หลักฐานอ้างอิง | NOTICE | การยืนยันข้อมูลส่วนบุคคล |
+| ROLE_GRANT | super_admin, staff:registrar(บางส่วน — lawyer เท่านั้นหลังยืนยันใบอนุญาต) — ผู้บันทึกจริง = RPC `admin_grant_role` (0035 atomic · SECURITY DEFINER · ตรวจ roles + aal2 ในตัว): INSERT role_assignments + audit ใน TX เดียวกัน · **super_admin ห้ามผ่าน endpoint** (bootstrap เท่านั้น) | target_user_id, role, reason, sod_exception | CRITICAL | การกำหนดสิทธิ์เข้าถึงข้อมูลบุคคล |
+| ROLE_REVOKE | super_admin, staff:registrar(lawyer) — ผู้บันทึกจริง = RPC `admin_revoke_role` (0035 atomic · เงื่อนไขเดียวกับ ROLE_GRANT · ถอน role สุดท้ายของบัญชี = ปฏิเสธ) | target_user_id, role, reason | CRITICAL | เช่นเดียวกัน |
+| USER_CREATE | super_admin — ผู้บันทึกจริง = RPC `admin_audit_user_created` (0038 atomic · หลัง invite+grant · retry จำกัด ค้าง = 503 `ERR-SYS-002\|user_create_audit_failed` — gate p5-r1 B4) | target_user_id, บทบาทเริ่มต้น, reason | NOTICE | การจัดเก็บข้อมูลสมาชิก/เจ้าหน้าที่ |
+| USER_UPDATE | staff:registrar, super_admin — ปัจจุบันผู้บันทึกจริง = RPC `admin_set_user_active` คืนสถานะใช้งาน (0038 atomic · gate p5-r1 B4 · การแก้ฟิลด์สมาชิกโดย registrar = Wave F) | target_user_id, ฟิลด์ที่เปลี่ยน (ชื่อฟิลด์เท่านั้น ไม่ใส่ค่า PII เดิม/ใหม่) | NOTICE | สิทธิ์แก้ไขข้อมูลส่วนบุคคล |
+| USER_DISABLE | super_admin — ผู้บันทึกจริง = RPC `admin_set_user_active` (0038 atomic กับ `profiles.is_active` ใน TX เดียว — gate p5-r1 B4) | target_user_id, reason | WARN | จำกัดการเข้าถึง |
+| PROFILE_DELETE | เจ้าของบัญชี (ยืนยันผ่าน token อีเมล) — ผู้บันทึกจริง = RPC `confirm_account_deletion` (0036 atomic · token hash ตรวจใน RPC · single-use): ban + profiles.deleted_at + audit ใน TX เดียว · บัญชี staff/instructor ห้ามลบเอง (SoD) | target_user_id (= ผู้ยื่น), retention_note | WARN | สิทธิลบข้อมูล (SEC-012 soft-delete — ผลสอบ/audit เก็บต่อ) |
+| LICENSE_BIND | citizen, lawyer — จุดเขียน = BFF `PUT /me/license` ขณะ INSERT license_applications (user-JWT ผ่าน RLS · audit ผ่าน service wrapper best-effort ได้เพราะแถวคำขอเองตรวจย้อนได้ — แต่ 0035 ทำเป็น RPC `my_submit_license_application` atomic ตาม §1.5) | target_user_id, license_hash (hash เท่านั้น), สถานะ=pending | NOTICE | ข้อมูลส่วนบุคคล (วิชาชีพ) |
+| LICENSE_VERIFY | staff:registrar, super_admin — ผู้บันทึกจริง = RPC `admin_decide_license_application` (0035 atomic): UPDATE คำขอ + (อนุมัติ) INSERT lawyer_licenses + INSERT role_assignments lawyer + audit + event `license.application.*` ทั้งหมดใน TX เดียว | target_user_id, ผล(อนุมัติ/ปฏิเสธ), หลักฐานอ้างอิง (application_id, resulting_license_id เมื่ออนุมัติ) — **ห้าม license_no ใน audit (PII §1.3 — เลขจริงอยู่เฉพาะ event_outbox เพื่อเทมเพลตอีเมล)** | NOTICE | การยืนยันข้อมูลส่วนบุคคล |
 
 ### 2.3 เนื้อหา / การเรียน
 
@@ -61,6 +62,7 @@
 | COURSE_CREATE | instructor, staff:content | course_id, title | INFO | — |
 | COURSE_UPDATE | instructor(เจ้าของ), staff:content | course_id, ส่วนที่แก้ | INFO | — |
 | COURSE_PUBLISH | staff:content, super_admin | course_id, ผู้อนุมัติ ≠ ผู้สร้าง (SoD ผ่าน) | NOTICE | — |
+| COURSE_RETURN | staff:content, super_admin — ผู้บันทึกจริง = RPC `admin_decide_course` (0035 atomic · ใช้ร่วมกับ COURSE_PUBLISH/UNPUBLISH — BFF PATCH /admin/courses/{id} เรียก) | course_id, comment (บังคับ) | NOTICE | — |
 | COURSE_UNPUBLISH | staff:content | course_id, reason | NOTICE | — |
 | COURSE_ARCHIVE | staff:content | course_id, reason | NOTICE | — |
 | QB_QUESTION_CREATE | instructor, staff:exam | bank_id (FK question_banks.id — DD §3.4), จำนวนข้อ | INFO | — |
@@ -104,6 +106,8 @@
 | --- | --- | --- | --- | --- |
 | PII_ACCESS | staff ทุกระดับ, super_admin | endpoint, target_user_id, จุดประสงค์(รายงาน/แก้ไข/ยืนยัน) | WARN | **หัวใจของ PDPA** — บันทึกการเข้าถึงข้อมูลส่วนบุคคล |
 | ADMIN_EXPORT | staff ตามสิทธิ์ | report_type, จำนวนแถว, ตัวกรอง (ไม่ใส่ค่ากรองที่เป็น PII) | WARN | การเปิดเผยข้อมูลออกนอกระบบ |
+| DATA_EXPORT_REQUEST | เจ้าของบัญชี | job_id | NOTICE | PDPA data portability — เจ้าของขอส่งออกข้อมูลตน (IDENT-008) |
+| DATA_EXPORT_DONE | ระบบ (worker pdpa-export) | job_id, file_media_id, จำนวนก้อนข้อมูล (ไม่ใส่ PII) | NOTICE | จัดส่งไฟล์ให้เจ้าของผ่าน signed URL |
 | RATE_LIMIT_HIT | ระบบ | group, endpoint, ip_hash/user_id | WARN | — |
 | NOTIFICATION_BULK_SEND | staff:registrar, super_admin | เทมเพลต, จำนวนผู้รับ, กลุ่มเป้าหมาย | NOTICE | การใช้ข้อมูลเพื่อการติดต่อ |
 | AUDIT_READ | staff:viewer, super_admin | ตัวกรอง, จำนวนแถว | NOTICE | การเข้าถึงบันทึกตรวจสอบเอง |

@@ -23,8 +23,6 @@ const DOC_CODES: readonly ErrorCode[] = [
   "ERR-IDM-001",
   "ERR-SYS-001",
   "ERR-SYS-002",
-  "ERR-PRF-001",
-  "ERR-PRF-002",
   "ERR-CRS-001",
   "ERR-ENR-001",
   "ERR-ENR-002",

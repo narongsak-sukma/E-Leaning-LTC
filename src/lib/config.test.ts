@@ -33,6 +33,13 @@ describe("loadConfig — ค่าบังคับ (SDS §7.2)", () => {
     expect(cfg.mediaProvider).toBe("supabase_storage");
   });
 
+  it("SUPABASE_PUBLIC_URL ไม่ตั้ง = null · ตั้งแล้วส่งผ่านเป็น origin มุมมองผู้รับ (gate p5-r2 hostname)", () => {
+    expect(loadConfig(baseEnv()).supabasePublicUrl).toBeNull();
+    expect(loadConfig(baseEnv({ SUPABASE_PUBLIC_URL: "http://localhost:8000" })).supabasePublicUrl).toBe(
+      "http://localhost:8000",
+    );
+  });
+
   it("throw ConfigError เมื่อขาด PUBLIC_BASE_URL", () => {
     const env = { ...BASE_ENV };
     delete env.PUBLIC_BASE_URL;

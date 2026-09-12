@@ -837,16 +837,20 @@ describe.skipIf(!DB_URL)(
          where recipient_user_id = '${settingsUser.id}' and template_key = 'exam.result.passed';
       `);
       expect(examEmails[0]?.n).toBe(1);
-      // รูปทรง GET — merged defaults ครบ 4 family · certificate.email คง false
+      // รูปทรง GET — merged defaults ครบ 6 family ของ RPC (0035 เพิ่ม license/account
+      // เป็น family ภายใน · สมาชิกทั้งชุดเป็นธุรกรรมบังคับ NTF-005 จึงถูก BFF กรองออก
+      // จากสัญญา API — ที่นี่ทดสอบ RPC ตรง จึงเห็นครบ 6) · certificate.email คง false
       const shape = await userRpc("my_notification_settings", settingsUser.accessToken, {});
       expect(shape.status, shape.text.slice(0, 300)).toBe(200);
       const settingsBody = shape.json as {
         settings: Record<string, { in_app: boolean; email: boolean }>;
       };
       expect(Object.keys(settingsBody.settings).sort()).toEqual([
+        "account",
         "certificate",
         "credit",
         "exam.result",
+        "license",
         "renewal",
       ]);
       expect(settingsBody.settings.certificate).toEqual({ in_app: true, email: false });
@@ -862,9 +866,11 @@ describe.skipIf(!DB_URL)(
       const patchedBody = patched.json as typeof settingsBody;
       expect(patchedBody.settings.certificate).toEqual({ in_app: true, email: true });
       expect(Object.keys(patchedBody.settings).sort()).toEqual([
+        "account",
         "certificate",
         "credit",
         "exam.result",
+        "license",
         "renewal",
       ]);
     }, 60_000);
