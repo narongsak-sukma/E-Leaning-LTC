@@ -305,7 +305,10 @@ create or replace function public.my_request_account_deletion(
   p_request_id text
 ) returns jsonb
 language plpgsql security definer
-set search_path = public
+-- r3: gen_random_bytes อยู่ที่ schema extensions (pgcrypto — จัดการไว้แล้วใน 0019:
+-- create extension + grant usage แก่ app_owner) ตัว DEFINER รันใต้ app_owner จึงต้อง
+-- ใส่ extensions เข้า search_path เหมือน cert_issue_core ของ 0019 ไม่งั้น 42883 ก่อน insert
+set search_path = public, extensions
 as $fn$
 declare
   v_uid uuid := auth.uid();
@@ -516,16 +519,18 @@ grant execute on function public.admin_dashboard_stats(date, date) to authentica
 -- ─── (8) admin_list_audit_logs — filter + keyset (D-p5-10 · AUD-003) ───
 -- audit_log:view ตาม RBAC §2.4: staff:viewer + super_admin · คืนเฉพาะคอลัมน์
 -- แสดงผล (context/request_id) — ไม่เปิด before/after/hash ผ่าน endpoint นี้
+-- r3: ทุกพารามิเตอร์มี default — PostgREST ไม่บังคับส่งครบ 9 ตัว (PGRST202 → 404
+--     เมื่อละเว้นตัวใดตัวหนึ่ง) ตัวเรียกส่งเฉพาะที่กรองจริงได้ · ตัวจำกัดเพดานอยู่ในตัว
 create or replace function public.admin_list_audit_logs(
-  p_action text,                 -- prefix match เช่น 'LICENSE' / 'ROLE_'
-  p_actor uuid,
-  p_entity_type text,
-  p_entity_id uuid,
-  p_from timestamptz,
-  p_to timestamptz,
-  p_cursor_occurred_at timestamptz,
-  p_cursor_id uuid,
-  p_limit int
+  p_action text default null,    -- prefix match เช่น 'LICENSE' / 'ROLE_'
+  p_actor uuid default null,
+  p_entity_type text default null,
+  p_entity_id uuid default null,
+  p_from timestamptz default null,
+  p_to timestamptz default null,
+  p_cursor_occurred_at timestamptz default null,
+  p_cursor_id uuid default null,
+  p_limit int default 20
 ) returns jsonb
 language plpgsql stable security definer
 set search_path = public

@@ -461,13 +461,18 @@ begin
     end if;
   end if;
   -- idempotent: ถืออยู่แล้ว = จบเงียบ (ไม่มี mutation จึงไม่มี audit)
+  -- r2: role_assignments.role เป็น enum role_key — p_role (text) ต้อง cast ก่อนเทียบ/แทรก
+  --     (ผ่าน whitelist ด้านบนมาแล้ว cast จึง fail ไม่ได้) ไม่งั้นพัง 42883
+  --     "operator does not exist: role_key = text" ทุกคำขอ
   if exists (select 1 from public.role_assignments ra
-             where ra.user_id = p_user_id and ra.role = p_role and ra.revoked_at is null) then
+             where ra.user_id = p_user_id
+               and ra.role = p_role::public.role_key
+               and ra.revoked_at is null) then
     return jsonb_build_object('userId', p_user_id, 'role', p_role, 'granted', false);
   end if;
 
   insert into public.role_assignments (user_id, role, granted_by, reason)
-  values (p_user_id, p_role, v_actor, btrim(p_reason));
+  values (p_user_id, p_role::public.role_key, v_actor, btrim(p_reason));
 
   perform public.append_audit_event_internal(
     'ROLE_GRANT', 'user', (p_user_id)::text, null, null,
@@ -506,6 +511,14 @@ begin
     raise exception 'ข้อมูลไม่ถูกต้อง: บทบาทนี้จัดการที่ bootstrap เท่านั้น (ERR-VAL-001|role_not_manageable)'
       using errcode = '22023';
   end if;
+  -- r2: ค่าต้องเป็น label จริงของ enum role_key ก่อนถึงชั้น cast ด้านล่าง —
+  --     ค่าขยะ ('banana') cast แล้วเป็น 22P02 ไร้แท็ก · citizen ยังถอนได้ตามดีไซน์
+  --     (ชั้น last_role ด้านล่างคือเงื่อนไขเดียวที่กันบัญชีไร้บทบาท)
+  if p_role not in ('citizen','lawyer','instructor',
+                    'staff:viewer','staff:content','staff:exam','staff:registrar') then
+    raise exception 'ข้อมูลไม่ถูกต้อง: ไม่มีบทบาทนี้ในระบบ (ERR-VAL-001|role_not_manageable)'
+      using errcode = '22023';
+  end if;
   if p_user_id = v_actor then
     raise exception 'ข้อมูลไม่ถูกต้อง: ถอนบทบาทของตัวเองไม่ได้ (ERR-VAL-001|self_revoke)'
       using errcode = '22023';
@@ -516,10 +529,11 @@ begin
       using errcode = '42501';
   end if;
 
+  -- r2: cast ตามแบบแผนของ grant (whitelist enum ผ่านมาแล้ว — cast ปลอดภัย)
   update public.role_assignments
      set revoked_at = now(), reason = btrim(p_reason)
    where user_id = p_user_id
-     and role = p_role
+     and role = p_role::public.role_key
      and revoked_at is null;
   if not found then
     raise exception 'ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)'

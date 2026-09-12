@@ -12,10 +12,10 @@
  *      + job_id + file_media_id) · complete ซ้ำบนงานที่ done แล้ว → job_not_processing
  *   d) fail_data_export_job → failed + error ข้อความ + completed_at (แถว error คงสาเหตุ)
  *   e) my_request_account_deletion — ผู้ถือบทบาท staff → ERR-RBAC-001|account_delete_sod ·
- *      การออก token จริงยังพังที่บั๊ก search_path ของ 0036 (gen_random_bytes อยู่ใน
- *      schema extensions — deviation จดในเคส) · เคส seed คำขอตรงตามที่ RPC ออกแบบ:
- *      token CSPRNG 43 อักขระ + ระบบเก็บ sha256(token) เท่านั้น (D24 — ตัว token
- *      ไม่ลง DB) เพื่อให้เคส f ทดสอบ confirm chain ต่อได้ครบ
+ *      RPC ออก token จริง 43 อักขระ base64url คืนทาง return ครั้งเดียว (0036 r3 แก้
+ *      search_path ให้เห็น gen_random_bytes ที่ schema extensions ตามแบบแผน 0019) ·
+ *      ขอซ้ำขณะค้าง → ERR-VAL-001|delete_pending · ระบบเก็บ sha256(token) เท่านั้น
+ *      (D24 — ตัว token ไม่ลง DB) เพื่อให้เคส f ทดสอบ confirm chain ต่อได้ครบ
  *   f) confirm_account_deletion (service) — token จริง → confirmed:true + profiles.deleted_at
  *      + display_name 'บัญชีที่ขอลบแล้ว' + audit PROFILE_DELETE (retention_note) + คำขอ
  *      confirmed · ยืนยันซ้ำ → token_used · token แปลก → token_not_found · หมดอายุ
@@ -31,6 +31,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { randomBytes } from "node:crypto";
 
 import {
@@ -39,6 +42,7 @@ import {
   psql,
   psqlRows,
   psqlScalar,
+  REPO_ROOT,
   restCall,
   SERVICE_KEY,
   type RestResult,
@@ -81,6 +85,19 @@ function userRpc(name: string, token: string, body: unknown): Promise<RestResult
   return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: ANON_KEY, token }, body);
 }
 
+const execFileAsync = promisify(execFile);
+
+/** หยุด container mailer (dev worker ยิง email-dispatch ทุก 30 วินาที) ช่วงรัน suite —
+ *  พัก cron แล้วก็ยังมีทาง tick ได้ (mailer ยิง HTTP email-dispatch ทุก 30 วิ และ tick
+ *  ที่ pg_cron dispatch ไปก่อน unschedule ยังวิ่งจบ — เห็นจริงใน suite นี้) */
+async function stopMailer(): Promise<void> {
+  await execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+}
+
+/** สตาร์ต mailer คืน (finally — ไม่ทิ้ง dev stack หยุดค้าง) */
+async function startMailer(): Promise<void> {
+  await execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+}
 /** พัก cron จริง 4 ตัวช่วงรัน (idempotent) — dispatch กิน event data_export.ready */
 async function pauseCrons(): Promise<void> {
   await psql(`
@@ -169,6 +186,7 @@ describe.skipIf(!DB_URL)(
     beforeAll(async () => {
       await cleanupE16World(); // ล้างของค้างจากรอบก่อน (ถ้ามี) ให้ beforeAll ทำซ้ำได้
       await pauseCrons(); // พัก cron จริงช่วงรัน (ตั้งคืนใน afterAll finally)
+      await stopMailer(); // หยุด dev worker อีเมล (ยิงทุก 30 วินาที) — start คืนใน finally
       exportA = await createTestUser("dcr11-pdpa-exporta", "citizen");
       exportB = await createTestUser("dcr11-pdpa-exportb", "citizen");
       failUser = await createTestUser("dcr11-pdpa-fail", "citizen");
@@ -183,6 +201,7 @@ describe.skipIf(!DB_URL)(
         await cleanupE16World();
       } finally {
         await restoreCrons();
+        await startMailer();
       }
     });
 
@@ -366,7 +385,7 @@ describe.skipIf(!DB_URL)(
 
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──
 
-    it("เคส e ขอลบบัญชี: ผู้ถือ staff role → ERR-RBAC-001|account_delete_sod · RPC ออก token จริงยังพังที่บั๊ก search_path ของ 0036 (gen_random_bytes อยู่ schema extensions — deviation) · seed คำขอตรงตามที่ RPC ออกแบบ (เก็บ sha256 เท่านั้น)", async () => {
+    it("เคส e ขอลบบัญชี: ผู้ถือ staff role → ERR-RBAC-001|account_delete_sod · RPC ออก token จริง 43 อักขระครั้งเดียว (r3) · ขอซ้ำ → delete_pending · DB เก็บ sha256 เท่านั้น", async () => {
       // SoD — บัญชีที่ถือบทบาทบริหารจัดการห้ามลบเอง (ตรวจบทบาทก่อนถึงชั้นออก token)
       const staffRes = await userRpc("my_request_account_deletion", delStaff.accessToken, {
         p_request_id: crypto.randomUUID(),
@@ -376,27 +395,28 @@ describe.skipIf(!DB_URL)(
       expect(staffErr.message ?? "").toContain("ERR-RBAC-001");
       expect(staffErr.message ?? "").toContain("account_delete_sod");
 
-      // deviation ของ 0036 บน dev DB (รายงานแยก): RPC ตั้ง search_path = public แต่
-      // gen_random_bytes อยู่ใน schema extensions (pgcrypto) → การออก token พัง 42883
-      // ก่อนสร้างคำขอ · เมื่อแก้ migration แล้วบล็อกนี้ต้องปรับกลับมา assert token
-      // 43 อักขระทาง return + delete_pending ตามคอมเมนต์ของ migration
-      const crashed = await userRpc("my_request_account_deletion", delCitizen.accessToken, {
+      // 0036 r3 แก้ search_path (public, extensions ตามแบบแผน cert_issue_core ของ
+      // 0019) แล้ว — การออก token ทำงานจริง: คืน token 43 อักขระ base64url ทาง
+      // return ครั้งเดียว พร้อม requestId/expiresAt (24 ชม.)
+      const issued = await userRpc("my_request_account_deletion", delCitizen.accessToken, {
         p_request_id: crypto.randomUUID(),
       });
-      expect(crashed.status, crashed.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
-      expect(((crashed.json ?? {}) as { message?: string }).message ?? "").toContain(
-        "gen_random_bytes",
+      expect(issued.status, issued.text.slice(0, 300)).toBe(200);
+      const issuedBody = issued.json as { requestId: string; token: string; expiresAt: string };
+      expect(issuedBody.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(issuedBody.requestId).toMatch(/^[0-9a-f-]{36}$/);
+      deletionToken = issuedBody.token;
+
+      // มีคำขอค้างที่ยังใช้ได้อยู่แล้ว = ไม่ออก token ใหม่ (กัน spam อีเมล)
+      const again = await userRpc("my_request_account_deletion", delCitizen.accessToken, {
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(again.status, again.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
+      expect(((again.json ?? {}) as { message?: string }).message ?? "").toContain(
+        "delete_pending",
       );
 
-      // seed คำขอ "ตามที่ RPC ออกแบบ" ตรง: token CSPRNG 43 อักขระ (base64url ของ
-      // 32 ไบต์) — ระบบเก็บ sha256(token) เท่านั้น ตัว token ไม่ปรากฏใน DB (D24)
-      deletionToken = randomBytes(32).toString("base64url"); // 43 อักขระ
-      expect(deletionToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
-      await psql(`
-        insert into public.account_deletion_requests (user_id, token_hash, expires_at)
-        values ('${delCitizen.id}', '${await sha256Hex(deletionToken)}',
-                now() + interval '24 hours');
-      `);
+      // ระบบเก็บ sha256(token) เท่านั้น — ตัว token ไม่ปรากฏใน DB (D24)
       const stored = await psqlScalar(`
         select token_hash from public.account_deletion_requests
          where user_id = '${delCitizen.id}' and status = 'pending'

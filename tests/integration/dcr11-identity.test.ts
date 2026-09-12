@@ -20,7 +20,9 @@
  *   f) JWT aal1 เรียก RPC admin → ERR-AUTH-004|mfa_required (guard ตรวจ aal2 ในตัว)
  *   g) admin_grant_role/admin_revoke_role — registrar มอบ non-lawyer → ERR-RBAC-001|
  *      role_scope · super_admin มอบ super_admin → ERR-VAL-001|role_not_grantable ·
- *      ถอนบทบาทสุดท้ายของบัญชี → ERR-VAL-001|last_role (citizen คงใช้งานอยู่)
+ *      grant instructor + idempotent + revoke จริงผ่านชั้น enum (0035 r2 แก้ cast) ·
+ *      ถอนบทบาทสุดท้ายของบัญชี → ERR-VAL-001|last_role (citizen คงใช้งานอยู่) ·
+ *      ค่านอก enum → ERR-VAL-001|role_not_manageable
  *   h) RLS — account_deletion_requests มืดสนิท: 0036 REVOKE SELECT จาก authenticated
  *      → ผู้ใช้อ่านตาราง → 403 permission denied (service_role อ่านได้) ·
  *      authenticated เห็น data_export_jobs เฉพาะของตัวเอง · INSERT ตรงทั้งสองตาราง
@@ -36,6 +38,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import {
   ANON_KEY,
   assignRole,
@@ -43,6 +48,7 @@ import {
   psql,
   psqlRows,
   psqlScalar,
+  REPO_ROOT,
   restCall,
   SERVICE_KEY,
   type RestResult,
@@ -124,6 +130,19 @@ function submitLicense(
   });
 }
 
+const execFileAsync = promisify(execFile);
+
+/** หยุด container mailer (dev worker ยิง email-dispatch ทุก 30 วินาที) ช่วงรัน suite —
+ *  พัก cron แล้วก็ยังมีทาง tick ได้ (mailer ยิง HTTP email-dispatch ทุก 30 วิ และ tick
+ *  ที่ pg_cron dispatch ไปก่อน unschedule ยังวิ่งจบ — เห็นจริงใน suite นี้) */
+async function stopMailer(): Promise<void> {
+  await execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+}
+
+/** สตาร์ต mailer คืน (finally — ไม่ทิ้ง dev stack หยุดค้าง) */
+async function startMailer(): Promise<void> {
+  await execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+}
 /** พัก cron จริง 4 ตัวช่วงรัน (idempotent) — dispatch กิน event license.application.* */
 async function pauseCrons(): Promise<void> {
   await psql(`
@@ -220,6 +239,7 @@ describe.skipIf(!DB_URL)(
     beforeAll(async () => {
       await cleanupE15World(); // ล้างของค้างจากรอบก่อน (ถ้ามี) ให้ beforeAll ทำซ้ำได้
       await pauseCrons(); // พัก cron จริงช่วงรัน (ตั้งคืนใน afterAll finally)
+      await stopMailer(); // หยุด dev worker อีเมล (ยิงทุก 30 วินาที) — start คืนใน finally
       applicant = await createTestUser("dcr11-ident-applicant", "citizen");
       applicant2 = await createTestUser("dcr11-ident-applicant2", "citizen");
       approveUser = await createTestUser("dcr11-ident-approve", "citizen");
@@ -239,6 +259,7 @@ describe.skipIf(!DB_URL)(
         await cleanupE15World();
       } finally {
         await restoreCrons();
+        await startMailer();
       }
     });
 
@@ -569,7 +590,7 @@ describe.skipIf(!DB_URL)(
 
     // ─── เคส g: scope การมอบ/ถอนบทบาท ──────────────────────────────────────────
 
-    it("เคส g บทบาท: registrar มอบ non-lawyer → ERR-RBAC-001|role_scope · super_admin มอบ super_admin → ERR-VAL-001|role_not_grantable · grant/revoke ทะลุถึงชั้น SQL แล้วพัง role_key=text (บั๊ก 0035 — last_role ยังไปไม่ถึง) · citizen คง active", async () => {
+    it("เคส g บทบาท: registrar มอบ non-lawyer → ERR-RBAC-001|role_scope · super_admin มอบ super_admin → ERR-VAL-001|role_not_grantable · grant/revoke จริงผ่านชั้น enum ได้ (0035 r2) · ถอนบทบาทสุดท้าย → ERR-VAL-001|last_role · citizen คง active", async () => {
       // registrar (aal2) มอบ instructor — ผิด resource-scope (มอบได้เฉพาะ lawyer)
       const scope = await userRpc("admin_grant_role", registrarAal2Token, {
         p_user_id: rejectUser.id,
@@ -592,40 +613,71 @@ describe.skipIf(!DB_URL)(
         "role_not_grantable",
       );
 
-      // บันทึกพฤติกรรมจริงของ 0035 บน dev DB (deviation จากคอมเมนต์ในไฟล์ migration —
-      // รายงานแยกตามข้อตกลง "migration is truth"): p_role เป็น text แต่
-      // role_assignments.role เป็น enum role_key — การเทียบ role = p_role ภายใน RPC
-      // (ชั้น idempotency ของ grant / ชั้น UPDATE ของ revoke) จึงพังด้วย
-      // "operator does not exist: role_key = text" ก่อนถึงชั้นตรวจ last_role →
-      // แท็ก ERR-VAL-001|last_role ยังไปไม่ถึงในบิลด์นี้ (โค้ดมีอยู่จริงใน 0035)
-      const grantCrash = await userRpc("admin_grant_role", superAal2Token, {
+      // 0035 r2 แก้ cast p_role::role_key แล้ว — เส้นทาง mutation ทะลุถึงชั้น SQL จริง:
+      // super_admin มอบ instructor ให้ rejectUser (ผู้ถือ citizen) → granted:true
+      const grant = await userRpc("admin_grant_role", superAal2Token, {
         p_user_id: rejectUser.id,
         p_role: "instructor",
-        p_reason: "ทดสอบพฤติกรรมจริงของ admin_grant_role บน dev DB ของ DCR-11",
+        p_reason: "ทดสอบมอบบทบาท instructor ผ่าน RPC จริงของ DCR-11",
         p_request_id: crypto.randomUUID(),
       });
-      expect(grantCrash.status, grantCrash.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
-      expect(((grantCrash.json ?? {}) as { message?: string }).message ?? "").toContain(
-        "role_key = text",
-      );
+      expect(grant.status, grant.text.slice(0, 300)).toBe(200);
+      expect((grant.json as { granted: boolean }).granted).toBe(true);
+      // idempotent — ถืออยู่แล้ว: granted:false ไม่เกิดแถวใหม่ (ไม่มี mutation/audit ซ้ำ)
+      const grantAgain = await userRpc("admin_grant_role", superAal2Token, {
+        p_user_id: rejectUser.id,
+        p_role: "instructor",
+        p_reason: "ทดสอบซ้ำ idempotent ของ admin_grant_role ของ DCR-11",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(grantAgain.status, grantAgain.text.slice(0, 300)).toBe(200);
+      expect((grantAgain.json as { granted: boolean }).granted).toBe(false);
+      const instructorRows = await psqlScalar(`
+        select count(*)::text from public.role_assignments
+         where user_id = '${rejectUser.id}' and role = 'instructor' and revoked_at is null;
+      `);
+      expect(instructorRows).toBe("1");
 
-      const revokeCrash = await userRpc("admin_revoke_role", superAal2Token, {
+      // ถอน instructor → revoked:true (บัญชียังเหลือ citizen อยู่)
+      const revoke = await userRpc("admin_revoke_role", superAal2Token, {
+        p_user_id: rejectUser.id,
+        p_role: "instructor",
+        p_reason: "ทดสอบถอนบทบาท instructor ผ่าน RPC จริงของ DCR-11",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(revoke.status, revoke.text.slice(0, 300)).toBe(200);
+      expect((revoke.json as { revoked: boolean }).revoked).toBe(true);
+
+      // ถอน citizen (บทบาทสุดท้ายที่เหลือ) → ERR-VAL-001|last_role — แท็กไปถึงจริงหลัง
+      // r2 · exception ใน TX เดียวกับ UPDATE → rollback ทั้งรายการ → citizen คง active
+      const lastRole = await userRpc("admin_revoke_role", superAal2Token, {
         p_user_id: rejectUser.id,
         p_role: "citizen",
-        p_reason: "ทดสอบพฤติกรรมจริงของ admin_revoke_role บน dev DB ของ DCR-11",
+        p_reason: "ทดสอบกันถอนบทบาทสุดท้ายของบัญชีของ DCR-11",
         p_request_id: crypto.randomUUID(),
       });
-      expect(revokeCrash.status, revokeCrash.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
-      expect(((revokeCrash.json ?? {}) as { message?: string }).message ?? "").toContain(
-        "role_key = text",
+      expect(lastRole.status, lastRole.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
+      expect(((lastRole.json ?? {}) as { message?: string }).message ?? "").toContain("last_role");
+
+      // ค่านอก enum → ERR-VAL-001|role_not_manageable (whitelist จับก่อน cast —
+      // ไม่รั่วเป็น 22P02 ไร้แท็ก)
+      const garbage = await userRpc("admin_revoke_role", superAal2Token, {
+        p_user_id: rejectUser.id,
+        p_role: "banana",
+        p_reason: "ทดสอบค่าบทบาทที่ไม่มีในระบบของ DCR-11",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(garbage.status, garbage.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
+      expect(((garbage.json ?? {}) as { message?: string }).message ?? "").toContain(
+        "role_not_manageable",
       );
-      // ไม่มี mutation ค้าง — citizen ยัง active (TX คืนทั้งชุดแม้ call พัง)
+      // ไม่มี mutation ค้าง — citizen ยัง active เพียงบทบาทเดียวที่ใช้งานอยู่
       const citizen = await psqlScalar(`
         select count(*)::text from public.role_assignments
          where user_id = '${rejectUser.id}' and role = 'citizen' and revoked_at is null;
       `);
       expect(citizen).toBe("1");
-    }, 45_000);
+    }, 60_000);
 
     // ─── เคส h: RLS — account_deletion_requests มืดสนิท · data_export_jobs เห็นของตัวเอง ──
 
