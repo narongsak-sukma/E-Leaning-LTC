@@ -4,8 +4,9 @@
  * - RBAC user:disable (super_admin เท่านั้น) · aal1 → 403 · :id ผิดรูป → 400
  * - body strict: is_active=false บังคับ reason 10-500 → 400 ก่อนแตะ DB/GoTrue
  * - guard: เป้าหมาย super_admin เมื่อผู้เรียกไม่ใช่ → 403 ก่อนแตะ GoTrue
- * - GoTrue ban/unban = ตัวบังคับจริง · profiles.is_active ตามหลัง · ล้มหลัง ban = 503
- * - audit USER_* best-effort (allowlist ยังไม่รับ — ล้มไม่กระทบ response)
+ * - GoTrue ban/unban = ตัวบังคับจริง · profiles.is_active + audit USER_DISABLE/
+ *   USER_UPDATE atomic ใน TX ของ RPC admin_set_user_active (0038 — gate p5-r1 B4)
+ *   retry จำกัด · ค้างหลัง ban = 503 (บัญชีค้างถูกแบน fail-closed)
  * - 200 { data: { userId, isActive } } · rate STAFF_WRITE
  *
  * mock ตามแบบ credit-rules/route.test.ts + ctx(id) แบบ certificates/[id]/revoke
@@ -83,12 +84,16 @@ function mockClient(options: {
   roles: readonly string[];
   aal?: "aal1" | "aal2";
   banError?: unknown;
-  profilesError?: unknown;
-  auditError?: unknown;
+  /** transient error กี่ครั้งแรกของ admin_set_user_active ก่อนคืนสำเร็จ (0 = สำเร็จทันที) */
+  setActiveErrors?: number;
+  /** error ถาวรของ admin_set_user_active (มีป้าย ERR-… = ไม่ retry) */
+  setActiveError?: unknown;
 }) {
-  const { raCalls, profilesUpdateCalls, raBuilder, profilesBuilder } = makeBuilders(options.profilesError);
+  const { raCalls, profilesUpdateCalls, raBuilder, profilesBuilder } = makeBuilders(undefined);
   const banCalls: Array<{ userId: string; attrs: unknown }> = [];
   const svcRpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+  const userRpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+  let setActiveAttempts = 0;
   const userClient = {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: CALLER_ID } }, error: null })),
@@ -99,9 +104,20 @@ function mockClient(options: {
         })),
       },
     },
-    rpc: vi.fn(async (fn: string) => {
+    rpc: vi.fn(async (fn: string, args: Record<string, unknown> = {}) => {
+      userRpcCalls.push({ fn, args });
       if (fn === "my_roles") {
         return { data: options.roles, error: null };
+      }
+      if (fn === "admin_set_user_active") {
+        setActiveAttempts += 1;
+        if (options.setActiveError !== undefined) {
+          return { data: null, error: options.setActiveError };
+        }
+        if (setActiveAttempts <= (options.setActiveErrors ?? 0)) {
+          return { data: null, error: { message: "network timeout (transient)" } };
+        }
+        return { data: { userId: TARGET_ID, isActive: true }, error: null };
       }
       return { data: null, error: null };
     }),
@@ -112,7 +128,7 @@ function mockClient(options: {
   const service = {
     rpc: vi.fn(async (fn: string, args: Record<string, unknown> = {}) => {
       svcRpcCalls.push({ fn, args });
-      return { error: options.auditError ?? null };
+      return { error: null };
     }),
     auth: {
       admin: {
@@ -126,7 +142,7 @@ function mockClient(options: {
   };
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(userClient as never);
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue(service as never);
-  return { raCalls, banCalls, profilesUpdateCalls, svcRpcCalls };
+  return { raCalls, banCalls, profilesUpdateCalls, svcRpcCalls, userRpcCalls };
 }
 
 function patchRequest(body: unknown, targetId: string = TARGET_ID): Request {
@@ -149,7 +165,7 @@ beforeEach(() => {
 });
 
 describe("PATCH /admin/users/{id} — ปิด/เปิดใช้งานบัญชี", () => {
-  it("SA ปิดบัญชี → 200 isActive=false + ban '876000h' + profiles.is_active=false", async () => {
+  it("SA ปิดบัญชี → 200 + ban '876000h' + RPC atomic admin_set_user_active (mutation+audit TX เดียว)", async () => {
     const control = mockClient({ roles: [SA] });
     const res = await PATCH(patchRequest({ is_active: false, reason: "ละเมิดข้อบังคับ ซ้ำ" }), ctx(TARGET_ID));
     expect(res.status).toBe(200);
@@ -157,21 +173,26 @@ describe("PATCH /admin/users/{id} — ปิด/เปิดใช้งาน�
     expect(body.data.userId).toBe(TARGET_ID);
     expect(body.data.isActive).toBe(false);
     expect(control.banCalls).toEqual([{ userId: TARGET_ID, attrs: { ban_duration: "876000h" } }]);
-    expect(control.profilesUpdateCalls).toEqual([{ is_active: false }]);
-    const audit = control.svcRpcCalls.find((c) => c.fn === "append_audit_event");
-    expect(audit?.args["p_action"]).toBe("USER_DISABLE");
+    // mutation + audit อยู่ใน RPC เดียว (0038 §2) — ไม่มี update profiles ตรง ๆ อีก
+    const setActive = control.userRpcCalls.filter((c) => c.fn === "admin_set_user_active");
+    expect(setActive).toHaveLength(1);
+    expect(setActive[0]?.args["p_target_user_id"]).toBe(TARGET_ID);
+    expect(setActive[0]?.args["p_is_active"]).toBe(false);
+    expect(setActive[0]?.args["p_reason"]).toBe("ละเมิดข้อบังคับ ซ้ำ");
+    expect(control.profilesUpdateCalls).toHaveLength(0);
+    expect(control.svcRpcCalls.filter((c) => c.fn === "append_audit_event")).toHaveLength(0);
   });
 
-  it("SA เปิดบัญชี → 200 isActive=true + unban 'none' + is_active=true (ไม่บังคับ reason)", async () => {
+  it("SA เปิดบัญชี → 200 + unban 'none' + RPC admin_set_user_active is_active=true (ไม่บังคับ reason)", async () => {
     const control = mockClient({ roles: [SA] });
     const res = await PATCH(patchRequest({ is_active: true }), ctx(TARGET_ID));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: { isActive: boolean } };
     expect(body.data.isActive).toBe(true);
     expect(control.banCalls).toEqual([{ userId: TARGET_ID, attrs: { ban_duration: "none" } }]);
-    expect(control.profilesUpdateCalls).toEqual([{ is_active: true }]);
-    const audit = control.svcRpcCalls.find((c) => c.fn === "append_audit_event");
-    expect(audit?.args["p_action"]).toBe("USER_UPDATE");
+    const setActive = control.userRpcCalls.filter((c) => c.fn === "admin_set_user_active");
+    expect(setActive).toHaveLength(1);
+    expect(setActive[0]?.args["p_is_active"]).toBe(true);
   });
 
   it("เป้าหมาย super_admin เมื่อผู้เรียกไม่ใช่ → 403 ก่อนแตะ GoTrue (BFF guard)", async () => {
@@ -229,25 +250,37 @@ describe("PATCH /admin/users/{id} — ปิด/เปิดใช้งาน�
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { details: { reason: string } } };
     expect(body.error.details.reason).toBe("gotrue_ban_failed");
-    expect(control.profilesUpdateCalls).toHaveLength(0);
+    expect(control.userRpcCalls.filter((c) => c.fn === "admin_set_user_active")).toHaveLength(0);
   });
 
-  it("profiles.is_active ล้มหลัง ban → 503 (บัญชีค้างถูกแบน fail-closed) + ยัง WARN audit", async () => {
-    const control = mockClient({ roles: [SA], profilesError: { message: "update blocked" } });
+  it("RPC ฝั่ง DB transient 3 ครั้งหลัง ban → 503 user_active_update_failed (บัญชีค้างถูกแบน fail-closed)", async () => {
+    const control = mockClient({ roles: [SA], setActiveErrors: 3 });
     const res = await PATCH(patchRequest({ is_active: false, reason: "ละเมิดข้อบังคับ ซ้ำ" }), ctx(TARGET_ID));
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { details: { reason: string } } };
-    expect(body.error.details.reason).toBe("profile_is_active_update_failed");
-    // ban เกิดขึ้นแล้ว — คงสถานะ fail-closed
+    expect(body.error.details.reason).toBe("user_active_update_failed");
+    // ban เกิดขึ้นแล้ว — คงสถานะ fail-closed · retry ครบ 3 ครั้งก่อนยอมแพ้
     expect(control.banCalls).toHaveLength(1);
-    expect(control.profilesUpdateCalls).toHaveLength(1);
-  });
+    expect(control.userRpcCalls.filter((c) => c.fn === "admin_set_user_active")).toHaveLength(3);
+  }, 10_000);
 
-  it("audit best-effort ล้ม → ยัง 200 (allowlist ยังไม่รับ USER_* — WARN เท่านั้น)", async () => {
-    const control = mockClient({ roles: [SA], auditError: { message: "42501" } });
+  it("RPC transient 2 ครั้ง → retry ครั้งที่ 3 สำเร็จ → 200 (เยียวยาได้)", async () => {
+    const control = mockClient({ roles: [SA], setActiveErrors: 2 });
     const res = await PATCH(patchRequest({ is_active: false, reason: "ละเมิดข้อบังคับ ซ้ำ" }), ctx(TARGET_ID));
     expect(res.status).toBe(200);
-    expect(control.svcRpcCalls.filter((c) => c.fn === "append_audit_event")).toHaveLength(1);
+    expect(control.userRpcCalls.filter((c) => c.fn === "admin_set_user_active")).toHaveLength(3);
+  }, 10_000);
+
+  it("RPC ป้าย (ERR-RBAC-001) → 403 ทันที ไม่ retry (1 call)", async () => {
+    const control = mockClient({
+      roles: [SA],
+      setActiveError: { message: "...(ERR-RBAC-001|user_disable_forbidden)" },
+    });
+    const res = await PATCH(patchRequest({ is_active: false, reason: "ละเมิดข้อบังคับ ซ้ำ" }), ctx(TARGET_ID));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-RBAC-001");
+    expect(control.userRpcCalls.filter((c) => c.fn === "admin_set_user_active")).toHaveLength(1);
   });
 
   it("rate STAFF_WRITE เกิน 60/min → 429 ERR-RATE-001", async () => {

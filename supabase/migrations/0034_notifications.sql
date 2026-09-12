@@ -1445,7 +1445,23 @@ begin
       v_err := nullif(btrim(coalesce(v_item ->> 'error', '')), '');
       if v_ok then
         update public.email_outbox
-        set status = 'sent', sent_at = now(), last_error = null
+        set status = 'sent', sent_at = now(), last_error = null,
+            -- gate p5-r1 M1: ลิงก์ bearer (token ลบบัญชี / signed URL 7 วัน) จำเป็น
+            -- เฉพาะตอนส่งอีเมลจริง — ถึงจุด sent แล้วถอดออกจาก payload ที่เก็บใน DB
+            -- อะตอมกับเปลี่ยนสถานะ (แถวส่งไม่สำเร็จคงลิงก์ไว้ให้ retry ใช้ต่อ)
+            payload = case
+              when payload ? 'vars' and jsonb_typeof(payload -> 'vars') = 'object'
+              then jsonb_set(payload, '{vars}',
+                     (payload -> 'vars')
+                     -- coalesce: CASE ไร้ ELSE คืน NULL เมื่อไม่มีลิงก์นั้น แล้ว
+                     -- jsonb || NULL = NULL → payload ทั้งแถว NULL (dcr10 เคส 1 จับ)
+                     || coalesce(case when payload -> 'vars' ? 'confirm_url'
+                              then jsonb_build_object(
+                                     'confirm_url', '[redacted-after-send]') end, '{}'::jsonb)
+                     || coalesce(case when payload -> 'vars' ? 'download_url'
+                              then jsonb_build_object(
+                                     'download_url', '[redacted-after-send]') end, '{}'::jsonb))
+              else payload end
         where id = v_id and status = 'sending';
         if found then
           v_sent := v_sent + 1;

@@ -126,7 +126,7 @@ function mockSsr(
 }
 
 function requestRow(): Record<string, unknown> {
-  return { requestId: REQUEST_ID, token: TOKEN, expiresAt: EXPIRES };
+  return { requestId: REQUEST_ID, token: TOKEN, expiresAt: EXPIRES, userId: USER_ID };
 }
 
 function confirmRow(): Record<string, unknown> {
@@ -154,10 +154,10 @@ describe("requestAccountDeletion — ทางหลัก", () => {
     expect(insert?.["template_key"]).toBe("account.delete.confirm");
     expect(insert?.["to_email"]).toBe("user@example.test");
     expect(insert?.["locale"]).toBe("th");
-    expect(insert?.["recipient_user_id"]).toBe(REQUEST_ID);
+    expect(insert?.["recipient_user_id"]).toBe(USER_ID);
     const payload = insert?.["payload"] as Record<string, unknown>;
     expect(payload["notification_id"]).toBe(REQUEST_ID);
-    expect(payload["user_id"]).toBe(REQUEST_ID);
+    expect(payload["user_id"]).toBe(USER_ID);
     const vars = payload["vars"] as Record<string, unknown>;
     expect(String(vars["confirm_url"])).toBe(
       `${BASE}/profile/delete/confirm?token=${encodeURIComponent(TOKEN)}`,
@@ -213,6 +213,19 @@ describe("requestAccountDeletion — ทางหลัก", () => {
       code: "ERR-SYS-002",
       details: { reason: "deletion_request_drift" },
     });
+  });
+
+  it("RPC ไม่คืน userId → drift (gate p5-r1 B1 — เจ้าของคำขอคือตัวชี้ขาดของอีเมล)", async () => {
+    const capture = mockService();
+    const rowWithoutOwner = { ...requestRow() } as Record<string, string>;
+    delete rowWithoutOwner["userId"];
+    mockSsr({ data: rowWithoutOwner, error: null });
+
+    await expect(requestAccountDeletion(null)).rejects.toMatchObject({
+      code: "ERR-SYS-002",
+      details: { reason: "deletion_request_drift" },
+    });
+    expect(capture.inserts.length).toBe(0);
   });
 
   it("โปรไฟล์อ่านไม่ได้ → ERR-SYS-002 deletion_profile_read_failed (ไม่แทรกอีเมล)", async () => {
@@ -305,6 +318,18 @@ describe("confirmAccountDeletion — token เสีย (token_invalid ไม่
     const outcome = await confirmAccountDeletion(TOKEN, null);
 
     expect(outcome).toEqual({ outcome: "token_invalid" });
+    expect(capture.banCalls.length).toBe(0);
+    expect(capture.inserts.length).toBe(0);
+  });
+
+  it("ป้าย sod_role_changed → sod_changed (คำขอยัง pending — B6) ไม่ ban ไม่แทรกอีเมล", async () => {
+    const capture = mockService({
+      confirmResult: { data: null, error: { message: "ห้าม (ERR-RBAC-001|sod_role_changed)" } },
+    });
+
+    const outcome = await confirmAccountDeletion(TOKEN, null);
+
+    expect(outcome).toEqual({ outcome: "sod_changed" });
     expect(capture.banCalls.length).toBe(0);
     expect(capture.inserts.length).toBe(0);
   });

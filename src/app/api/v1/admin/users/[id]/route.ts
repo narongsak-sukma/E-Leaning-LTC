@@ -12,9 +12,9 @@
  * - ปิดใช้งานบังคับจริงด้วย GoTrue ban (ban_duration '876000h' — 100 ปี ตามตัวอย่างทางการ
  *   supabase-js) + profiles.is_active=false · เปิดใช้งาน = unban ('none') +
  *   is_active=true — ลำดับ ban ก่อน profiles เสมอ (ล้มหลัง ban = ค้างถูกแบน fail-closed)
- * - audit USER_DISABLE/USER_UPDATE best-effort + WARN tripwire — allowlist ปัจจุบันของ
- *   append_audit_event (0008/0019/0025) ไม่รับ USER_* จาก BFF ทั้งสองชั้น role จึงเขียน
- *   ไม่ได้จริง ณ ปัจจุบัน (ต้องมี RPC ฝั่ง DB อนาคต) — รายละเอียดในหัวไฟล์ lib
+ * - profiles.is_active + audit USER_DISABLE (ปิด·มี reason) / USER_UPDATE (เปิด)
+ *   atomic ใน TX เดียวผ่าน RPC admin_set_user_active (0038 — gate p5-r1 B4) หลัง ban
+ *   — retry จำกัด 3 (guard 4xx ไม่ retry) · ค้างหลัง ban = 503 fail-closed
  * - 200 { data: { userId, isActive } }
  */
 import { NextResponse } from "next/server";

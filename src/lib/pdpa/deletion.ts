@@ -51,13 +51,19 @@ export const DeletionRequestRow = z
     requestId: z.uuid(),
     token: z.string().min(40).max(60),
     expiresAt: z.iso.datetime({ offset: true }),
+    // gate p5-r1 B1: เจ้าของคำขอ — เดิม BFF เอา requestId ไปอ่าน profiles /
+    // recipient_user_id ผิดทั้งสาย (requestId เป็น uuid เลยหลุด zod มาได้)
+    userId: z.uuid(),
   })
   .strict();
 
-/** ผลการยืนยัน — confirmed พร้อม userId จาก RPC · token_invalid = ไม่เฉลยสถานะคำขอ */
+/** ผลการยืนยัน — confirmed พร้อม userId จาก RPC · token_invalid = ไม่เฉลยสถานะคำขอ ·
+ * sod_changed = บัญชีได้บทบาทเจ้าหน้าที่/ผู้สอนระหว่างอายุ token (gate p5-r1 B6 —
+ * RPC ปฏิเสธใน TX ยืนยัน คำขอยัง pending token ยังใช้ได้หลังปลดบทบาท) */
 export type ConfirmAccountDeletionOutcome =
   | { readonly outcome: "confirmed"; readonly userId: string; readonly emailQueued: boolean }
-  | { readonly outcome: "token_invalid" };
+  | { readonly outcome: "token_invalid" }
+  | { readonly outcome: "sod_changed" };
 
 /** แถวโปรไฟล์ที่ใช้แต่งอีเมล — เฉพาะฟิลด์ที่ต้องใช้จริง (email + display_name) */
 const ProfileForEmail = z
@@ -125,11 +131,11 @@ export async function requestAccountDeletion(
     // อย่างปลอดภัย → 503 ให้ผู้ใช้ลองใหม่; คำขอเดิมรอหมดอายุ 24 ชม. ตาม migration)
     throw new AppError("ERR-SYS-002", { details: { reason: "deletion_request_drift" } });
   }
-  const { requestId: rid, token, expiresAt } = row.data;
+  const { requestId: rid, token, expiresAt, userId: uid } = row.data;
 
   // 2) ผู้รับอีเมล — service client อ่านเฉพาะ email + display_name (justified: อีเมลธุรกรรม)
   const service = createSupabaseServiceRoleClient();
-  const profile = await readProfileForEmail(service, rid);
+  const profile = await readProfileForEmail(service, uid);
   if (profile === null) {
     throw new AppError("ERR-SYS-002", { details: { reason: "deletion_profile_read_failed" } });
   }
@@ -141,17 +147,17 @@ export async function requestAccountDeletion(
     confirm_url: `${base}/profile/delete/confirm?token=${encodeURIComponent(token)}`,
   };
   const insert = await service.from("email_outbox").insert({
-    recipient_user_id: rid,
+    recipient_user_id: uid,
     to_email: profile.email,
     template_key: DELETE_CONFIRM_TEMPLATE,
-    payload: { notification_id: rid, user_id: rid, vars },
+    payload: { notification_id: rid, user_id: uid, vars },
     locale: "th",
   });
   if (insert.error !== null) {
-    logger.warn("pdpa_delete_confirm_email_enqueue_failed", { route: "pdpa:delete", user_id: rid });
+    logger.warn("pdpa_delete_confirm_email_enqueue_failed", { route: "pdpa:delete", user_id: uid });
     throw new AppError("ERR-SYS-002", { details: { reason: "deletion_email_enqueue_failed" } });
   }
-  logger.info("pdpa_delete_confirm_email_queued", { route: "pdpa:delete", user_id: rid });
+  logger.info("pdpa_delete_confirm_email_queued", { route: "pdpa:delete", user_id: uid });
   return { requestId: rid, expiresAt };
 }
 
@@ -187,6 +193,15 @@ export async function confirmAccountDeletion(
         status: parsed.reason,
       });
       return { outcome: "token_invalid" };
+    }
+    // gate p5-r1 B6: SoD เปลี่ยนระหว่างอายุ token — RPC rollback ทั้ง TX (คำขอยัง
+    // pending) แยกผลจากลิงก์เสียเพราะผู้ใช้แก้เองไม่ได้ ต้องติดต่อผู้ดูแล
+    if (parsed !== undefined && parsed.reason === "sod_role_changed") {
+      logger.warn("pdpa_delete_confirm_sod_changed", {
+        route: "pdpa:delete:confirm",
+        status: parsed.reason,
+      });
+      return { outcome: "sod_changed" };
     }
     throw mapDeletionRpcError(rpc.error as RpcErrorLike, "confirm_deletion_failed");
   }

@@ -30,6 +30,19 @@ export const ConfirmInvalidView = z
   })
   .strict();
 
+/**
+ * หน้าผล SoD เปลี่ยนระหว่างอายุ token (gate p5-r1 B6) — บัญชีได้บทบาท
+ * เจ้าหน้าที่/ผู้สอนหลังยื่นคำขอ → RPC ปฏิเสธใน TX ยืนยัน (rollback — คำขอยัง
+ * pending token ยังใช้ได้หลังปลดบทบาท) ต้องบอกต่างจากลิงก์เสียเพราะผู้ใช้ทำอะไรต่อไม่ได้
+ * เอง (ติดต่อผู้ดูแล)
+ */
+export const ConfirmSodChangedView = z
+  .object({
+    status: z.literal("sod_changed"),
+    message: z.string().min(1),
+  })
+  .strict();
+
 /** token ขาเข้าจาก query — base64url 43 อักขระจากระบบ (ยืดหยุ่นช่วงยาว 20..200) */
 export const ConfirmTokenQuery = z
   .string()

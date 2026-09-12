@@ -243,7 +243,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     enforceRateLimit(request, { group: "STAFF_WRITE", secondaryKey: userId });
     // 3) body strict — ผิดรูป → 400 ERR-VAL-001
     const body = await parseCreateBody(request);
-    // 4) service lib จุดเดียว (D-p5-6): invite GoTrue + grant RPC + audit best-effort
+    // 4) service lib จุดเดียว (D-p5-6): invite GoTrue + grant RPC + audit durable (0038)
     const created = await createStaffUser({
       email: body.email,
       displayName: body.displayName,

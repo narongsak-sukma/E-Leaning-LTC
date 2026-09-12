@@ -432,6 +432,10 @@ declare
   v_actor uuid;
 begin
   v_actor := public.admin_license_staff_guard();
+  -- gate p5-r1 B5: per-account lock ก่อนแตะ role_assignments — สอง TX ถอนคนละ
+  -- role พร้อมกันต้องไม่ผ่านด่าน last_role ทั้งคู่ (บัญชีไร้ role) · คู่กันกับ
+  -- confirm_account_deletion (0036 §6 — SoD recheck ใต้ lock เดียวกัน)
+  perform pg_advisory_xact_lock(hashtext('ltc:account:roles:' || p_user_id::text)::bigint);
   if p_reason is null or length(btrim(p_reason)) < 10 or length(p_reason) > 500 then
     raise exception 'ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 อักขระ (ERR-VAL-001|reason_required)'
       using errcode = '22023';
@@ -503,6 +507,10 @@ declare
   v_actor uuid;
 begin
   v_actor := public.admin_license_staff_guard();
+  -- gate p5-r1 B5: per-account lock ก่อนแตะ role_assignments — สอง TX ถอนคนละ
+  -- role พร้อมกันต้องไม่ผ่านด่าน last_role ทั้งคู่ (บัญชีไร้ role) · คู่กันกับ
+  -- confirm_account_deletion (0036 §6 — SoD recheck ใต้ lock เดียวกัน)
+  perform pg_advisory_xact_lock(hashtext('ltc:account:roles:' || p_user_id::text)::bigint);
   if p_reason is null or length(btrim(p_reason)) < 10 or length(p_reason) > 500 then
     raise exception 'ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 อักขระ (ERR-VAL-001|reason_required)'
       using errcode = '22023';

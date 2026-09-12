@@ -5,7 +5,8 @@
  *       audit PII_ACCESS fail-closed ก่อนคืนแถว (ล้ม 2 ครั้ง → 503) · drift → 503 ·
  *       keyset nextCursor เซ็น · rate STAFF_WRITE
  * POST — RBAC user:create (super_admin เท่านั้น) · body strict (+reason 10-500) ·
- *       GoTrue invite + RPC admin_grant_role + audit USER_CREATE best-effort ·
+ *       GoTrue invite + RPC admin_grant_role + durable audit USER_CREATE ผ่าน RPC
+ *       admin_audit_user_created (0038 — retry จำกัด · ค้าง = 503 fail-closed) ·
  *       error tag → AppError · drift → 503 · PostgREST wrap [แถวเดียว] → unwrap
  *
  * mock ตามแบบ credit-rules/route.test.ts (vi.mock supabase/ssr + server · auth.getUser +
@@ -121,6 +122,10 @@ function makeServiceClient(options: {
 function mockClient(options: {
   listResult?: { data?: unknown; error?: unknown } | null;
   grantResult?: { data?: unknown; error?: unknown } | null;
+  /** transient error กี่ครั้งแรกของ admin_audit_user_created ก่อนคืนสำเร็จ (0 = สำเร็จทันที) */
+  auditCreateErrors?: number;
+  /** error ถาวรของ admin_audit_user_created (มีป้าย ERR-… = ไม่ retry) */
+  auditCreateError?: unknown;
   roles: readonly string[];
   aal?: "aal1" | "aal2";
 }): {
@@ -132,6 +137,7 @@ function mockClient(options: {
     maybeSingle: vi.fn(async () => ({ data: { is_active: true, deleted_at: null }, error: null })),
   };
   const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
+  let auditCreateAttempts = 0;
   const client = {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: STAFF_ID } }, error: null })),
@@ -157,6 +163,19 @@ function mockClient(options: {
         return {
           data: options.grantResult?.data ?? null,
           error: options.grantResult?.error ?? null,
+        };
+      }
+      if (fn === "admin_audit_user_created") {
+        auditCreateAttempts += 1;
+        if (options.auditCreateError !== undefined) {
+          return { data: null, error: options.auditCreateError };
+        }
+        if (auditCreateAttempts <= (options.auditCreateErrors ?? 0)) {
+          return { data: null, error: { message: "network timeout (transient)" } };
+        }
+        return {
+          data: { userId: "b0000000-0000-4000-8000-000000000009", role: "staff:viewer", audited: true },
+          error: null,
         };
       }
       return { data: null, error: null };
@@ -304,7 +323,7 @@ describe("GET /admin/users — สิทธิ์ + keyset + PII audit", () => {
 });
 
 describe("POST /admin/users — สร้างบัญชีเจ้าหน้าที่ (super_admin เท่านั้น)", () => {
-  it("super_admin สร้างสำเร็จ → 201 + invite พร้อม display_name + RPC grant + audit best-effort", async () => {
+  it("super_admin สร้างสำเร็จ → 201 + invite พร้อม display_name + RPC grant + durable audit USER_CREATE (0038)", async () => {
     const control = setup({
       grantResult: { data: { userId: USER_ID, role: "staff:viewer", granted: true } },
       roles: [SA],
@@ -323,9 +342,54 @@ describe("POST /admin/users — สร้างบัญชีเจ้าหน
     expect(grantCall?.args["p_role"]).toBe("staff:viewer");
     expect(grantCall?.args["p_reason"]).toBe("แต่งตั้งให้ดูแลรายงานประจำวัน");
     expect(grantCall?.args["p_request_id"]).toBe("req-e11-1");
-    // audit USER_CREATE best-effort ผ่าน service client — ไม่ทำ fail request
-    const auditCall = service.rpcCalls.find((c) => c.fn === "append_audit_event");
-    expect(auditCall?.args["p_action"]).toBe("USER_CREATE");
+    // durable audit USER_CREATE — RPC user-JWT admin_audit_user_created (0038 §1)
+    // พร้อม actor+reason ใน context (ไม่ใช่ service append_audit_event ที่ allowlist
+    // ปฏิเสธ USER_* ทุกครั้งอีกแล้ว — gate p5-r1 B4)
+    const auditCall = control.rpcCalls.find((c) => c.fn === "admin_audit_user_created");
+    expect(auditCall?.args["p_target_user_id"]).toBe("b0000000-0000-4000-8000-000000000009");
+    expect(auditCall?.args["p_role"]).toBe("staff:viewer");
+    expect(auditCall?.args["p_reason"]).toBe("แต่งตั้งให้ดูแลรายงานประจำวัน");
+    expect(service.rpcCalls.filter((c) => c.fn === "append_audit_event")).toHaveLength(0);
+  });
+
+  it("audit RPC transient 2 ครั้ง → retry ครั้งที่ 3 สำเร็จ → 201 (เยียวยาได้)", async () => {
+    const control = setup({
+      grantResult: { data: { userId: USER_ID, role: "staff:viewer", granted: true } },
+      auditCreateErrors: 2,
+      roles: [SA],
+    });
+    const res = await POST(postRequest(createBody()));
+    expect(res.status).toBe(201);
+    expect(control.rpcCalls.filter((c) => c.fn === "admin_audit_user_created")).toHaveLength(3);
+  });
+
+  it("audit RPC transient 3 ครั้ง → 503 user_create_audit_failed (fail-closed — บัญชีถูกสร้างแล้ว ให้ตรวจซ้ำ ไม่ใช่ WARN เงียบ)", async () => {
+    const control = setup({
+      grantResult: { data: { userId: USER_ID, role: "staff:viewer", granted: true } },
+      auditCreateErrors: 3,
+      roles: [SA],
+    });
+    const res = await POST(postRequest(createBody()));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details.reason).toBe("user_create_audit_failed");
+    // invite+grant เกิดแล้ว (ระบบภายนอก) — audit ค้างจึงต้องบอกให้ตรวจซ้ำ ไม่อ้างว่าสำเร็จ
+    expect(service.inviteCalls).toHaveLength(1);
+    expect(control.rpcCalls.filter((c) => c.fn === "admin_audit_user_created")).toHaveLength(3);
+  }, 10_000);
+
+  it("audit RPC ป้าย (ERR-AUTH-004) → 403 ทันที ไม่ retry (1 call)", async () => {
+    const control = setup({
+      grantResult: { data: { userId: USER_ID, role: "staff:viewer", granted: true } },
+      auditCreateError: { message: "...(ERR-AUTH-004|mfa_required)" },
+      roles: [SA],
+    });
+    const res = await POST(postRequest(createBody()));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-AUTH-004");
+    expect(control.rpcCalls.filter((c) => c.fn === "admin_audit_user_created")).toHaveLength(1);
   });
 
   it("registrar เรียก → 403 (user:create = super_admin เท่านั้น) + ไม่แตะ GoTrue/RPC", async () => {

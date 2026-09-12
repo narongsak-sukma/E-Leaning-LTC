@@ -25,13 +25,16 @@ import {
 import { AppError } from "@/lib/errors";
 import { confirmAccountDeletion } from "@/lib/pdpa/deletion";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { ConfirmInvalidView, ConfirmSuccessView, ConfirmTokenQuery } from "../schema";
+import { ConfirmInvalidView, ConfirmSodChangedView, ConfirmSuccessView, ConfirmTokenQuery } from "../schema";
 
 /** ข้อความหน้าผล (ไทย-first) — generic เดียวทั้งสองกรณีตามสัญญา spec */
 const SUCCESS_MESSAGE =
   "ยืนยันการลบบัญชีสำเร็จ บัญชีของท่านถูกลบเรียบร้อยแล้ว ขอบคุณที่ใช้บริการ";
 const INVALID_MESSAGE =
   "ลิงก์ยืนยันไม่ถูกต้องหรือหมดอายุแล้ว หากท่านยังต้องการลบบัญชี กรุณาเข้าสู่ระบบและยื่นคำขอใหม่";
+/** gate p5-r1 B6 — บัญชีได้บทบาทเจ้าหน้าที่/ผู้สอนระหว่างอายุ token (คำขอยัง pending) */
+const SOD_CHANGED_MESSAGE =
+  "บัญชีนี้มีบทบาทผู้สอนหรือเจ้าหน้าที่อยู่ จึงยืนยันการลบด้วยตนเองไม่ได้ กรุณาติดต่อผู้ดูแลระบบ";
 
 /** x-request-id (SDS §5.4) → envelope options (exactOptionalPropertyTypes-safe) */
 function responseOptions(request: Request): JsonResponseOptions {
@@ -85,6 +88,14 @@ export async function GET(request: Request): Promise<NextResponse> {
         "confirm_invalid_view_drift",
       );
       return jsonResult(invalid, options);
+    }
+    if (outcome.outcome === "sod_changed") {
+      const sod = parseOutgoingView(
+        ConfirmSodChangedView,
+        { status: "sod_changed", message: SOD_CHANGED_MESSAGE },
+        "confirm_sod_view_drift",
+      );
+      return jsonResult(sod, options);
     }
     const success = parseOutgoingView(
       ConfirmSuccessView,

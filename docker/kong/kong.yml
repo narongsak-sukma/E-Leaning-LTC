@@ -49,20 +49,15 @@ services:
             - apikey
           hide_credentials: true
 
-  # ---- Storage: ลิงก์ signed URL / ไฟล์สาธารณะ (browser ใช้ token แทน apikey) ----
-  - name: storage-v1-open
-    url: http://storage:5000
-    routes:
-      - name: storage-v1-open-route
-        paths:
-          - /storage/v1/object/sign
-          - /storage/v1/object/authenticated
-          - /storage/v1/object/public
-        strip_path: true
-    plugins:
-      - name: cors
-
-  # ---- Storage: เส้นทางทั่วไป (apikey บังคับ) ----
+  # ---- Storage: เส้นทางทั่วไป (apikey บังคับ — รวม /object/sign) ----
+  # gate p5-r1 (DCR-12 เคส g): storage-v1-open เดิม (paths /object/sign|authenticated/
+  # public + strip_path:true) ตัด "ทั้งเซกเมนต์ที่ match" ทิ้ง — storage:5000 ซึ่ง mount
+  # ที่ root (/object/...) ได้รับ /{bucket}/{key} ล้วน → 404 (createSignedUrl พังทุกบักเก็ต
+  # · พิสูจน์ด้วย probe: POST /object/sign/... ตรง = 400 ต้องการ authorization แต่ route
+  # มีจริง) · แอปทุก flow เป็น server-side service client (แนบ apikey เสมอ) — เส้นทาง
+  # เดียวนี้ถูกต้องอยู่แล้ว (strip เฉพาะ /storage/v1) · browser public/authenticated
+  # ยังไม่มีการใช้ใน src — เมื่อต้องการ ให้สร้าง service แยกโดยฝัง prefix ใน service
+  # url เอง (http://storage:5000/object/public) เพราะ Kong strip เฉพาะทั้ง match เท่านั้น
   - name: storage-v1
     url: http://storage:5000
     routes:

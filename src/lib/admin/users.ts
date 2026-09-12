@@ -7,13 +7,12 @@
  * - GoTrue admin API จาก service client (invite + ban/unban — D-p5-6 "service lib จุดเดียว")
  * - PII_ACCESS แบบ fail-closed (retry ครั้งเดียว ยังล้ม = 503 ERR-SYS-002 — แบบแผน 1.1.2 B7
  *   เดียวกับ GET /admin/credits/{userId})
- * - best-effort audit USER_CREATE/USER_DISABLE/USER_UPDATE + tripwire WARN — allowlist
- *   ปัจจุบันของ append_audit_event (0008 §4 / 0019-r1 / 0025) ไม่รับ USER_* ทั้งชั้น
- *   authenticated (class ข) และ service_role (เฉพาะ AUTH_* และ PII_ACCESS/ADMIN_EXPORT) เท่านั้น —
- *   event เหล่านี้ต้องย้ายเข้า RPC ฝั่ง DB อนาคต (migration — นอกกรรมสิทธิ์ lane นี้) จึง
- *   เขียนไม่ได้จาก BFF เด็ดขาด ณ ปัจจุบัน ไฟล์นี้จึง "พยายามเขียน + วัดผลจริง + WARN
- *   tripwire" ตามแบบแผน best-effort ของ auditCertificateEvent (certificates/shared.ts)
- *   แทนการอ้างว่าเขียนสำเร็จ
+ * - audit USER_CREATE/USER_DISABLE/USER_UPDATE แบบ **durable atomic** (gate p5-r1 B4 —
+ *   migration 0038): RPC admin_audit_user_created + admin_set_user_active ฝั่ง user-JWT
+ *   เขียน audit ผ่าน append_audit_event_internal (path ของ business functions เหมือน
+ *   ROLE_GRANT/ROLE_REVOKE — เดิมเรียก append_audit_event ชั้นนอกที่ allowlist ปฏิเสธ
+ *   USER_* ทุกครั้ง = audit หลุดทั้งเส้น เหลือ WARN เก็บแค่ route) · BFF ทำ retry จำกัด
+ *   (transient เยียวยา · guard 4xx ไม่ retry) · ค้าง = 503 fail-closed + WARN มี target
  *
  * - ห้าม log PII (D24) — logger ตัดฟิลด์นอก allowlist ทิ้งก่อนเขียนทุกบรรทัด (SDS §6.2)
  * - GoTrue อยู่นอก Postgres TX โดยธรรมชาติ — ลำดับที่ปลอดภัยคือ ban ก่อน profiles.update
@@ -426,57 +425,129 @@ export async function decideCourseViaRpc(input: DecideCourseInput): Promise<z.ou
   return parseRpcEnvelope(RpcDecideCourseResult, rpc.data, "admin_decide_course_row_drift");
 }
 
-/** ผลของ best-effort audit — แบบ AuditEventResult ของ certificates/shared.ts */
-export interface BestEffortAuditResult {
-  readonly written: boolean;
-  readonly reason: string;
+/** ผล RPC admin_audit_user_created (0038 §1) — strict ตามสัญญา */
+const RpcUserCreatedAuditResult = z
+  .object({ userId: z.uuid(), role: z.string().min(1), audited: z.literal(true) })
+  .strict();
+
+/** ผล RPC admin_set_user_active (0038 §2) — strict ตามสัญญา */
+const RpcSetUserActiveResult = z
+  .object({ userId: z.uuid(), isActive: z.boolean() })
+  .strict();
+
+/** ครั้งที่ลอง RPC ฝั่ง DB รวมครั้งแรก (gate p5-r1 B4: success/failure/retry ชัดเจน) */
+const DB_RPC_ATTEMPTS = 3;
+
+/** ถอยหลังระหว่าง retry (250ms → 600ms) — เยียวยา transient สั้น ๆ ไม่ถ่วง route นาน */
+function retryDelayMs(attempt: number): number {
+  return attempt === 1 ? 250 : 600;
 }
 
-/** จำแนกสาเหตุแบบสั้น ไม่มี PII และไม่คัดลอกข้อความ SQL เต็มลง log (แบบ shared.ts) */
-function auditDenialReason(error: unknown): string {
-  if (typeof error === "object" && error !== null) {
-    const code = (error as { code?: unknown }).code;
-    if (code === "42501") {
-      return "db_allowlist_denies_service_role";
-    }
-    if (code === "P0001") {
-      return "db_function_rejected_event";
-    }
-  }
-  return "rpc_error";
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 /**
- * best-effort audit ของ USER_* — event ชุดนี้ยังไม่อยู่ใน allowlist ของ append_audit_event
- * (ทั้งชั้น authenticated และ service_role — ดูหัวไฟล์) จึง "พยายามเขียน + วัดผลจริง +
- * WARN tripwire" ไม่ปิดกั้นธุรกิจ · ต้องไม่ใช้กับ event ที่ต้อง fail-closed
+ * ครั้งเดียวของ RPC user-JWT พร้อมการจำแนก error: มีป้าย "(ERR-…|tag)" = ความผิด
+ * สัญญา/guard ถาวร → โยนทันที (retry ไม่ช่วย) · ไม่มีป้าย (network/5xx) = transient
+ * → คืนให้ caller retry ตาม DB_RPC_ATTEMPTS (การแลกเปลี่ยนที่ยอมรับ: response
+ * หายหลัง DB commit อาจซ้ำแถว audit ได้ ≤1 แถว — append-only เก็บได้ ไม่ใช่การสูญ)
  */
-export async function auditUserEventBestEffort(input: {
-  readonly action: "USER_CREATE" | "USER_DISABLE" | "USER_UPDATE";
-  readonly targetUserId: string;
-  readonly requestId: string | null;
-}): Promise<BestEffortAuditResult> {
-  const service = createSupabaseServiceRoleClient();
-  const { error } = await service.rpc("append_audit_event", {
-    p_action: input.action,
-    p_entity_type: "user",
-    p_entity_id: input.targetUserId,
-    p_before: null,
-    p_after: null,
-    p_context: { target_user_id: input.targetUserId },
-    p_actor_roles: null,
-    p_ip_hash: null,
-    p_user_agent: null,
-    p_request_id: input.requestId,
-  });
-  if (error === null) {
-    return { written: true, reason: "audit_written" };
+async function rpcOnceWithClassification(
+  fn: string,
+  args: Record<string, unknown>,
+): Promise<
+  | { readonly kind: "ok"; readonly data: unknown }
+  | { readonly kind: "transient"; readonly error: RpcErrorLike }
+> {
+  const supabase = await createSupabaseSsrClient();
+  const rpc = await supabase.rpc(fn, args);
+  if (rpc.error === null) {
+    return { kind: "ok", data: rpc.data };
   }
-  const reason = auditDenialReason(error);
-  adminUsersLogger.warn("admin_users_event_audit_rpc_denied", {
-    route: `admin:users:${input.action}`,
+  const error = rpc.error as RpcErrorLike;
+  if (parseRpcErrorCodeDetailed(error) !== undefined) {
+    throw mapAdminRpcError(error, `${fn}_failed`);
+  }
+  return { kind: "transient", error };
+}
+
+/**
+ * durable audit USER_CREATE (0038 §1) — เรียกหลัง GoTrue invite + admin_grant_role
+ * สำเร็จ: การสร้างบัญชีใน GoTrue เป็นระบบภายนอกจึงไม่มี TX ร่วม แต่ audit ต้อง
+ * durable — retry จำกัด · ค้าง = 503 ERR-SYS-002\|user_create_audit_failed
+ * (บัญชีถูกสร้างแล้ว ซองบอกให้ตรวจซ้ำ — ไม่ใช่ WARN เงียบแล้วอ้างว่าเขียนสำเร็จ)
+ */
+export async function auditUserCreatedViaRpc(input: {
+  readonly targetUserId: string;
+  readonly role: string;
+  readonly reason: string;
+  readonly requestId: string | null;
+}): Promise<void> {
+  const args = {
+    p_target_user_id: input.targetUserId,
+    p_role: input.role,
+    p_reason: input.reason,
+    p_request_id: input.requestId,
+  };
+  for (let attempt = 1; attempt <= DB_RPC_ATTEMPTS; attempt += 1) {
+    const outcome = await rpcOnceWithClassification("admin_audit_user_created", args);
+    if (outcome.kind === "ok") {
+      const row = RpcUserCreatedAuditResult.safeParse(unwrapScalarJsonb(outcome.data));
+      if (!row.success) {
+        throw new AppError("ERR-SYS-002", { details: { reason: "user_create_audit_row_drift" } });
+      }
+      return;
+    }
+    if (attempt < DB_RPC_ATTEMPTS) {
+      await sleep(retryDelayMs(attempt));
+    }
+  }
+  adminUsersLogger.warn("admin_users_create_audit_persist_failed", {
+    route: "admin:users:USER_CREATE",
+    user_id: input.targetUserId,
   });
-  return { written: false, reason };
+  throw new AppError("ERR-SYS-002", { details: { reason: "user_create_audit_failed" } });
+}
+
+/**
+ * profiles.is_active + audit USER_DISABLE/USER_UPDATE **atomic ใน TX ของ RPC**
+ * (0038 §2) — แทน update ตรง + best-effort แยกสองจังหวะเดิม · retry จำกัด ·
+ * ค้าง = 503 ERR-SYS-002\|user_active_update_failed (บัญชีค้างถูกแบนตาม GoTrue
+ * ที่ทำไปก่อนหน้า = ทิศ fail-closed เดิม)
+ */
+export async function setUserActiveViaRpc(input: {
+  readonly targetUserId: string;
+  readonly isActive: boolean;
+  readonly reason: string | null;
+  readonly requestId: string | null;
+}): Promise<void> {
+  const args = {
+    p_target_user_id: input.targetUserId,
+    p_is_active: input.isActive,
+    p_reason: input.reason,
+    p_request_id: input.requestId,
+  };
+  for (let attempt = 1; attempt <= DB_RPC_ATTEMPTS; attempt += 1) {
+    const outcome = await rpcOnceWithClassification("admin_set_user_active", args);
+    if (outcome.kind === "ok") {
+      const row = RpcSetUserActiveResult.safeParse(unwrapScalarJsonb(outcome.data));
+      if (!row.success) {
+        throw new AppError("ERR-SYS-002", { details: { reason: "set_user_active_row_drift" } });
+      }
+      return;
+    }
+    if (attempt < DB_RPC_ATTEMPTS) {
+      await sleep(retryDelayMs(attempt));
+    }
+  }
+  adminUsersLogger.warn("admin_users_active_persist_failed", {
+    route: "admin:users:USER_ACTIVE",
+    user_id: input.targetUserId,
+  });
+  throw new AppError("ERR-SYS-002", { details: { reason: "user_active_update_failed" } });
 }
 
 /** input ของ createStaffUser — role เป็นชุดมอบได้ของ endpoint นี้ (super_admin เท่านั้น) */
@@ -519,7 +590,8 @@ function mapGoTrueError(error: { readonly status?: unknown }, fallbackReason: st
  *    on_auth_user_created (0003) สร้าง profiles + role citizen ให้เอง
  * 2) มอบบทบาทเริ่มต้นผ่าน RPC admin_grant_role ด้วย user-JWT ของผู้เรียก — audit
  *    ROLE_GRANT ถูกเขียน **atomic ใน TX ของ RPC** (0035 §6) ไม่ใช่ best-effort
- * 3) best-effort audit USER_CREATE (+ WARN tripwire — ดู auditUserEventBestEffort)
+ * 3) durable audit USER_CREATE ผ่าน RPC admin_audit_user_created (0038) พร้อม retry
+ *    จำกัด — ค้าง = 503 user_create_audit_failed (บัญชีถูกสร้างแล้ว ให้ตรวจซ้ำ)
  *
  * บังคับ MFA ตั้งแต่วันแรก = กลไกเดิมของ rbac.ts (staff:* และ instructor ถือบทบาทบังคับ MFA —
  * requirePermission ปฏิเสธ aal1 ทันที) ไม่ต้องตั้งค่าเพิ่มที่ GoTrue
@@ -543,8 +615,13 @@ export async function createStaffUser(input: CreateStaffUserInput): Promise<Crea
     reason: input.reason,
     requestId: input.requestId,
   });
-  // USER_CREATE ยังไม่อยู่ใน allowlist ของ append_audit_event — best-effort + WARN (ดูหัวไฟล์)
-  await auditUserEventBestEffort({ action: "USER_CREATE", targetUserId: userId, requestId: input.requestId });
+  // durable USER_CREATE (0038) — ล้มค้าง = throw 503 ไม่ใช่ WARN เงียบ (gate p5-r1 B4)
+  await auditUserCreatedViaRpc({
+    targetUserId: userId,
+    role: input.role,
+    reason: input.reason,
+    requestId: input.requestId,
+  });
   const invitedAt =
     typeof invited.data.user.invited_at === "string" ? invited.data.user.invited_at : null;
   return {
@@ -582,10 +659,9 @@ export interface SetUserActiveInput {
  *    ก่อนแตะ GoTrue)
  * 2) GoTrue ban/unban = **ตัวบังคับจริง** (ban → login ไม่ได้ทันที) — ล้ม = หยุดทันที
  *    profiles ยังไม่แตะ (ไม่เกิดสถานะคลาดเคลื่อน)
- * 3) profiles.is_active ผ่าน service client (guard_profiles_update_columns ยอมรับ
- *    service_role path — 0010/0036 §10) · ล้มหลัง ban = บัญชีค้างถูกแบน (fail-closed
- *    ทางความปลอดภัย) + WARN
- * 4) best-effort audit USER_DISABLE/USER_UPDATE (+ WARN tripwire — ดู auditUserEventBestEffort)
+ * 3) profiles.is_active + audit USER_DISABLE/USER_UPDATE **atomic ใน TX เดียว** ผ่าน
+ *    RPC admin_set_user_active (0038 §2 — gate p5-r1 B4) พร้อม retry จำกัด · ค้าง =
+ *    บัญชีค้างถูกแบน (fail-closed ทางความปลอดภัย) + WARN มี target
  */
 export async function setUserActive(input: SetUserActiveInput): Promise<SetUserActiveResult> {
   // 1) guard: เป้าหมายเป็น super_admin หรือไม่ — ผู้ไม่ใช่ super_admin ห้ามแตะ (D-p5-6)
@@ -614,23 +690,12 @@ export async function setUserActive(input: SetUserActiveInput): Promise<SetUserA
       details: { reason: input.isActive ? "gotrue_unban_failed" : "gotrue_ban_failed" },
     });
   }
-  // 3) profiles.is_active — ล้มหลัง ban = ค้างถูกแบน (fail-closed) + WARN
-  const { error: profileError } = await service
-    .from("profiles")
-    .update({ is_active: input.isActive })
-    .eq("id", input.targetUserId);
-  if (profileError !== null) {
-    adminUsersLogger.warn("admin_users_profile_is_active_update_failed", {
-      route: "admin:users:disable",
-    });
-    throw new AppError("ERR-SYS-002", {
-      details: { reason: "profile_is_active_update_failed" },
-    });
-  }
-  // 4) best-effort audit USER_DISABLE/USER_UPDATE (+ WARN tripwire — ดูหัวไฟล์)
-  await auditUserEventBestEffort({
-    action: input.isActive ? "USER_UPDATE" : "USER_DISABLE",
+  // 3) profiles.is_active + audit USER_DISABLE/USER_UPDATE atomic TX เดียว (0038 §2)
+  //    retry จำกัด · ค้าง = 503 (บัญชีค้างถูกแบน — ทิศ fail-closed เดิม) + WARN มี target
+  await setUserActiveViaRpc({
     targetUserId: input.targetUserId,
+    isActive: input.isActive,
+    reason: input.reason,
     requestId: input.requestId,
   });
   return { userId: input.targetUserId, isActive: input.isActive };

@@ -477,15 +477,18 @@ describe.skipIf(!DB_URL)(
       expect(reuse.status, reuse.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
       expect(((reuse.json ?? {}) as { message?: string }).message ?? "").toContain("token_used");
 
-      // token แปลก (ผ่านรูป 43 อักขระ แต่ไม่เคยออก) → ปฏิเสธ · (P0002 ผ่าน gateway
-      // ของ stack นี้ body error หาย — บทเรียน dcr10 · assert เฉพาะสถานะ;
-      // แท็ก ERR-NF-001|token_not_found พิสูจน์ได้ที่ชั้น DB)
+      // token แปลก (ผ่านรูป 43 อักขระ แต่ไม่เคยออก) → ปฏิเสธ · gate p5-r1 B2:
+      // errcode เปลี่ยน P0002 → 22023 (ขนส่งเท่านั้น — P0002 โดน gateway ตัด
+      // ร่างกาย error) แท็ก ERR-NF-001|token_not_found จึงมาถึงผู้เรียกได้จริง —
+      // เงื่อนไขเดียวที่หน้า UI เลือกการ์ด "ลิงก์ไม่ถูกต้อง" แทน system_error
       const stranger = await svcRpc("confirm_account_deletion", {
         p_token: "Z".repeat(43),
         p_request_id: crypto.randomUUID(),
       });
       expect(stranger.status, stranger.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
-      expect(stranger.json, "P0002 ผ่าน gateway ต้องไม่กลายเป็น 200 เงียบ").toBeNull();
+      expect(((stranger.json ?? {}) as { message?: string }).message ?? "").toContain(
+        "token_not_found",
+      );
 
       // หมดอายุ — seed คำขอของ delExpired ตรง (RPC ออก token ยังพังที่ search_path —
       // เคส e) โดยตั้ง expires_at ย้อนหลัง 1 ชั่วโมงตั้งแต่ตอน insert

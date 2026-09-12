@@ -30,6 +30,9 @@ export const EMAIL_DISPATCH_MAX_BATCHES = 5;
 /** รูปแบบ UUID (แบบเดียวกับ lib/api/pagination) — ใช้ชั้น drift-row reporting */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** อายุลิงก์ดาวน์โหลดส่งออกข้อมูล PDPA — 7 วัน (604800s ตามสัญญา DD §· API-SPEC §3.2) */
+const PDPA_EXPORT_DOWNLOAD_TTL_SECONDS = 604800;
+
 /**
  * แถวของ email_claim_batch — strict: คีย์เกิน/คีย์ขาด/ค่าผิดชนิด = drift →
  * แถวนั้นไม่ถูกส่ง (fail-closed) และรายงาน drift เข้าคิวให้ attempts+1/backoff
@@ -217,6 +220,41 @@ async function processEmailRow(
       verify_url: `${base}/verify/${verifyCode}`,
       pdf_url: `${base}/api/v1/certificates/${certificateId}/pdf`,
     };
+  }
+  // gate p5-r1 B3: อีเมลส่งออกข้อมูล (template account/data-export — event
+  // data_export.ready ของ 0036 §4) อ้าง {{download_url}} = storage signed URL อายุ
+  // 7 วัน (604800s ตามสัญญา DD/API-SPEC) — SQL ผู้ผลิตส่ง "ตัวระบุเท่านั้น"
+  // (file_media_id — สัญญาเดียวกับ verify_code/certificate_id ของใบประกาศฯ) ·
+  // worker แปลงเป็น URL ตรงนี้: media_assets (bucket, storage_path) →
+  // createSignedUrl · โจทย์ใดพลาด = fail รายแถวก่อนส่ง (ห้ามส่งอีเมลลิงก์ตาย —
+  // template_var_missing จะไม่เกิดเพราะ var ถูกใส่ครบก่อน render)
+  const fileMediaId = vars["file_media_id"];
+  if (
+    typeof fileMediaId === "string" &&
+    UUID_RE.test(fileMediaId) &&
+    vars["download_url"] === undefined
+  ) {
+    const media = await ctx.client
+      .from("media_assets")
+      .select("bucket,storage_path")
+      .eq("id", fileMediaId)
+      .maybeSingle();
+    if (media.error !== null || media.data === null) {
+      return { item: { id: row.id, ok: false, error: "media_asset_missing" }, sent: false };
+    }
+    // สัญญา media_assets.storage_path เก็บ "path เต็มรวม prefix บักเก็ต" (แบบเดียวกับ
+    // license-evidence/{user_id}/{uuid}.{ext} ของ API-SPEC §3.2) — createSignedUrl
+    // รับ key "ใน" บักเก็ต จึงต้องตัด prefix ออกก่อนลงนาม
+    const objectPath = media.data.storage_path.startsWith(`${media.data.bucket}/`)
+      ? media.data.storage_path.slice(media.data.bucket.length + 1)
+      : media.data.storage_path;
+    const signed = await ctx.client.storage
+      .from(media.data.bucket)
+      .createSignedUrl(objectPath, PDPA_EXPORT_DOWNLOAD_TTL_SECONDS);
+    if (signed.error !== null || signed.data === null) {
+      return { item: { id: row.id, ok: false, error: "signed_url_failed" }, sent: false };
+    }
+    vars = { ...vars, download_url: signed.data.signedUrl };
   }
   const tpl = await loadEmailTemplate(ctx.client, ctx.cache, row.template_key, row.locale);
   if (tpl === null) {

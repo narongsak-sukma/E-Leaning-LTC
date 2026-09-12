@@ -42,11 +42,14 @@ create table if not exists public.data_export_jobs (
                 check (status in ('pending','processing','done','failed')),
   file_media_id uuid references public.media_assets(id) on delete restrict,
   requested_at  timestamptz not null default now(),
+  claimed_at    timestamptz,             -- gate p5-r1 B7: lease ของ worker (reclaim 10 นาที)
   completed_at  timestamptz,
   error         text,
   constraint data_export_jobs_done_has_file
     check (status <> 'done' or file_media_id is not null)
 );
+-- gate p5-r1 B7: DB ที่สร้างตารางไว้ก่อนแก้ไฟล์นี้ (idempotent re-apply)
+alter table public.data_export_jobs add column if not exists claimed_at timestamptz;
 
 create unique index if not exists uq_data_export_jobs_active
   on public.data_export_jobs(user_id)
@@ -194,6 +197,10 @@ begin
   select id, user_id into v_job
   from public.data_export_jobs
   where status = 'pending'
+     -- gate p5-r1 B7: reclaim — processing ที่ claimed_at เก่ากว่า 10 นาที =
+     -- worker ตายกลางคัน (ไม่มี lease ใหม่) หยิบกลับมาทำต่อได้ ไม่ค้างเป็น
+     -- อมตะ + ไม่บล็อก my_request_data_export (active guard) ตลอดไป
+     or (status = 'processing' and claimed_at < now() - interval '10 minutes')
   order by requested_at, id
   limit 1
   for update skip locked;
@@ -201,7 +208,7 @@ begin
     return jsonb_build_object('jobId', null);
   end if;
   update public.data_export_jobs
-     set status = 'processing'
+     set status = 'processing', claimed_at = now()
    where id = v_job.id;
   return jsonb_build_object('jobId', v_job.id, 'userId', v_job.user_id);
 end;
@@ -351,7 +358,10 @@ begin
   return jsonb_build_object(
     'requestId', v_req.id,
     'token', v_token,                -- ออกครั้งเดียว — BFF แต่งอีเมลเท่านั้น ห้าม log
-    'expiresAt', v_req.expires_at);
+    'expiresAt', v_req.expires_at,
+    -- gate p5-r1 B1: userId คืนให้ BFF ด้วย — เดิม BFFเอา requestId ไปเรียก
+    -- profiles/recipient_user_id ผิดทั้งสาย (503 หลังสร้างคำขอ + อีเมลตก)
+    'userId', v_uid);
 end;
 $fn$;
 alter function public.my_request_account_deletion(text) owner to app_owner;
@@ -383,8 +393,12 @@ begin
   where token_hash = v_hash
   for update;
   if not found then
+    -- gate p5-r1 B2 (DCR-12 เคส b): P0002 ผ่าน gateway ของ stack นี้ถูกตัดร่างกาย
+    -- error ทิ้ง (BFF เห็น 500 "Something went wrong" — แท็กไปไม่ถึงหน้า UI) ·
+    -- 22023 ผ่านร่างกายเต็ม (พิสูจน์แล้วด้วย token_used/token_expired ที่ใช้อยู่)
+    -- errcode เปลี่ยนเพื่อการขนส่งเท่านั้น ข้อความ/แท็ก ERR-NF-001 คงเดิม
     raise exception 'รหัสยืนยันไม่ถูกต้อง (ERR-NF-001|token_not_found)'
-      using errcode = 'P0002';
+      using errcode = '22023';
   end if;
   if v_req.status <> 'pending' then
     raise exception 'รหัสยืนยันนี้ถูกใช้ไปแล้ว (ERR-VAL-001|token_used)'
@@ -393,6 +407,21 @@ begin
   if v_req.expires_at <= now() then
     raise exception 'รหัสยืนยันหมดอายุแล้ว (24 ชั่วโมง) กรุณาขอใหม่ (ERR-VAL-001|token_expired)'
       using errcode = '22023';
+  end if;
+
+  -- gate p5-r1 B6: ตรวจ SoD ซ้ำใน TX ยืนยัน — ช่วงอายุ token 24 ชม. บัญชีอาจได้
+  -- บทบาทเจ้าหน้าที่/ผู้สอนใหม่ (admin_grant_role) · เช็คสดใต้ per-account lock
+  -- เดียวกับ grant/revoke (0035 §6) — raise ที่นี่ = TX ทั้งอัน rollback → คำขอ
+  -- ยัง pending token ยังใช้ได้หลังปลดบทบาท (ไม่กลืน token เงียบ)
+  perform pg_advisory_xact_lock(hashtext('ltc:account:roles:' || (v_req.user_id)::text)::bigint);
+  if exists (select 1 from public.role_assignments ra
+             where ra.user_id = v_req.user_id
+               and ra.revoked_at is null
+               and ra.role::text in ('instructor','staff:viewer','staff:content',
+                                     'staff:exam','staff:registrar','super_admin')) then
+    raise exception
+      'บัญชีนี้มีบทบาทผู้สอนหรือเจ้าหน้าที่อยู่ จึงยืนยันการลบไม่ได้ กรุณาติดต่อผู้ดูแลระบบ (ERR-RBAC-001|sod_role_changed)'
+      using errcode = '42501';
   end if;
 
   -- single-use: UPDATE ด้วย WHERE status='pending' AND expires_at > now() เป็นชั้น
