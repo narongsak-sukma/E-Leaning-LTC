@@ -219,10 +219,23 @@ begin
 
   -- resolve attempt → enrollment ของทุก event ที่เก็บไว้ (เฟส 2 ใช้จับ lock · เฟส 3
   -- ใช้เฝ้า attempt_not_found — enroll ที่หายระหว่างทางคือ error ตามเดิม)
+  -- gate r4 BLOCKER-1: cast ตรง ๆ ตรงนี้ (นอก subtransaction ราย event) ทำให้
+  -- source_id เสีย "ตัวเดียว" ฆ่าทั้ง tick โดยไม่มี attempts/last_error/backoff —
+  -- poison event ถูกเลือกซ้ำทุกนาที (available_at ไม่เลื่อน) และขวาง event ปกติ
+  -- ใน batch เดียวกันตลอดไป · แก้: กรองรูปแบบก่อน cast — CASE บังคับให้เงื่อนไข
+  -- ถูกประเมินก่อนผลลัพธ์ (เฉพาะ branch ที่ชนเท่านั้นที่ cast) ค่าที่ไม่ผ่าน =
+  -- enr null → เฟส 3 จัดการ "ราย event" ใน subtransaction (cast ล้ม → backoff /
+  -- attempts ≥5 → failed) คิวปกติไหลต่อ ไม่โดนลากตาย · analyze ให้ planner เห็น
+  -- ขนาด temp table จริง (join เข้า pkey ของ assessment_attempts แทน hash scan)
+  analyze _tick_events;
   update _tick_events t
      set enr = a.enrollment_id
     from public.assessment_attempts a
-   where (t.payload ->> 'source_id')::uuid = a.id;
+   where a.id = (case
+                   when (t.payload ->> 'source_id') ~*
+                        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                     then (t.payload ->> 'source_id')::uuid
+                   else null::uuid end);
 
   -- ── เฟส 2: จับ advisory lock ระดับ enrollment ของ "ทุก" event ก่อนประมวลผล event ──
   -- แรก — คีย์เดียวกับ admin_revoke_certificate (gate r2 BLOCKER-2) เรียงตาม enrollment
