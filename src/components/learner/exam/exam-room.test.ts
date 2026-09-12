@@ -205,3 +205,54 @@ describe("setSingle ของเอนจิ้น autosave (onChange ของ�
     saver.dispose();
   });
 });
+
+/** เรนเดอร์ห้องสอบที่ phase/เวลาที่เหลือกำหนดเอง (harness shim เดิม — สล็อตตามลำดับ
+ *  useState ของ ExamRoom: phase, session, answers, currentIdx, flags, remainingMs,
+ *  dialogOpen, idempotencyKey) สำหรับตรวจ disabled ระหว่างส่ง/หมดเวลา */
+function renderRoomAt(phase: unknown, remainingMs: number): string {
+  stateShim.slots = [
+    phase,
+    sessionOf("single_choice"),
+    {},
+    0,
+    {},
+    remainingMs,
+    false,
+    "00000000-0000-4000-8000-000000000009",
+  ];
+  stateShim.cursor = 0;
+  return renderToStaticMarkup(createElement(ExamRoom, { attemptId: ATT }));
+}
+
+/** สถิติ input ของหน้า: จำนวน tag <input> ทั้งหมด และที่ถูก disabled (นับระดับ tag
+ *  จึงไม่ไปนับ disabled ของปุ่มอื่น เช่น ปุ่มก่อนหน้า/ส่งคำตอบ) */
+function inputDisabledStats(html: string): { readonly total: number; readonly disabled: number } {
+  const tags = html.match(/<input\b[^>]*>/g) ?? [];
+  return {
+    total: tags.length,
+    disabled: tags.filter((tag) => /\bdisabled\b/.test(tag)).length,
+  };
+}
+
+describe("input ข้อสอบ disabled ระหว่างส่ง/หมดเวลา (disabled = submitting || timeup)", () => {
+  it("phase submitting → input ของทุกตัวเลือกในข้อปัจจุบัน disabled ครบ", () => {
+    const stats = inputDisabledStats(renderRoomAt({ kind: "submitting" }, 60_000));
+    expect(stats.total).toBe(2);
+    expect(stats.disabled).toBe(stats.total);
+  });
+
+  it("หมดเวลา (remainingMs = 0 → timeup) → input disabled ครบ แม้ phase ยัง ready + โฉนหมดเวลาขึ้น", () => {
+    const html = renderRoomAt({ kind: "ready" }, 0);
+    const stats = inputDisabledStats(html);
+    expect(stats.total).toBe(2);
+    expect(stats.disabled).toBe(stats.total);
+    // โฉนหมดเวลา (timeup && phase ready) แสดงขึ้นด้วย — หลักฐานยืนยันเงื่อนไข timeup จริง
+    expect(html).toContain("exam-timeup-title");
+  });
+
+  it("ควบคุมตรงข้าม: ready + เวลายังเหลือ → ไม่มี input ตัวใด disabled (พิสูจน์ disabled มาจากเงื่อนไขนี้จริง)", () => {
+    const stats = inputDisabledStats(renderRoomAt({ kind: "ready" }, 60_000));
+    expect(stats.total).toBe(2);
+    expect(stats.disabled).toBe(0);
+  });
+});

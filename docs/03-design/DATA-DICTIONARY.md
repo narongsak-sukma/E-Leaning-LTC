@@ -2,7 +2,7 @@
 
 |          |                                                   |
 | -------- | ------------------------------------------------- |
-| เวอร์ชัน | 1.1.1 — DCR-7 (Wave E): view `course_exam_summary` เพิ่มคอลัมน์ `assessment_id` (PB-17) · `question_snapshot` เพิ่มคีย์ `type` (PB-18) · ตารางใหม่ `cert_bulk_jobs` (§3.7) · อ่านบทเรียนยอม enrollment active/completed (ปิด D39 — D55-4) · 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.1.7 — แก้ความหมายคอลัมน์ sweep_top_* ตาม 0030 (หัวของรอบ ไม่ใช่ขอบบน/ผู้มาใหม่) + กำกับข้ออ้าง "ช่วงต่อเนื่อง" ของ 1.1.5 ว่าถูกหักล้าง (codex gate r5 MINOR-3) · 1.1.6 — DCR-8 walked-markers (migration 0030 ตาม codex gate r4 MAJOR-1/MAJOR-2 + MINOR-1): สถานะ "เดินแล้ว" ของ sweep แยกออกจาก watermark เป็น **marker ต่อแถว** ในตารางใหม่ `cert_auto_walked` (§3.7 — scope_key, sweep_epoch, attempt_id) + picker ใหม่ `admin_cert_auto_unmarked_pick` (เรียง desc — ใหม่สุดก่อน) + `cert_auto_issue_tick` เดิน unmarked ทีละแถว: แถวที่ commit ช้า (submitted_at = now() ตอน*เริ่ม* TX — visibility สลับลำดับกับเวลาได้) ไม่ตกหล่นอีก · `cert_auto_cursor` += `sweep_epoch` + คู่ cursor/sweep_top เหลือเป็น**ข้อมูลชี้แจง** (ไม่ใช่เงื่อนไขความถูกต้อง) · สถานะขัดที่ 0028 ค้างไว้ (คู่เดียว null) = normalize เป็น sweep ใหม่ · 1.1.5 — DCR-8 arrival-first tick (migration 0029 ตาม codex gate r3 MAJOR-1 + MINOR-1): `cert_auto_cursor` เพิ่มคอลัมน์ `sweep_top_submitted_at`/`sweep_top_attempt_id` (ขอบบนของ sweep) + picker ใหม่ `admin_cert_auto_fresh_pick` + `cert_auto_issue_tick` เป็น **tick สองเฟส** — fresh lane รับ "ผู้มาใหม่" เหนือขอบบน*ก่อน* backlog: ผู้ผ่านเงื่อนไขที่มากลาง sweep ได้ใบใน tick ถัดไปทันที ไม่รอ sweep เก่าจบ (AC ≤5 นาที — 0028 ทำให้เขาล่องหนถึงนาที 8) · ชุดที่เดินแล้วของ sweep = ช่วงต่อเนื่อง [cursor, sweep_top] โดยก่อสร้าง (ข้ออ้างนี้ถูก gate r4 หักล้าง — visibility สลับลำดับกับ submitted_at ได้ ดู 1.1.6) · 1.1.4 — DCR-8 cursor durable (migration 0028 ตาม codex gate r2 MAJOR-1/2 + MINOR-3): `cert_bulk_jobs` เพิ่มคอลัมน์ `cursor_submitted_at`/`cursor_attempt_id` + ตารางใหม่ `cert_auto_cursor` (§3.7) — step/tick เดินคิวต่อจาก cursor ที่ commit ไว้**ข้าม CALL** (at-least-once ไม่มีแถวถูกข้าม) · เพดาน 100k ของ job ตรวจก่อนลูปและก่อน branch ชนเพดาน call · builtin ทั้งหมด qualify `pg_catalog` · 1.1.3 — DCR-8 worker redesign (migration 0027 ตาม codex gate r1 M1/M2/M3): เปลี่ยน runner/tick เป็น **procedure commit ต่อใบ** `admin_cert_bulk_issue_step`/`cert_auto_issue_tick` + picker v2 มี cursor เดินผ่านแถวที่ล้ม + BFF POST insert-only 202 (worker pg_cron ทุกนาที) + ข้อจำกัด PG ≥15 (procedure ที่ COMMIT ห้าม SECURITY DEFINER/SET search_path) · 1.1.2 — DCR-8 (Wave E Phase 2, migration 0026): ตารางใหม่ `feature_flags` (§3.7) + RPC runner `admin_cert_bulk_issue_run`/`cert_auto_issue_tick` (CRT-008) + `cert_issue_core` เพิ่ม `p_mode` manual/bulk/auto ลง audit context + policy `app_owner` ของ `cert_bulk_jobs` ให้ runner (D55-5/D55-7) — *runner/tick ของ 0026 ถูก 0027 แทนแล้ว* · 1.1.1 — DCR-7 (Wave E): view `course_exam_summary` เพิ่มคอลัมน์ `assessment_id` (PB-17) · `question_snapshot` เพิ่มคีย์ `type` (PB-18) · ตารางใหม่ `cert_bulk_jobs` (§3.7) · อ่านบทเรียนยอม enrollment active/completed (ปิด D39 — D55-4) · 1.1.0 — additive (DCR-4): enum `course_level` + `courses.level`/`outcome_highlights` + views `course_public_stats`/`course_instructors_public`/`course_exam_summary` · 1.0.0 ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D8–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                        |
 | เจ้าของ  | worker-3 (Wave A — deliverable 7)                 |
 | สถานะ    | ผ่าน CTO gate (codex รอบ 5: PASS — D17)           |
@@ -707,7 +707,7 @@ Retention: แถว 12 เดือน (ไฟล์ 7 วันตาม expir
 
 #### `cert_bulk_jobs` — งานออกประกาศนียบัตรเป็นชุด **(DCR-7 · D55-5 · D36-O4)**
 
-วัตถุประสงค์ (ตารางเสริม DCR-7 · D55-5 · D36-O4): งานออกประกาศนียบัตรเป็นชุด (`POST /admin/certificates/bulk` — API-SPEC §3.6) — job async ตารางสถานะ; คิว eligible กรองก่อนตัดหน้า (filter-before-cut); RPC batch 200 · TX เดียวต่อใบ + audit `CERT_ISSUE` actor ครบต่อใบ
+วัตถุประสงค์ (ตารางเสริม DCR-7 · D55-5 · D36-O4): งานออกประกาศนียบัตรเป็นชุด (`POST /admin/certificates/bulk` — API-SPEC §3.6) — job async ตารางสถานะ; คิว eligible กรองก่อนตัดหน้า (filter-before-cut) · **โมเดล worker ของ 0027**: BFF insert job (`status='pending'`) แล้วตอบ 202 ทันที — **ไม่รันใน request**; worker `admin_cert_bulk_issue_step` (pg_cron `ltc-cert-bulk-step` ทุกนาที) หยิบ job รัน **commit ต่อใบ** (ใบ + audit `CERT_ISSUE` mode='bulk' + counts ของ job = TX เดียวต่อใบ) และเดินผ่านแถวที่ล้มด้วย cursor · **0028**: cursor ของ job commit พร้อม counts ทุกใบ = CALL ถัดไปเดินต่อจริง (ไม่เริ่มหัวคิวใหม่ — at-least-once)
 
 | คอลัมน์ | ชนิด | Constraints / Default |
 | ------- | ---- | --------------------- |
@@ -721,9 +721,67 @@ Retention: แถว 12 เดือน (ไฟล์ 7 วันตาม expir
 | last_error | text | NULL (ตัดทอน — ห้าม PII) |
 | created_at | timestamptz | NOT NULL DEFAULT now() |
 | finished_at | timestamptz | NULL |
+| cursor_submitted_at | timestamptz | NULL (0028 MAJOR-1 — ตำแหน่งเดินคิวล่าสุดของ job commit พร้อม counts ทุกใบ ข้าม CALL; null = ยังไม่เริ่มเดิน) |
+| cursor_attempt_id | uuid | NULL (0028 — tie-break เมื่อ submitted_at ซ้ำ) |
 คีย์/Index: PK(id); INDEX(status) WHERE status IN ('pending','running'); INDEX(created_by, created_at DESC)
-RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ทุกการเข้าถึงผ่าน BFF `service_role` เท่านั้น (บทบาท gate ที่ BFF: staff:registrar + super_admin ตาม D55-2) — **append-only เกี่ยวกับผล: ห้าม UPDATE issued_count/failed_count นอก job path ของ BFF**
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ทุกการเข้าถึงผ่าน BFF `service_role` เท่านั้น (บทบาท gate ที่ BFF: staff:registrar + super_admin ตาม D55-2) — **ห้าม UPDATE issued_count/failed_count นอก worker path** · policy `app_owner_select_cert_bulk_jobs`/`app_owner_update_cert_bulk_jobs` (D58/0026 — ยังใช้เมื่อ invoker เป็น `app_owner`) · ผู้เขียนจริงของ 0027 = worker procedure ที่ cron (supabase_admin — superuser) เรียก
 Retention: ถาวร (ประวัติงานออกใบ — ตรวจสอบย้อนหลัง)
+
+Worker/procedure (0030 — canonical ของ tick · step ของ 0028 ยัง canonical ต่อ · tick แทนของ 0029 ตาม codex gate r4 MAJOR-1/2 · picker v2/ตาราง/cron/grants ยังเป็นของ 0027 · สัญญา inout p_result เท่าเดิมทุกการแทนที่):
+- **`admin_cert_bulk_pick(p_course_id, p_limit, p_after_submitted_at, p_after_attempt_id)`** (SECURITY DEFINER `app_owner`) — คิว eligible เรียง `(submitted_at, attempt_id)` desc · **cursor คู่ (M1)**: caller ส่งตำแหน่งแถวสุดท้ายที่เห็น → ชุดถัดไปเริ่มหลังจากนั้น *ไม่สนผลสำเร็จ* (แถวที่ล้มถูกเดินผ่าน ไม่ปิดคิว) · EXECUTE: `app_owner`/`postgres` เท่านั้น (0027 ถอน service_role — BFF ไม่เรียกเองแล้ว)
+- **`admin_cert_auto_unmarked_pick(p_course_id, p_limit, p_epoch)`** (0030 r4 MAJOR-1 — SECURITY DEFINER `app_owner` · language sql stable · แทน `admin_cert_auto_fresh_pick` ของ 0029 ที่ถูก drop) — คิว eligible ที่*ยังไม่ถูก mark* ของรอบ (scope, epoch): eligibility เหมือน picker v2 เป๊ะ (anti-join ใบ valid · enrollment completed · attempt passed) + anti-join `cert_auto_walked` · เรียง `(submitted_at, attempt_id)` **desc** = ใหม่สุดก่อน (arrival-first โดยลำดับ — แถวที่ commit ช้า ไม่มี marker จึงมองเห็นเสมอ ไม่ผูกกับช่วง submitted_at อีกต่อไป) · `p_epoch null` = ไม่คืนแถว (guard การเรียกลำพัง — tick ส่ง epoch จริงเสมอ) · EXECUTE: `app_owner`/`postgres` เท่านั้น (revoke รวม service_role)
+- **`admin_cert_bulk_issue_step(p_job_id, p_max_certs, inout p_result)`** — PROCEDURE (ไม่ใช่ function) เพราะ **commit ต่อใบ**: หยิบทีละแถวผ่าน cursor → `cert_issue_core(actor=job.created_by, mode='bulk')` ใน savepoint (ใบล้มย้อนเฉพาะใบ) → update counts ของ job **+ cursor (0028)** → **COMMIT** (= TX เดียวต่อใบ — ใบ+audit+ความคืบหน้ามองเห็นจาก session อื่นทันที · M2) → เดินต่อ · เพดาน `p_max_certs` (clamp 1..10000, default 1000) ชนกลางคิว = คืน `status:'running'` แล้ว worker รอบถัดไปเล่นต่อจาก **cursor ที่ commit ไว้ในแถว job** (0028 MAJOR-1 — self-healing — รอบที่ pick ได้ 0 แถวปิด completed เอง) · เพดานสะสมของ job 100k แถว = `failed` **(0028 MAJOR-2: ตรวจก่อนเริ่มลูป — job ที่ถึงเพดานอยู่แล้วปิดทันทีไม่ประมวลผลแถวใด · และตรวจทุกแถวหลัง update counts *ก่อน* branch ชน v_max — ครบ 100,000 พอดีปิดในรอบเดียวแม้ p_max_certs=1)** · session advisory lock ต่อ job (`pg_try_advisory_lock` — ตัวอื่นถืออยู่ = คืน `locked`; row lock หลุดที่ COMMIT แรกจึงต้องระดับ session) · `p_job_id null` = worker หยิบ pending/running เก่าสุด (ไม่มี = `idle`) · เรียกตรง job ที่จบแล้ว → `ERR-VAL-001|bulk_job_already_finished` · job ไม่มี → `ERR-NF-001|bulk_job_not_found`
+- **`cert_auto_issue_tick(p_course_id, p_max_certs, inout p_result)`** — **tick marker-based single lane (0030 r4 MAJOR-1/2 · แทน tick สองเฟสของ 0029)**: โหลด epoch + watermark สองคู่ — สถานะขัด (คู่ใดคู่หนึ่ง null คู่เดียว = สถานะที่ 0028 ค้างมา 0029 ไม่ normalize) → **normalize** เป็น sweep ใหม่ (epoch+1 · null ทั้งสี่ · ลบ marker เก่า) ภายใต้ advisory lock ของ scope · เดินแถว eligible ที่ยังไม่ mark **เรียง desc ทีละแถว** (ใหม่สุดก่อน = ผู้มาใหม่หัวคิวเสมอแม้ submitted_at จะตกในช่วงที่เดินไปแล้ว — AC ≤5 นาที): `cert_issue_core(actor ระบบ a170, mode='auto')` ใบล้มยกเลือกเฉพาะใบ → upsert watermark + **insert marker** = TX เดียวต่อแถว (ข้าม CALL จริง) · watermark สองคู่ = **ข้อมูลชี้แจง** (cursor = แถวสุดท้ายที่เดิน · sweep_top = หัวของ sweep ตั้งครั้งเดียวต่อรอบ — cursor อาจใหม่กว่าหัว) ไม่ใช่เงื่อนไข picker อีกต่อไป · คิวหมด (ไม่ capped หรือ capped แล้ว probe ด้วย picker ตัวเองยืนยัน ไม่มีแถว unmarked เหลือ) → ลบ marker รอบนี้ + epoch+1 + reset ทั้งสองคู่ = รอบ retry ใหม่ · รับขอบเขตหลักสูตร (`p_course_id null` = ทุกหลักสูตร — cron; test/ops ส่งหลักสูตรเจาะจง) · flag `cert_auto_issue` ปิด → `{skipped:true,reason:'flag_off'}` (ไม่ audit) · advisory lock **ต่อ scope** (`'ltc:cert-auto-issue:'||scope_key`) กำลังรัน → `{skipped:true,reason:'already_running'}`
+- **ข้อจำกัด PG ≥15 (บทเรียนสำคัญ — พิสูจน์บน dev 15.8)**: procedure ที่ COMMIT **ห้ามเป็น SECURITY DEFINER และห้ามมี SET clause** (ทั้งคู่ทำให้ `0B000 invalid transaction termination`) → ทั้งสอง procedure เป็น INVOKER ธรรมดา + อ้างชื่อ 2-part ครบทุกตาราง/ฟังก์ชัน + **คุมสิทธิ์ที่ EXECUTE**: revoke ทุก JWT role รวม service_role เหลือ `app_owner`/`postgres` (cron supabase_admin = superuser) · ผลข้างเคียง: **PostgREST เรียก CALL procedure ไม่ได้** จึงเป็นเหตุผลรองของโมเดล worker (BFF insert job อย่างเดียว)
+- **cron ×2**: `ltc-cert-bulk-step` ทุกนาที → `call public.admin_cert_bulk_issue_step(null, 1000, null)` · `ltc-cert-auto-issue` ทุก 2 นาที (SRS AC ≤ 5 นาที) → `call public.cert_auto_issue_tick(null, 1000, null)`
+
+#### `cert_auto_cursor` — cursor ของ auto tick ต่อ scope **(DCR-8 · 0028+0029+0030 · codex gate r2 MAJOR-1/r3 MAJOR-1/r4 MAJOR-1/2)**
+
+วัตถุประสงค์ (ตารางใหม่ 0028 · ขยาย 0029 · เปลี่ยนบทบาท 0030): จุดเดินคิวล่าสุดของ `cert_auto_issue_tick` แยกตามขอบเขต — `scope_key` = uuid หลักสูตร (tick แบบระบุหลักสูตร) หรือ `'*'` (tick ของ cron ทุกหลักสูตร) — commit พร้อมใบ+audit+marker เป็น TX เดียวต่อแถว ทำให้ tick รอบถัดไปเดินต่อ**ข้าม CALL** จริง (at-least-once) · **0030: ความถูกต้องวัดจาก marker ต่อแถวใน `cert_auto_walked` ผูก `sweep_epoch` — คู่ cursor (แถวสุดท้ายที่เดิน) + คู่ sweep_top (หัวของ sweep) เหลือเป็นข้อมูลชี้แจง/สังเกตการณ์ ไม่ใช่เงื่อนไขความถูกต้องอีกต่อไป** (แถว commit ช้าที่ submitted_at ตกในช่วง watermark ไม่ตกหล่น — ไม่มี marker = มองเห็นเสมอ) · สถานะขัด (0028 ค้าง: คู่เดียว null) = normalize เป็น sweep ใหม่ · sweep จบ = epoch+1 + reset ทั้งสองคู่ → รอบ retry ใหม่
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| scope_key | text | PK CHECK `<> ''` (uuid หลักสูตร หรือ '*') |
+| cursor_submitted_at | timestamptz | NULL (null = sweep รอบใหม่) |
+| cursor_attempt_id | uuid | NULL (tie-break เมื่อ submitted_at ซ้ำ) |
+| sweep_top_submitted_at | timestamptz | NULL (หัวของ sweep = แถว*แรก*ที่เดินของรอบ — desc จึงเป็นแถวใหม่สุด*ตอนเริ่มรอบ* · cursor ที่เดินต่อมาอาจ*ใหม่กว่า*หัวเมื่อมีแถว commit ช้า/แถวใหม่กลางรอบถูกเดินทับหัว (0030 แก้ความหมายจาก "ขอบบน/ผู้มาใหม่" ของ 0029) · 0030: ข้อมูลชี้แจง — ไม่ใช่เงื่อนไข picker · null = sweep ยังไม่เริ่ม/จบแล้ว · คอลัมน์ของ 0029 เดิม) |
+| sweep_top_attempt_id | uuid | NULL (tie-break ของหัว sweep — คู่กับ sweep_top_submitted_at) |
+| sweep_epoch | bigint | NOT NULL DEFAULT 0 (0030 r4 — รอบ sweep ปัจจุบัน · marker ของ `cert_auto_walked` ผูกค่านี้ · sweep จบ (คิวหมด/probe ยืนยัน) = +1 พร้อมลบ marker รอบเก่า = รอบ retry ใหม่ · สถานะขัดของ 0028 = normalize +1 เมื่อโหลด) |
+| updated_at | timestamptz | NOT NULL DEFAULT now() |
+คีย์/Index: PK(scope_key)
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ตารางภายในของ worker เท่านั้น (BFF/PostgREST ไม่แตะ — revoke รวม service_role) · policy `app_owner_select/insert/update_cert_auto_cursor` (D58 — invoker `app_owner` ของ tick; upsert on conflict ต้องมีครบสามคำสั่ง) · ผู้เขียนจริง = tick procedure ที่ cron (supabase_admin — superuser) เรียก
+Retention: ถาวร (แถวเดียวต่อ scope — ไม่โต)
+
+
+
+
+#### `cert_auto_walked` — marker "เดินแล้วของรอบ" ต่อแถว **(DCR-8 · 0030 · codex gate r4 MAJOR-1)**
+
+วัตถุประสงค์ (ตารางใหม่ 0030): สถานะ "แถวนี้ถูกเดินแล้วในรอบ sweep นี้" แยกออกจาก watermark — แทนสมมติฐาน "ชุดที่เดินแล้ว = ช่วงต่อเนื่อง [cursor, sweep_top]" ที่เป็นเท็จเมื่อ submitted_at (now() ตอน*เริ่ม* TX ของ 0020) กับเวลา commit สลับลำดับกัน (READ COMMITTED): แถวที่ commit ช้าตกช่อง (cursor, sweep_top) ของ 0029 = ไม่ใช่ fresh ไม่ใช่ backlog → ล่องหนจน sweep จบ+reset (ขัด SRS AC ≤5 นาที) · picker `admin_cert_auto_unmarked_pick` หยิบเฉพาะแถวที่ยังไม่ถูก mark — แถวไม่มี marker = มองเห็นเสมอ ไม่ผูกกับช่วงเวลา · insert พร้อมใบ+audit+watermark TX เดียวต่อแถว · sweep จบ (probe ยืนยัน) = ลบทั้งรอบ + epoch+1 = แถวที่เคยล้มถูก retry รอบหน้า · ลบ cursor ของ scope = cascade ลบ marker ด้วย · **ไม่มีการ backfill จาก cursor ของ 0028/0029** — scope ที่กำลังเดินค้างตอนใช้ 0030 ครั้งแรก แถวที่เดินไปแล้ว ถูกลองซ้ำรอบเดียว (anti-join ใบ valid ทำให้ idempotent · failed ได้ retry เพิ่มหนึ่งครั้งต่อ scope — bounded)
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| scope_key | text | NOT NULL FK→cert_auto_cursor(scope_key) ON DELETE CASCADE (uuid หลักสูตร หรือ '*') |
+| sweep_epoch | bigint | NOT NULL (รอบ sweep ที่เดินแถวนี้ — ตรง sweep_epoch ของ cert_auto_cursor ตอนนั้น) |
+| attempt_id | uuid | NOT NULL (แถว assessment_attempts ที่ถูกเดิน — สำเร็จหรือล้ม · ล้มก็ mark เพื่อไม่กินงบซ้ำในรอบเดียว) |
+| created_at | timestamptz | NOT NULL DEFAULT now() |
+คีย์/Index: PK(scope_key, sweep_epoch, attempt_id); FK cascade ผ่าน scope_key
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — ตารางภายในของ worker เท่านั้น (BFF/PostgREST ไม่แตะ — revoke รวม service_role) · policy `app_owner_select/insert/delete_cert_auto_walked` (D58 — invoker `app_owner` ของ tick · ไม่ต้องมี update)
+Retention: สั้นตามรอบ sweep (ลบทั้งรอบเมื่อ sweep จบ — ขนาดไม่โตเกินจำนวนแถว eligible ค้างของรอบ)
+#### `feature_flags` — feature flag ของ job ระบบ **(DCR-8 · D55-7 · CRT-008)**
+
+วัตถุประสงค์ (ตารางใหม่ 0026): source of truth ฝั่ง DB ของ flag คุม job อัตโนมัติ — แก้ได้โดย super_admin ผ่าน BFF (`service_role`) โดยไม่ต้อง redeploy; BFF อ่านอย่างเดียว (E-6) · seed flag แรก `cert_auto_issue` default **false** (ปิดจนกว่าจะสั่งเปิด)
+
+| คอลัมน์ | ชนิด | Constraints / Default |
+| ------- | ---- | --------------------- |
+| key | text | PK CHECK `^[a-z][a-z0-9_]{0,63}$` |
+| enabled | boolean | NOT NULL DEFAULT false |
+| note | text | NULL (คำอธิบาย/เหตุผลการสั่ง) |
+| updated_at | timestamptz | NOT NULL DEFAULT now() |
+| updated_by | uuid | NULL FK→profiles (ผู้สั่งล่าสุด) |
+คีย์/Index: PK(key)
+RLS: **ไม่มี policy สำหรับ JWT path ใด (fail-closed)** — อ่าน/เขียนผ่าน BFF `service_role` เท่านั้น · policy `app_owner_select_feature_flags` (D58/0026 — ยังใช้เมื่อ invoker เป็น `app_owner`; tick ของ 0027 เป็น INVOKER ที่ cron/superuser เรียก)
+Retention: ถาวร
 
 Reporting ทั้งหมดอ่านผ่าน view + สิทธิ์ staff เท่านั้น (SDS §2 M7): `v_credit_balance` (ยอด credit ต่อรอบ/ประเภท จาก SUM ledger), `v_enrollment_progress` (สรุปความคืบหน้าจาก lesson_progress), `v_assessment_statistics` (ผลสอบต่อหลักสูตร), `v_certificates_issued` — นิยามใน migration แยก; export CSV ทำที่ BFF โดย stream จาก view
 

@@ -82,7 +82,7 @@
 | EXAM_TIME_LIMIT_EXCEED | — | **รวมกับ EXAM_SUBMIT แถวเดียวตั้งแต่ D-10** (auto=true + late_seconds แทน event แยก — ปิด 1 attempt = audit 1 แถว) | WARN | — |
 | EXAM_SESSION_TAKEOVER | ระบบ (D12-21: ASM-011) | attempt_id, session_id เดิม→ใหม่, สาเหตุ (disconnect นานเกิน `exam_disconnect_grace_minutes` + lease_expires_at ครบ), ip_hash | WARN | — |
 | EXAM_GRADE_OVERRIDE | staff:exam | attempt_id, คะแนนเดิม→ใหม่, reason | WARN | ผลกระทบต่อสิทธิ์ของบุคคล |
-| CERT_ISSUE | staff:registrar | certificate_id, code, attempt_id, ผู้ออก | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล |
+| CERT_ISSUE | staff:registrar หรือ ระบบออกอัตโนมัติ (DCR-8: actor ระบบ `00000000-0000-4000-8000-00000000a170` mode='auto') | certificate_id, code, attempt_id, ผู้ออก, **mode: manual/bulk/auto (0026 — bulk = job ของ registrar, auto = cron CRT-008)** · **0027: mode bulk/auto เกิดใน worker ของ DB (pg_cron) ไม่ได้อยู่ใน request ใด → `request_id` เป็น null สำหรับสอง mode นี้** (manual ผ่าน BFF ยังผูก x-request-id ตามปกติ) | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล |
 | CERT_REVOKE | staff:registrar | certificate_id, reason | CRITICAL | เช่นเดียวกัน |
 | CERT_REISSUE | staff:registrar | certificate_id เดิม → ใหม่, เหตุผล (ใบเดิมกลายเป็น superseded — เติมตาม CRT-007) | CRITICAL | เช่นเดียวกัน |
 | CERT_PDF_ATTACH | staff:registrar | certificate_id, pdf_media_id | CRITICAL | การสร้างเอกสารเกี่ยวกับบุคคล (แนบไฟล์ PDF เข้าใบ — 0019-r2 F2: mutation+audit TX เดียว) |
