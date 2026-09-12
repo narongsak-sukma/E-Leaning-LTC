@@ -2,7 +2,7 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 1.0.1 — DCR-9 (Wave E Phase 3 · D68): §2.5 เพิ่ม **CREDIT_REVERSAL** (reversal อัตโนมัติใน TX เพิกถอนใบ — CRT-006 · 0031) + กำกับ CREDIT_ACCRUAL ว่า**เขียนโดย consumer `credit_accrual_tick` ณ การ INSERT ledger** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — คนละจุดกับ audit) · นับรวม 53 event types · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.0.2 — DCR-9 r1 (lead · 0032): §2.5 กำกับจุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** = BFF service_role RPC (allowlist 0032 · best-effort ตามแบบแผน ADMIN_EXPORT/0025 — การตัดสิน lead บันทึกในหัวไฟล์ 0032) + context keys strict ตาม v_keys จริง · 1.0.1 — DCR-9 (Wave E Phase 3 · D68): §2.5 เพิ่ม **CREDIT_REVERSAL** (reversal อัตโนมัติใน TX เพิกถอนใบ — CRT-006 · 0031) + กำกับ CREDIT_ACCRUAL ว่า**เขียนโดย consumer `credit_accrual_tick` ณ การ INSERT ledger** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — คนละจุดกับ audit) · นับรวม 53 event types · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                      |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน 8), §8 (security), กฎ CTO D6 · RBAC-DESIGN.md (§3.1 canonical helpers) · API-SPECIFICATION.md · SRS.md (AUD-001–005) |
 
@@ -92,8 +92,8 @@
 
 | action (ชื่อ event) | Actor | หัวข้อหลักใน context (jsonb) | ระดับ | PDPA |
 | --- | --- | --- | --- | --- |
-| CREDIT_RULE_CREATE | staff:registrar, super_admin | rule_id, ค่ากฎ, effective_from | NOTICE | — |
-| CREDIT_RULE_UPDATE | staff:registrar(draft), super_admin | rule_id, version | NOTICE | — |
+| CREDIT_RULE_CREATE | staff:registrar, super_admin — ผู้บันทึกจริง = BFF credit-rules route ผ่าน RPC `append_audit_event` ทาง **service_role** (allowlist เปิดโดย migration 0032 — best-effort หลัง mutation สำเร็จตามแบบแผน ADMIN_EXPORT/0025; การตัดสิน lead: config-data ระดับ NOTICE ไม่ใช่สิทธิ์รายบุคคล จึงไม่บังคับ atomic แบบ class ก 0019-r1 — บันทึกเหตุผลไว้ในหัวไฟล์ 0032) | rule_id, code, credit_type, credits, effective_from (strict — 0032 v_keys) | NOTICE | — |
+| CREDIT_RULE_UPDATE | staff:registrar, super_admin — จุดเขียนเดียวกับ CREDIT_RULE_CREATE (BFF service_role RPC · 0032) | rule_id, code, status_from, status_to (strict — 0032 v_keys) | NOTICE | — |
 | CREDIT_ACCRUAL | ระบบ — **เกิดตอนตรวจผ่าน (grading TX) ไม่ใช่ตอนออก cert** (D12-14) · ผู้บันทึกจริง = consumer `credit_accrual_tick` (0031 — DCR-9) **ณ การ INSERT แถว ledger สำเร็จ** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — จุด produce ≠ จุดเขียน audit; ผู้ไม่มีรอบเป้าหมาย (citizen) ไม่มี ledger จึงไม่มี event นี้) | ledger_id, user_id, จำนวน, rule_id, `source_type='assessment_attempt'`, attempt_id, เกณฑ์ตัดสินตามวันที่ผ่าน | NOTICE | คุณวุฒิของบุคคล |
 | CREDIT_ADJUST | staff:registrar, super_admin | ledger_id, user_id, delta, reason, evidence | CRITICAL | การแก้ไขข้อมูลสิทธิ์โดยบุคคล |
 | CREDIT_REVERSAL | ระบบ (ในนามผู้เพิกถอน — `created_by` = registrar/super_admin) — เกิดใน **TX เดียวกับ CERT_REVOKE** อัตโนมัติ (0031 — CRT-006/D68 C-5) หนึ่ง event ต่อการเพิกถอน (สรุปทุกแถว reversal ของใบนั้น) · idempotent ต่อ (cert, original_entry) — เพิกถอนซ้ำ/ใบไม่มี accrual = ไม่เกิด event | certificate_id, cert_no, reversed_rows, total_amount (ผลรวมติดลบ), original_entry_ids | CRITICAL | การแก้ไขข้อมูลสิทธิ์โดยบุคคล (ผลพวงของการเพิกถอน) |

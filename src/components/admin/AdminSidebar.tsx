@@ -9,12 +9,13 @@ const READY_ITEMS = [
   { href: "/admin/assessments", label: "ข้อสอบและการประเมิน", icon: "clipboard" },
   { href: "/admin/question-banks", label: "คลังข้อสอบ", icon: "stack" },
   { href: "/admin/certificates", label: "ประกาศนียบัตร", icon: "award" },
+  { href: "/admin/credit-rules", label: "กฎหน่วยกิต", icon: "sliders" },
+  { href: "/admin/credits", label: "หน่วยกิต (Credit Bank)", icon: "coins" },
 ] as const;
 
 const SOON_ITEMS = [
   "แดชบอร์ด",
   "ผู้ใช้และบทบาท",
-  "หน่วยกิต (Credit Bank)",
   "บันทึกการตรวจสอบ",
 ] as const;
 
@@ -70,12 +71,36 @@ function AwardIcon() {
   );
 }
 
+function SlidersIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <path d="M4 7h10M18 7h2M4 17h2M10 17h10" strokeLinecap="round" />
+      <circle cx="16" cy="7" r="2.2" strokeLinejoin="round" />
+      <circle cx="8" cy="17" r="2.2" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CoinsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <ellipse cx="12" cy="6" rx="7" ry="3" strokeLinejoin="round" />
+      <path d="M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6" strokeLinejoin="round" />
+      <path d="M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 const ICONS = {
   book: BookIcon,
   folder: FolderIcon,
   clipboard: ClipboardIcon,
   stack: StackIcon,
   award: AwardIcon,
+  sliders: SlidersIcon,
+  coins: CoinsIcon,
 } as const;
 
 export function AdminSidebar() {
