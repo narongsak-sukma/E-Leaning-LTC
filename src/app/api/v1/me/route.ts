@@ -79,3 +79,122 @@ export async function GET(request: Request): Promise<NextResponse> {
     return jsonErrorResponse(err, options);
   }
 }
+
+/**
+ * PATCH /api/v1/me — แก้โปรไฟล์ตนเอง (Wave E Phase 5 · IDENT-001 · API-SPEC §3.2 แถว 125)
+ *
+ * - เขต display_name/phone/preferred_locale เท่านั้น (guard 0010 trigger D20-M2) —
+ *   first_name/last_name เป็นข้อมูลนิติบุคคล แก้ผ่านเจ้าหน้าที่ (D-p5-13) ·
+ *   pdpa_consented_at ไม่รับที่นี่ (จัดผ่าน /profile/consents · ห้ามแตะ)
+ * - strict body (key แปลกปลอม/first_name/last_name/pdpa_consented_at → 400 ERR-VAL-001)
+ * - ต้องส่งอย่างน้อย 1 ฟิลด์ — ว่างเปล่า = 400
+ * - phone = E.164 (CHECK profiles_phone_e164_check) · preferred_locale = th|en (CHECK)
+ * - rate = READ ตาม §5 แถว /me* (ทุก method) — แก้โปรไฟล์ความถี่ต่ำ
+ * - เขียนผ่าน user-JWT — RLS profiles_update_owner (0010) คุมแถวตัวเอง + trigger guard
+ *   คอลัมน์คุมขอบเขต (defense in depth — BFF ส่งเฉพาะ key ที่ยอมเสมอ)
+ * - 200 { data: { id, email, displayName, phone, preferredLocale } } — strict ขาออก
+ */
+
+/** phone E.164 (CHECK profiles_phone_e164_check 0003) */
+const PATCH_PHONE_E164 = /^\+[1-9]\d{1,14}$/;
+
+/** body ของ PATCH — strict (first_name/last_name/pdpa_consented_at ไม่อยู่ในชุด = 400) */
+const MePatchBody = z
+  .object({
+    displayName: z.string().trim().min(1).max(100).optional(),
+    phone: z.string().trim().regex(PATCH_PHONE_E164).nullish(),
+    preferredLocale: z.enum(["th", "en"]).optional(),
+  })
+  .strict();
+
+/** ขาออก — แถวโปรไฟล์หลังแก้ (strict) */
+const MeUpdatedResource = z
+  .object({
+    id: z.string().uuid(),
+    email: z.string().min(1),
+    displayName: z.string().min(1),
+    phone: z.string().nullable(),
+    preferredLocale: z.enum(["th", "en"]).nullable(),
+  })
+  .strict();
+
+/** JSON body → parsed (parse ไม่ได้ / ชนิดผิด / key แปลกปลอม → ERR-VAL-001 พร้อมรายชื่อ field) */
+async function parsePatchBody(request: Request): Promise<z.infer<typeof MePatchBody>> {
+  let raw: unknown;
+  try {
+    raw = await request.json();
+  } catch {
+    throw new AppError("ERR-VAL-001", { details: { field: "body" } });
+  }
+  const parsed = MePatchBody.safeParse(raw);
+  if (!parsed.success) {
+    const fields = [...new Set(parsed.error.issues.map((issue) => issue.path.map(String).join(".")))];
+    throw new AppError("ERR-VAL-001", { details: { fields: fields.length > 0 ? fields : ["body"] } });
+  }
+  return parsed.data;
+}
+
+/** PATCH — แก้โปรไฟล์ตนเอง (200) */
+export async function PATCH(request: Request): Promise<NextResponse> {
+  const options = responseOptions(request);
+  try {
+    // 1) session (allowlist AUTH-007 เดียวกับ GET — แก้โปรไฟล์ของตัวเองไม่บังคับ MFA)
+    const user = await requireUser();
+    // 2) rate READ (§5 /me* — ทุก method)
+    enforceRateLimit(request, { group: "READ", secondaryKey: user.userId });
+    // 3) body strict — ผิดรูป/key แปลกปลอม → 400 ERR-VAL-001
+    const body = await parsePatchBody(request);
+    // 4) ต้องมีอย่างน้อย 1 ฟิลด์ — ว่างเปล่า = 400 (ไม่มีอะไรให้แก้)
+    const payload: Record<string, string | null> = {};
+    if (body.displayName !== undefined) {
+      payload["display_name"] = body.displayName;
+    }
+    if (body.phone !== undefined) {
+      payload["phone"] = body.phone ?? null;
+    }
+    if (body.preferredLocale !== undefined) {
+      payload["preferred_locale"] = body.preferredLocale;
+    }
+    if (Object.keys(payload).length === 0) {
+      throw new AppError("ERR-VAL-001", { details: { fields: ["body"] } });
+    }
+    // 5) เขียนผ่าน user-JWT — RLS profiles_update_owner + guard 0010 คุมคอลัมน์ (แถวตัวเอง)
+    const supabase = await createSupabaseSsrClient();
+    const { data, error } = await supabase
+      .from("profiles")
+      .update(payload)
+      .eq("id", user.userId)
+      .select("id, email, display_name, phone, preferred_locale")
+      .single();
+    if (error !== null) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "profile_update_failed" } });
+    }
+    const row = (data ?? null) as Row | null;
+    const updatedId = typeof row?.["id"] === "string" ? row["id"] : null;
+    const updatedEmail = typeof row?.["email"] === "string" ? row["email"] : null;
+    const updatedDisplayName =
+      typeof row?.["display_name"] === "string" ? row["display_name"] : null;
+    const updatedPhone = row?.["phone"] === null || typeof row?.["phone"] === "string" ? (row?.["phone"] as string | null) : null;
+    const updatedLocale =
+      row?.["preferred_locale"] === "th" || row?.["preferred_locale"] === "en"
+        ? row["preferred_locale"]
+        : null;
+    if (row === null || updatedId !== user.userId || updatedEmail === null || updatedDisplayName === null) {
+      throw new AppError("ERR-SYS-001", { details: { reason: "profile_update_inconsistent" } });
+    }
+    // 6) ประกอบขาออก — zod ตรวจก่อนส่ง (drift → 503)
+    const parsedView = MeUpdatedResource.safeParse({
+      id: updatedId,
+      email: updatedEmail,
+      displayName: updatedDisplayName,
+      phone: updatedPhone,
+      preferredLocale: updatedLocale,
+    });
+    if (!parsedView.success) {
+      throw new AppError("ERR-SYS-002", { details: { reason: "me_patch_bad_contract" } });
+    }
+    return jsonOk(parsedView.data, options);
+  } catch (err: unknown) {
+    return jsonErrorResponse(err, options);
+  }
+}
