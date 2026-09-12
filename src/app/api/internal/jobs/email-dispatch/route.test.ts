@@ -33,6 +33,7 @@ function configStub(overrides: Partial<AppConfig> = {}): AppConfig {
     supabaseAnonKey: "stub-anon",
     supabaseServiceRoleKey: "stub-svc",
     supabaseDbPoolerUrl: null,
+    supabasePublicUrl: null,
     cursorHmacSecret: null,
     ipHashSalt: null,
     mediaProvider: "supabase_storage",

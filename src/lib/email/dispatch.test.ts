@@ -569,6 +569,52 @@ describe("download_url — data_export.ready (gate p5-r1 B3: SQL ส่ง file_
     expect(completeCalls).toEqual([[{ id: ID_A, ok: true }]]);
   });
 
+  it("ตั้ง supabasePublicUrl → ลิงก์ในเมล์ใช้ origin มุมมองผู้รับ คง path+token เดิม (gate p5-r2 hostname — dev container เห็น kong:8000 ผู้รับเปิดไม่ได้)", async () => {
+    getConfigMock.mockReturnValue({
+      publicBaseUrl: APP_BASE,
+      certPublicBaseUrl: null,
+      supabasePublicUrl: "http://localhost:8000",
+    });
+    const { signCalls } = mockClient({
+      batches: [[exportRow()], []],
+      templates: {
+        "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+      },
+      media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    // origin เขียนทับเป็นมุมมองผู้รับ · path ในบักเก็ต + query (ttl) ครบตามลงนาม
+    expect(sentBody).toContain(
+      `http://localhost:8000/sign/pdpa-exports/${encodeURIComponent(OBJECT_KEY)}?ttl=604800`,
+    );
+    expect(sentBody).not.toContain("storage.ltc.test");
+    // ลงนามด้วย key ในบักเก็ตเหมือนเดิม — การเขียนทับ origin เกิด "หลัง" ลงนาม
+    expect(signCalls).toEqual([{ bucket: "pdpa-exports", path: OBJECT_KEY, ttl: 604800 }]);
+  });
+
+  it("supabasePublicUrl รูปแบบผิด → download_url_invalid fail-closed ไม่ส่งเมล์ลิงก์เปิดไม่ได้", async () => {
+    getConfigMock.mockReturnValue({
+      publicBaseUrl: APP_BASE,
+      certPublicBaseUrl: null,
+      supabasePublicUrl: "not-a-url",
+    });
+    const { completeCalls } = mockClient({
+      batches: [[exportRow()], []],
+      templates: {
+        "data_export.ready|th": tpl("ข้อมูลพร้อม", "{{download_url}}"),
+      },
+      media: { bucket: "pdpa-exports", storage_path: MEDIA_PATH },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "download_url_invalid" }]]);
+  });
+
   it("media_assets ไม่มีแถว → media_asset_missing ไม่เรียก provider/ลงนาม (ห้ามส่งเมล์ลิงก์ตาย)", async () => {
     const { completeCalls, signCalls } = mockClient({
       batches: [[exportRow()], []],

@@ -7,15 +7,18 @@
  *
  * 1) claim: RPC `claim_data_export_job()` (service client — ตาราง data_export_jobs
  *    REVOKE write ตรงจากทุกบทบาท JWT ตาม 0036 — path เดียวคือ RPC) คืน
- *    {jobId, userId} หรือ {jobId: null} เมื่อคิวว่าง (FOR UPDATE SKIP LOCKED)
+ *    {jobId, userId, claimToken} หรือ {jobId: null} เมื่อคิวว่าง (FOR UPDATE SKIP
+ *    LOCKED) · claimToken = ตัวปิดกั้น worker เก่า (gate p5-r2 M1 — complete/fail
+ *    ผูกกับรอบการถือครอง lease ปัจจุบันเท่านั้น)
  * 2) compose: อ่านข้อมูลของเจ้าของครบทุกก้อน (9 chunks — profiles+roles, consents,
  *    enrollments, lesson_progress, quiz_attempts, assessment_attempts, certificates,
  *    credit ledger, notifications) ด้วย service client จุดเดียวของไฟล์นี้
  * 3) upload: JSON ก้อนเดียว → bucket ส่วนตัว `pdpa-exports`
- *    path `pdpa-exports/{user_id}/{job_id}.json` (bucket private — ดาวน์โหลดผ่าน
- *    signed URL อายุ 7 วันที่ประกอบโดย tick data_export.ready เท่านั้น)
+ *    object key ในบักเก็ต = `{user_id}/{job_id}.json` ขณะที่ media_assets.
+ *    storage_path เก็บ path เต็ม `pdpa-exports/{user_id}/{job_id}.json` (bucket
+ *    private — ดาวน์โหลดผ่าน signed URL อายุ 7 วันที่ email worker ลงนามตอนส่ง)
  * 4) media_assets INSERT (status ready · uploaded_by = เจ้าของข้อมูล) → RPC
- *    `complete_data_export_job(job, media, chunks, request_id)` — audit
+ *    `complete_data_export_job(job, media, chunks, request_id, claim_token)` — audit
  *    DATA_EXPORT_DONE + event `data_export.ready` เกิดใน TX เดียวของ RPC (0036)
  * 5) ทุกทางล้มเหลว → RPC `fail_data_export_job` ด้วยข้อความ static ไม่มี PII
  *    (left(error,500) ที่ฝั่ง SQL ตัดอีกชั้น) — ห้าม throw ทิ้งคิว
@@ -36,9 +39,11 @@ export const PDPA_EXPORT_BUCKET = "pdpa-exports";
 /** จำนวน job สูงสุดต่อ tick หนึ่งรอบ (กัน cron รันยาว — D-p5-7 cap 10) */
 export const PDPA_EXPORT_MAX_JOBS_PER_TICK = 10;
 
-/** แถวที่ claim ได้ — strict: คีย์เกิน/ค่าเพี้ยน = drift ปฏิเสธงานนั้น */
+/** แถวที่ claim ได้ — strict: คีย์เกิน/ค่าเพี้ยน = drift ปฏิเสธงานนั้น
+ *  · claimToken (gate p5-r2 M1) = ตัวป้องกัน worker เก่า: complete/fail ต้องแนบ
+ *    token ของ "รอบการถือครองล่าสุด" — lease ถูกยึดคืนแล้ว token เก่าใช้ปิดงานไม่ได้ */
 export const ClaimedExportJobSchema = z
-  .object({ jobId: z.uuid(), userId: z.uuid() })
+  .object({ jobId: z.uuid(), userId: z.uuid(), claimToken: z.uuid() })
   .strict();
 
 /** คิวว่าง — {jobId: null} เท่านั้น */
@@ -53,6 +58,7 @@ const JobOutcomeSchema = z
 export interface DataExportTask {
   readonly jobId: string;
   readonly userId: string;
+  readonly claimToken: string;
 }
 
 /** สรุปผลหนึ่ง tick — ตัวเลขเมตาเท่านั้น (response ของ internal job route) */
@@ -178,9 +184,23 @@ async function rowsIn(
   return data;
 }
 
-/** path ใน bucket — `pdpa-exports/{user_id}/{job_id}.json` (สัญญา D-p5-7) */
+/**
+ * ที่อยู่เต็มของไฟล์ใน `media_assets.storage_path` — `pdpa-exports/{user_id}/{job_id}.json`
+ * (สัญญา D-p5-7 · รวม prefix บักเก็ตเหมือน license-evidence ของ API-SPEC §3.2)
+ *
+ * gate p5-r2 BLOCKER-1: ห้ามส่งค่านี้ตรง ๆ ให้ `storage.from(bucket).upload()` —
+ * storage-js เติม bucketId ให้อีกชั้น (`_getFinalPath` = `{bucket}/{path}`) ทำให้
+ * object จริงไปอยู่ที่ `pdpa-exports/pdpa-exports/…` คนละชื่อกับที่ email worker
+ * ลงนาม ({bucket} + storage_path ตัด prefix) → signed_url_failed · ตัวส่งให้
+ * `.upload()` ต้องเป็น key ในบักเก็ต (`{user_id}/{job_id}.json`) เท่านั้น
+ */
 export function exportStoragePath(userId: string, jobId: string): string {
   return `${PDPA_EXPORT_BUCKET}/${userId}/${jobId}.json`;
+}
+
+/** key ของ object "ใน" บักเก็ต (ไม่รวม prefix) — ตัวที่ส่งให้ .upload() จริง */
+function exportObjectKey(userId: string, jobId: string): string {
+  return `${userId}/${jobId}.json`;
 }
 
 /**
@@ -198,12 +218,17 @@ export async function processDataExportJob(
     // 1) compose — อ่านครบทุกก้อน (ล้มก้อนใด = fail ทั้ง job)
     const document = await composePersonalDataExport(client, task.userId, task.jobId);
 
-    // 2) upload JSON ก้อนเดียวเข้า bucket ส่วนตัว — path ตามสัญญา
+    // 2) upload JSON ก้อนเดียวเข้า bucket ส่วนตัว — key "ใน" บักเก็ต (ไม่รวม prefix
+    //    — gate p5-r2 B1: storage-js เติม bucketId เอง ส่ง path เต็มจะได้ object
+    //    ซ้อนสองชั้น) · media_assets.storage_path เก็บ path เต็มตามสัญญา
     const path = exportStoragePath(task.userId, task.jobId);
     const bytes = new TextEncoder().encode(JSON.stringify(document));
     const upload = await client.storage
       .from(PDPA_EXPORT_BUCKET)
-      .upload(path, bytes, { contentType: "application/json", upsert: false });
+      .upload(exportObjectKey(task.userId, task.jobId), bytes, {
+        contentType: "application/json",
+        upsert: false,
+      });
     if (upload.error !== null) {
       throw new Error("export_upload_failed");
     }
@@ -229,11 +254,13 @@ export async function processDataExportJob(
     const mediaId: string = mediaInsert.data.id;
 
     // 4) complete — audit DATA_EXPORT_DONE + event data_export.ready ใน TX เดียวของ RPC
+    //    · p_claim_token (gate p5-r2 M1): RPC ตรวจว่าเรายังเป็นผู้ถือ lease ปัจจุบัน
     const complete = await client.rpc("complete_data_export_job", {
       p_job_id: task.jobId,
       p_file_media_id: mediaId,
       p_chunks: document["chunk_count"],
       p_request_id: requestId ?? null,
+      p_claim_token: task.claimToken,
     });
     if (complete.error !== null || JobOutcomeSchema.safeParse(complete.data).success === false) {
       throw new Error("export_complete_failed");
@@ -251,6 +278,7 @@ export async function processDataExportJob(
     const fail = await client.rpc("fail_data_export_job", {
       p_job_id: task.jobId,
       p_error: reason,
+      p_claim_token: task.claimToken,
     });
     if (fail.error !== null) {
       // fail RPC เองล้ม (เช่นแถวไม่อยู่สถานะ processing — ถูก worker อื่นแตะ) — แจ้งเตือนเงียบ

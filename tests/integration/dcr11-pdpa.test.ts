@@ -69,11 +69,14 @@ let delExpired: TestUser; // เคส f — token หมดอายุ
 /** token ลบบัญชีของ delCitizen — RPC คืนทาง return ครั้งเดียว (เคส e เก็บ · เคส f ใช้ ·
  *  ห้าม log ค่านี้ใน output ใด ๆ — D24) */
 let deletionToken = "";
+/** claimToken ของงาน exportA (จับจากเคส b — ใช้ต่อในเคส c · gate p5-r2 M1) */
+let exportTokenA = "";
 
 interface JobResult {
   readonly jobId: string | null;
   readonly userId?: string;
   readonly status?: string;
+  readonly claimToken?: string;
 }
 
 function svcRpc(name: string, body: unknown): Promise<RestResult> {
@@ -252,6 +255,9 @@ describe.skipIf(!DB_URL)(
       const first = claim1.json as JobResult;
       expect(first.jobId).toMatch(/^[0-9a-f-]{36}$/);
       expect(first.userId).toBe(exportA.id);
+      // gate p5-r2 M1: claim คืน token ของรอบการถือครอง (uuid) — complete/fail ต้องแนบ
+      expect(first.claimToken ?? "").toMatch(/^[0-9a-f-]{36}$/);
+      exportTokenA = first.claimToken ?? "";
       const status1 = await psqlScalar(
         `select status::text from public.data_export_jobs where id = '${first.jobId ?? ""}';`,
       );
@@ -262,6 +268,7 @@ describe.skipIf(!DB_URL)(
       const second = claim2.json as JobResult;
       expect(second.jobId).toBe(jobIdB);
       expect(second.userId).toBe(exportB.id);
+      expect(second.claimToken ?? "").toMatch(/^[0-9a-f-]{36}$/);
       // คิวหมด — ไม่มี pending เหลือ → jobId null
       const claim3 = await svcRpc("claim_data_export_job", {});
       expect(claim3.status, claim3.text.slice(0, 300)).toBe(200);
@@ -273,6 +280,7 @@ describe.skipIf(!DB_URL)(
       const failB = await svcRpc("fail_data_export_job", {
         p_job_id: jobIdB,
         p_error: "dcr11-pdpa-case-b-finish",
+        p_claim_token: second.claimToken ?? "",
       });
       expect(failB.status, failB.text.slice(0, 300)).toBe(200);
     }, 45_000);
@@ -301,6 +309,7 @@ describe.skipIf(!DB_URL)(
         p_file_media_id: E16_MEDIA_DONE,
         p_chunks: 3,
         p_request_id: crypto.randomUUID(),
+        p_claim_token: exportTokenA,
       });
       expect(res.status, res.text.slice(0, 300)).toBe(200);
       expect((res.json as JobResult).status).toBe("done");
@@ -356,6 +365,7 @@ describe.skipIf(!DB_URL)(
         p_file_media_id: E16_MEDIA_DONE,
         p_chunks: 3,
         p_request_id: crypto.randomUUID(),
+        p_claim_token: exportTokenA,
       });
       expect(again.status, again.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
       expect(again.json, "P0002 ผ่าน gateway ต้องไม่กลายเป็น 200 เงียบ").toBeNull();
@@ -372,8 +382,14 @@ describe.skipIf(!DB_URL)(
       const claim = await svcRpc("claim_data_export_job", {});
       expect(claim.status, claim.text.slice(0, 300)).toBe(200);
       expect((claim.json as JobResult).jobId).toBe(jobId);
+      const token = ((claim.json as JobResult).claimToken ?? "");
+      expect(token).toMatch(/^[0-9a-f-]{36}$/);
       const reason = "ประกอบไฟล์ JSON ไม่สำเร็จ (storage timeout) — ทดสอบ fail path ของ DCR-11";
-      const fail = await svcRpc("fail_data_export_job", { p_job_id: jobId, p_error: reason });
+      const fail = await svcRpc("fail_data_export_job", {
+        p_job_id: jobId,
+        p_error: reason,
+        p_claim_token: token,
+      });
       expect(fail.status, fail.text.slice(0, 300)).toBe(200);
       expect((fail.json as JobResult).status).toBe("failed");
       const job = await psqlRows<{ status: string; error: string | null }>(`

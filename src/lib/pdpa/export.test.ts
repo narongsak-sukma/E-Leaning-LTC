@@ -4,9 +4,10 @@
  * fake Supabase client (thenable builder — await chain คืนผลที่ตั้งค่าไว้) — จุดหลัก:
  * - composePersonalDataExport: ครบ 9 chunks + chunk_count 9 · lesson_progress อ่าน
  *   ผ่าน in(enrollment_id) · notifications embed notification · ก้อนใดล้ม = throw
- * - processDataExportJob: upload path `pdpa-exports/{uid}/{job}.json` → media_assets
- *   (status ready · uploaded_by = เจ้าของ) → complete RPC (p_chunks 9) · ทุกทางล้ม =
- *   fail RPC ด้วย static reason ไม่มี PII + ไม่ throw
+ * - processDataExportJob: upload key ในบักเก็ต `{uid}/{job}.json` (ไม่รวม prefix —
+ *   gate p5-r2 B1) → media_assets storage_path เต็ม `pdpa-exports/{uid}/{job}.json`
+ *   (status ready · uploaded_by = เจ้าของ) → complete RPC (p_chunks 9 + p_claim_token
+ *   fencing M1) · ทุกทางล้ม = fail RPC ด้วย static reason ไม่มี PII + ไม่ throw
  * - runPersonalDataExportLoop: claim จนว่าง/ครบ cap · drift = break fail-closed
  */
 vi.hoisted(() => {
@@ -34,6 +35,7 @@ const JOB_ID = "d0000000-0000-4000-8000-000000000002";
 const JOB_ID_2 = "d0000000-0000-4000-8000-000000000003";
 const USER_ID = "b0000000-0000-4000-8000-000000000001";
 const MEDIA_ID = "e0000000-0000-4000-8000-000000000004";
+const CLAIM_TOKEN = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
 
 type Result = { data: unknown; error: { message: string } | null };
 
@@ -108,7 +110,7 @@ function mockServiceClient(spec: ClientSpec = {}): { client: SupabaseClient; cap
           return spec.claimQueue.shift();
         }
         if (spec.claimForever === true) {
-          return { data: { jobId: JOB_ID, userId: USER_ID }, error: null };
+          return { data: { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN }, error: null };
         }
         return { data: { jobId: null }, error: null };
       }
@@ -244,11 +246,13 @@ describe("processDataExportJob — ทางหลัก done", () => {
       tables: { profiles: ok({ id: USER_ID }) },
     });
 
-    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID });
+    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN });
 
     expect(outcome).toBe("done");
     expect(capture.uploads.length).toBe(1);
-    expect(capture.uploads[0]?.path).toBe(`pdpa-exports/${USER_ID}/${JOB_ID}.json`);
+    // gate p5-r2 B1: ตัวส่ง .upload() คือ key "ใน" บักเก็ต (ไม่รวม prefix —
+    // storage-js เติม bucketId เอง) · storage_path ของ media row เป็น path เต็ม
+    expect(capture.uploads[0]?.path).toBe(`${USER_ID}/${JOB_ID}.json`);
     expect(capture.uploads[0]?.contentType).toBe("application/json");
     const doc = JSON.parse(new TextDecoder().decode(capture.uploads[0]?.body)) as Record<string, unknown>;
     expect(doc["schema"]).toBe("ltc.pdpa-export.v1");
@@ -268,6 +272,7 @@ describe("processDataExportJob — ทางหลัก done", () => {
       p_file_media_id: MEDIA_ID,
       p_chunks: 9,
       p_request_id: null,
+      p_claim_token: CLAIM_TOKEN,
     });
   });
 
@@ -276,7 +281,7 @@ describe("processDataExportJob — ทางหลัก done", () => {
       tables: { profiles: ok({ id: USER_ID }) },
     });
 
-    await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID }, "req-e15-1");
+    await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN }, "req-e15-1");
 
     const complete = capture.rpcCalls.find((c) => c.fn === "complete_data_export_job");
     expect(complete?.args).toMatchObject({ p_request_id: "req-e15-1" });
@@ -287,12 +292,16 @@ describe("processDataExportJob — ล้มเหลวทุกทาง → f
   it("compose ล้ม → failed + fail RPC reason export_compose_failed + ไม่ upload", async () => {
     const { client, capture } = mockServiceClient({ tables: { profiles: fail("SQLSTATE XX000") } });
 
-    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID });
+    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN });
 
     expect(outcome).toBe("failed");
     expect(capture.uploads.length).toBe(0);
     const failCall = capture.rpcCalls.find((c) => c.fn === "fail_data_export_job");
-    expect(failCall?.args).toEqual({ p_job_id: JOB_ID, p_error: "export_compose_failed" });
+    expect(failCall?.args).toEqual({
+      p_job_id: JOB_ID,
+      p_error: "export_compose_failed",
+      p_claim_token: CLAIM_TOKEN,
+    });
   });
 
   it("upload ล้ม → failed + reason export_upload_failed + ไม่แทรก media", async () => {
@@ -301,12 +310,16 @@ describe("processDataExportJob — ล้มเหลวทุกทาง → f
       uploadError: { message: "bucket missing" },
     });
 
-    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID });
+    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN });
 
     expect(outcome).toBe("failed");
     expect(capture.mediaInserts.length).toBe(0);
     const failCall = capture.rpcCalls.find((c) => c.fn === "fail_data_export_job");
-    expect(failCall?.args).toEqual({ p_job_id: JOB_ID, p_error: "export_upload_failed" });
+    expect(failCall?.args).toEqual({
+      p_job_id: JOB_ID,
+      p_error: "export_upload_failed",
+      p_claim_token: CLAIM_TOKEN,
+    });
   });
 
   it("media insert ล้ม → failed + reason export_media_insert_failed + ไม่ complete", async () => {
@@ -315,13 +328,17 @@ describe("processDataExportJob — ล้มเหลวทุกทาง → f
       mediaError: { message: "insert failed" },
     });
 
-    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID });
+    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN });
 
     expect(outcome).toBe("failed");
     const complete = capture.rpcCalls.find((c) => c.fn === "complete_data_export_job");
     expect(complete).toBeUndefined();
     const failCall = capture.rpcCalls.find((c) => c.fn === "fail_data_export_job");
-    expect(failCall?.args).toEqual({ p_job_id: JOB_ID, p_error: "export_media_insert_failed" });
+    expect(failCall?.args).toEqual({
+      p_job_id: JOB_ID,
+      p_error: "export_media_insert_failed",
+      p_claim_token: CLAIM_TOKEN,
+    });
   });
 
   it("complete ล้ม → failed + reason export_complete_failed + fail RPC เรียก", async () => {
@@ -330,11 +347,15 @@ describe("processDataExportJob — ล้มเหลวทุกทาง → f
       completeError: { message: "rpc failed" },
     });
 
-    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID });
+    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN });
 
     expect(outcome).toBe("failed");
     const failCall = capture.rpcCalls.find((c) => c.fn === "fail_data_export_job");
-    expect(failCall?.args).toEqual({ p_job_id: JOB_ID, p_error: "export_complete_failed" });
+    expect(failCall?.args).toEqual({
+      p_job_id: JOB_ID,
+      p_error: "export_complete_failed",
+      p_claim_token: CLAIM_TOKEN,
+    });
   });
 
   it("fail RPC เองล้มด้วย → ยังคืน failed (ไม่ throw ทิ้งคิว)", async () => {
@@ -343,7 +364,7 @@ describe("processDataExportJob — ล้มเหลวทุกทาง → f
       failError: { message: "db down" },
     });
 
-    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID });
+    const outcome = await processDataExportJob(client, { jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN });
 
     expect(outcome).toBe("failed");
     expect(capture.rpcCalls.filter((c) => c.fn === "fail_data_export_job").length).toBe(1);
@@ -354,7 +375,10 @@ describe("runPersonalDataExportLoop", () => {
   it("claim 2 job — ทั้งคู่ compose ล้ม → {claimed:2, done:0, failed:2} แล้วคิวว่างหยุด", async () => {
     mockServiceClient({
       tables: { profiles: fail("SQLSTATE XX000") },
-      claimQueue: [ok({ jobId: JOB_ID, userId: USER_ID }), ok({ jobId: JOB_ID_2, userId: USER_ID })],
+      claimQueue: [
+        ok({ jobId: JOB_ID, userId: USER_ID, claimToken: CLAIM_TOKEN }),
+        ok({ jobId: JOB_ID_2, userId: USER_ID, claimToken: CLAIM_TOKEN }),
+      ],
     });
 
     const summary = await runPersonalDataExportLoop();
@@ -391,5 +415,16 @@ describe("runPersonalDataExportLoop", () => {
     const summary = await runPersonalDataExportLoop();
 
     expect(summary).toEqual({ claimed: 0, done: 0, failed: 0 });
+  });
+
+  it("claim drift (ไม่มี claimToken — gate p5-r2 M1) → break fail-closed claimed 0", async () => {
+    const { capture } = mockServiceClient({
+      claimQueue: [ok({ jobId: JOB_ID, userId: USER_ID })],
+    });
+
+    const summary = await runPersonalDataExportLoop();
+
+    expect(summary).toEqual({ claimed: 0, done: 0, failed: 0 });
+    expect(capture.rpcCalls.filter((c) => c.fn === "fail_data_export_job").length).toBe(0);
   });
 });

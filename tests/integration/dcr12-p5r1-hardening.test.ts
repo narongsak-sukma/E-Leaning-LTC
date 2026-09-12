@@ -2,10 +2,12 @@
  * DCR-12 — integration tests ของ fix wave codex gate p5-r1 (BLOCKER 1-7 + M1)
  * บน dev stack จริง — ระดับ DB (RPC ผ่าน REST + psql) และ "หน้า HTML จริง"
  * ผ่าน container app (:3000) ตามแบบ suite DCR-10/DCR-11:
- *   g) B3 (ฝั่ง SQL): request → claim → complete → event → tick จริง → แถว
- *      email_outbox template data_export.ready โดย vars มี "ตัวระบุ" เท่านั้น
- *      (full_name + job_id + file_media_id) — ไม่มี download_url (signed URL
- *      604800s ผู้กลาง email worker ลงนามจาก media_assets — พิสูจน์คู่ unit tests)
+ *   g) B3 ครบสาย "ผ่าน worker จริง" (gate p5-r2 B1/B2): request → claim →
+ *      processDataExportJob ของ src จริง (compose → upload คีย์ในบักเก็ต →
+ *      media_assets → complete) → event → tick จริง → email_outbox vars มี
+ *      "ตัวระบุ" เท่านั้น → dispatch → Mailpit มี signed URL → "GET ลิงก์จริง
+ *      โดยไม่มี apikey" (route Kong storage-v1-signed) = 200 + JSON ของ
+ *      เจ้าของครบ · token ปลอม = storage ปฏิเสธเอง ไม่ใช่ Kong 401
  *   a) B1: my_request_account_deletion คืน userId ของผู้ขอจริง (คีย์ที่ BFF
  *      ใช้ผูกเจ้าของอีเมล confirm — เดิมคืน requestId ตัวเดียว)
  *   b) B2: เปิดลิงก์จากอีเมล /profile/delete/confirm?token=… ผ่าน HTTP จริง
@@ -17,9 +19,10 @@
  *   d) B6: ขอลบ → ได้บทบาท instructor ระหว่างอายุ token → confirm เจอ SoD
  *      re-check ใต้ lock เดียวกัน → sod_role_changed กลิ้ง "ทั้ง TX" —
  *      บัญชีอยู่ครบ คำขอยัง pending · ถอนบทบาทกลับ → token "เดิม" ยืนยันผ่าน
- *   e) B7: claim ตั้ง claimed_at (lease) · เวลาผ่าน 11 นาที (จำลอง worker
- *      ตายกลางทาง) → claim ถัดไปยึดงานคืนได้ + lease ใหม่ (ไม่ติด processing
- *      ตลอดกาล)
+ *   e) B7+B4+M1: claim ตั้ง claimed_at+claim_token · 11 นาที → ผู้ถือใหม่
+ *      ยึดคืนได้ (token ใหม่) · "worker เก่าใช้ token เดิมปิดงานไม่ได้" (stale_lease)
+ *      · แถว processing ที่ claimed_at IS NULL (งานค้างก่อนมี lease — B4) ถูก
+ *      claim ถัดไปยึดกลับ · ปิดงานด้วยผู้ถือปัจจุบันผ่าน
  *   f) B4: admin_audit_user_created / admin_set_user_active (0038) — audit
  *      USER_CREATE + USER_DISABLE/USER_UPDATE เป็นแถว audit_logs จริง พร้อม
  *      actor (aal2 super_admin) + reason ใน context · mutation+audit ของ
@@ -42,6 +45,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+// gate p5-r2 B1: เคส g ต้องวิ่ง "worker จริง" ของ src (compose → upload → media →
+// complete) ไม่ใช่จำลองมือ — alias @ จัดให้โดย vitest.integration.config.ts
+import { createClient } from "@supabase/supabase-js";
+import { processDataExportJob } from "@/lib/pdpa/export";
+
 import {
   ANON_KEY,
   assignRole,
@@ -51,6 +59,7 @@ import {
   psqlScalar,
   REPO_ROOT,
   restCall,
+  REST_URL,
   SERVICE_KEY,
   type RestResult,
   type TestUser,
@@ -63,9 +72,8 @@ const DB_URL = process.env.TEST_DATABASE_URL;
 const APP_URL = process.env["TEST_APP_URL"] ?? "http://localhost:3000";
 
 // ─── id ตายตัวของ fixture ชุดนี้ (เนมสเปซ e17) ─────────────────────────────────
-
-/** media ผลลัพธ์ของเคส g (บักเก็ต pdpa-exports — สัญญาเดียวกับ complete RPC) */
-const E17_MEDIA_DONE = "cccccccc-cccc-4ccc-8ccc-e17a00000001";
+// (gate p5-r2: เคส g ใช้ worker จริง — media id และ object key เกิดตามรอบแล้วแต่
+//  jobId ที่ RPC ออกให้ ไม่มี id ตายตัวของ media อีกต่อไป)
 
 // ─── ผู้ใช้ทดสอบ (GoTrue จริง) ─────────────────────────────────────────────────
 
@@ -88,6 +96,7 @@ interface JobResult {
   readonly jobId: string | null;
   readonly userId?: string;
   readonly status?: string;
+  readonly claimToken?: string;
 }
 
 function svcRpc(name: string, body: unknown): Promise<RestResult> {
@@ -179,12 +188,26 @@ async function restoreCrons(): Promise<void> {
  *  ตั้งใจคงไว้ (เคส c/f นับแถวด้วย entity_id ของผู้ใช้สดต่อรอบจึง deterministic) */
 async function cleanupE17World(): Promise<void> {
   // object ใน bucket อยู่นอก TX ของ DB — ลบแยก (best-effort กันสะสมข้ามรอบ)
+  // gate p5-r2: worker จริงวาง object ที่ {user_id}/{job_id}.json — list ตาม prefix
+  // ของผู้ใช้ชุดนี้แล้วลบทีละชิ้น (id เกิดใหม่ทุกรอบ จึงห้าม hardcode)
   try {
-    await restCall(
-      "DELETE",
-      `/storage/v1/object/pdpa-exports/dcr12/${E17_MEDIA_DONE}.json`,
-      { apiKey: SERVICE_KEY, token: SERVICE_KEY },
-    );
+    if (typeof exportMail?.id === "string") {
+      const list = await restCall(
+        "POST",
+        `/storage/v1/object/list/pdpa-exports`,
+        { apiKey: SERVICE_KEY, token: SERVICE_KEY },
+        { prefix: `${exportMail.id}/`, limit: 100 },
+      );
+      if (list.status === 200 && Array.isArray(list.json)) {
+        for (const obj of list.json as readonly { name: string }[]) {
+          await restCall(
+            "DELETE",
+            `/storage/v1/object/pdpa-exports/${exportMail.id}/${obj.name}`,
+            { apiKey: SERVICE_KEY, token: SERVICE_KEY },
+          );
+        }
+      }
+    }
   } catch {
     // สแตกยังไม่พร้อม/ลบไปแล้ว — ไม่ขัดข้องของ suite
   }
@@ -204,7 +227,8 @@ async function cleanupE17World(): Promise<void> {
      where user_id in (select id from auth.users where email like 'dcr12-p5r1-%');
     delete from public.account_deletion_requests
      where user_id in (select id from auth.users where email like 'dcr12-p5r1-%');
-    delete from public.media_assets where id = '${E17_MEDIA_DONE}';
+    delete from public.media_assets
+     where uploaded_by in (select id from auth.users where email like 'dcr12-p5r1-%');
     delete from public.role_assignments
      where user_id in (select id from auth.users where email like 'dcr12-p5r1-%');
     delete from public.profiles
@@ -217,13 +241,16 @@ async function cleanupE17World(): Promise<void> {
  * claim จนกว่าจะได้งานของ suite — งานกำพร้า (รอบก่อนพังกลางทาง/cleanup ไม่ทัน)
  * ถูกปิดด้วย fail เพื่อไม่บังลำดับคิวของเคส · คิวว่างก่อนเจองานตัวเอง = fail-loud
  */
-async function claimUntilJob(jobId: string): Promise<void> {
+async function claimUntilJob(jobId: string): Promise<string> {
   for (let round = 0; round < 10; round += 1) {
     const claim = await svcRpc("claim_data_export_job", {});
     expect(claim.status, claim.text.slice(0, 300)).toBe(200);
     const got = (claim.json as JobResult).jobId;
+    const token = (claim.json as JobResult).claimToken ?? "";
     if (got === jobId) {
-      return;
+      // gate p5-r2 M1: ตัวระบุรอบการถือครอง — complete/fail ต้องแนบค่านี้
+      expect(token).toMatch(/^[0-9a-f-]{36}$/);
+      return token;
     }
     if (got === null) {
       throw new Error(`claim ไม่พบงานของ suite ในคิว (งานหายก่อนถูก claim)`);
@@ -231,6 +258,7 @@ async function claimUntilJob(jobId: string): Promise<void> {
     await svcRpc("fail_data_export_job", {
       p_job_id: got,
       p_error: "dcr12-p5r1-orphan-cleanup",
+      p_claim_token: token,
     });
   }
   throw new Error("claim ไม่พบงานของ suite ภายใน 10 รอบ (คิวพร้ามากผิดปกติ)");
@@ -273,41 +301,32 @@ describe.skipIf(!DB_URL)(
 
     // ─── เคส g: export เต็มสาย → event → tick → email_outbox (B3 ฝั่ง SQL) ────
 
-    it("เคส g complete → event data_export.ready → tick จริง → email_outbox vars ส่งตัวระบุเท่านั้น (job_id+file_media_id ไม่มี download_url — worker ลงนามเอง)", async () => {
+    it("เคส g worker จริง → complete → event → tick → dispatch → Mailpit → ผู้รับ GET ลิงก์จริง 200 (B1+B2 ครบสาย)", async () => {
       const res = await userRpc("my_request_data_export", exportMail.accessToken, {
         p_request_id: crypto.randomUUID(),
       });
       expect(res.status, res.text.slice(0, 300)).toBe(200);
       const jobId = (res.json as JobResult).jobId ?? "";
       expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
-      await claimUntilJob(jobId);
-      // media ผลลัพธ์ — สัญญาเดียวกับเคส c ของ DCR-11 (worker อัปโหลดก่อนเรียก RPC)
-      await psql(`
-        insert into public.media_assets
-          (id, provider, media_type, bucket, storage_path, mime_type, size_bytes, status, uploaded_by)
-        values
-          ('${E17_MEDIA_DONE}', 'supabase_storage', 'document', 'pdpa-exports',
-           'pdpa-exports/dcr12/${E17_MEDIA_DONE}.json', 'application/json', 2048, 'ready',
-           '${exportMail.id}')
-        on conflict (id) do nothing;
-      `);
-      // worker จริงอัปโหลดไฟล์ JSON ก่อนเสมอ (0036 §11) — ไม่มี object จริง =
-      // createSignedUrl ล้ม (storage ตรวจ object ตอนลงนาม) → เมล์ fail ก่อนส่ง
-      const upload = await restCall(
-        "POST",
-        `/storage/v1/object/pdpa-exports/dcr12/${E17_MEDIA_DONE}.json`,
-        { apiKey: SERVICE_KEY, token: SERVICE_KEY },
-        { job_id: jobId, user_id: exportMail.id, suite: "dcr12-p5r1-g" },
-      );
-      expect(upload.status, upload.text.slice(0, 300)).toBe(200);
-      const done = await svcRpc("complete_data_export_job", {
-        p_job_id: jobId,
-        p_file_media_id: E17_MEDIA_DONE,
-        p_chunks: 2,
-        p_request_id: crypto.randomUUID(),
+      const claimToken = await claimUntilJob(jobId);
+      // gate p5-r2 B1: วิ่ง worker "จริง" ของ src — compose 9 chunks → upload คีย์
+      // ในบักเก็ต {user_id}/{job_id}.json (ไม่มี prefix ซ้อน) → แถว media_assets →
+      // complete แนบ claimToken · client ผ่าน Kong มุมมอง host (เหมือน worker ใน
+      // container ที่ใช้ SUPABASE_URL ของตัวเอง)
+      const worker = createClient(REST_URL, SERVICE_KEY, {
+        auth: { persistSession: false },
       });
-      expect(done.status, done.text.slice(0, 300)).toBe(200);
-      expect((done.json as JobResult).status).toBe("done");
+      const outcome = await processDataExportJob(worker, {
+        jobId,
+        userId: exportMail.id,
+        claimToken,
+      });
+      expect(outcome, "worker จริงต้อง done (compose→upload→media→complete)").toBe("done");
+      // media id เกิดจากมือ worker — อ่านกลับจากแถวงาน (สัญญา complete RPC)
+      const mediaId = await psqlScalar(`
+        select file_media_id::text from public.data_export_jobs where id = '${jobId}';
+      `);
+      expect(mediaId ?? "").toMatch(/^[0-9a-f-]{36}$/);
       // tick จริง (psql ตรง — สิทธิ์เดียวกับ pg_cron) แปลง event → notification +
       // email_outbox · data_export.ready เป็นธุรกรรมบังคับ (0036 §12) — แถวอีเมล
       // เกิดเสมอไม่ขึ้นกับ consent ของผู้ใช้
@@ -336,7 +355,7 @@ describe.skipIf(!DB_URL)(
       expect(rows[0]?.p_user).toBe(exportMail.id);
       expect(rows[0]?.v_name ?? "").not.toBe(""); // full_name สำหรับ render template
       expect(rows[0]?.v_job).toBe(jobId);
-      expect(rows[0]?.v_file).toBe(E17_MEDIA_DONE);
+      expect(rows[0]?.v_file).toBe(mediaId);
       // สัญญา B3: SQL ผู้ผลิตส่ง "ตัวระบุ" เท่านั้น — URL ลงนาม 7 วันเกิดที่ worker
       expect(rows[0]?.has_download_url).toBe(false);
       // event ปิดจบ (processed — ไม่ค้าง retry)
@@ -380,8 +399,8 @@ describe.skipIf(!DB_URL)(
       expect(sentRow[0]?.has_download).toBe(false);
       expect(sentRow[0]?.vars_download).toBeNull();
       // ปลายทางจริงของ B3 — เนื้อเมล์ (Mailpit) ต้องมี signed URL ของ object นี้
-      // (host ของลิงก์ตาม SUPABASE_URL ใน container = kong:8000 — dev เท่านั้น ·
-      // assert เป็น path ล้วนจึงผ่านทั้ง host view และ container view)
+      // (host ตาม SUPABASE_PUBLIC_URL มุมมองผู้รับ — gate p5-r2 hostname ·
+      // ตรวจด้วย path ล้วนของ object ก่อน แล้วเช็ค host แยกท้ายเคส)
       const mailList = (await (
         await fetch("http://localhost:8025/api/v1/messages?limit=50")
       ).json()) as {
@@ -391,7 +410,7 @@ describe.skipIf(!DB_URL)(
           Subject: string;
         }[];
       };
-      const signedKey = `/object/sign/pdpa-exports/dcr12/${E17_MEDIA_DONE}.json`;
+      const signedKey = `/object/sign/pdpa-exports/${exportMail.id}/${jobId}.json`;
       let mailText: string | null = null;
       for (const m of mailList.messages.filter((x) =>
         x.To.some((to) => to.Address === exportMail.email),
@@ -399,17 +418,44 @@ describe.skipIf(!DB_URL)(
         const full = (await (
           await fetch(`http://localhost:8025/api/v1/message/${m.ID}`)
         ).json()) as { Text: string };
-        if (full.Text.includes("object/sign/pdpa-exports/")) {
+        if (full.Text.includes(signedKey)) {
           mailText = full.Text;
           break;
         }
       }
       expect(mailText, "ไม่พบจดหมาย export พร้อมลิงก์ที่ Mailpit ของ exportMail").not.toBeNull();
-      expect(
-        mailText?.includes(signedKey),
-        `เนื้อเมล์ขาด signed URL ของ object นี้ (${signedKey})`,
-      ).toBe(true);
-    }, 45_000);
+      // gate p5-r2 B1+B2 ปลายทางสุดท้าย: ผู้รับ "กดลิงก์จริง" จากเมล์ — ไม่มี apikey
+      // ไม่มี cookie — route Kong storage-v1-signed (GET เท่านั้น) พาไป storage
+      // ซึ่งตรวจ token เอง → 200 + JSON ของเจ้าของครบ · gate p5-r2 hostname ruling:
+      // ลิงก์ที่อีเมลถือต้องเป็น origin "มุมมองผู้รับ" (SUPABASE_PUBLIC_URL ของ
+      // container app = localhost:8000) อยู่แล้ว — ไม่ใช่ kong:8000 ที่ผู้รับเปิด
+      // ไม่ได้ (การเขียนกลับด้านล่างคงไว้เป็น safety ของสแตกที่ไม่ตั้งค่า)
+      const linkMatch = mailText?.match(/https?:\/\/[^\s"<>]+\/object\/sign\/[^\s"<>]+/);
+      expect(linkMatch, "เนื้อเมล์ไม่มี URL เต็มของ signed link").not.toBeNull();
+      const link = new URL(linkMatch?.[0] ?? "");
+      const base = new URL(REST_URL);
+      expect(link.host, "host ลิงก์ในเมล์ต้องเป็นมุมมองผู้รับ ไม่ใช่ kong:8000").toBe(base.host);
+      expect(mailText).not.toContain("http://kong:8000");
+      link.protocol = base.protocol;
+      link.host = base.host;
+      const dl = await fetch(link, { signal: AbortSignal.timeout(15_000) });
+      expect(dl.status, `GET signed URL ต้อง 200 (ได้ ${dl.status})`).toBe(200);
+      const document = (await dl.json()) as {
+        schema: string;
+        user_id: string;
+        job_id: string;
+      };
+      expect(document.schema).toBe("ltc.pdpa-export.v1");
+      expect(document.user_id).toBe(exportMail.id);
+      expect(document.job_id).toBe(jobId);
+      // token ปลอม = storage ปฏิเสธเอง (ไม่ใช่ Kong 401 — route นี้ไม่มี key-auth)
+      const tampered = new URL(link);
+      tampered.searchParams.set("token", "tampered-gate-r2");
+      const bad = await fetch(tampered, { signal: AbortSignal.timeout(15_000) });
+      const badText = await bad.text();
+      expect(bad.status, `token ปลอมต้อง 4xx (ได้ ${bad.status})`).toBeGreaterThanOrEqual(400);
+      expect(badText).not.toContain("No API key found"); // ตัวหลักฐานว่าถึง storage จริง
+    }, 90_000);
 
     // ─── เคส a: RPC ขอลบบัญชีคืน userId ของผู้ขอ (B1) ──────────────────────────
 
@@ -573,14 +619,14 @@ describe.skipIf(!DB_URL)(
 
     // ─── เคส e: lease/reclaim ของ claim (B7) ───────────────────────────────────
 
-    it("เคส e claim ตั้ง claimed_at · worker ตาย 11 นาที → claim ถัดไปยึดงานคืน + lease ใหม่ (B7 — ไม่ติด processing ตลอดกาล)", async () => {
+    it("เคส e claim ตั้ง claimed_at+claim_token · 11 นาทียึดคืน token ใหม่ · worker เก่าปิดงานไม่ได้ (stale_lease) · claimed_at NULL ยึดกลับได้ (B7+B4+M1)", async () => {
       const res = await userRpc("my_request_data_export", exportLease.accessToken, {
         p_request_id: crypto.randomUUID(),
       });
       expect(res.status, res.text.slice(0, 300)).toBe(200);
       const jobId = (res.json as JobResult).jobId ?? "";
       expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
-      await claimUntilJob(jobId);
+      const tokenA = await claimUntilJob(jobId);
       // lease ถูกตั้งจริงตอน claim (คอลัมน์ใหม่ของ fix — ไม่มี = งานตายกลางทางแล้ว
       // คิวหมดตลอดกาล)
       const lease1 = await psqlScalar(`
@@ -596,15 +642,44 @@ describe.skipIf(!DB_URL)(
       const reclaim = await svcRpc("claim_data_export_job", {});
       expect(reclaim.status, reclaim.text.slice(0, 300)).toBe(200);
       expect((reclaim.json as JobResult).jobId).toBe(jobId); // ยึดงานเดิมคืน
+      const tokenB = (reclaim.json as JobResult).claimToken ?? "";
+      expect(tokenB).toMatch(/^[0-9a-f-]{36}$/); // รอบถือครอง "ใหม่" มี token ใหม่
+      expect(tokenB).not.toBe(tokenA); // M1 — token เก่าต้องใช้ไม่ได้อีก
       const lease2 = await psqlScalar(`
         select (claimed_at > now() - interval '1 minute')::text
           from public.data_export_jobs where id = '${jobId}';
       `);
       expect(lease2).toBe("true"); // lease ใหม่สำหรับ worker ที่ยึดคืน
-      // ปิดงานไม่ทิ้งคิวค้าง
+      // M1: worker เก่า (ยังถือ tokenA) ตื่นมาปิดงาน — ต้องถูกปฏิเสธ (stale_lease
+      // errcode 22023 = ร่าง error ผ่าน gateway เป็น 4xx พร้อมข้อความ) และงานยัง
+      // processing ของผู้ถือปัจจุบัน
+      const staleFail = await svcRpc("fail_data_export_job", {
+        p_job_id: jobId,
+        p_error: "dcr12-r2-stale-worker",
+        p_claim_token: tokenA,
+      });
+      expect(staleFail.status, staleFail.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
+      expect(rpcMessage(staleFail)).toContain("stale_lease");
+      const stillProcessing = await psqlScalar(`
+        select status::text from public.data_export_jobs where id = '${jobId}';
+      `);
+      expect(stillProcessing).toBe("processing");
+      // B4: แถว "ก่อนมี lease" — processing ที่ claimed_at IS NULL ต้องถูก claim
+      // ถัดไปยึดกลับได้ (NULL-lease reclaim ของ 0039) ไม่ใช่ตายนิรันดร์
+      await psql(`
+        update public.data_export_jobs set claimed_at = null
+         where id = '${jobId}';
+      `);
+      const claim3 = await svcRpc("claim_data_export_job", {});
+      expect(claim3.status, claim3.text.slice(0, 300)).toBe(200);
+      expect((claim3.json as JobResult).jobId).toBe(jobId);
+      const tokenC = (claim3.json as JobResult).claimToken ?? "";
+      expect(tokenC).toMatch(/^[0-9a-f-]{36}$/);
+      // ปิดงานด้วยผู้ถือ "ปัจจุบัน" — ผ่าน (ไม่ทิ้งคิวค้าง)
       const fail = await svcRpc("fail_data_export_job", {
         p_job_id: jobId,
-        p_error: "dcr12-p5r1-case-e-close",
+        p_error: "dcr12-r2-case-e-close",
+        p_claim_token: tokenC,
       });
       expect(fail.status, fail.text.slice(0, 300)).toBe(200);
     }, 45_000);

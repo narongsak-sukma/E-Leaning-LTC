@@ -254,7 +254,27 @@ async function processEmailRow(
     if (signed.error !== null || signed.data === null) {
       return { item: { id: row.id, ok: false, error: "signed_url_failed" }, sent: false };
     }
-    vars = { ...vars, download_url: signed.data.signedUrl };
+    // gate p5-r2 (hostname ruling — ไม่ใช่ cosmetic): ลิงก์ในเมล์ต้องเปิดได้จาก
+    // "ผู้รับ" จริง — createSignedUrl สร้าง URL ตาม SUPABASE_URL ที่ container เห็น
+    // (dev = http://kong:8000 ผู้รับบน host เปิดไม่ได้) · SUPABASE_PUBLIC_URL คือ
+    // origin มุมมองผู้รับ (dev = http://localhost:8000 · prod ไม่ตั้ง = ใช้ URL
+    // เดิมตรง ๆ) — เขียนทับเฉพาะ protocol+host คง path+query (โดย token ลงนาม) เดิม
+    const config = getConfig();
+    let downloadUrl = signed.data.signedUrl;
+    if (config.supabasePublicUrl) {
+      try {
+        const rewritten = new URL(signed.data.signedUrl);
+        const publicOrigin = new URL(config.supabasePublicUrl);
+        rewritten.protocol = publicOrigin.protocol;
+        rewritten.host = publicOrigin.host;
+        downloadUrl = rewritten.toString();
+      } catch {
+        // SUPABASE_PUBLIC_URL รูปแบบผิด (หรือ signedUrl เพี้ยน) = fail แถว ไม่ส่ง
+        // เมล์ลิงก์เปิดไม่ได้ (fail-closed ตามแบบ media_asset_missing)
+        return { item: { id: row.id, ok: false, error: "download_url_invalid" }, sent: false };
+      }
+    }
+    vars = { ...vars, download_url: downloadUrl };
   }
   const tpl = await loadEmailTemplate(ctx.client, ctx.cache, row.template_key, row.locale);
   if (tpl === null) {

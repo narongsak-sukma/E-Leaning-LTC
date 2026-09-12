@@ -49,7 +49,7 @@ services:
             - apikey
           hide_credentials: true
 
-  # ---- Storage: เส้นทางทั่วไป (apikey บังคับ — รวม /object/sign) ----
+  # ---- Storage: เส้นทางทั่วไป (apikey บังคับ — รวม POST /object/sign การลงนาม) ----
   # gate p5-r1 (DCR-12 เคส g): storage-v1-open เดิม (paths /object/sign|authenticated/
   # public + strip_path:true) ตัด "ทั้งเซกเมนต์ที่ match" ทิ้ง — storage:5000 ซึ่ง mount
   # ที่ root (/object/...) ได้รับ /{bucket}/{key} ล้วน → 404 (createSignedUrl พังทุกบักเก็ต
@@ -72,6 +72,27 @@ services:
           key_names:
             - apikey
           hide_credentials: true
+
+  # ---- Storage: ดาวน์โหลดไฟล์ด้วย signed URL (browser คลิกลิงก์จากอีเมล — ไม่มี apikey) ----
+  # gate p5-r2 BLOCKER-2: ลิงก์ data_export.ready มีเพียง ?token=… ผู้รับไม่ได้แนบ
+  # apikey — route ทั่วไป (key-auth) จะ 401 ก่อนถึง storage · route นี้เปิดเฉพาะ
+  # GET /storage/v1/object/sign/{bucket}/{key} โดยฝัง prefix ใน service url
+  # (http://storage:5000/object/sign) เพราะ strip_path ตัดได้เฉพาะ "ทั้ง match" —
+  # storage รับ /{bucket}/{key}?token=… ตรง mount และตรวจ token เอง (invalid/หมดอายุ
+  # = 400 จาก storage ไม่ใช่ 401 จาก Kong) · การ "สร้าง" signature (POST sign) ไม่ผ่าน
+  # route นี้ (methods GET เท่านั้น + storage เองบังคับ authorization อยู่แล้ว) ·
+  # Kong เลือก route ที่ path ยาวกว่าก่อน → GET ที่ชนคำนวณ /storage/v1 ตก route นี้
+  - name: storage-v1-signed
+    url: http://storage:5000/object/sign
+    routes:
+      - name: storage-v1-signed-route
+        paths:
+          - /storage/v1/object/sign
+        strip_path: true
+        methods:
+          - GET
+    plugins:
+      - name: cors
 
 consumers:
   - username: anon
