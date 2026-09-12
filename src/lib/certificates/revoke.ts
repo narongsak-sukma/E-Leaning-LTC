@@ -33,6 +33,9 @@ export interface RevokedCertificate {
   readonly status: "revoked";
   readonly revokedAt: string;
   readonly revokedReason: string;
+  /** สรุปผล reversal ของ ledger ใน TX เดียวกัน (0031 v2 · gate p3-r1 B1) */
+  readonly creditReversedRows: number;
+  readonly creditReversedTotal: number;
 }
 
 /** เพิกถอนใบที่สถานะ valid — mutation + audit TX เดียวใน RPC (คืน id/cert_no/revoked_at) */
@@ -54,9 +57,9 @@ export async function revokeCertificate(input: RevokeCertificateInput): Promise<
     // ป้าย (ERR-XXX-NNN|reason) ของ RPC → map ตรง; ไม่มีป้าย = ERR-SYS-002 opaque
     throw certRpcError(rpc.error, "cert_revoke_rpc_failed");
   }
-  // r7-M2: ตรวจ strict ตาม jsonb_build_object 3 คีย์ exact ของ RPC (id/cert_no/
-  // revoked_at) — คีย์หาย/คีย์เกิน/ค่าผิดชนิด = drift → ERR-SYS-002 (รวมกรณี data
-  // null หรือไม่ใช่ object — รูปใด ๆ ที่ schema ไม่ผ่านคือ drift ทั้งหมด)
+  // r7-M2: ตรวจ strict ตาม jsonb_build_object 5 คีย์ exact ของ RPC (id/cert_no/
+  // revoked_at/credit_reversed_rows/credit_reversed_total — 0031 v2 เพิ่มสองคีย์
+  // หลัง · gate p3-r1 B1) — คีย์หาย/คีย์เกิน/ค่าผิดชนิด = drift → ERR-SYS-002
   // r8-N2: แกะ array เฉพาะความยาว 1 พอดี — แถวที่สองหายเงียบไม่ได้ (schema ตีตกเอง)
   const parsed = RevokedRowSchema.safeParse(unwrapScalarRow(rpc.data));
   if (!parsed.success) {
@@ -68,5 +71,7 @@ export async function revokeCertificate(input: RevokeCertificateInput): Promise<
     status: "revoked",
     revokedAt: parsed.data.revoked_at,
     revokedReason: reason,
+    creditReversedRows: parsed.data.credit_reversed_rows,
+    creditReversedTotal: parsed.data.credit_reversed_total,
   };
 }

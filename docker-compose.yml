@@ -76,6 +76,13 @@ services:
       GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
       GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
       GOTRUE_LOGGING_LEVEL: debug
+      # gate p3-r1 B3 (สืบเนื่อง): MFA ของ GoTrue v2.164.0 อยู่ที่ /auth/v1/factors*
+      # (POST /factors · POST /factors/{id}/challenge · POST /factors/{id}/verify ·
+      # DELETE /factors/{id}) — เวอร์ชันนี้ไม่มี /mfa/* เลย (probe จริง: /mfa/enroll
+      # = 404 จากตัว GoTrue · /factors = 401 รอ Bearer) · TOTP enroll/verify เปิด
+      # default true (internal/conf TOTPFactorTypeConfiguration) ไม่ต้องตั้ง env
+      # ใด — aal2 พิสูจน์จริงได้บน dev stack: enroll → challenge → verify สำเร็จ
+      # = response เป็น session ใหม่ access_token aal=aal2
     networks: [ltc-dev]
 
   # ----------------------------------------------------------------- PostgREST

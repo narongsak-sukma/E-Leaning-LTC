@@ -144,7 +144,8 @@ export const IssuedCertificateResource = z
 
 export type IssuedCertificateResourceParsed = z.infer<typeof IssuedCertificateResource>;
 
-/** ใบที่เพิกถอนแล้ว (POST /admin/certificates/{id}/revoke) */
+/** ใบที่เพิกถอนแล้ว (POST /admin/certificates/{id}/revoke) — additive 0031 v2:
+ *  + creditReversedRows/creditReversedTotal สรุปผล reversal จาก TX เดียวกัน (gate p3-r1 B1) */
 export const RevokedCertificateResource = z
   .object({
     id: z.string().uuid(),
@@ -152,6 +153,10 @@ export const RevokedCertificateResource = z
     status: z.literal("revoked"),
     revokedAt: IsoTimestamp,
     revokedReason: z.string().min(1),
+    creditReversedRows: z.number().int().min(0),
+    // gate r2 BLOCKER-1: reversal เขียน ledger ติดลบ (-amount ใน 0031) — ผลรวมที่
+    // RPC คืนจึงเป็นลบหรือศูนย์เสมอ (ตรง "ผลรวมติดลบ" ของ AUDIT §2.5 CREDIT_REVERSAL)
+    creditReversedTotal: z.number().min(-999_999_999).max(0),
   })
   .strict();
 
@@ -220,12 +225,18 @@ export const ReissueRowSchema = z
   })
   .strict();
 
-/** แถวของ admin_revoke_certificate (3 คีย์ exact) */
+/** แถวของ admin_revoke_certificate (5 คีย์ exact — jsonb_build_object ท้ายฟังก์ชัน
+ *  0031 v2: + credit_reversed_rows/total ผล reversal ใน TX เดียวกัน · gate p3-r1 B1:
+ *  ครั้งแรกพลาดไม่ใส่สองคีย์นี้ → strict parse พังทุกครั้งที่เพิกถอน (503 drift) */
 export const RevokedRowSchema = z
   .object({
     id: z.string().uuid(),
     cert_no: z.string().regex(CERT_NO_PATTERN),
     revoked_at: IsoTimestamp,
+    credit_reversed_rows: z.number().int().min(0),
+    // gate r2 BLOCKER-1: sum ของแถว reversal (-amount) = ค่าติดลบหรือศูนย์เสมอ —
+    // ค่าบวกคือ drift · ตรง "ผลรวมติดลบ" ของ AUDIT §2.5 CREDIT_REVERSAL
+    credit_reversed_total: z.number().min(-999_999_999).max(0),
   })
   .strict();
 

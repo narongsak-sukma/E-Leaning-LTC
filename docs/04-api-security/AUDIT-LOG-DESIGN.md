@@ -2,7 +2,7 @@
 
 |          |                                                 |
 | -------- | ----------------------------------------------- |
-| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
+| เวอร์ชัน | 1.0.3 — codex gate r1 (feat/wave-e-phase3 **B2**): §2.5 จุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** เปลี่ยนเป็น **atomic RPC** — `admin_create_credit_rule`/`admin_update_credit_rule_status` (0032 ฉบับ atomic) บันทึก audit ผ่าน `append_audit_event_internal` **ใน TX เดียวกับ mutation** (audit ล้ม = rollback ทั้งรายการ) · แบบแผน allowlist best-effort ของ 1.0.2 **ถูกปฏิเสธ**: §1.5 บังคับ event ที่คู่กับ business mutation เขียน atomic — ADMIN_EXPORT (0025) เป็น read-side disclosure ไม่ใช่ mutation จึงตั้งแบบแผนให้ config mutation ไม่ได้ · allowlist ของ wrapper กลับสู่สถานะ 0025 (ไม่มี CREDIT_RULE_*) · RPC ตรวจ roles + aal2 ในตัว (gate r1 B3) · 1.0.2 — DCR-9 r1 (lead · 0032): §2.5 กำกับจุดเขียนของ **CREDIT_RULE_CREATE/UPDATE** = BFF service_role RPC (allowlist 0032 · best-effort ตามแบบแผน ADMIN_EXPORT/0025 — การตัดสิน lead บันทึกในหัวไฟล์ 0032 **— ถูกปฏิเสธใน 1.0.3**) + context keys strict ตาม v_keys จริง · 1.0.1 — DCR-9 (Wave E Phase 3 · D68): §2.5 เพิ่ม **CREDIT_REVERSAL** (reversal อัตโนมัติใน TX เพิกถอนใบ — CRT-006 · 0031) + กำกับ CREDIT_ACCRUAL ว่า**เขียนโดย consumer `credit_accrual_tick` ณ การ INSERT ledger** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — คนละจุดกับ audit) · นับรวม 53 event types · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · แก้ตาม D11–D16 · baseline สำหรับ Wave B |
 | วันที่    | 2026-09-09                                      |
 | อ้างอิง  | PROJECT-BRIEF.md §5 (โดเมน 8), §8 (security), กฎ CTO D6 · RBAC-DESIGN.md (§3.1 canonical helpers) · API-SPECIFICATION.md · SRS.md (AUD-001–005) |
 
@@ -92,10 +92,11 @@
 
 | action (ชื่อ event) | Actor | หัวข้อหลักใน context (jsonb) | ระดับ | PDPA |
 | --- | --- | --- | --- | --- |
-| CREDIT_RULE_CREATE | staff:registrar, super_admin | rule_id, ค่ากฎ, effective_from | NOTICE | — |
-| CREDIT_RULE_UPDATE | staff:registrar(draft), super_admin | rule_id, version | NOTICE | — |
-| CREDIT_ACCRUAL | ระบบ — **เกิดตอนตรวจผ่าน (grading TX) ไม่ใช่ตอนออก cert** (D12-14) | ledger_id, user_id, จำนวน, rule_id, `source_type='assessment_attempt'`, attempt_id, เกณฑ์ตัดสินตามวันที่ผ่าน | NOTICE | คุณวุฒิของบุคคล |
+| CREDIT_RULE_CREATE | staff:registrar, super_admin — ผู้บันทึกจริง = RPC `admin_create_credit_rule` (0032 ฉบับ atomic · SECURITY DEFINER class ก): **INSERT credit_rules + audit ผ่าน `append_audit_event_internal` ใน TX เดียวกัน — audit ล้ม = rollback ทั้งรายการ** (§1.5 fail-closed แบบเดียวกับ CERT_ISSUE 0019-r1) · RPC ตรวจ roles + aal2 ในตัว · allowlist best-effort ของ 0032 r1 ถูกปฏิเสธโดย codex gate r1 (B2) — wrapper กลับสถานะ 0025 | rule_id, code, credit_type, credits, effective_from (สร้างฝั่ง server ใน RPC — strict โดยการสร้าง) | NOTICE | — |
+| CREDIT_RULE_UPDATE | staff:registrar, super_admin — จุดเขียนเดียวกับ CREDIT_RULE_CREATE: RPC `admin_update_credit_rule_status` (0032 atomic · ตรวจ roles + aal2 ในตัว) — UPDATE + audit ใน TX เดียว | rule_id, code, status_from, status_to (สร้างฝั่ง server ใน RPC — strict โดยการสร้าง) | NOTICE | — |
+| CREDIT_ACCRUAL | ระบบ — **เกิดตอนตรวจผ่าน (grading TX) ไม่ใช่ตอนออก cert** (D12-14) · ผู้บันทึกจริง = consumer `credit_accrual_tick` (0031 — DCR-9) **ณ การ INSERT แถว ledger สำเร็จ** (event `credit.accrual` ถูก produce ใน grading TX ตั้งแต่ 0020 — จุด produce ≠ จุดเขียน audit; ผู้ไม่มีรอบเป้าหมาย (citizen) ไม่มี ledger จึงไม่มี event นี้) | ledger_id, user_id, จำนวน, rule_id, `source_type='assessment_attempt'`, attempt_id, เกณฑ์ตัดสินตามวันที่ผ่าน | NOTICE | คุณวุฒิของบุคคล |
 | CREDIT_ADJUST | staff:registrar, super_admin | ledger_id, user_id, delta, reason, evidence | CRITICAL | การแก้ไขข้อมูลสิทธิ์โดยบุคคล |
+| CREDIT_REVERSAL | ระบบ (ในนามผู้เพิกถอน — `created_by` = registrar/super_admin) — เกิดใน **TX เดียวกับ CERT_REVOKE** อัตโนมัติ (0031 — CRT-006/D68 C-5) หนึ่ง event ต่อการเพิกถอน (สรุปทุกแถว reversal ของใบนั้น) · idempotent ต่อ (cert, original_entry) — เพิกถอนซ้ำ/ใบไม่มี accrual = ไม่เกิด event | certificate_id, cert_no, reversed_rows, total_amount (ผลรวมติดลบ), original_entry_ids | CRITICAL | การแก้ไขข้อมูลสิทธิ์โดยบุคคล (ผลพวงของการเพิกถอน) |
 
 ### 2.6 การเข้าถึงข้อมูล / ระบบ
 
@@ -109,7 +110,7 @@
 | AUDIT_EXPORT | super_admin | ช่วงเวลา, จำนวนแถว, รูปแบบ | CRITICAL | ส่งออกบันทึกที่มีข้อมูลบุคคล |
 | AUDIT_CHAIN_VERIFY | ระบบ (cron) | ผล (ok/broken ที่ id ใด), anchor ที่ใช้ | NOTICE (broken=CRITICAL) | พิสูจน์ความถูกต้องของบันทึก |
 
-รวม **52 event types** (นับจากตาราง §2.1–2.6 — เพิ่ม AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14; AUTH_MFA_BACKUPS_REGENERATED ตาม D11-12; EXAM_SESSION_TAKEOVER ตาม D12-21; CERT_PDF_ATTACH ตาม D38)
+รวม **53 event types** (นับจากตาราง §2.1–2.6 — เพิ่ม AUTH_PASSWORD_CHANGE, QB_QUESTION_DELETE, CERT_REISSUE ตาม A6 review B-14; AUTH_MFA_BACKUPS_REGENERATED ตาม D11-12; EXAM_SESSION_TAKEOVER ตาม D12-21; CERT_PDF_ATTACH ตาม D38; CREDIT_REVERSAL ตาม DCR-9/D68)
 
 ---
 
@@ -297,7 +298,7 @@ create policy audit_read_self on public.audit_logs for select to authenticated
 
 | เงื่อนไข | ผู้รับแจ้งเตือน | ช่องทาง |
 | --- | --- | --- |
-| event ระดับ CRITICAL (ROLE_GRANT, CERT_ISSUE/REVOKE, CREDIT_ADJUST, AUDIT_EXPORT) | super_admin ทุกบัญชี | notification ในระบบ + อีเมลทันที |
+| event ระดับ CRITICAL (ROLE_GRANT, CERT_ISSUE/REVOKE, CREDIT_ADJUST/REVERSAL, AUDIT_EXPORT) | super_admin ทุกบัญชี | notification ในระบบ + อีเมลทันที |
 | AUTH_LOGIN_FAIL ≥ 20/ชม. จาก ip_hash เดียว | super_admin | สรุปรายชั่วโมง |
 | AUTH_LOCKOUT ของบัญชี staff | super_admin + เจ้าของบัญชี | ทันที |
 | AUDIT_CHAIN_VERIFY = broken | super_admin + ช่องทางเตือนภัย (เช่น webhook ภายนอกที่ config) | ทันที — ต้องสอบสวนก่อนทำอย่างอื่น |
