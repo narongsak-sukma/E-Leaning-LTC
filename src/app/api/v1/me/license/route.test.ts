@@ -208,6 +208,29 @@ describe("GET /api/v1/me/license", () => {
     expect(body.data.canResubmit).toBe(true);
   });
 
+  it("approved + ใบ verified → canResubmit false (ผูกเลขแล้วห้ามเสนอฟอร์มยื่นซ้ำ)", async () => {
+    mockClient({
+      tables: {
+        license_applications: {
+          data: { status: "approved", rejected_reason: null, decided_at: T, submitted_at: T },
+          error: null,
+        },
+        lawyer_licenses: { data: { license_no: "7301589", verified_at: T }, error: null },
+      },
+    });
+    const res = await GET(getUrl());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { latestApplication: unknown; currentLicense: unknown; canResubmit: boolean } };
+    expect(body.data.latestApplication).toEqual({
+      status: "approved",
+      rejectedReason: null,
+      decidedAt: T,
+      submittedAt: T,
+    });
+    expect(body.data.currentLicense).toEqual({ licenseNo: "7301589", verifiedAt: T });
+    expect(body.data.canResubmit).toBe(false);
+  });
+
   it("ไม่มีคำขอ/ไม่มีใบ → null ทั้งคู่ + canResubmit true", async () => {
     mockClient({ tables: {} });
     const res = await GET(getUrl());

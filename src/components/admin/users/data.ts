@@ -1,7 +1,7 @@
 /**
  * users/data — ชั้นข้อมูลหน้า /admin/users (Wave E Phase 5 · lane F · ADM-002)
  *
- * - เรียก GET /api/v1/admin/users?q&status&cursor&limit (API-SPECIFICATION §3.8 แถว 210 ·
+ * - เรียก GET /api/v1/admin/users?query&status&cursor&limit (API-SPECIFICATION §3.8 แถว 210 ·
  *   keyset ผ่าน RPC admin_list_users — D-p5-6) ผ่าน transport กลาง (PB-19) แบบ server-side
  *   absolute-origin + ส่งต่อ cookie ของ request เดิม + cache no-store
  * - ข้อมูลผู้ใช้ = PII — BFF เขียน audit PII_ACCESS (fail-closed) อยู่แล้ว · หน้าแสดงเท่าที่
@@ -14,36 +14,36 @@ import { ApiError, fetchJson } from "@/lib/api/transport";
 import { getConfig } from "@/lib/config";
 import type { AdminDataErrorKind, AdminResult } from "@/lib/fixtures/admin";
 
-/** สถานะบัญชีที่หน้ากรองได้ — mirror ฝั่ง BFF (ban/unban ของ GoTrue คือตัวบังคับจริง) */
-export type UserStatus = "active" | "disabled";
+/** สถานะบัญชีที่หน้ากรองได้ — mirror enum ของ BFF (active/deleted ตาม p_status ของ RPC) */
+export type UserStatus = "active" | "deleted";
 
 /** กันค่า ?status= จาก URL ที่ไม่อยู่ใน enum ก่อนส่งไปกรองฝั่ง BFF */
 export function isUserStatus(value: unknown): value is UserStatus {
-  return value === "active" || value === "disabled";
+  return value === "active" || value === "deleted";
 }
 
 /** ตัวเลือกกรองสถานะของหน้า (ข้อความไทย) — "all" = ไม่ส่งพารามิเตอร์ไป BFF */
 export const USER_STATUS_FILTER_OPTIONS = [
   { value: "all", label: "ทั้งหมด" },
   { value: "active", label: "ใช้งาน" },
-  { value: "disabled", label: "ปิดใช้งาน" },
+  { value: "deleted", label: "ถูกลบแล้ว" },
 ] as const;
 
 /** ขนาดหน้าของรายการผู้ใช้ — default ของ PageQuery (API-SPECIFICATION §4 #12) */
 export const ADMIN_USERS_PAGE_SIZE = 20;
 
-/** แถวผู้ใช้จาก GET /admin/users (camelCase ตาม convention resource ของ repo) */
+/** แถวผู้ใช้จาก GET /admin/users (camelCase · ตรง AdminUserResource ของ route — strict) */
 export type AdminUserRow = {
   id: string;
   email: string;
   displayName: string;
-  /** สถานะบัญชีตามที่ BFF ส่ง — แสดงตามทะเบียน USER_STATUS_LABEL ค่าแปลกปลอมแสดงเป็นกลาง */
-  status: string;
   /** บทบาททั้งหมดที่ถือ (ค่าแปลกปลอมกรองทิ้งตอนแสดง — ตัดสินจริงอยู่ที่ BFF/DB เสมอ) */
   roles: readonly string[];
+  /** วันที่ถูกลบ (soft-delete) — null = ยังใช้งาน · สถานะ ban ของ GoTrue ไม่อยู่ในแถวของ RPC (Wave F) */
+  deletedAt: string | null;
   createdAt: string;
-  /** เหตุผลการปิดใช้งานล่าสุด — null/ขาด = ไม่มี (แสดงเมื่อมี เพื่อให้เจ้าหน้าที่เห็นบริบท) */
-  disabledReason: string | null;
+  /** มีใบอนุญาตที่ verified หรือไม่ (จาก lawyer_licenses ผ่าน RPC) */
+  hasVerifiedLicense: boolean;
 };
 
 /** ผลหน้าของ keyset pagination — รูปร่างเดียวกับ AdminCoursesPage */
@@ -78,8 +78,8 @@ export function parseAdminUserRow(raw: unknown): AdminUserRow | null {
   const id = requiredString(raw, "id");
   const email = requiredString(raw, "email");
   const displayName = requiredString(raw, "displayName");
-  const status = requiredString(raw, "status");
   const createdAt = requiredString(raw, "createdAt");
+  const deletedAt = nullableString(raw, "deletedAt");
   const rolesRaw = raw["roles"];
   const roles =
     rolesRaw === undefined
@@ -87,15 +87,15 @@ export function parseAdminUserRow(raw: unknown): AdminUserRow | null {
       : Array.isArray(rolesRaw)
         ? rolesRaw.filter((role): role is string => typeof role === "string")
         : undefined;
-  const disabledReason = nullableString(raw, "disabledReason");
+  const hasVerifiedLicense = raw["hasVerifiedLicense"];
   if (
     id === null ||
     email === null ||
     displayName === null ||
-    status === null ||
     createdAt === null ||
+    deletedAt === undefined ||
     roles === undefined ||
-    disabledReason === undefined
+    typeof hasVerifiedLicense !== "boolean"
   ) {
     return null;
   }
@@ -103,10 +103,10 @@ export function parseAdminUserRow(raw: unknown): AdminUserRow | null {
     id,
     email,
     displayName,
-    status,
     roles,
+    deletedAt,
     createdAt,
-    disabledReason,
+    hasVerifiedLicense,
   };
 }
 
@@ -148,7 +148,8 @@ export async function getAdminUsers(query: {
 }): Promise<AdminResult<AdminUsersPage>> {
   const parameters: Record<string, string> = {};
   if (query.q !== undefined && query.q.length > 0) {
-    parameters["q"] = query.q;
+    // wire key ของ route คือ `query` (strict zod — คีย์อื่นถูกปฏิเสธ 400)
+    parameters["query"] = query.q;
   }
   if (query.status !== undefined) {
     parameters["status"] = query.status;

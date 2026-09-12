@@ -12,10 +12,11 @@ import {
   LICENSE_STATUS_FILTER_OPTIONS,
   type AdminLicenseApplicationRow,
 } from "@/components/admin/license/data";
-import {
-  licenseStatusViewOf,
-  LicenseDecisionActions,
-} from "@/components/admin/license/LicenseDecisionActions";
+// ปุ่มตัดสินเป็น client component — licenseStatusViewOf เป็น pure helper ที่หน้า
+// server เรียน SSR ต้องมาจากโมดูลไม่มี "use client" (โมดูล client ห้ามเรียกจาก
+// server — SSR ล่มทุกคำขอแม้ BFF 200 — e2e-15 t4)
+import { LicenseDecisionActions } from "@/components/admin/license/LicenseDecisionActions";
+import { licenseStatusViewOf } from "@/components/admin/license/license-status";
 
 export const metadata: Metadata = {
   title: "คำขอใบอนุญาตทนายความ · หลังบ้าน",
@@ -118,6 +119,20 @@ export default async function AdminLicenseApplicationsPage({
         const view = licenseStatusViewOf(row.status);
         return <StatusBadge tone={view.tone} label={view.label} />;
       },
+    },
+    {
+      // เหตุผลการปฏิเสธ (BFF ส่งมาในแถว — reason) — registrar เห็นเหตุผลที่ตัดสิน
+      // ไว้ต่อคำขอนั้น ๆ (e2e-15 t7) · แถวที่ไม่ใช่ rejected แสดง "—"
+      id: "reason",
+      header: "เหตุผล (ปฏิเสธ)",
+      render: (row) =>
+        row.status === "rejected" && row.reason !== null ? (
+          <span className="max-w-[16rem] inline-block truncate text-ink-600" title={row.reason}>
+            {row.reason}
+          </span>
+        ) : (
+          <span className="text-ink-400">—</span>
+        ),
     },
     {
       id: "submitted",

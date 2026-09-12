@@ -10,6 +10,7 @@ import {
   buildDisableBody,
   buildEnableBody,
   buildGrantRoleBody,
+  buildRevokeRoleBody,
   canCreateStaffUser,
   canDisableUser,
   canManageRoles,
@@ -20,6 +21,7 @@ import {
   roleOptionsForCaller,
   roleRevokePath,
   userActionPath,
+  userStatusKeyOf,
   userStatusViewOf,
   validateCreateStaffForm,
 } from "./UserActions";
@@ -35,13 +37,18 @@ describe("reasonValid", () => {
   });
 });
 
-describe("userStatusViewOf / roleLabelOf", () => {
+describe("userStatusViewOf / userStatusKeyOf / roleLabelOf", () => {
   it("สถานะที่รู้จักได้ป้าย+โทน · ค่าแปลกปลอมแสดงเป็นกลาง (ไม่เดา)", () => {
     expect(userStatusViewOf("active")).toEqual({ label: "ใช้งาน", tone: "success" });
-    expect(userStatusViewOf("disabled")).toEqual({ label: "ปิดใช้งาน", tone: "danger" });
+    expect(userStatusViewOf("deleted")).toEqual({ label: "ถูกลบแล้ว", tone: "danger" });
     const unknown = userStatusViewOf("frozen");
     expect(unknown.label).toBe("frozen");
     expect(unknown.tone).toBe("neutral");
+  });
+
+  it("userStatusKeyOf — deletedAt null = active · มีค่า = deleted", () => {
+    expect(userStatusKeyOf(null)).toBe("active");
+    expect(userStatusKeyOf("2026-09-01T00:00:00Z")).toBe("deleted");
   });
 
   it("บทบาทในทะเบียนได้ป้ายไทย · นอกทะเบียนคืนรหัสเดิม", () => {
@@ -84,22 +91,24 @@ describe("สิทธิ์ต่อ action", () => {
 });
 
 describe("bodies/paths ต่อ endpoint", () => {
-  it("disable มี reason ตัดช่องว่าง · enable ไม่มี reason", () => {
+  it("disable → {is_active:false, reason trim} · enable → {is_active:true}", () => {
     expect(buildDisableBody("  เหตุผลยาวพอควรสำหรับการปิด  ")).toEqual({
-      action: "disable",
+      is_active: false,
       reason: "เหตุผลยาวพอควรสำหรับการปิด",
     });
-    expect(buildEnableBody()).toEqual({ action: "enable" });
+    expect(buildEnableBody()).toEqual({ is_active: true });
   });
 
-  it("grant ส่ง role+reason (trim) · revoke ผูก role ใน query", () => {
+  it("grant/revoke ส่ง role+reason ใน body (trim) · revoke path ไม่มี query", () => {
     expect(buildGrantRoleBody("lawyer", "  ผ่านการยืนยันใบอนุญาตแล้ว  ")).toEqual({
       role: "lawyer",
       reason: "ผ่านการยืนยันใบอนุญาตแล้ว",
     });
-    expect(roleRevokePath("u-1", "lawyer")).toBe(
-      "/api/v1/admin/users/u-1/roles?role=lawyer",
-    );
+    expect(buildRevokeRoleBody("lawyer", "  พ้นสภาทนายความแล้ว  ")).toEqual({
+      role: "lawyer",
+      reason: "พ้นสภาทนายความแล้ว",
+    });
+    expect(roleRevokePath("u-1")).toBe("/api/v1/admin/users/u-1/roles");
   });
 
   it("path ต่อผู้ใช้ encode id · isUuid คัด id มั่ว", () => {
@@ -110,9 +119,14 @@ describe("bodies/paths ต่อ endpoint", () => {
 });
 
 describe("validateCreateStaffForm / buildCreateStaffBody", () => {
-  const VALID = { email: "new.staff@lawcouncil.go.th", displayName: "สมหญิง รักเรียน", role: "staff:viewer" };
+  const VALID = {
+    email: "new.staff@lawcouncil.go.th",
+    displayName: "สมหญิง รักเรียน",
+    role: "staff:viewer",
+    reason: "ขอสร้างบัญชีเจ้าหน้าที่ดูข้อมูลสำหรับหน่วยงาน",
+  };
 
-  it("ครบถ้วน → {} (ผ่าน) และบอดี้ trim แล้วครบ 3 คีย์", () => {
+  it("ครบถ้วน → {} (ผ่าน) และบอดี้ trim แล้วครบ 4 คีย์", () => {
     expect(validateCreateStaffForm(VALID)).toEqual({});
     const built = buildCreateStaffBody(VALID);
     expect(built.ok).toBe(true);
@@ -121,15 +135,18 @@ describe("validateCreateStaffForm / buildCreateStaffBody", () => {
         email: "new.staff@lawcouncil.go.th",
         displayName: "สมหญิง รักเรียน",
         role: "staff:viewer",
+        reason: "ขอสร้างบัญชีเจ้าหน้าที่ดูข้อมูลสำหรับหน่วยงาน",
       });
     }
   });
 
-  it("อีเมล/ชื่อ/บทบาทผิด → ข้อความไทยต่อช่อง · buildCreateStaffBody → { ok: false }", () => {
-    const errors = validateCreateStaffForm({ email: "no-at", displayName: "", role: "" });
+  it("อีเมล/ชื่อ/บทบาท/เหตุผลผิด → ข้อความไทยต่อช่อง · buildCreateStaffBody → { ok: false }", () => {
+    const errors = validateCreateStaffForm({ email: "no-at", displayName: "", role: "", reason: "" });
     expect(errors["email"]).toBe("รูปแบบอีเมลไม่ถูกต้อง");
     expect(errors["displayName"]).toBe("ชื่อ-นามสกุลต้องยาว 1-120 ตัวอักษร");
     expect(errors["role"]).toBe("เลือกบทบาทเริ่มต้นของบัญชี");
+    expect(errors["reason"]).toBe("ระบุเหตุผลให้ยาวอย่างน้อย 10 ตัวอักษร");
     expect(buildCreateStaffBody({ ...VALID, email: "broken@" }).ok).toBe(false);
+    expect(buildCreateStaffBody({ ...VALID, reason: "สั้น" }).ok).toBe(false);
   });
 });

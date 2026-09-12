@@ -90,7 +90,26 @@ describe("normalizeLicenseApplication / normalizeLicenseCurrent", () => {
 });
 
 describe("normalizeMyLicenseView — wrapper และแผงราบ + canResubmit", () => {
-  it("แบบ wrapper application/license", () => {
+  it("แบบ wrapper latestApplication/currentLicense (ขาออกจริงของ BFF)", () => {
+    const view = normalizeMyLicenseView({
+      latestApplication: { status: "approved", submittedAt: ISO_1, decidedAt: ISO_2, rejectedReason: null },
+      currentLicense: { licenseNo: "1234567", verifiedAt: ISO_2 },
+      canResubmit: false,
+    });
+    expect(view?.application?.status).toBe("approved");
+    expect(view?.application?.decidedAt).toBe(ISO_2);
+    expect(view?.license?.licenseNo).toBe("1234567");
+    expect(view?.canResubmit).toBe(false);
+  });
+
+  it("latestApplication/currentLicense = null อย่างชัด → null (ยังไม่ยื่น/ยังไม่มีใบ)", () => {
+    const view = normalizeMyLicenseView({ latestApplication: null, currentLicense: null, canResubmit: true });
+    expect(view?.application).toBeNull();
+    expect(view?.license).toBeNull();
+    expect(view?.canResubmit).toBe(true);
+  });
+
+  it("แบบ wrapper application/license (alias tolerant เดิม)", () => {
     const view = normalizeMyLicenseView({
       application: { status: "approved", submittedAt: ISO_1, decidedAt: ISO_2, rejectedReason: null },
       license: { licenseNo: "1234567", verifiedAt: ISO_2 },
@@ -142,13 +161,13 @@ describe("getMyLicense — GET /me/license", () => {
   it("200 → normalize + strict parse ผ่าน · URL/method ถูก", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       okEnvelope({
-        application: {
+        latestApplication: {
           status: "rejected",
           submittedAt: ISO_1,
           decidedAt: ISO_2,
           rejectedReason: "เอกสารไม่ครบ",
         },
-        license: { licenseNo: "1234567", verifiedAt: ISO_2 },
+        currentLicense: { licenseNo: "1234567", verifiedAt: ISO_2 },
         canResubmit: true,
       }),
     );

@@ -22,7 +22,7 @@ export type AdminAuditRow = {
   id: string;
   occurredAt: string;
   action: string;
-  /** ผู้กระทำ (BFF แปลง uuid → ชื่อ/รหัสแสดง) — null = ระบบ/ไม่ระบุ */
+  /** ผู้กระทำ — uuid จาก wire "actorUserId" (แสดงตรง ๆ · null = ระบบ/ไม่ระบุ) */
   actor: string | null;
   entityType: string | null;
   entityId: string | null;
@@ -63,7 +63,12 @@ export function isJsonValue(value: unknown): boolean {
   return kind === "string" || kind === "number" || kind === "boolean" || Array.isArray(value) || isRecord(value);
 }
 
-/** pure — แถวผ่าน contract → view · ผิดรูป → null (fail-closed) */
+/** pure — แถวผ่าน contract → view · ผิดรูป → null (fail-closed)
+ *
+ *  wire ตาม resource ขาออกของ route (AuditLogResource — strict zod): ผู้กระทำคือ
+ *  "actorUserId" (uuid|null) ไม่ใช่ "actor" — เดิมอ่าน "actor" ที่ BFF ไม่เคยส่ง =
+ *  parse null ทุกแถวทั้งที่ 200 → หน้าแสดงแผง "ระบบล่ม" (e2e-16 t6 จับ)
+ */
 export function parseAdminAuditRow(raw: unknown): AdminAuditRow | null {
   if (!isRecord(raw)) {
     return null;
@@ -71,7 +76,7 @@ export function parseAdminAuditRow(raw: unknown): AdminAuditRow | null {
   const id = requiredString(raw, "id");
   const occurredAt = requiredString(raw, "occurredAt");
   const action = requiredString(raw, "action");
-  const actor = nullableString(raw, "actor");
+  const actor = nullableString(raw, "actorUserId");
   const entityType = nullableString(raw, "entityType");
   const entityId = nullableString(raw, "entityId");
   const context = raw["context"];

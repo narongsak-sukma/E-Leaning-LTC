@@ -27,14 +27,26 @@ import {
   parseAdminAuditLogsPage,
 } from "./data";
 
+/** แถวตาม wire จริงของ route (AuditLogResource — ผู้กระทำ = actorUserId uuid) */
 const ROW = {
   id: "00000000-0000-4000-8000-0000000000bb",
   occurredAt: "2026-08-30T02:00:00Z",
   action: "LICENSE_VERIFY",
-  actor: "somchai",
+  actorUserId: "00000000-0000-4000-8000-0000000000aa",
   entityType: "license_application",
   entityId: "00000000-0000-4000-8000-0000000000cc",
   context: { reason: "เอกสารครบ" },
+};
+
+/** view ของหน้า — parser map actorUserId (wire) → actor (แสดงผล) */
+const ROW_VIEW = {
+  id: ROW.id,
+  occurredAt: ROW.occurredAt,
+  action: ROW.action,
+  actor: ROW.actorUserId,
+  entityType: ROW.entityType,
+  entityId: ROW.entityId,
+  context: ROW.context,
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -58,8 +70,8 @@ beforeEach(() => {
 });
 
 describe("parseAdminAuditRow", () => {
-  it("row ok -> same shape", () => {
-    expect(parseAdminAuditRow(ROW)).toEqual(ROW);
+  it("row ok -> view (actorUserId ของ wire → actor ของหน้า)", () => {
+    expect(parseAdminAuditRow(ROW)).toEqual(ROW_VIEW);
   });
 
   it("row drift -> null", () => {
@@ -67,7 +79,14 @@ describe("parseAdminAuditRow", () => {
     expect(parseAdminAuditRow({ ...ROW, id: "" })).toBeNull();
     expect(parseAdminAuditRow({ ...ROW, occurredAt: 5 })).toBeNull();
     expect(parseAdminAuditRow({ ...ROW, action: undefined })).toBeNull();
-    expect(parseAdminAuditRow({ ...ROW, actor: 9 })).toBeNull();
+    expect(parseAdminAuditRow({ ...ROW, actorUserId: 9 })).toBeNull();
+  });
+
+  it("wire เดิมที่ส่ง actor (BFF ไม่เคยส่ง) -> null — กัน regression", () => {
+    const legacyWire = { ...ROW } as Record<string, unknown>;
+    delete legacyWire["actorUserId"];
+    legacyWire["actor"] = "somchai";
+    expect(parseAdminAuditRow(legacyWire)).toBeNull();
   });
 
   it("context must be JSON value", () => {
@@ -90,7 +109,7 @@ describe("isJsonValue", () => {
 describe("parseAdminAuditLogsPage", () => {
   it("page ok, one bad row fails whole page", () => {
     const page = { nextCursor: "c2", hasMore: true };
-    expect(parseAdminAuditLogsPage({ data: [ROW], page })).toEqual({ data: [ROW], page });
+    expect(parseAdminAuditLogsPage({ data: [ROW], page })).toEqual({ data: [ROW_VIEW], page });
     expect(parseAdminAuditLogsPage({ data: [ROW, { ...ROW, id: 7 }], page })).toBeNull();
     expect(parseAdminAuditLogsPage({ data: [ROW] })).toBeNull();
     expect(parseAdminAuditLogsPage({ data: [ROW], page: { hasMore: "yes" } })).toBeNull();
@@ -141,7 +160,7 @@ describe("getAdminAuditLogs", () => {
     const result = await getAdminAuditLogs(query);
     expect(result).toEqual({
       ok: true,
-      data: { data: [ROW], page: { nextCursor: null, hasMore: false } },
+      data: { data: [ROW_VIEW], page: { nextCursor: null, hasMore: false } },
     });
     expect(capturedUrl).toContain("/api/v1/admin/audit-logs?");
     expect(capturedUrl).toContain("action=LICENSE");

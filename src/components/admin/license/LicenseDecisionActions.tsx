@@ -24,18 +24,10 @@ export function rejectReasonValid(reason: string): boolean {
   return reason.trim().length >= REJECT_REASON_MIN_LENGTH;
 }
 
-/** มุมมองสถานะคำขอสำหรับ badge (ทะเบียนไทย + โทนตาม StatusBadge) */
-export const LICENSE_STATUS_VIEW: Record<string, { label: string; tone: "success" | "danger" | "neutral" }> = {
-  pending: { label: "รอตรวจ", tone: "neutral" },
-  approved: { label: "อนุมัติแล้ว", tone: "success" },
-  rejected: { label: "ปฏิเสธแล้ว", tone: "danger" },
-};
-
-/** pure — สถานะที่ไม่รู้จักแสดงเป็นกลาง (ไม่เดา — ตัดสินจริงที่ BFF) */
-export function licenseStatusViewOf(status: string): { label: string; tone: "success" | "danger" | "neutral" } {
-  const known = LICENSE_STATUS_VIEW[status];
-  return known ?? { label: status, tone: "neutral" };
-}
+// pure mapping สถานะย้ายไป license-status.ts (ไม่มี "use client") — หน้า server
+// /admin/license-applications เรียกตอน SSR ต้องมาจากโมดูลนั้น (โมดูล client ห้าม
+// เรียกจาก server) · re-export ต่อเพื่อ test/UI เดิมไม่ต้องแก้ import
+export { licenseStatusViewOf, LICENSE_STATUS_VIEW } from "./license-status";
 
 /** pure — บอดี้ของ PATCH ตัดสิน — reject แนบ reason บังคับ · approve ไม่แนบ reason (RPC ไม่ใช้) */
 export function buildDecisionBody(

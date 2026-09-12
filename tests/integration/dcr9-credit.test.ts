@@ -409,6 +409,9 @@ async function cleanupE12World(): Promise<void> {
       delete from public.lesson_progress
        where enrollment_id in (select id from public.enrollments where user_id in (${list}));
       delete from public.enrollments where user_id in (${list});
+      -- แจ้งเตือนจากการออกใบประกาศของ suite (Wave E notifications — recipients
+      -- ชี้ FK เข้า profiles ก่อนถึงแถวผู้ใช้ ไม่ลบก่อน = cleanup ทั้งชุดตายที่ profiles)
+      delete from public.notification_recipients where user_id in (${list});
       delete from public.role_assignments where user_id in (${list});
       delete from public.profiles where id in (${list});
       delete from auth.users where email like 'dcr9-credit-%';

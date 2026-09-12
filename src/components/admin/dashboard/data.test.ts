@@ -28,16 +28,33 @@ import {
   parseDashboardStats,
 } from "./data";
 
-const STATS = {
+/** view model flat ที่การ์ด KPI ใช้ (ผลลัพธ์หลัง map) */
+const EXPECTED = {
   usersNew: 5,
   usersTotal: 120,
   enrollmentsNew: 42,
   examAttempts: 30,
   examPassed: 21,
-  examPassRatePct: 70,
+  examPassRatePct: 66.67,
   certificatesIssued: 18,
-  creditsIssued: 180,
+  creditsIssued: 180.5,
 };
+
+/**
+ * รูปร่างบน wire จริง = jsonb ซ้อนของ RPC admin_dashboard_stats (API-SPEC 1.2.1 —
+ * passRatePct/credits.issued เป็น numeric ได้เศษ) · เดิม fixture เขียน flat
+ * ตรง ๆ ทำ parser ผ่านเท็จกับรูปที่ BFF ไม่เคยส่ง (e2e-16 t5 จับ drift นี้)
+ */
+const WIRE = {
+  range: { from: "2026-08-14", to: "2026-09-12" },
+  users: { new: 5, total: 120 },
+  enrollments: { new: 42 },
+  exams: { attempts: 30, passed: 21, passRatePct: 66.67 },
+  certificates: { issued: 18 },
+  credits: { issued: 180.5 },
+};
+
+const STATS = EXPECTED;
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -60,26 +77,33 @@ beforeEach(() => {
 });
 
 describe("parseDashboardStats", () => {
-  it("envelope { data } ครบทุกคีย์ → parse ได้ครบ", () => {
-    expect(parseDashboardStats({ data: STATS })).toEqual(STATS);
+  it("jsonb ซ้อนของ RPC ครบทุกกลุ่ม → map เป็น view flat ได้ครบ (ทศนิยมคงเดิม)", () => {
+    expect(parseDashboardStats({ data: WIRE })).toEqual(EXPECTED);
   });
 
-  it("ค่า null (บทบาทไม่เห็น KPI นั้น) → ยอมและคง null", () => {
+  it("passRatePct null (ไม่มีคนสอบ) → ยอมและคง null", () => {
     expect(
       parseDashboardStats({
-        data: { ...STATS, certificatesIssued: null, creditsIssued: null },
+        data: { ...WIRE, exams: { ...WIRE.exams, passRatePct: null } },
       }),
-    ).toEqual({ ...STATS, certificatesIssued: null, creditsIssued: null });
+    ).toEqual({ ...EXPECTED, examPassRatePct: null });
   });
 
   it("คีย์ใดผิด type → null (fail-closed)", () => {
-    expect(parseDashboardStats({ data: { ...STATS, usersNew: "5" } })).toBeNull();
-    expect(parseDashboardStats({ data: { ...STATS, examPassRatePct: -1 } })).toBeNull();
+    expect(parseDashboardStats({ data: { ...WIRE, users: { new: "5", total: 120 } } })).toBeNull();
+    expect(
+      parseDashboardStats({ data: { ...WIRE, exams: { ...WIRE.exams, passRatePct: -1 } } }),
+    ).toBeNull();
   });
 
-  it("ไม่ใช่ object / ไม่มี data → null", () => {
+  it("กลุ่มใดขาดหาย / ไม่ใช่ object / ไม่มี data → null", () => {
+    expect(parseDashboardStats({ data: { ...WIRE, credits: null } })).toBeNull();
     expect(parseDashboardStats(null)).toBeNull();
     expect(parseDashboardStats({ nope: 1 })).toBeNull();
+  });
+
+  it("รูป flat เดิม (BFF ไม่เคยส่ง) → null — กัน regression กลับไปหา contract เดิม", () => {
+    expect(parseDashboardStats({ data: STATS })).toBeNull();
   });
 });
 
@@ -110,9 +134,9 @@ describe("defaultDashboardRange", () => {
 describe("getAdminDashboard", () => {
   const RANGE = { from: "2026-08-14", to: "2026-09-12" };
 
-  it("200 ครบรูป → ok", async () => {
-    stubBff(200, { data: STATS });
-    expect(await getAdminDashboard(RANGE)).toEqual({ ok: true, data: STATS });
+  it("200 ครบรูป (jsonb ซ้อน) → ok + map เป็น view flat", async () => {
+    stubBff(200, { data: WIRE });
+    expect(await getAdminDashboard(RANGE)).toEqual({ ok: true, data: EXPECTED });
   });
 
   it("ส่ง from/to + cookie ของ request เดิมให้ BFF ครบ", async () => {
@@ -123,7 +147,7 @@ describe("getAdminDashboard", () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = String(input);
         capturedCookie = new Headers(init?.headers).get("cookie") ?? "";
-        return jsonResponse(200, { data: STATS });
+        return jsonResponse(200, { data: WIRE });
       }),
     );
     await getAdminDashboard(RANGE);
@@ -149,7 +173,7 @@ describe("getAdminDashboard", () => {
       }),
     );
     expect(await getAdminDashboard(RANGE)).toEqual({ ok: false, kind: "server" });
-    stubBff(200, { data: { ...STATS, usersNew: "5" } });
+    stubBff(200, { data: { ...WIRE, users: { new: "5", total: 120 } } });
     expect(await getAdminDashboard(RANGE)).toEqual({ ok: false, kind: "server" });
   });
 });

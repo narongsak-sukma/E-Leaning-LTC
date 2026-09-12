@@ -11,16 +11,19 @@ import {
   USER_STATUS_FILTER_OPTIONS,
   type AdminUserRow,
 } from "@/components/admin/users/data";
+// ปุ่ม/โมดัลเป็น client component — pure helper ต้องมาจาก user-actions.view (ไม่มี
+// "use client") เท่านั้น: server page เรียกฟังก์ชันของโมดูล clientไม่ได้ (SSR ล่ม
+// ทุกคำขอ — e2e-16 t2)
+import { CreateStaffButton, UserRowActions } from "@/components/admin/users/UserActions";
 import {
   canCreateStaffUser,
   canDisableUser,
   canManageRoles,
-  CreateStaffButton,
   roleLabelOf,
   roleOptionsForCaller,
-  UserRowActions,
+  userStatusKeyOf,
   userStatusViewOf,
-} from "@/components/admin/users/UserActions";
+} from "@/components/admin/users/user-actions.view";
 
 export const metadata: Metadata = {
   title: "ผู้ใช้และบทบาท · หลังบ้าน",
@@ -144,9 +147,19 @@ export default async function AdminUsersPage({
       id: "status",
       header: "สถานะ",
       render: (user) => {
-        const view = userStatusViewOf(user.status);
+        const view = userStatusViewOf(userStatusKeyOf(user.deletedAt));
         return <StatusBadge tone={view.tone} label={view.label} />;
       },
+    },
+    {
+      id: "license",
+      header: "ใบอนุญาต",
+      render: (user) =>
+        user.hasVerifiedLicense ? (
+          <StatusBadge tone="success" label="ยืนยันแล้ว" />
+        ) : (
+          <span className="text-ink-400">—</span>
+        ),
     },
     {
       id: "createdAt",
@@ -162,7 +175,7 @@ export default async function AdminUsersPage({
         <UserRowActions
           userId={user.id}
           displayName={user.displayName}
-          status={user.status}
+          status={userStatusKeyOf(user.deletedAt)}
           roles={user.roles}
           canDisable={canDisable}
           canManageRoles={canManageRolesFlag}

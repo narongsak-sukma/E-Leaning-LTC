@@ -32,10 +32,10 @@ const ROW = {
   id: "00000000-0000-4000-8000-000000000001",
   email: "staff@lawcouncil.go.th",
   displayName: "สมชาย ใจดี",
-  status: "active",
   roles: ["staff:viewer"],
+  deletedAt: null,
   createdAt: "2026-08-01T03:00:00Z",
-  disabledReason: null,
+  hasVerifiedLicense: false,
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -65,17 +65,18 @@ describe("parseAdminUserRow / parseAdminUsersPage", () => {
     expect(withoutRoles).toEqual({ ...ROW, roles: [] });
   });
 
-  it("แถวผิดรูป (id/email/displayName/status/createdAt ว่างหรือ type ผิด) → null", () => {
+  it("แถวผิดรูป (id/email/displayName/createdAt ว่างหรือ type ผิด) → null", () => {
     expect(parseAdminUserRow(null)).toBeNull();
     expect(parseAdminUserRow({ ...ROW, id: "" })).toBeNull();
     expect(parseAdminUserRow({ ...ROW, email: 5 })).toBeNull();
     expect(parseAdminUserRow({ ...ROW, displayName: null })).toBeNull();
-    expect(parseAdminUserRow({ ...ROW, status: "" })).toBeNull();
     expect(parseAdminUserRow({ ...ROW, createdAt: undefined })).toBeNull();
   });
 
-  it("disabledReason ผิด type → null (contract ผิดรูป)", () => {
-    expect(parseAdminUserRow({ ...ROW, disabledReason: 7 })).toBeNull();
+  it("deletedAt ผิด type หรือ hasVerifiedLicense ไม่ใช่ boolean → null (contract ผิดรูป)", () => {
+    expect(parseAdminUserRow({ ...ROW, deletedAt: 7 })).toBeNull();
+    expect(parseAdminUserRow({ ...ROW, hasVerifiedLicense: "yes" })).toBeNull();
+    expect(parseAdminUserRow({ ...ROW, hasVerifiedLicense: undefined })).toBeNull();
   });
 
   it("หน้าครบรูป → { data, page } · แถวเดียวผิดรูป → null ทั้งหน้า (fail-closed)", () => {
@@ -88,9 +89,10 @@ describe("parseAdminUserRow / parseAdminUsersPage", () => {
 });
 
 describe("isUserStatus / ตัวเลือกกรอง", () => {
-  it("สถานะใน enum → true · ค่าแปลกปลอม → false", () => {
+  it("สถานะใน enum (active/deleted ตาม BFF) → true · ค่าแปลกปลอม → false", () => {
     expect(isUserStatus("active")).toBe(true);
-    expect(isUserStatus("disabled")).toBe(true);
+    expect(isUserStatus("deleted")).toBe(true);
+    expect(isUserStatus("disabled")).toBe(false);
     expect(isUserStatus("banned")).toBe(false);
     expect(isUserStatus(undefined)).toBe(false);
   });
@@ -99,14 +101,14 @@ describe("isUserStatus / ตัวเลือกกรอง", () => {
     expect(USER_STATUS_FILTER_OPTIONS.map((option) => option.value)).toEqual([
       "all",
       "active",
-      "disabled",
+      "deleted",
     ]);
     expect(USER_STATUS_FILTER_OPTIONS[0]?.label).toBe("ทั้งหมด");
   });
 });
 
 describe("getAdminUsers", () => {
-  it("200 ครบรูป → ok + ส่ง q/status/cursor/limit ครบ", async () => {
+  it("200 ครบรูป → ok + ส่ง query/status/cursor/limit ครบ (wire key = query)", async () => {
     let capturedUrl = "";
     vi.stubGlobal(
       "fetch",
@@ -121,7 +123,8 @@ describe("getAdminUsers", () => {
       data: { data: [ROW], page: { nextCursor: null, hasMore: false } },
     });
     expect(capturedUrl).toContain("/api/v1/admin/users?");
-    expect(capturedUrl).toContain("q=");
+    expect(capturedUrl).toContain("query=");
+    expect(capturedUrl).not.toContain("q=");
     expect(capturedUrl).toContain("status=active");
     expect(capturedUrl).toContain("cursor=c1");
     expect(capturedUrl).toContain(`limit=${ADMIN_USERS_PAGE_SIZE}`);

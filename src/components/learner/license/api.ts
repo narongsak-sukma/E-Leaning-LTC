@@ -223,25 +223,35 @@ export function normalizeLicenseCurrent(
 }
 
 /**
- * normalize ผล GET /me/license ทั้งก้อน — ยอมทั้งแบบมี wrapper application/license และ
- * แบบแผงราบ (ฟิลด์คลี่อยู่ top-level ตามแถวข้อจำกัดที่อ่านเป็นรูปเดียว) · canResubmit
- * ไม่มา = derive เอง (ไม่มี pending) ตามนิยามในข้อจำกัด
+ * normalize ผล GET /me/license ทั้งก้อน — wrapper ขาออกจริงของ BFF คือ
+ * latestApplication/currentLicense (§3.2 · as-built route me/license) · ยอม alias
+ * application/license และแผงราบแบบ tolerant-read เดิม · canResubmit ไม่มา = derive
+ * เอง (ไม่มี pending) ตามนิยามในข้อจำกัด
  */
 export function normalizeMyLicenseView(raw: Record<string, unknown>): MyLicenseView | null {
-  const wrapper = isRecord(raw["application"]) ? raw["application"] : null;
-  const licenseWrapper = isRecord(raw["license"]) ? raw["license"] : null;
+  const applicationRaw = [
+    raw["latestApplication"],
+    raw["application"],
+  ].find((value) => value !== undefined);
+  const licenseRaw = [raw["currentLicense"], raw["license"]].find(
+    (value) => value !== undefined,
+  );
   const application =
-    wrapper !== null
-      ? normalizeLicenseApplication(wrapper)
-      : raw["application"] === null
-        ? null
-        : normalizeLicenseApplication(raw);
+    applicationRaw === null
+      ? null
+      : isRecord(applicationRaw)
+        ? normalizeLicenseApplication(applicationRaw)
+        : applicationRaw === undefined
+          ? normalizeLicenseApplication(raw)
+          : null;
   const license =
-    licenseWrapper !== null
-      ? normalizeLicenseCurrent(licenseWrapper)
-      : raw["license"] === null
-        ? null
-        : normalizeLicenseCurrent(raw);
+    licenseRaw === null
+      ? null
+      : isRecord(licenseRaw)
+        ? normalizeLicenseCurrent(licenseRaw)
+        : licenseRaw === undefined
+          ? normalizeLicenseCurrent(raw)
+          : null;
   const canResubmitBool =
     typeof raw["canResubmit"] === "boolean"
       ? raw["canResubmit"]

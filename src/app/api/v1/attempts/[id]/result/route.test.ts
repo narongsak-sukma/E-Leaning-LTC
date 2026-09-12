@@ -215,6 +215,18 @@ describe("GET /attempts/{id}/result — happy path (เฉลยเปิดต�
     expect(raw).not.toContain("เพราะข้อ ก ถูกต้อง");
   });
 
+  // regression e2e-09 (0022/DCR-7): snapshot จริงหลัง 0022 มีคีย์ type — เคยทำทุก final
+  // attempt ตาย 503 attempt_result_row_drift (strict ขาเข้าไม่รู้จักคีย์ใหม่)
+  it("snapshot as-built 0022 (มี type) บนครั้งสุดท้าย → 200 (เคย 503 บน e2e จริง)", async () => {
+    const { res } = await get(ATTEMPT_ID, {
+      rows: [viewRow({ question_snapshot: { ...SNAPSHOT, type: "single_choice" } })],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OkBody;
+    const parsed = AttemptResultView.parse(body.data);
+    expect(parsed.questions[0]?.content?.options[0]?.isCorrect).toBe(true);
+  });
+
   it("select ระบุคอลัมน์ตาม view (0009 L23-77) — รวมคอลัมน์เฉลยที่ view ควบคุมการเปิดเอง", async () => {
     const { rec } = await get(ATTEMPT_ID, { rows: [viewRow()] });
     const cols = String(rec.select[0]);

@@ -196,7 +196,12 @@ describe("GET /api/v1/admin/license-applications", () => {
       reason: null,
       evidenceUrl: null,
     });
-    expect(calls.select[0]).toContain("profiles(display_name,email)");
+    expect(calls.select[0]).toContain(
+      "profiles!license_applications_user_id_fkey(display_name,email)",
+    );
+    expect(calls.select[0]).toContain(
+      "media_assets!license_applications_evidence_media_id_fkey(storage_path)",
+    );
     expect(calls.limit[0]).toBe(21);
     expect(calls.order).toEqual([
       ["submitted_at", { ascending: false }],

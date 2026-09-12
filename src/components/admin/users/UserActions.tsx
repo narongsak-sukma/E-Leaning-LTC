@@ -3,10 +3,11 @@
 /**
  * UserActions — ปุ่ม/โมดัลจัดการบัญชีผู้ใช้ของหน้า /admin/users (Wave E Phase 5 · lane F · ADM-002)
  *
- * - UserRowActions — ต่อแถว: ปิด/เปิดใช้งาน (PATCH /api/v1/admin/users/{id} · disable บังคับ
- *   reason ≥10 ตัวอักษร — แบบแผน revoke) · มอบ/ถอดบทบาท (POST/DELETE /api/v1/admin/users/{id}/roles)
+ * - UserRowActions — ต่อแถว: ปิด/เปิดใช้งาน (PATCH /api/v1/admin/users/{id} body {is_active, reason?}
+ *   — API-SPEC 1.2.3 §3.7 แถว 212 · disable บังคับ reason ≥10) · มอบ/ถอดบทบาท (POST/DELETE
+ *   /api/v1/admin/users/{id}/roles — ทั้งคู่บังคับ body {role, reason 10-500})
  * - CreateStaffButton — สร้างบัญชีเจ้าหน้าที่ (POST /api/v1/admin/users — super_admin เท่านั้น ·
- *   บังคับ MFA ตั้งแต่วันแรกเป็นหน้าที่ของ BFF)
+ *   body {email, displayName, role, reason 10-500} · บังคับ MFA ตั้งแต่วันแรกเป็นหน้าที่ของ BFF)
  * - ทุก action ผ่าน ConfirmModal ภาษาไทยก่อนยิงเสมอ · 403 → แสดงข้อความจาก BFF ไม่ crash ·
  *   pure helpers ทั้งหมดถูก export เพื่อ unit test ใน node env (แบบ AssessmentFormModal)
  */
@@ -21,164 +22,26 @@ import {
   postAdminJson,
 } from "@/components/admin/users/api-client";
 
-/** ความยาวขั้นต่ำของเหตุผล (mirror zod ของ BFF — แบบแผน revoke/D-p5-6) */
-export const REASON_MIN_LENGTH = 10;
+// pure helpers ทั้งหมดย้ายไป user-actions.view.ts (ไม่มี "use client") เพื่อให้หน้า
+// server /admin/users เรียกได้ — Next.js ห้ามเรียกฟังก์ชันของโมดูล client จาก server
+// (e2e-16 t2 จับ: SSR ล่มทุกคำขอแม้ BFF 200) · re-export ต่อเพื่อโมดูล/test เดิม
+import {
+  buildCreateStaffBody,
+  buildDisableBody,
+  buildEnableBody,
+  buildGrantRoleBody,
+  buildRevokeRoleBody,
+  CREATE_STAFF_FORM_DEFAULTS,
+  reasonValid,
+  roleLabelOf,
+  roleRevokePath,
+  userActionPath,
+  validateCreateStaffForm,
+  type CreateStaffFormState,
+} from "./user-actions.view";
 
-/** pure — เหตุผลผ่านเงื่อนไข — trim แล้วยาว ≥10 (mirror BFF) */
-export function reasonValid(reason: string): boolean {
-  return reason.trim().length >= REASON_MIN_LENGTH;
-}
+export * from "./user-actions.view";
 
-/** มุมมองสถานะบัญชีสำหรับ badge (ทะเบียนไทย + โทนตาม StatusBadge) */
-export const USER_STATUS_VIEW: Record<string, { label: string; tone: "success" | "danger" | "neutral" }> = {
-  active: { label: "ใช้งาน", tone: "success" },
-  disabled: { label: "ปิดใช้งาน", tone: "danger" },
-  banned: { label: "ปิดใช้งาน", tone: "danger" },
-};
-
-/** pure — สถานะที่ไม่รู้จักแสดงเป็นกลาง ไม่ตัดสินแทน (ค่าจริงมาจาก BFF) */
-export function userStatusViewOf(status: string): { label: string; tone: "success" | "danger" | "neutral" } {
-  const known = USER_STATUS_VIEW[status];
-  return known ?? { label: status, tone: "neutral" };
-}
-
-/** ป้ายบทบาทไทย (จากทะเบียน ROLES ของ src/lib/rbac.ts) */
-export const ROLE_LABEL_TH: Record<string, string> = {
-  citizen: "ประชาชน",
-  lawyer: "ทนายความ",
-  instructor: "ผู้สอน",
-  "staff:viewer": "เจ้าหน้าที่ (ดูข้อมูล)",
-  "staff:content": "เจ้าหน้าที่ (เนื้อหา)",
-  "staff:exam": "เจ้าหน้าที่ (สอบ)",
-  "staff:registrar": "เจ้าหน้าที่ (ทะเบียน)",
-  super_admin: "ผู้ดูแลระบบสูงสุด",
-};
-
-/** pure — บทบาทที่ไม่อยู่ในทะเบียนแสดงรหัสเดิม (ไม่เดาความหมาย) */
-export function roleLabelOf(role: string): string {
-  return ROLE_LABEL_TH[role] ?? role;
-}
-
-/** ชุดบทบาทที่มอบได้ผ่าน endpoint (super_admin ห้ามผ่าน endpoint — bootstrap เท่านั้น) */
-export const GRANTABLE_ROLES = [
-  "lawyer",
-  "instructor",
-  "staff:viewer",
-  "staff:content",
-  "staff:exam",
-  "staff:registrar",
-] as const;
-
-/** pure — ตัวเลือกบทบาทต่อผู้เรียก (spec แถว 214: registrar มอบได้เฉพาะ lawyer) */
-export function roleOptionsForCaller(roles: readonly string[]): readonly string[] {
-  if (roles.includes("super_admin")) {
-    return GRANTABLE_ROLES;
-  }
-  if (roles.includes("staff:registrar")) {
-    return ["lawyer"];
-  }
-  return [];
-}
-
-/** pure — มีสิทธิ์ปิด/เปิดใช้งานบัญชี (spec แถว 212) */
-export function canDisableUser(roles: readonly string[]): boolean {
-  return roles.includes("super_admin") || roles.includes("staff:registrar");
-}
-
-/** pure — มีสิทธิ์มอบ/ถอดบทบาท (spec แถว 214-215) */
-export function canManageRoles(roles: readonly string[]): boolean {
-  return roles.includes("super_admin") || roles.includes("staff:registrar");
-}
-
-/** pure — บอดี้ของ PATCH ปิดใช้งาน (reason ตัดช่องว่างก่อนส่ง — mirror BFF) */
-export function buildDisableBody(reason: string): { action: "disable"; reason: string } {
-  return { action: "disable", reason: reason.trim() };
-}
-
-/** pure — บอดี้ของ PATCH เปิดใช้งาน (ไม่มี reason — BFF ไม่เรียกใช้ตอน enable) */
-export function buildEnableBody(): { action: "enable" } {
-  return { action: "enable" };
-}
-
-/** pure — บอดี้ของ POST มอบบทบาท */
-export function buildGrantRoleBody(role: string, reason: string): { role: string; reason: string } {
-  return { role, reason: reason.trim() };
-}
-
-/** pure — path ของ DELETE ถอดบทบาท (role ผูกใน query — ไม่แนบ body) */
-export function roleRevokePath(userId: string, role: string): string {
-  return `/api/v1/admin/users/${encodeURIComponent(userId)}/roles?role=${encodeURIComponent(role)}`;
-}
-
-/** pure — path ของ PATCH/POST ต่อผู้ใช้ (กัน id ว่าง/มีตัวอักษรควบคุม) */
-export function userActionPath(userId: string): string {
-  return `/api/v1/admin/users/${encodeURIComponent(userId)}`;
-}
-
-/** uuid แบบง่าย — กันส่ง id มั่ว ๆ ขึ้น BFF (BFF ยังตรวจซ้ำเสมอ) */
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** pure — id รูปแบบ uuid หรือไม่ */
-export function isUuid(value: string): boolean {
-  return UUID_PATTERN.test(value.trim());
-}
-
-/** ฟอร์มสร้างบัญชีเจ้าหน้าที่ (mirror POST /admin/users — super_admin) */
-export type CreateStaffFormState = {
-  email: string;
-  displayName: string;
-  role: string;
-};
-
-/** ค่าเริ่มต้นของฟอร์มสร้างบัญชี */
-export const CREATE_STAFF_FORM_DEFAULTS: CreateStaffFormState = {
-  email: "",
-  displayName: "",
-  role: "",
-};
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-/** pure — ตรวจฟอร์มสร้างบัญชี — คืนข้อความไทยต่อช่อง ({} = ผ่านทั้งหมด) */
-export function validateCreateStaffForm(
-  form: CreateStaffFormState,
-): Record<string, string> {
-  const errors: Record<string, string> = {};
-  if (EMAIL_PATTERN.test(form.email.trim()) === false) {
-    errors["email"] = "รูปแบบอีเมลไม่ถูกต้อง";
-  }
-  const name = form.displayName.trim();
-  if (name.length < 1 || name.length > 120) {
-    errors["displayName"] = "ชื่อ-นามสกุลต้องยาว 1-120 ตัวอักษร";
-  }
-  if (form.role.length === 0) {
-    errors["role"] = "เลือกบทบาทเริ่มต้นของบัญชี";
-  }
-  return errors;
-}
-
-/** pure — บอดี้ของ POST สร้างบัญชี (camelCase เป๊ะ ไม่แนบคีย์ว่าง) */
-export function buildCreateStaffBody(form: CreateStaffFormState):
-  | { ok: true; body: { email: string; displayName: string; role: string } }
-  | { ok: false } {
-  const errors = validateCreateStaffForm(form);
-  if (Object.keys(errors).length > 0) {
-    return { ok: false };
-  }
-  return {
-    ok: true,
-    body: {
-      email: form.email.trim(),
-      displayName: form.displayName.trim(),
-      role: form.role,
-    },
-  };
-}
-
-/** pure — มีสิทธิ์สร้างบัญชีเจ้าหน้าที่ (POST /admin/users — super_admin เท่านั้น · spec แถว 211) */
-export function canCreateStaffUser(roles: readonly string[]): boolean {
-  return roles.includes("super_admin");
-}
 
 /** ป้าย/ข้อความของโมดัลบทบาท — ใช้ซ้ำทั้ง grant/revoke */
 const ROLE_MODAL_COPY = {
@@ -190,7 +53,7 @@ const ROLE_MODAL_COPY = {
   revoke: {
     title: "ถอดบทบาท",
     confirm: "ถอดบทบาท",
-    hint: "เลือกบทบาทที่ต้องการถอด — บัญชีต้องเหลือบทบาทไว้อย่างน้อย 1 บทบาทเสมอ",
+    hint: "เลือกบทบาทที่ต้องการถอด — บัญชีต้องเหลือบทบาทไว้อย่างน้อย 1 บทบาทเสมอ (ต้องระบุเหตุผลตามสัญญา route)",
   },
 } as const;
 
@@ -266,7 +129,9 @@ export function UserRowActions({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const isDisabledAccount = status === "disabled" || status === "banned";
+  // สถานะจากแถวรายการบอกได้แค่ active/deleted — แถวที่ถูกลบไม่นำเข้าโมดัลจัดการอีก
+  // (สถานะ ban ของ GoTrue ไม่อยู่ในขาออกของ RPC — ปุ่มปิด/เปิดจึงแสดงคู่กันตามสิทธิ์)
+  const isDeleted = status === "deleted";
 
   function resetAndClose() {
     setModal(null);
@@ -322,7 +187,7 @@ export function UserRowActions({
     setSubmitting(true);
     setError(null);
     try {
-      await deleteAdminJson(roleRevokePath(userId, selectedRole));
+      await deleteAdminJson(roleRevokePath(userId), buildRevokeRoleBody(selectedRole, reason));
       resetAndClose();
       router.refresh();
     } catch (caught: unknown) {
@@ -335,23 +200,23 @@ export function UserRowActions({
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {canDisable && isDisabledAccount === false ? (
-        <button
-          type="button"
-          onClick={() => setModal("disable")}
-          className="rounded-[10px] border border-danger-600 bg-white px-3 py-1.5 text-sm font-semibold text-danger-600 hover:bg-danger-50"
-        >
-          ปิดใช้งาน
-        </button>
-      ) : null}
-      {canDisable && isDisabledAccount ? (
-        <button
-          type="button"
-          onClick={() => setModal("enable")}
-          className="rounded-[10px] border border-brand-600 bg-white px-3 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50"
-        >
-          เปิดใช้งาน
-        </button>
+      {canDisable && isDeleted === false ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setModal("disable")}
+            className="rounded-[10px] border border-danger-600 bg-white px-3 py-1.5 text-sm font-semibold text-danger-600 hover:bg-danger-50"
+          >
+            ปิดใช้งาน
+          </button>
+          <button
+            type="button"
+            onClick={() => setModal("enable")}
+            className="rounded-[10px] border border-brand-600 bg-white px-3 py-1.5 text-sm font-semibold text-brand-700 hover:bg-brand-50"
+          >
+            เปิดใช้งาน
+          </button>
+        </>
       ) : null}
       {canManageRoles ? (
         <>
@@ -419,7 +284,7 @@ export function UserRowActions({
         confirmLabel={modal === "revoke" ? ROLE_MODAL_COPY.revoke.confirm : ROLE_MODAL_COPY.grant.confirm}
         confirmDisabled={
           selectedRole.length === 0 ||
-          (modal === "grant" && reasonValid(reason) === false) ||
+          reasonValid(reason) === false ||
           submitting
         }
         confirmDisabledReason={
@@ -427,7 +292,7 @@ export function UserRowActions({
             ? "กำลังส่งข้อมูล โปรดรอสักครู่"
             : selectedRole.length === 0
               ? "เลือกบทบาทก่อนยืนยัน"
-              : modal === "grant" && reasonValid(reason) === false
+              : reasonValid(reason) === false
                 ? "ระบุเหตุผลให้ยาวอย่างน้อย 10 ตัวอักษรก่อนยืนยัน"
                 : undefined
         }
@@ -452,19 +317,13 @@ export function UserRowActions({
               ))}
             </select>
           </div>
-          {modal === "grant" ? (
-            <ReasonField
-              id={`grant-reason-${userId}`}
-              label="เหตุผลที่มอบบทบาท (บังคับ)"
-              value={reason}
-              onChange={setReason}
-              hint="เหตุผลจะถูกบันทึกในบันทึกการตรวจสอบ (audit) — ยาวอย่างน้อย 10 ตัวอักษร"
-            />
-          ) : (
-            <p className="text-xs text-ink-500">
-              การถอดบทบาทไม่ต้องระบุเหตุผลในแบบฟอร์ม — ระบบบันทึกผู้ถอดและเวลาในบันทึกการตรวจสอบให้อัตโนมัติ
-            </p>
-          )}
+          <ReasonField
+            id={`${modal === "revoke" ? "revoke" : "grant"}-reason-${userId}`}
+            label={modal === "revoke" ? "เหตุผลที่ถอดบทบาท (บังคับ)" : "เหตุผลที่มอบบทบาท (บังคับ)"}
+            value={reason}
+            onChange={setReason}
+            hint="เหตุผลจะถูกบันทึกในบันทึกการตรวจสอบ (audit) — ยาวอย่างน้อย 10 ตัวอักษร"
+          />
         </div>
         {error !== null ? <ErrorPanel message={error} /> : null}
       </ConfirmModal>
@@ -579,7 +438,16 @@ export function CreateStaffButton({ callerRoleOptions }: { callerRoleOptions: re
                 </option>
               ))}
             </select>
+            {errors["role"] ? <p className="mt-1 text-xs text-danger-600">{errors["role"]}</p> : null}
           </div>
+          <ReasonField
+            id="staff-reason"
+            label="เหตุผลที่สร้างบัญชี (บังคับ)"
+            value={form.reason}
+            onChange={(reason) => setForm({ ...form, reason })}
+            hint="เหตุผลจะถูกบันทึกในบันทึกการตรวจสอบ (audit) — ยาวอย่างน้อย 10 ตัวอักษร"
+          />
+          {errors["reason"] ? <p className="text-xs text-danger-600">{errors["reason"]}</p> : null}
         </div>
         {error !== null ? <ErrorPanel message={error} /> : null}
       </ConfirmModal>

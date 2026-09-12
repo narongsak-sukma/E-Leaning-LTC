@@ -100,7 +100,10 @@ export default async function AdminAuditPage({
       <div>
         <h1 className="font-heading text-xl font-bold text-ink-900 sm:text-2xl">บันทึกการตรวจสอบ</h1>
         <div className="mt-4">
-          <AdminDataState kind="server" retryHref="/admin/audit" />
+          {/* kind จากชั้นข้อมูล (401/403 = forbidden — เช่น registrar ที่ไม่มี
+              audit_log:view · เดิม hardcode "server" ทำ 403 แสดงแผง "ระบบล่ม"
+              ผิดความจริง — แบบแผนเดียวกับ dashboard/users/courses) */}
+          <AdminDataState kind={result.kind} retryHref="/admin/audit" />
         </div>
       </div>
     );

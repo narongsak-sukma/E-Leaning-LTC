@@ -82,18 +82,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** อ่านค่า KPI — number | null เท่านั้น (type อื่น = contract ผิดรูป → undefined) */
-function nullableCount(record: Record<string, unknown>, key: string): number | null | undefined {
+/**
+ * อ่านค่า KPI ที่อนุญาตทศนิยม — number | null (type อื่น → undefined) · passRatePct
+ * ของ RPC เป็น numeric (เช่น 66.67) ไม่ใช่จำนวนเต็ม — ตรวจแบบ integer จะทิ้ง
+ * ทุกค่าจริงที่มีเศษ = drift ปลอม (credits.issued = ผลรวม numeric เช่นกัน)
+ */
+function nullableNumber(record: Record<string, unknown>, key: string): number | null | undefined {
   const value = record[key];
   if (value === null) {
     return null;
   }
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** อ่าน KPI จำนวนเต็มบังคับ (ตัวนับ) — ผิด type → undefined */
+function requiredCount(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**
  * แตก { data: { …kpi } } ออกจาก envelope §1.1 — ผิดรูป = null (fail-closed)
- * ทุกคีย์ต้องมีและถูก type (number | null) — ขาด/type ผิด = ทิ้งทั้ง response
+ *
+ * รูปร่างบน wire = jsonb ซ้อนของ RPC admin_dashboard_stats (API-SPEC 1.2.1: "jsonb
+ * camelCase ตรง resource ขาออก" — DashboardStatsRpcSchema ของ src/lib/admin/users.ts):
+ * { data: { range, users:{new,total}, enrollments:{new}, exams:{attempts,passed,
+ * passRatePct}, certificates:{issued}, credits:{issued} } } · เดิม parser คาด flat
+ * 8 คีย์ (usersNew ฯลฯ) ที่ BFF ไม่เคยส่ง → parse คืน null ทุกครั้ง = แผง "ระบบล่ม"
+ * แม้ BFF ตอบ 200 (e2e-16 t5 จับ) — แก้โดย map จาก jsonb ซ้อนเป็น view model flat
+ * ของการ์ด KPI ฝั่งหน้า
  */
 export function parseDashboardStats(body: unknown): DashboardStats | null {
   if (!isRecord(body)) {
@@ -103,14 +120,28 @@ export function parseDashboardStats(body: unknown): DashboardStats | null {
   if (!isRecord(data)) {
     return null;
   }
-  const usersNew = nullableCount(data, "usersNew");
-  const usersTotal = nullableCount(data, "usersTotal");
-  const enrollmentsNew = nullableCount(data, "enrollmentsNew");
-  const examAttempts = nullableCount(data, "examAttempts");
-  const examPassed = nullableCount(data, "examPassed");
-  const examPassRatePct = nullableCount(data, "examPassRatePct");
-  const certificatesIssued = nullableCount(data, "certificatesIssued");
-  const creditsIssued = nullableCount(data, "creditsIssued");
+  const users = isRecord(data["users"]) ? data["users"] : null;
+  const enrollments = isRecord(data["enrollments"]) ? data["enrollments"] : null;
+  const exams = isRecord(data["exams"]) ? data["exams"] : null;
+  const certificates = isRecord(data["certificates"]) ? data["certificates"] : null;
+  const credits = isRecord(data["credits"]) ? data["credits"] : null;
+  if (
+    users === null ||
+    enrollments === null ||
+    exams === null ||
+    certificates === null ||
+    credits === null
+  ) {
+    return null;
+  }
+  const usersNew = requiredCount(users, "new");
+  const usersTotal = requiredCount(users, "total");
+  const enrollmentsNew = requiredCount(enrollments, "new");
+  const examAttempts = requiredCount(exams, "attempts");
+  const examPassed = requiredCount(exams, "passed");
+  const examPassRatePct = nullableNumber(exams, "passRatePct");
+  const certificatesIssued = requiredCount(certificates, "issued");
+  const creditsIssued = nullableNumber(credits, "issued");
   if (
     usersNew === undefined ||
     usersTotal === undefined ||

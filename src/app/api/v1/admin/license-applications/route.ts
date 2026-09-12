@@ -15,7 +15,8 @@
  *   สำเร็จ = null — เอนริชเมนต์ ไม่ใช่การเปิดเผยข้อมูล)
  * - audit PII_ACCESS fail-closed (แบบแผน B7 เดียวกับ ledger GET): หลัง strict ขาออกผ่าน
  *   ทุกแถว เขียน event ทาง service_role (retry ครั้งเดียว ยังล้ม = 503 — ห้าม disclosure
- *   โดยไม่มี audit) · context ไม่มี PII (endpoint/purpose/actor/status filter)
+ *   โดยไม่มี audit) · context ไม่มี PII (endpoint/purpose/actor เท่านั้น — คีย์อื่นนอก
+ *   allowlist {endpoint,target_user_id,purpose} โดน RPC ปฏิเสธ 22023 ตาม AUDIT §3.2)
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -30,10 +31,14 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
-/** select + embed (profiles/media_assets ผ่าน FK — แถวใดฝั่ง RLS มองไม่เห็น = null) */
+/** select + embed (profiles/media_assets ผ่าน FK — แถวใดฝั่ง RLS มองไม่เห็น = null)
+ *  ต้องระบุ !fk hint ทุก embed — license_applications มี FK ไป profiles สองเส้น
+ *  (user_id + decided_by) จึง ambiguous ใน PostgREST (PGRST201 300 — พิสูจน์กับ
+ *  REST จริง: ไม่มี hint โดน 300 ทุกคำขอ = 503 license_applications_query_failed) */
 const LICENSE_APPLICATION_SELECT =
   "id,user_id,license_no,status,submitted_at,decided_at,rejected_reason," +
-  "profiles(display_name,email),media_assets(storage_path)";
+  "profiles!license_applications_user_id_fkey(display_name,email)," +
+  "media_assets!license_applications_evidence_media_id_fkey(storage_path)";
 
 /** อายุ signed URL หลักฐาน — 5 นาที (เพียงพอให้ registrar เปิดดูต่อหน้า ไม่ค้างรั่ว) */
 const EVIDENCE_URL_TTL_SEC = 300;
@@ -136,7 +141,6 @@ async function evidenceUrlOf(
  */
 async function auditApplicationsPiiAccess(input: {
   readonly actorId: string;
-  readonly status: string | null;
   readonly requestId: string | null;
 }): Promise<void> {
   const service = createSupabaseServiceRoleClient();
@@ -148,11 +152,15 @@ async function auditApplicationsPiiAccess(input: {
       p_entity_id: null,
       p_before: null,
       p_after: null,
+      // context ⊆ {endpoint, target_user_id, purpose} + user_id (ช่องทาง actor ทางการ
+      // ของ service_role — RPC ยกเป็น actor แล้ว strip ก่อนตรวจ strict keys) · เดิมใส่
+      // status_filter โดน 22023 "คีย์นอก schema ของ event PII_ACCESS" → 503 ทุกคำขอ
+      // (พิสูจน์กับ RPC จริง — ตัวกรองสถานะจึงไม่ลง audit ตาม AUDIT §3.2 แต่ค่ากรอง
+      // ปรากฏใน query log ของ BFF/PostgREST อยู่แล้ว)
       p_context: {
         endpoint: "/api/v1/admin/license-applications",
         purpose: "license_applications_list",
         user_id: input.actorId,
-        status_filter: input.status,
       },
       p_actor_roles: null,
       p_ip_hash: null,
@@ -239,7 +247,6 @@ export async function GET(request: Request): Promise<NextResponse> {
     // 6) audit PII_ACCESS fail-closed — ล้ม = 503 ไม่มี disclosure (ดูหัวไฟล์)
     await auditApplicationsPiiAccess({
       actorId: userId,
-      status: query.status ?? null,
       requestId: options.requestId ?? null,
     });
     return jsonPageOk({ data: resources, page: page.page }, options);

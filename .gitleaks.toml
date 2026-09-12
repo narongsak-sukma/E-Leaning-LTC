@@ -38,6 +38,20 @@ paths = [
   '''(^|/)\.next/''',
 ]
 
+# พาธ local-only ที่ .gitignore บล็อกไม่ให้ commit (ตรวจแล้ว: ไม่มีแม้แต่ไฟล์เดียว
+# ใน git ls-files) — ci-local gate 5 รัน --no-git สแกน workdir ทั้งหมดจึงต้องข้าม:
+# .env เก็บค่าจริงของเครื่องนี้ตามดีไซน์ (D24/D26 token GitHub อยู่ที่นี่เท่านั้น) ·
+# .omc/ state ของ orchestration tooling · e2e/.artifacts/ trace ของ playwright
+# (จับ header ที่ฝัง anon key — ค่าสาธารณะตามดีไซน์ Supabase)
+[[allowlists]]
+description = "พาธ local-only ที่ gitignore ไว้ — ไม่มีทางขึ้น repo (CI checkout ไม่มีไฟล์พวกนี้)"
+paths = [
+  '''(^|/)\.env$''',
+  '''(^|/)\.env\.[^.]+$''',
+  '''(^|/)\.omc/''',
+  '''(^|/)e2e/\.artifacts/''',
+]
+
 # -----------------------------------------------------------------------------
 # กฎเฉพาะโปรจเกต (ต่อยอดจาก default rules ของ gitleaks)
 # หลักการ: จับ "การฝังค่าจริง" (literal ยาว 40+ ตัวอักษร) ไม่ใช่แค่การอ้างชื่อ

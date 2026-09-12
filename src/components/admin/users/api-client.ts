@@ -104,7 +104,13 @@ export async function postAdminJson(
   return sendAdminJson("POST", path, body);
 }
 
-/** DELETE JSON — role query ผูกใน path แล้ว (เช่น …/roles?role=lawyer) · 204 = body null */
-export async function deleteAdminJson(path: string): Promise<{ status: number; body: unknown }> {
-  return sendAdminJson("DELETE", path, undefined);
+/**
+ * DELETE JSON — ถอดบทบาทบังคับ body `{role, reason}` ตามสัญญา route (API-SPEC 1.2.3 §3.7)
+ * · 204 = body null · body = undefined → ไม่แนบ (route จะ 400 เอง — ใช้เพื่อทดสอบประตู)
+ */
+export async function deleteAdminJson(
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; body: unknown }> {
+  return sendAdminJson("DELETE", path, body);
 }

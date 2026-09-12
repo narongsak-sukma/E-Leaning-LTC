@@ -122,7 +122,10 @@ export async function GET(request: Request): Promise<NextResponse> {
       {
         latestApplication,
         currentLicense,
-        canResubmit: latestApplication?.status !== "pending",
+        // ยื่นใหม่ได้ = ยังไม่เคยยื่น หรือคำขอล่าสุดถูกปฏิเสธ (API-SPEC §3.2 แถว 131) —
+        // pending = รอผล · approved = ผูกเลขแล้ว ทั้งคู่ห้ามเสนอฟอร์มยื่นซ้ำ (เดิมเทียบ
+        // แค่ "ไม่ pending" ทำ approved คืน true จน UI โชว์ฟอร์มแก่ทนายที่ verify แล้ว)
+        canResubmit: latestApplication === null || latestApplication.status === "rejected",
       },
       "my_license_status_drift",
     );
