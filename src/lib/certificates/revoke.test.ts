@@ -32,14 +32,15 @@ const REVOKED_AT = "2026-09-08T05:00:00+00:00";
 const REASON = "ตรวจพบการทุจริตในการสอบ";
 
 /** แถวที่ RPC คืน (5 คีย์ exact ของ 0031 v2 — gate p3-r1 B1: reversal counters
- *  มาใน TX เดียวกัน ห้ามหายจาก strict schema) */
+ *  มาใน TX เดียวกัน ห้ามหายจาก strict schema · gate r2 BLOCKER-1: total ติดลบ
+ *  ตามจริง — แถว reversal คือ -amount ใน 0031 ระบบจึงไม่เคยคืนค่าบวก) */
 function revokedRow(): Row {
   return {
     id: CERT_ID,
     cert_no: CERT_NO,
     revoked_at: REVOKED_AT,
     credit_reversed_rows: 2,
-    credit_reversed_total: 12.5,
+    credit_reversed_total: -12.5,
   };
 }
 
@@ -111,7 +112,7 @@ describe("revokeCertificate", () => {
       revokedAt: REVOKED_AT,
       revokedReason: REASON,
       creditReversedRows: 2,
-      creditReversedTotal: 12.5,
+      creditReversedTotal: -12.5,
     });
     expect(rpc).toHaveBeenCalledTimes(1);
     expect(rpc).toHaveBeenCalledWith("admin_revoke_certificate", {

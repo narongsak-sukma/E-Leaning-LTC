@@ -62,8 +62,6 @@ declare
   v_end date;
   v_anchor timestamptz;
   v_years int;
-  v_last_no int;
-  v_last_end date;
 begin
   if p_user_id is null or p_on_date is null then
     raise exception 'ข้อมูลไม่ถูกต้อง: ต้องระบุผู้ใช้และวันที่ (ERR-VAL-001|ensure_cycle_args)'
@@ -85,48 +83,43 @@ begin
     return null;
   end if;
 
-  -- (c) หน้าต่างรอบ: มีรอบเดิม = ต่อจากรอบล่าสุด (เลขรอบต่อเนื่อง แม้ช่องว่างเวลาหลายปี
-  --     ก็กระโดดไปรอบที่ cover วันที่สนใจ ไม่ materialize รอบระหว่างทาง) ·
-  --     รอบแรก = anchor จากใบอนุญาตอนุมัติล่าสุด → ไม่มีจึงใช้ role lawyer เก่าสุด (C-3)
-  select cycle_no, ends_on into v_last_no, v_last_end
-  from public.renewal_cycles where user_id = p_user_id
-  order by cycle_no desc limit 1;
-  if found then
-    v_no := v_last_no + 1;
-    v_start := v_last_end + 1;
-    v_years := greatest(0, floor((p_on_date - v_start)::numeric / 365.25)::int);
-    v_start := (v_start::timestamp + make_interval(years => v_years))::date;
-  else
-    select max(decided_at) into v_anchor from public.license_applications
-    where user_id = p_user_id and status = 'approved' and decided_at is not null;
-    if v_anchor is null then
-      select min(granted_at) into v_anchor from public.role_assignments
-      where user_id = p_user_id and role = 'lawyer' and revoked_at is null;
-    end if;
-    -- ถึงตรงนี้แล้ว anchor ต้องไม่ null (ผ่าน (b) ด้วย role lawyer) — กันไว้ fail-closed
-    if v_anchor is null then
-      raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cycle_anchor_missing)'
-        using errcode = 'P0001';
-    end if;
-    v_no := 1;
-    v_years := greatest(0, floor((p_on_date - v_anchor::date)::numeric / 365.25)::int);
-    v_start := (v_anchor::date::timestamp + make_interval(years => v_years))::date;
+  -- (c) anchor คงที่ของผู้ใช้ — ทุกรอบของ user เดียวกันคำนวณบน lattice ปีของ anchor
+  --     คนเดียวกันเสมอ: L(k) = anchor + k ปี (clip 29 ก.พ. → 28 ก.พ.) หน้าต่างรอบ k
+  --     = [L(k), L(k+1) − 1 วัน] ต่อกันพอดีทั้งเส้นเวลา ไม่มีช่องว่าง/ซ้อนทับ
+  --     · gate r2 BLOCKER-3: เดิม (มีรอบเดิม) ต่อจาก ends_on รอบล่าสุดซึ่งเป็นค่า
+  --     ที่ clip/ปรับแล้ว = anchor เลื่อนทีละรอบ — anchor 2020-02-29 + event ตามลำดับ
+  --     2024-02-29 → 2023-03-01 → 2024-02-28 สร้างหน้าต่างซ้อนกัน ชน EXCLUDE แล้ว
+  --     event retry จน failed · เลขรอบ = max+1 (ต่อเนื่องแม้สร้างนอกลำดับเวลา —
+  --     event เก่ามาช้าเข้ารอบก่อนหน้า ไม่ materialize รอบระหว่างทาง — C-3)
+  select max(decided_at) into v_anchor from public.license_applications
+  where user_id = p_user_id and status = 'approved' and decided_at is not null;
+  if v_anchor is null then
+    select min(granted_at) into v_anchor from public.role_assignments
+    where user_id = p_user_id and role = 'lawyer' and revoked_at is null;
   end if;
-  -- กัน calendar drift ของปีอธิกสุรทิน (floor บน 365.25 + make_interval ปีจริง) สองทิศ:
-  -- gate r1 BLOCKER-5 — floor((on-anchor)/365.25) ตัดทิศลง ทำให้ "วันครบรอบปีแรกพอดี"
-  -- (เช่น anchor 2025-09-12 + on_date 2026-09-12 → 365 วัน → floor(365/365.25)=0)
-  -- ได้หน้าต่าง [2025-09-12, 2026-09-11] ที่ **ไม่ครอบ** on_date → ledger เข้ารอบผิด
-  -- แก้: ปรับบน "โครงปี" (lattice) ของ anchor สองทิศ — ถอยหลังก่อนจน start ≤ on_date
-  -- (ครอบทั้ง drift เกินของ leap year และ event เก่ามาถึงช้ากว่ารอบล่าสุด) แล้วเดิน
-  -- หน้าทีละปีจนหน้าต่างครอบ on_date · invariant ตรวจ cover จริงก่อน INSERT
+  -- ถึงตรงนี้แล้ว anchor ต้องไม่ null (ผ่าน (b) ด้วย role lawyer) — กันไว้ fail-closed
+  if v_anchor is null then
+    raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cycle_anchor_missing)'
+      using errcode = 'P0001';
+  end if;
+  select coalesce(max(cycle_no), 0) + 1 into v_no
+  from public.renewal_cycles where user_id = p_user_id;
+  -- จุดตั้งต้น k บน lattice ของ anchor (floor 365.25 ใกล้พอ) แล้วเดินสองทิศให้
+  -- [L(k), L(k+1)−1] ครอบ on_date — ทุกจุดคำนวณจาก anchor ตรง ๆ ไม่ผ่านค่าที่ปรับแล้ว
+  -- (ครอบทั้ง drift ปีอธิกสุรทินของ gate r1 BLOCKER-5 และ event เก่ามาถึงช้า)
+  v_years := greatest(0, floor((p_on_date - v_anchor::date)::numeric / 365.25)::int);
+  v_start := (v_anchor::date::timestamp + make_interval(years => v_years))::date;
   while v_start > p_on_date loop
-    v_start := (v_start::timestamp - interval '1 year')::date;
+    v_years := v_years - 1;
+    v_start := (v_anchor::date::timestamp + make_interval(years => v_years))::date;
   end loop;
-  while (v_start::timestamp + make_interval(years => 1) - interval '1 day')::date
-        < p_on_date loop
-    v_start := (v_start::timestamp + make_interval(years => 1))::date;
+  while (v_anchor::date::timestamp + make_interval(years => v_years + 1))::date
+        <= p_on_date loop
+    v_years := v_years + 1;
+    v_start := (v_anchor::date::timestamp + make_interval(years => v_years))::date;
   end loop;
-  v_end := (v_start::timestamp + make_interval(years => 1) - interval '1 day')::date;
+  v_end := (v_anchor::date::timestamp + make_interval(years => v_years + 1)
+            - interval '1 day')::date;
   -- invariant fail-closed: รอบที่จะ INSERT ต้องครอบ p_on_date จริง (ทุก path มาถึง
   -- ตรงนี้ต้องผ่าน — ถ้าไม่ผ่านคือ logic พัง ห้ามเขียนรอบเงียบ)
   if not (p_on_date between v_start and v_end) then
@@ -179,6 +172,7 @@ declare
   v_event uuid;
   v_user uuid;
   v_attempt uuid;
+  v_enr uuid; -- gate r2 BLOCKER-2: enrollment ของ attempt (คีย์ advisory lock)
   v_rule jsonb;
   v_cycle uuid;
   v_ledger uuid;
@@ -226,6 +220,17 @@ begin
           where id = v_event;
           v_no_cycle := v_no_cycle + 1;
         else
+          -- gate r2 BLOCKER-2: จับ advisory lock ระดับ enrollment เดียวกับ
+          -- admin_revoke_certificate ก่อนอ่านสถานะ cert — serialize สองเส้นทาง
+          -- (เพิกถอนรอเรา commit → reversal เห็น accrual ที่เราเขียนครบ /
+          --  เรารอเพิกถอน commit → เห็น revoked → skip ตาม BLOCKER-4)
+          select enrollment_id into v_enr from public.assessment_attempts
+          where id = v_attempt;
+          if v_enr is null then
+            raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|attempt_not_found)';
+          end if;
+          perform pg_advisory_xact_lock(
+            hashtext('ltc:credit:enr:' || v_enr::text)::bigint);
           -- gate r1 BLOCKER-4: ความพยายามสอบที่ enrollment มีใบประกาศนียบัตรถูกเพิกถอน
           -- (revoked) อยู่ = ผลสอบถูก invalidate แล้ว — ห้าม accrual ไม่ว่า event มาถึง
           -- tick ช้าแค่ไหน (at-least-once re-delivery หลังเพิกถอนก็ห้าม) · ปิด event
@@ -460,6 +465,10 @@ begin
   if not found then
     raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|certificate_not_found)';
   end if;
+  -- gate r2 BLOCKER-2: serialize กับ credit_accrual_tick บน enrollment เดียวกัน —
+  -- ไม่มี lock นี้: tick อ่าน cert valid → การเพิกถอนนี้ reverse ได้ 0 แถว (accrual
+  -- ยังไม่ถูกเขียน) → tick INSERT accrual หลัง commit ของเรา = เครดิตรอดจากใบที่ถูกเพิกถอน
+  perform pg_advisory_xact_lock(hashtext('ltc:credit:enr:' || v_enrollment::text)::bigint);
   update public.certificates
   set status = 'revoked', revoked_at = now(), revoked_reason = p_reason
   where id = p_certificate_id and status = 'valid'

@@ -27,6 +27,15 @@
  *  10) anniversary lattice (gate r1 BLOCKER-5) — anchor ใบอนุญาต 2025-09-12:
  *      ensure_renewal_cycle('2026-09-12') → [2026-09-12, 2027-09-11] ครบรอบปีพอดี ·
  *      '2026-09-11' → รอบก่อนหน้า [2025-09-12, 2026-09-11] (walk-back สองทิศ) · ซ้ำ idempotent
+ *  11) Feb-29 fixed-anchor lattice (gate r2 BLOCKER-3) — anchor role 2020-02-29 (UTC):
+ *      2024-02-29 → [2024-02-29, 2025-02-27] · event เก่ามาช้า 2023-03-01 → [2023-02-28,
+ *      2024-02-28] ต่อกันพอดีกับรอบแรก (ends_on+1 = starts_on) · 2024-02-28 ("ช่องว่างของ
+ *      รุ่นเดิม") คืน id รอบเดิมไม่ INSERT ซ้ำ → ไม่มีวันชน EXCLUDE (starts_on,ends_on)
+ *  12) advisory-lock tick↔revoke (gate r2 BLOCKER-2) — session อื่นถือ
+ *      pg_advisory_xact_lock(ltc:credit:enr:<enr>) : revoke ตายที่ lock_timeout โดยใบยัง
+ *      valid · tick บล็อกเช่นกัน → event กลับคิวพร้อม last_error breadcrumb ไม่มี ledger ·
+ *      ปล่อย lock → tick accrual ได้ → revoke ผ่าน คืน credit_reversed_total ติดลบ
+ *      (BLOCKER-1 sign end-to-end ที่ชั้น RPC จริง)
  *
  * การแยกโลกของ suite (ไม่ชน seed/ชุดอื่น):
  *   - หลักสูตร fixture 2 หลักสูตรของตัวเอง (is_public=true ให้ citizen ลงทะเบียนได้) +
@@ -169,6 +178,8 @@ let viewerUser: TestUser; // staff:viewer — เคส 6 ฝั่งถูก�
 let registrarUser: TestUser; // staff:registrar — เคส 6 ฝั่งดำเนินการสำเร็จ
 let revokeUser: TestUser; // lawyer — เคส 9 revoke-before-tick
 let licenseUser: TestUser; // lawyer — เคส 10 anniversary lattice
+let leapUser: TestUser; // lawyer — เคส 11 fixed-anchor lattice 29 ก.พ. (gate r2 BLOCKER-3)
+let lockUser: TestUser; // lawyer — เคส 12 advisory lock tick↔revoke (gate r2 BLOCKER-2)
 /** session aal2 จริงของ registrar (helpers-aal2 — B3: admin_credit_adjust บังคับ MFA) */
 let registrarAal2Token = "";
 /** B8 — id ผู้ใช้ที่รันนี้สร้าง (cleanup ลบด้วย id เหล่านี้ก่อน แล้วค่อย prefix sweep) */
@@ -497,6 +508,8 @@ describe.skipIf(!DB_URL)(
       registrarUser = await createTestUser("dcr9-credit-registrar", "staff:registrar");
       revokeUser = await createTestUser("dcr9-credit-revoke", "lawyer");
       licenseUser = await createTestUser("dcr9-credit-license", "lawyer");
+      leapUser = await createTestUser("dcr9-credit-leap", "lawyer");
+      lockUser = await createTestUser("dcr9-credit-lock", "lawyer");
       // B8 — จด id ผู้ใช้ทั้งหมดของรันนี้ (ลบด้วย id ก่อน — prefix sweep เป็นชั้นสอง)
       trackedUserIds = [
         mainUser,
@@ -507,6 +520,8 @@ describe.skipIf(!DB_URL)(
         registrarUser,
         revokeUser,
         licenseUser,
+        leapUser,
+        lockUser,
       ].map((u) => u.id);
       // session aal2 จริงของ registrar (helpers-aal2 — enroll TOTP → challenge →
       // verify ผ่าน GoTrue /auth/v1/factors; B3: admin_credit_adjust บังคับ MFA)
@@ -516,6 +531,7 @@ describe.skipIf(!DB_URL)(
       await enrollViaRpc(citizenUser, E12_COURSE_MAIN);
       await enrollViaRpc(snapUser, E12_COURSE_SNAP);
       await enrollViaRpc(revokeUser, E12_COURSE_MAIN); // เคส 9 — หลักสูตรหลัก
+      await enrollViaRpc(lockUser, E12_COURSE_MAIN); // เคส 12 — หลักสูตรหลัก
     }, 300_000);
 
     afterAll(async () => {
@@ -1064,5 +1080,153 @@ describe.skipIf(!DB_URL)(
       `);
       expect(count[0]?.n).toBe(2);
     });
+
+    // ─── เคส 11: Feb-29 fixed-anchor lattice (gate r2 BLOCKER-3) ────────────────
+
+    it("เคส 11 Feb-29 lattice: anchor role 2020-02-29 (UTC) → '2024-02-29'=[2024-02-29, 2025-02-27] · '2023-03-01'=[2023-02-28, 2024-02-28] ต่อกันพอดี · '2024-02-28' คืนรอบเดิม (ไม่ INSERT ซ้ำ/ไม่ชน EXCLUDE) · '2025-06-01'=[2025-02-28, 2026-02-27]", async () => {
+      // leapUser ไม่มีใบอนุญาต → anchor = role_assignments.granted_at — จัด 29 ก.พ. 2020
+      // เที่ยงคืน UTC (timestamptz::date ของ session UTC = 2020-02-29 เสมอ — เหตุผล
+      // เดียวกับ probe-r2.sql: ใส่ +07 แล้ว date เพี้ยนเป็น 02-28 ทั้ง fixture)
+      await psql(`
+        update public.role_assignments set granted_at = '2020-02-29 00:00:00+00'
+         where user_id = '${leapUser.id}' and role = 'lawyer';
+      `);
+      // (1) ครบรอบ 4 ปีพอดี (29 ก.พ. อธิกสุรทิน) → L(4)=2024-02-29 … L(5)−1=2025-02-27
+      const c1 = await psqlScalar(
+        `select public.ensure_renewal_cycle('${leapUser.id}', '2024-02-29', null)::text;`,
+      );
+      const first = await psqlRows<{ id: string; starts_on: string; ends_on: string }>(`
+        select id::text, starts_on::text, ends_on::text from public.renewal_cycles
+         where user_id = '${leapUser.id}' and starts_on = '2024-02-29';
+      `);
+      expect(first).toHaveLength(1);
+      expect(c1).toBe(first[0]?.id ?? "");
+      expect(first[0]?.ends_on).toBe("2025-02-27");
+      // (2) event เก่ามาช้า (2023-03-01) → ต้องเป็นรอบ lattice L(3)=[2023-02-28, 2024-02-28]
+      //     — รุ่นเดิมต่อจาก ends_on+1 ของรอบล่าสุด ทำให้ [2023-02-28, 2024-02-27]
+      //     เกิดช่องว่าง 1 วันก่อนรอบ (1)
+      const c2 = await psqlScalar(
+        `select public.ensure_renewal_cycle('${leapUser.id}', '2023-03-01', null)::text;`,
+      );
+      const second = await psqlRows<{ id: string; starts_on: string; ends_on: string }>(`
+        select id::text, starts_on::text, ends_on::text from public.renewal_cycles
+         where user_id = '${leapUser.id}' and starts_on = '2023-02-28';
+      `);
+      expect(second).toHaveLength(1);
+      expect(c2).toBe(second[0]?.id ?? "");
+      expect(second[0]?.ends_on).toBe("2024-02-28");
+      // ต่อกันพอดี: จบรอบ (2) + 1 วัน = เริ่มรอบ (1) — ไม่มีช่องว่าง/ซ้อนทับ
+      // (2024-02-28 + 1 วัน = 2024-02-29 ตรง starts_on ของรอบ (1) ที่ assert ไว้แล้ว)
+      // (3) วันที่ตกใน "ช่องว่างของรุ่นเดิม" (2024-02-28) → ต้องคืน id รอบ (2) ที่มีอยู่แล้ว
+      //     — รุ่นเดิมจะ INSERT [2024-02-28, 2025-02-27] ซ้อนรอบ (1) → ชน EXCLUDE → raise
+      const c3 = await psqlScalar(
+        `select public.ensure_renewal_cycle('${leapUser.id}', '2024-02-28', null)::text;`,
+      );
+      expect(c3).toBe(c2);
+      const cycles = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.renewal_cycles where user_id = '${leapUser.id}';
+      `);
+      expect(cycles[0]?.n).toBe(2);
+      // (4) เดินหน้าต่อจากรอบ (1) ปกติ: 2025-06-01 → L(5)=[2025-02-28, 2026-02-27]
+      const c4 = await psqlScalar(
+        `select public.ensure_renewal_cycle('${leapUser.id}', '2025-06-01', null)::text;`,
+      );
+      const third = await psqlRows<{ id: string; starts_on: string; ends_on: string }>(`
+        select id::text, starts_on::text, ends_on::text from public.renewal_cycles
+         where user_id = '${leapUser.id}' and starts_on = '2025-02-28';
+      `);
+      expect(third).toHaveLength(1);
+      expect(c4).toBe(third[0]?.id ?? "");
+      expect(third[0]?.ends_on).toBe("2026-02-27");
+    });
+
+    // ─── เคส 12: advisory-lock tick↔revoke (gate r2 BLOCKER-2) ──────────────────
+
+    it("เคส 12 lock serialization: session อื่นถือ advisory lock enrollment → revoke ตายที่ lock_timeout (ใบยัง valid) · tick บล็อกเช่นกัน (last_error breadcrumb + ledger 0) → ปล่อย lock → tick accrual ได้ → revoke ผ่านคืน total ติดลบ (BLOCKER-1 sign end-to-end ชั้น RPC)", async () => {
+      // เตรียมด้วยเส้นทางจริงทั้งหมด (เหมือนเคส 9): สอบผ่าน → event คิว → ปิดการเรียน →
+      // ออกใบ valid — แต่ "ยังไม่" tick และ "ยังไม่" เพิกถอน
+      const attemptId = await passExamViaRest(lockUser, "main");
+      const enrollmentId = await psqlScalar(`
+        select id::text from public.enrollments
+         where user_id = '${lockUser.id}' and course_id = '${E12_COURSE_MAIN}' limit 1;
+      `);
+      await psql(`
+        update public.enrollments set status = 'completed', completed_at = now()
+         where id = '${enrollmentId}';
+      `);
+      const issue = await svcRpc("admin_issue_certificate", {
+        p_actor_user_id: STAFF_EXAM_DEMO_ID,
+        p_enrollment_id: enrollmentId,
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(issue.status, issue.text.slice(0, 300)).toBe(200);
+      const certId = (issue.json as { id: string }).id;
+      // session คู่แข่ง (psql() = session ใหม่ทุกครั้ง) ถือ advisory lock ระดับ enrollment
+      // คีย์เดียวกับ admin_revoke_certificate/credit_accrual_tick ~8 วินาที
+      const holder = psql(`
+        begin;
+        select pg_advisory_xact_lock(hashtext('ltc:credit:enr:${enrollmentId}')::bigint);
+        select pg_sleep(8);
+        commit;
+      `);
+      await new Promise((resolve) => setTimeout(resolve, 1500)); // ให้ทันจับ lock
+      // (1) revoke ต้องบล็อกที่ lock เดียวกัน → cancel ด้วย lock_timeout — psql helper
+      //     ปฏิเสธพร้อม stderr "canceling statement due to lock timeout"
+      await expect(
+        psql(`set lock_timeout='1500ms';
+              select public.admin_revoke_certificate('${STAFF_EXAM_DEMO_ID}'::uuid,
+                '${certId}'::uuid, 'ทดสอบ serialization ของเคสสิบสอง', 'dcr9-case12');`),
+      ).rejects.toThrow(/lock timeout/i);
+      // ใบยัง valid — TX ของการเพิกถอนถูกยกเลิกสมบูรณ์ ไม่มี half-done
+      const statusDuring = await psqlScalar(
+        `select status from public.certificates where id = '${certId}';`,
+      );
+      expect(statusDuring).toBe("valid");
+      // (2) tick บล็อกที่ lock เดียวกัน — subtransaction ต่อ event จับ exception ไว้ →
+      //     event กลับคิวพร้อม last_error breadcrumb · ยังไม่มี ledger เกิดขึ้น
+      await psql(`set lock_timeout='1500ms'; select public.credit_accrual_tick();`);
+      const ev = await psqlRows<{ last_error: string | null }>(`
+        select last_error from public.event_outbox
+         where topic = 'credit.accrual' and payload ->> 'source_id' = '${attemptId}';
+      `);
+      expect(ev[0]?.last_error ?? "").toMatch(/lock timeout/i);
+      const ledgerDuring = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.credit_ledger_entries
+         where user_id = '${lockUser.id}';
+      `);
+      expect(ledgerDuring[0]?.n).toBe(0);
+      // (3) ปล่อย lock (holder commit จบ) → tick ประมวลผล accrual ได้ตามปกติ —
+      //     แต่ความล้ำรอบแรกเข้าโหมด backoff (available_at = now()+60s×2^attempts)
+      //     จึงตั้งกลับมาเหมือน "รอ backoff ผ่านแล้ว" (คง attempts/last_error จริงไว้ —
+      //     การกระโดดข้ามเวลารอเป็นของ harness เท่านั้น)
+      await holder;
+      await psql(`
+        update public.event_outbox set available_at = now() - interval '1 second'
+         where topic = 'credit.accrual' and payload ->> 'source_id' = '${attemptId}';
+      `);
+      const tick = await runTick();
+      expect(tick.processed, JSON.stringify(tick)).toBeGreaterThanOrEqual(1);
+      const accrued = await psqlRows<{ amount: string }>(`
+        select amount::text from public.credit_ledger_entries
+         where user_id = '${lockUser.id}' and entry_type = 'accrual';
+      `);
+      expect(accrued).toHaveLength(1);
+      expect(accrued[0]?.amount).toBe(RULE_MAIN_CREDITS);
+      // (4) ตอนนี้ revoke ผ่านได้ — reversal = −accrual → credit_reversed_total ติดลบ
+      //     (BLOCKER-1 end-to-end: ค่าจริงจาก sum ใน TX ของ RPC ไม่ผ่าน zod ใด ๆ)
+      const revoke = await svcRpc("admin_revoke_certificate", {
+        p_actor_user_id: STAFF_EXAM_DEMO_ID,
+        p_certificate_id: certId,
+        p_reason: "เพิกถอนหลัง accrual แล้ว — reversal ต้องติดลบเต็มจำนวนที่ accrual ไป",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(revoke.status, revoke.text.slice(0, 300)).toBe(200);
+      const revoked = revoke.json as {
+        credit_reversed_rows: number;
+        credit_reversed_total: string | number;
+      };
+      expect(revoked.credit_reversed_rows).toBe(1);
+      expect(Number(revoked.credit_reversed_total)).toBe(-Number(RULE_MAIN_CREDITS));
+    }, 30_000);
   },
 );

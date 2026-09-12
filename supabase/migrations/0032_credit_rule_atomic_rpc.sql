@@ -367,7 +367,11 @@ begin
       using errcode = '22023';
   end if;
 
-  select status into v_from from public.credit_rules where id = p_rule_id;
+  -- gate r2 MINOR-1: FOR UPDATE ล็อกแถวก่อนอ่านสถานะ — PATCH สองคำขอพร้อมกันบนกฎ
+  -- เดียวกันต้องอ่านค่าหลังคนแรก commit (ไม่งั้นทั้งคู่เห็น draft → ผ่าน transition
+  -- ทั้งคู่ → audit draft→active ซ้ำสองแถว · FOR UPDATE ต้องมีสิทธิ์ UPDATE —
+  -- app_owner ได้รับ grant+policy UPDATE จาก §5 แล้ว)
+  select status into v_from from public.credit_rules where id = p_rule_id for update;
   if not found then
     raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|rule_not_found)';
   end if;

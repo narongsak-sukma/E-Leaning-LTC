@@ -51,6 +51,10 @@ const DB_URL = process.env.TEST_DATABASE_URL;
 
 /** จุดอ้างอิงของรัน — ใช้เลือกหมายเลขรหัสกฎ (ย่าน 700-949) ไม่ให้ชนรหัสของรันอื่น */
 const RUN_ID = Date.now();
+/** gate r2 BLOCKER-4 — เวลาเริ่มรันของ suite: เข็มขัด cleanup ของรหัส guard (ย่าน
+ *  CR-LTC-7xx ซึ่งมีกฎของ dev DB จริงปะปน) ต้องกรอง created_at >= จุดนี้ด้วย —
+ *  ไม่งั้นชนรหัสกับกฎจริงที่สร้างก่อนหน้าแล้ว cleanup ลบกฎของคนอื่นทิ้ง */
+const SUITE_STARTED_AT = new Date().toISOString();
 /** entity_id ของ audit_logs เป็นคอลัมน์ uuid — ทุก entity_id ของ suite ต้องเป็น uuid
  *  รูปแบบถูกต้อง (แถว accept ถูก rollback / reject ไม่เขียนแถว จึงไม่มีทางชนของจริง) */
 const ENTITY_PROBE = "aaaaaaaa-aaaa-4aaa-8aaa-0032000000a1";
@@ -67,6 +71,10 @@ let registrarAal2 = "";
 let viewerAal2 = "";
 /** id กฎที่เคส 7 สร้างจริง (track เพื่อลบใน afterAll) */
 let createdRuleId = "";
+/** รหัส guard ที่เคส 6 เลือกใช้จริง (หลังเดินเลี่ยงรหัสที่มีอยู่ก่อน) — เข็มขัด cleanup
+ *  ของ afterAll อ้างตัวนี้ (gate r2 BLOCKER-4: ต้องกรอง created_at ด้วยเพราะย่าน 7xx
+ *  มีกฎจริงของ dev DB ปะปน) */
+let guardCode = "";
 /** B8 — id ผู้ใช้ที่รันนี้สร้าง (ลบด้วย id ก่อน แล้วค่อย prefix sweep เป็นเข็มขัดชั้นสอง) */
 let trackedUserIds: readonly string[] = [];
 
@@ -200,11 +208,13 @@ async function createRuleWithRetry(): Promise<{ id: string; code: string }> {
  */
 async function cleanupAuditWorld(): Promise<void> {
   // เข็มขัดชั้นสองเฉพาะ suite: รหัสที่เคส 5/6 อาจหลุดเขียนได้หาก revoke/guard พังจริง
-  // (regression) — E12-DIRECT-% เป็นเนมสเปซของ suite · รหัส guard ผูกกับ RUN_ID ของรัน
+  // (regression) — E12-DIRECT-% เป็นเนมสเปซของ suite · รหัส guard = ตัวที่เคส 6 เลือก
+  //   จริง (guardCode) · gate r2 BLOCKER-4: ย่าน CR-LTC-7xx มีกฎของ dev DB จริง — ลบ
+  //   เฉพาะแถวที่ถูกสร้างตั้งแต่ suite เริ่ม (created_at >= SUITE_STARTED_AT) เท่านั้น
   await psql(`
     delete from public.credit_rules
      where code like 'E12-DIRECT-%'
-        or code = 'CR-LTC-${700 + (RUN_ID % 250)}';
+        ${guardCode ? `or (code = '${guardCode}' and created_at >= '${SUITE_STARTED_AT}')` : ""};
   `);
   if (createdRuleId) {
     await psql(`delete from public.credit_rules where id = '${createdRuleId}';`);
@@ -468,7 +478,17 @@ describe.skipIf(!DB_URL)(
     it("เคส 6 ลำดับ guard: aal1 → ERR-AUTH-004 ก่อนเสมอ (ไม่ว่า role) · aal2 แต่ role ไม่พอ → ERR-RBAC-001 · ไม่มีแถวกฎถูกสร้างหลุด", async () => {
       // guard ทำงานก่อน validation ทั้งหมด (0032 — บรรทัดแรกของทั้งสอง RPC) จึงใช้ body
       // ใด ๆ ก็ได้; รหัสจากย่านของรัน + assert count 0 ท้ายเคส + belt ใน cleanup
-      const guardCode = `CR-LTC-${700 + (RUN_ID % 250)}`;
+      // · gate r2 BLOCKER-4: ย่าน 7xx มีกฎจริงของ dev DB — เดิน +7 เลี่ยงรหัสที่มีอยู่ก่อน
+      //   (ไม่งั้น assert count 0 ท้ายเคสเจอกฎของคนอื่น → เคสแดงหลอก) และจดรหัสที่เลือก
+      //   ไว้ใน guardCode ระดับ suite ให้ belt ของ cleanup ใช้ตัวเดียวกัน
+      guardCode = `CR-LTC-${700 + (RUN_ID % 250)}`;
+      for (let i = 1; i <= 10; i += 1) {
+        const taken = await psqlRows<{ n: number }>(`
+          select count(*)::int as n from public.credit_rules where code = '${guardCode}';
+        `);
+        if ((taken[0]?.n ?? 0) === 0) break;
+        guardCode = `CR-LTC-${700 + ((RUN_ID + i * 7) % 250)}`;
+      }
       const body = {
         p_code: guardCode,
         p_name: "กฎทดสอบลำดับ guard (integration)",

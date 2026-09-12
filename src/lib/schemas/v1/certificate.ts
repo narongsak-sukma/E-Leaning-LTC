@@ -154,7 +154,9 @@ export const RevokedCertificateResource = z
     revokedAt: IsoTimestamp,
     revokedReason: z.string().min(1),
     creditReversedRows: z.number().int().min(0),
-    creditReversedTotal: z.number().min(0).max(999_999_999),
+    // gate r2 BLOCKER-1: reversal เขียน ledger ติดลบ (-amount ใน 0031) — ผลรวมที่
+    // RPC คืนจึงเป็นลบหรือศูนย์เสมอ (ตรง "ผลรวมติดลบ" ของ AUDIT §2.5 CREDIT_REVERSAL)
+    creditReversedTotal: z.number().min(-999_999_999).max(0),
   })
   .strict();
 
@@ -232,7 +234,9 @@ export const RevokedRowSchema = z
     cert_no: z.string().regex(CERT_NO_PATTERN),
     revoked_at: IsoTimestamp,
     credit_reversed_rows: z.number().int().min(0),
-    credit_reversed_total: z.number().min(0).max(999_999_999),
+    // gate r2 BLOCKER-1: sum ของแถว reversal (-amount) = ค่าติดลบหรือศูนย์เสมอ —
+    // ค่าบวกคือ drift · ตรง "ผลรวมติดลบ" ของ AUDIT §2.5 CREDIT_REVERSAL
+    credit_reversed_total: z.number().min(-999_999_999).max(0),
   })
   .strict();
 
