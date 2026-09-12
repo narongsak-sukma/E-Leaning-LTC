@@ -3,7 +3,9 @@
  *
  * mock ssr client (requirePermission จริง — session + my_roles RPC) + rate-limit —
  * จุดหลัก: uuid รูปแปลก → VAL-001 · RLS/permission 403 · pdf_media_id null → 404 NF-001 ·
- * media + download ครบ → 200 application/pdf (e2e จริงรอ D-4/D-8 — storage ยังไม่มี)
+ * media + download ครบ → 200 application/pdf — เจ้าของใบโหลดได้จริงทั้ง issued/revoked
+ * (RLS media_read 0019 PB-14a + storage.objects ครอบเจ้าของแล้ว — e2e-10 พิสูจน์
+ * 200 + %PDF- ผ่าน session เจ้าของใบบน stack จริง)
  */
 process.env.PUBLIC_BASE_URL = "https://elearning.lawyerthai.test";
 process.env.SUPABASE_URL = "https://stub.supabase.co";
@@ -189,7 +191,7 @@ describe("GET /certificates/{code}/pdf — resolve media + ตอบไฟล์
     });
   });
 
-  it("pdf_media_id null → 404 ERR-NF-001 (ธง D-4: ยังไม่มีการ render ไฟล์จริง)", async () => {
+  it("pdf_media_id null → 404 ERR-NF-001 (ใบจากเส้นทาง SQL ล้วน/attach ล้ม fail-open ยังไม่มีไฟล์)", async () => {
     const client = makeClient({ certs: { data: { pdf_media_id: null } } });
     const response = await GET(pdfUrl(), ctx(CERT_ID));
     const body = (await response.json()) as { error: { code: string } };
@@ -228,7 +230,7 @@ describe("GET /certificates/{code}/pdf — resolve media + ตอบไฟล์
     expect(body.error.code).toBe("ERR-SYS-002");
   });
 
-  it("media_assets ไม่เจอ → 404 ERR-NF-001 (ธง D-8: RLS media_read ยังไม่ครอบเจ้าของใบ)", async () => {
+  it("media_assets ไม่เจอ → 404 ERR-NF-001 (แถวถูก RLS ซ่อน = ไม่ใช่เจ้าของใบ/ไม่ใช่ผู้ที่ได้รับสิทธิ์)", async () => {
     const client = makeClient({ certs: { data: { pdf_media_id: MEDIA_ID } }, media: { data: null } });
     const response = await GET(pdfUrl(), ctx(CERT_ID));
     const body = (await response.json()) as { error: { code: string } };

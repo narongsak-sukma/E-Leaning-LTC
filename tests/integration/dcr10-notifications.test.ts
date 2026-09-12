@@ -21,7 +21,8 @@
  *      ทั้งสองฉบับมี verify_code + certificate_id ครบคู่ (gate r2 B5 — UUID ของใบ
  *      สำหรับ PDF) · dispatch จริง → Mailpit body มีลิงก์ verify+PDF ครบทั้งสองฉบับ ·
  *      ปลายทางจริง: GET verify สาธารณะ → 200 status revoked · GET PDF ไร้ session →
- *      401 (200 เต็มรูปแบบติดธง D-4/D-8 ข้าม wave — ดูคอมเมนต์ในเคส)
+ *      401 (200 + %PDF- ด้วย session เจ้าของใบพิสูจน์ที่ e2e-10 ผ่าน flow ออกใบ BFF
+ *      จริงที่แนบไฟล์ — fixture นี้เรียก RPC ตรงจึงไม่มีไฟล์ ดูคอมเมนต์ในเคส)
  *   6) credit.adjusted — registrar aal2 (mintAal2Token) admin_credit_adjust −1.25 → tick →
  *      notification topic credit.adjusted body มี "-1.25" · ref_type credit_ledger
  *   7) re-delivery — copy event exam.result ที่ processed แล้ว (topic+payload เดิม) → tick →
@@ -991,11 +992,12 @@ describe.skipIf(!DB_URL)(
       expect(verifyBody.status).toBe("revoked");
       expect(verifyBody.code).toBe(certNo);
       // ปลายทางลิงก์ PDF — route BFF มีชีวิตและ auth ก่อนเสมอ: ไม่มี session → 401
-      // ERR-AUTH-001 (ไม่ใช่ 404 เงียบ = เส้นทางถูกต้อง) · การได้ 200 application/pdf
-      // เต็มรูปแบบ "วันนี้" ไม่เป็นไปได้ตามธงข้าม wave ที่บันทึกไว้: D-4 (ตัว render
-      // ไฟล์ยังไม่มี — pdf_media_id เป็น null → 404 แม้เจ้าของ) + D-8 (RLS media_read
-      // ยังเปิดแค่ instructor/staff — ผู้เรียนเจ้าของใบยังโดนปฏิเสธ) — route.test.ts
-      // ของ route ครอบ 400-uuid/401/404-D-4/404-D-8/200 ไว้แล้วที่ระดับ unit
+      // ERR-AUTH-001 (ไม่ใช่ 404 เงียบ = เส้นทางถูกต้อง) · การพิสูจน์ 200 application/pdf
+      // + bytes %PDF- "ด้วย session เจ้าของใบ" อยู่ที่ e2e-10: ชุดนั้นออกใบผ่าน BFF
+      // จริง (issueCertificate รัน pipeline แนบ PDF ครบหลัง RPC) แล้วเปิด URL นี้ด้วย
+      // session ผู้เรียนทั้งก่อน/หลังเพิกถอน — fixture นี้เรียก RPC ออกใบ "ตรง" (SQL
+      // ล้วน ไม่ผ่าน pipeline แนบไฟล์) pdf_media_id จึงเป็น null และเจ้าของจะได้ 404
+      // ที่นี่ ไม่ใช่ 200 — ตรงตามสัญญา 404 ของ route สำหรับใบที่ยังไม่มีไฟล์แนบ
       const pdfRoute = await fetch(`${base}/api/v1/certificates/${certId}/pdf`);
       expect(pdfRoute.status, `pdf HTTP ${pdfRoute.status}`).toBe(401);
     }, 60_000);

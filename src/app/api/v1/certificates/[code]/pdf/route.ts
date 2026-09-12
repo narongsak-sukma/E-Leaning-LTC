@@ -10,10 +10,16 @@
  *   (ไม่เปิดเผยการมีอยู่ของทรัพยากรผู้อื่น)
  * - rate กลุ่ม READ (user_id + ip — D12-11)
  * - โครง 2 ขั้น: certificates.pdf_media_id → media_assets (bucket/storage_path/mime_type) →
- *   storage download ด้วย user-JWT · **ธงค้าง Wave D**: สื่อประกาศนียบัตรยังไม่มีจริง —
- *   pdf_media_id เป็น null จนกว่า D-4 จะ render/อัปโหลด จึงตอบ 404 ERR-NF-001 ไปก่อน ·
- *   และ RLS media_read (0010 L372-375) เปิดเฉพาะ instructor/staff — เจ้าของใบ (learner) ยัง
- *   อ่าน media_assets/storage ไม่ได้ = e2e จริงรอ D-4/D-8 เติมนโยบาย storage
+ *   storage download ด้วย user-JWT · PDF ถูก render/อัปโหลด/ผูกจริงโดย pipeline ของ
+ *   issueCertificate (BFF ออกใบรายบุคคล — renderCertificatePdf → upload → RPC
+ *   admin_attach_certificate_pdf ต่อจาก admin_issue_certificate ใน request เดียวกัน) ·
+ *   pdf_media_id เป็น null ได้จากเส้นทาง SQL ล้วนที่ไม่ผ่าน pipeline นี้ (bulk/auto
+ *   หรือ RPC ตรง) และจาก attach ที่ล้มแบบ fail-open (D36-O6 — ใบยัง valid แก้ด้วย
+ *   การออกใบแทน) → ยังไม่มีไฟล์ = ตอบ 404 ERR-NF-001 ตามสัญญา · RLS media_read
+ *   (0019 PB-14a) + storage.objects ครอบเจ้าของใบแล้ว — เจ้าของโหลด PDF ตัวเองได้
+ *   ทั้ง issued/revoked (e2e-10 พิสูจน์ 200 application/pdf + %PDF- จริง) · route ไม่
+ *   กรองสถานะใบโดยเจตนา — ผู้ถือใบที่ถูกเพิกถอนยังถือสำเนาของตัวเองได้ (ลิงก์ PDF
+ *   ในอีเมลเพิกถอน NTF-003 จึงใช้ได้)
  * - ห้ามมี holder_name ใน header/body ใด ๆ (PII) — filename ใช้ id ของใบ
  */
 import { NextResponse } from "next/server";
@@ -75,11 +81,13 @@ export async function GET(
     // r10-P1: ตรวจแถวขาเข้าก่อนหยิบค่า — คีย์หาย/คีย์เกิน = drift 503 (แทน cast ผ่าน)
     const certRow = parseInboundRow(CertPdfRowSchema, cert.data, "cert_pdf_row_drift");
     const mediaId = certRow.pdf_media_id;
-    // ธง D-4: ยังไม่มีการ render/อัปโหลด PDF จริง — pdf_media_id ว่าง = ยังไม่มีไฟล์ (404)
+    // pdf_media_id ว่าง = ใบนี้ยังไม่มีไฟล์แนบ (เส้นทาง SQL ล้วน bulk/auto/RPC ตรง
+    // ไม่ผ่าน attachCertificatePdf หรือ attach ล้มแบบ fail-open D36-O6) → 404 ตามสัญญา
     if (mediaId === null) {
       throw new AppError("ERR-NF-001");
     }
-    // 5) หา path ของไฟล์จาก media_assets (RLS media_read ปัจจุบันไม่ครอบ learner เจ้าของใบ — ธง D-8)
+    // 5) หา path ของไฟล์จาก media_assets — RLS media_read (0019 PB-14a) เปิดให้เจ้าของ
+    //    ใบ (owner ของ pdf_media_id นั้น) + instructor/staff ตามขอบเขตเดิม
     const media = await supabase.from("media_assets").select(MEDIA_SELECT).eq("id", mediaId).maybeSingle();
     if (media.error !== null) {
       throwQueryError("cert_pdf_media_query_failed", media.error.code);
@@ -90,7 +98,8 @@ export async function GET(
     // r10-P1: ตรวจแถว media ก่อน download/header — mime_type หาย/null = drift 503
     // (กัน Content-Type: undefined) · "" ยังผ่านเพื่อคง fallback application/pdf
     const mediaRow = parseInboundRow(MediaAssetRowSchema, media.data, "cert_pdf_media_row_drift");
-    // 6) ดาวน์โหลดด้วย user-JWT (storage.objects RLS ยังไม่มีนโยบายสำหรับใบประกาศ — ธง D-8)
+    // 6) ดาวน์โหลดด้วย user-JWT — storage.objects RLS (0019) มิเรอร์ media_read:
+    //    เจ้าของใบอ่าน PDF ของตัวเองได้ (bucket certificates เป็น PII — ห้ามแผ่ครอบ)
     const { data, error } = await supabase.storage.from(mediaRow.bucket).download(mediaRow.storage_path);
     if (error !== null || data === null) {
       throw new AppError("ERR-SYS-002", { details: { reason: "cert_pdf_download_failed" } });
