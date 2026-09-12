@@ -11,12 +11,11 @@ const READY_ITEMS = [
   { href: "/admin/certificates", label: "ประกาศนียบัตร", icon: "award" },
   { href: "/admin/credit-rules", label: "กฎหน่วยกิต", icon: "sliders" },
   { href: "/admin/credits", label: "หน่วยกิต (Credit Bank)", icon: "coins" },
-] as const;
-
-const SOON_ITEMS = [
-  "แดชบอร์ด",
-  "ผู้ใช้และบทบาท",
-  "บันทึกการตรวจสอบ",
+  { href: "/admin/dashboard", label: "แดชบอร์ด", icon: "grid" },
+  { href: "/admin/users", label: "ผู้ใช้และบทบาท", icon: "users" },
+  { href: "/admin/license-applications", label: "คำขอใบอนุญาต", icon: "id-card" },
+  { href: "/admin/audit", label: "บันทึกการตรวจสอบ", icon: "shield" },
+  { href: "/admin/reports", label: "รายงาน", icon: "chart" },
 ] as const;
 
 function BookIcon() {
@@ -93,6 +92,62 @@ function CoinsIcon() {
   );
 }
 
+function GridIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <rect x="4" y="4" width="6.5" height="6.5" rx="1.5" strokeLinejoin="round" />
+      <rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5" strokeLinejoin="round" />
+      <rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5" strokeLinejoin="round" />
+      <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function UsersIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <circle cx="9" cy="8" r="3.2" strokeLinejoin="round" />
+      <path d="M3.5 19c.6-3 2.8-4.5 5.5-4.5S13.9 16 14.5 19" strokeLinecap="round" />
+      <path d="M15.5 5.6a3.2 3.2 0 0 1 0 4.8" strokeLinecap="round" />
+      <path d="M17.5 14.8c1.6.7 2.6 2 3 4.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IdCardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2" strokeLinejoin="round" />
+      <circle cx="8.5" cy="11" r="1.8" />
+      <path d="M6 16c.4-1.3 1.4-2 2.5-2s2.1.7 2.5 2" strokeLinecap="round" />
+      <path d="M14 9.5h4M14 13h4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <path d="M12 3l7 2.5V11c0 4.4-2.9 7.6-7 9-4.1-1.4-7-4.6-7-9V5.5L12 3Z" strokeLinejoin="round" />
+      <path d="M9.5 11.5l1.8 1.8 3.4-3.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ChartIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+      className="h-5 w-5 shrink-0" aria-hidden="true">
+      <path d="M4 4v15a1 1 0 0 0 1 1h15" strokeLinecap="round" />
+      <path d="M8.5 15.5v-4M12.5 15.5v-7M16.5 15.5v-2.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 const ICONS = {
   book: BookIcon,
   folder: FolderIcon,
@@ -101,6 +156,11 @@ const ICONS = {
   award: AwardIcon,
   sliders: SlidersIcon,
   coins: CoinsIcon,
+  grid: GridIcon,
+  users: UsersIcon,
+  "id-card": IdCardIcon,
+  shield: ShieldIcon,
+  chart: ChartIcon,
 } as const;
 
 export function AdminSidebar() {
@@ -132,21 +192,6 @@ export function AdminSidebar() {
             </Link>
           );
         })}
-      </div>
-      <div className="mt-2 flex gap-1 overflow-x-auto rounded-[14px] bg-brand-900 p-2 lg:mt-3 lg:flex-col lg:overflow-visible lg:p-3">
-        <p className="hidden px-3 pb-2 pt-1 text-xs font-semibold text-brand-200 lg:block">
-          เมนูอื่น — เร็ว ๆ นี้
-        </p>
-        {SOON_ITEMS.map((label) => (
-          <span
-            key={label}
-            aria-disabled="true"
-            title="เชื่อมต่อในเฟสถัดไป"
-            className="flex items-center gap-2 whitespace-nowrap rounded-[10px] px-3 py-2.5 text-sm text-brand-200"
-          >
-            {label}
-          </span>
-        ))}
       </div>
     </nav>
   );

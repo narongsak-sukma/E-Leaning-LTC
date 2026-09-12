@@ -3,6 +3,8 @@ import Link from "next/link";
 import { DataTable, type DataTableColumn } from "@/components/admin/DataTable";
 import { CourseStatusBadge } from "@/components/admin/StatusBadge";
 import { AdminDataState } from "@/components/admin/AdminDataState";
+import { CourseDecisionActions } from "@/components/admin/courses/CourseDecisionActions";
+import { getAdminStaffSession } from "@/lib/fixtures/admin";
 import {
   ADMIN_COURSES_PAGE_SIZE,
   formatThaiDate,
@@ -83,6 +85,14 @@ export default async function AdminCoursesPage({
   );
   }
   const { data: rows, page } = result.data;
+  // สิทธิ์ตัดสินหลักสูตร (แสดง/ซ่อนปุ่มเท่านั้น — BFF ตรวจซ้ำที่ PATCH → RPC
+  // admin_decide_course เสมอ: staff:content | super_admin)
+  const session = await getAdminStaffSession();
+  const canDecide =
+    session.ok &&
+    session.staff !== null &&
+    (session.staff.roles.includes("staff:content") ||
+      session.staff.roles.includes("super_admin"));
   const categories = await getAdminCategories();
   const categoryNameById = categories.ok
     ? new Map(categories.data.map((category) => [category.id, category.nameTh]))
@@ -130,13 +140,21 @@ export default async function AdminCoursesPage({
       id: "actions",
       header: "การจัดการ",
       render: (course) => (
-        <Link
-          href={`/admin/courses/${course.id}`}
-          aria-label={`ดูรายละเอียดหลักสูตร ${course.titleTh}`}
-          className="font-semibold text-brand-600 hover:underline"
-        >
-          ดูรายละเอียด
-        </Link>
+        <div className="flex flex-col items-start gap-2">
+          <CourseDecisionActions
+            courseId={course.id}
+            courseTitle={course.titleTh}
+            status={course.status}
+            canDecide={canDecide}
+          />
+          <Link
+            href={`/admin/courses/${course.id}`}
+            aria-label={`ดูรายละเอียดหลักสูตร ${course.titleTh}`}
+            className="font-semibold text-brand-600 hover:underline"
+          >
+            ดูรายละเอียด
+          </Link>
+        </div>
       ),
     },
   ];
