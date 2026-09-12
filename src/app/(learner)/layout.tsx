@@ -6,6 +6,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { NotificationBell } from "@/components/learner/notifications/notification-bell";
 import { LogoutButton } from "@/components/learner/logout-button";
 
 export const metadata: Metadata = {
@@ -41,6 +42,7 @@ export default function LearnerLayout({ children }: { children: React.ReactNode 
             >
               หลักสูตรของฉัน
             </Link>
+            <NotificationBell />
             <LogoutButton className="rounded-[8px] px-3 py-2 text-sm font-semibold text-brand-700 hover:bg-brand-50" />
           </nav>
   </div>

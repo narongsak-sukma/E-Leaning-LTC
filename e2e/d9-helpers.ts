@@ -264,6 +264,17 @@ export async function deleteD9User(userId: string): Promise<void> {
     delete from public.certificate_verifications
      where verify_code in (select verify_code from public.certificates where user_id = '${userId}');
     delete from public.certificates where user_id = '${userId}';
+    -- credit_ledger_entries + consents เป็น append-only (0010 §4) — พัก trigger
+    -- เพื่อลบของ fixture เหมือน cleanup ของ DCR-10 (แถว audit_logs คงไว้ตามดีไซน์)
+    begin;
+    alter table public.credit_ledger_entries disable trigger trg_append_only_rows;
+    delete from public.credit_ledger_entries
+     where user_id = '${userId}' or created_by = '${userId}';
+    alter table public.credit_ledger_entries enable trigger trg_append_only_rows;
+    alter table public.consents disable trigger trg_append_only_rows;
+    delete from public.consents where user_id = '${userId}';
+    alter table public.consents enable trigger trg_append_only_rows;
+    commit;
     delete from public.media_assets
      where uploaded_by = '${userId}'
        and not exists (select 1 from public.certificates c where c.pdf_media_id = media_assets.id)
@@ -275,6 +286,20 @@ export async function deleteD9User(userId: string): Promise<void> {
     delete from public.lesson_progress
      where enrollment_id in (select id from public.enrollments where user_id = '${userId}');
     delete from public.enrollments where user_id = '${userId}';
+    -- โลกของ Phase 3/4 (credit bank + notifications) ที่ FK ยึด profiles — cron จริง
+    -- (credit-accrual/notification-dispatch ทุก 1 นาที) สร้างแถวเหล่านี้ให้ผู้ใช้ที่สอบ
+    -- ผ่าน/ได้ใบระหว่าง suite เอง: renewal_cycles + ledger (append-only — พัก trigger
+    -- เหมือน cleanup ของ DCR-10) + event/outbox/recipients/notifications/settings/consents
+    delete from public.event_outbox where payload ->> 'user_id' = '${userId}';
+    delete from public.email_outbox where recipient_user_id = '${userId}';
+    -- recipients ก่อน notifications (FK immediate ไม่ cascade) — CTE จับ id ที่เพิ่งลบ
+    with mine as (
+      delete from public.notification_recipients where user_id = '${userId}'
+      returning notification_id
+    )
+    delete from public.notifications n using mine where n.id = mine.notification_id;
+    delete from public.notification_settings where user_id = '${userId}';
+    delete from public.renewal_cycles where user_id = '${userId}';
     delete from public.role_assignments where user_id = '${userId}';
     delete from public.profiles where id = '${userId}';
     delete from auth.users where id = '${userId}';

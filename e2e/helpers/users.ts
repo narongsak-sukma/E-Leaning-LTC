@@ -52,6 +52,12 @@ export async function deleteLearnerUser(userId: string): Promise<void> {
     delete from public.lesson_progress where enrollment_id in (select id from public.enrollments where user_id = '${userId}');
     delete from public.quiz_attempts where user_id = '${userId}';
     delete from public.enrollments where user_id = '${userId}';
+    -- ตาราง notification/consent ของ 0034 ที่ FK → profiles (D-p4-14: e2e-14 เขียน
+    -- settings/consents ผ่าน BFF จริง — ไม่ลบก่อน profiles จะโดน RESTRICT)
+    delete from public.consents where user_id = '${userId}';
+    delete from public.email_outbox where recipient_user_id = '${userId}';
+    delete from public.notification_recipients where user_id = '${userId}';
+    delete from public.notification_settings where user_id = '${userId}';
     delete from public.role_assignments where user_id = '${userId}';
     delete from public.profiles where id = '${userId}';
     delete from auth.users where id = '${userId}';

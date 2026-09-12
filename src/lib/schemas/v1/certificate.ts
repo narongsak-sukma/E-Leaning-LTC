@@ -269,8 +269,9 @@ export const PdfAttachRowSchema = z
 
 /**
  * r10-P1: แถว certificates ที่ pdf route อ่าน — select 1 คอลัมน์ exact
- * (CERT_PDF_SELECT = "pdf_media_id"): pdf_media_id nullable จริง (ยังไม่ render/
- * อัปโหลด → 404 ตามธง D-4) แต่คีย์ต้องมี — คีย์หาย/คีย์เกิน = drift 503 แทนที่
+ * (CERT_PDF_SELECT = "pdf_media_id"): pdf_media_id nullable จริง (เส้นทาง SQL ล้วน
+ * bulk/auto/RPC ตรงไม่ผ่าน pipeline แนบไฟล์ หรือ attach ล้ม fail-open D36-O6 →
+ * 404 ตามสัญญา) แต่คีย์ต้องมี — คีย์หาย/คีย์เกิน = drift 503 แทนที่
  * cast ผ่านแล้ว undefined ไหลไปเทียบ === null ไม่เคยเท่ากัน
  */
 export const CertPdfRowSchema = z

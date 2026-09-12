@@ -143,6 +143,34 @@ describe("loadConfig — เงื่อนไขข้ามฟิลด์ (SD
   });
 });
 
+describe("CRON_SECRET — secret ของ cron email-dispatch (D-p4-8 · Wave E Phase 4)", () => {
+  it("ไม่ตั้ง → cronSecret = null (route /api/internal/jobs/email-dispatch ตอบ 404 fail-closed เงียบ)", () => {
+    expect(loadConfig(baseEnv()).cronSecret).toBeNull();
+  });
+
+  it("ตั้งค่า → เก็บค่าตาม env (trim แล้ว)", () => {
+    const cfg = loadConfig(baseEnv({ CRON_SECRET: "  cron-secret-dev-0123456789abcdef  " }));
+    expect(cfg.cronSecret).toBe("cron-secret-dev-0123456789abcdef");
+  });
+
+  it("ค่าว่าง → ConfigError (ห้าม secret ว่าง)", () => {
+    expect(() => loadConfig(baseEnv({ CRON_SECRET: "   " }))).toThrow(ConfigError);
+  });
+
+  it("EMAIL_PROVIDER=resend ต้องระบุ RESEND_API_KEY / EMAIL_FROM (ทาง prod — SDS)", () => {
+    expect(() => loadConfig(baseEnv({ EMAIL_PROVIDER: "resend" }))).toThrow(ConfigError);
+    const cfg = loadConfig(
+      baseEnv({
+        EMAIL_PROVIDER: "resend",
+        RESEND_API_KEY: "re_dev_placeholder_123",
+        EMAIL_FROM: "noreply@lawyerthai.test",
+      }),
+    );
+    expect(cfg.emailProvider).toBe("resend");
+    expect(cfg.resendApiKey).toBe("re_dev_placeholder_123");
+  });
+});
+
 describe("CURSOR_HMAC_SECRET — signed cursor (API-SPECIFICATION §1.2)", () => {
   it("ไม่ตั้ง → cursorHmacSecret = null (fallback ใช้ service key เป็น PRF ฝั่ง pagination)", () => {
     expect(loadConfig(baseEnv()).cursorHmacSecret).toBeNull();

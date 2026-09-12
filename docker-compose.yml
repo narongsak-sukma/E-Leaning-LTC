@@ -235,6 +235,37 @@ services:
       start_period: 60s
     networks: [ltc-dev]
 
+  # ----------------------------------------------------------------- mailer
+  # ทริกเกอร์ email dispatch worker (D-p4-8 dev) — loop ทุก 30 วินาที ยิง POST
+  # /api/internal/jobs/email-dispatch พร้อม header x-cron-secret (prod = Vercel Cron)
+  # CRON_SECRET อ่านจาก .env อัตโนมัติ (compose interpolation) — ค่าว่าง = ยังไม่ตั้ง
+  # config → sleep ยาว + log ว่ารอ (fail-closed ไม่ยิง endpoint)
+  mailer:
+    image: curlimages/curl:8.11.1
+    container_name: ltc-dev-mailer
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      # $$ = escape ของ compose — shell ใน container อ่านจาก environment ตอน runtime
+      CRON_SECRET: ${CRON_SECRET:-}
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        while true; do
+          if [ -z "$$CRON_SECRET" ]; then
+            echo "$$(date +%FT%T%z) mailer: CRON_SECRET ยังไม่ตั้ง — รอ config (ไม่ยิง endpoint)"
+            sleep 300
+          else
+            code=$$(curl -s -m 25 -o /tmp/resp.txt -w "%{http_code}" -X POST -H "x-cron-secret: $$CRON_SECRET" http://app:3000/api/internal/jobs/email-dispatch) || code=curl_failed
+            echo "$$(date +%FT%T%z) mailer: HTTP=$$code body=$$(head -c 200 /tmp/resp.txt 2>/dev/null)"
+            sleep 30
+          fi
+        done
+    networks: [ltc-dev]
+
   # ----------------------------------------------------------------- migrations
   # one-shot: apply supabase/migrations/*.sql ทุกครั้งที่ up (idempotent) — ดู docker/db/migrate.sh
   db-migrate:
