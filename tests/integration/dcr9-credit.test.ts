@@ -31,11 +31,17 @@
  *      2024-02-29 → [2024-02-29, 2025-02-27] · event เก่ามาช้า 2023-03-01 → [2023-02-28,
  *      2024-02-28] ต่อกันพอดีกับรอบแรก (ends_on+1 = starts_on) · 2024-02-28 ("ช่องว่างของ
  *      รุ่นเดิม") คืน id รอบเดิมไม่ INSERT ซ้ำ → ไม่มีวันชน EXCLUDE (starts_on,ends_on)
- *  12) advisory-lock tick↔revoke (gate r2 BLOCKER-2) — session อื่นถือ
- *      pg_advisory_xact_lock(ltc:credit:enr:<enr>) : revoke ตายที่ lock_timeout โดยใบยัง
- *      valid · tick บล็อกเช่นกัน → event กลับคิวพร้อม last_error breadcrumb ไม่มี ledger ·
- *      ปล่อย lock → tick accrual ได้ → revoke ผ่าน คืน credit_reversed_total ติดลบ
- *      (BLOCKER-1 sign end-to-end ที่ชั้น RPC จริง)
+ *  12) advisory-lock tick↔revoke (gate r2 BLOCKER-2 + gate r3 BLOCKER-1) —
+ *      (ก) lock domain เดียวกัน: session อื่นถือ pg_advisory_xact_lock(ltc:credit:enr:<enr>)
+ *      → revoke ตายที่ lock_timeout โดยใบยัง valid · tick (สองเฟส) ตายที่ lock_timeout
+ *      "เฟส 2" เช่นกัน = หลักฐานว่า tick จับ lock enrollment ก่อนแตะ event แรก และ
+ *      การ abort ทั้งฟังก์ชันไม่ทิ้ง state ค้าง (event ทั้งคู่ยัง pending รอได้ ไม่มี
+ *      backoff ลวง · ledger 0) (ข) deadlock choreography สอง enrollment: H_audit ถือ
+ *      ltc:audit_chain → tick จอดที่ audit ของ event แรกโดยถือ lock enr ครบทุกตัว →
+ *      revoke จริงของ enrollment B มาทีหลัง ต้องรอ enr_B (ไม่ใช่แย่ง audit) → ปล่อย
+ *      audit → tick accrual ครบสองราย commit → revoke ผ่าน reversal ติดลบ — เส้นตรี
+ *      ไม่ปิดวงรอ (ฉบับ per-event เดิมจะ deadlock จริงใน interleaving นี้) · ครบทั้ง
+ *      BLOCKER-1 sign end-to-end ที่ชั้น RPC จริง
  *
  * การแยกโลกของ suite (ไม่ชน seed/ชุดอื่น):
  *   - หลักสูตร fixture 2 หลักสูตรของตัวเอง (is_public=true ให้ citizen ลงทะเบียนได้) +
@@ -179,7 +185,8 @@ let registrarUser: TestUser; // staff:registrar — เคส 6 ฝั่งด�
 let revokeUser: TestUser; // lawyer — เคส 9 revoke-before-tick
 let licenseUser: TestUser; // lawyer — เคส 10 anniversary lattice
 let leapUser: TestUser; // lawyer — เคส 11 fixed-anchor lattice 29 ก.พ. (gate r2 BLOCKER-3)
-let lockUser: TestUser; // lawyer — เคส 12 advisory lock tick↔revoke (gate r2 BLOCKER-2)
+let lockUser: TestUser; // lawyer — เคส 12 คู่แข่ง A (event แรกของ tick)
+let lockUserB: TestUser; // lawyer — เคส 12 คู่แข่ง B (ใบ cert ที่โดนเพิกถอนระหว่าง tick)
 /** session aal2 จริงของ registrar (helpers-aal2 — B3: admin_credit_adjust บังคับ MFA) */
 let registrarAal2Token = "";
 /** B8 — id ผู้ใช้ที่รันนี้สร้าง (cleanup ลบด้วย id เหล่านี้ก่อน แล้วค่อย prefix sweep) */
@@ -510,6 +517,7 @@ describe.skipIf(!DB_URL)(
       licenseUser = await createTestUser("dcr9-credit-license", "lawyer");
       leapUser = await createTestUser("dcr9-credit-leap", "lawyer");
       lockUser = await createTestUser("dcr9-credit-lock", "lawyer");
+      lockUserB = await createTestUser("dcr9-credit-lockb", "lawyer");
       // B8 — จด id ผู้ใช้ทั้งหมดของรันนี้ (ลบด้วย id ก่อน — prefix sweep เป็นชั้นสอง)
       trackedUserIds = [
         mainUser,
@@ -522,6 +530,7 @@ describe.skipIf(!DB_URL)(
         licenseUser,
         leapUser,
         lockUser,
+        lockUserB,
       ].map((u) => u.id);
       // session aal2 จริงของ registrar (helpers-aal2 — enroll TOTP → challenge →
       // verify ผ่าน GoTrue /auth/v1/factors; B3: admin_credit_adjust บังคับ MFA)
@@ -532,6 +541,7 @@ describe.skipIf(!DB_URL)(
       await enrollViaRpc(snapUser, E12_COURSE_SNAP);
       await enrollViaRpc(revokeUser, E12_COURSE_MAIN); // เคส 9 — หลักสูตรหลัก
       await enrollViaRpc(lockUser, E12_COURSE_MAIN); // เคส 12 — หลักสูตรหลัก
+      await enrollViaRpc(lockUserB, E12_COURSE_MAIN); // เคส 12(ข) — enrollment ที่สองของ tick
     }, 300_000);
 
     afterAll(async () => {
@@ -1142,36 +1152,38 @@ describe.skipIf(!DB_URL)(
 
     // ─── เคส 12: advisory-lock tick↔revoke (gate r2 BLOCKER-2) ──────────────────
 
-    it("เคส 12 lock serialization: session อื่นถือ advisory lock enrollment → revoke ตายที่ lock_timeout (ใบยัง valid) · tick บล็อกเช่นกัน (last_error breadcrumb + ledger 0) → ปล่อย lock → tick accrual ได้ → revoke ผ่านคืน total ติดลบ (BLOCKER-1 sign end-to-end ชั้น RPC)", async () => {
-      // เตรียมด้วยเส้นทางจริงทั้งหมด (เหมือนเคส 9): สอบผ่าน → event คิว → ปิดการเรียน →
-      // ออกใบ valid — แต่ "ยังไม่" tick และ "ยังไม่" เพิกถอน
-      const attemptId = await passExamViaRest(lockUser, "main");
-      const enrollmentId = await psqlScalar(`
+    it("เคส 12 (ก) lock domain เดียวกัน: holder ถือ enr lock → revoke และ tick ตายที่ lock_timeout เหมือนกัน โดย event ทั้งคู่ยัง pending ไม่มี ledger · (ข) deadlock สอง enrollment: H_audit จอด tick ไว้กลาง audit → revoke B มาทีหลังรอ enr_B → ปล่อย audit → tick accrual ครบ + revoke ผ่าน reversal ติดลบ (gate r3 BLOCKER-1)", async () => {
+      // เตรียมด้วยเส้นทางจริงทั้งหมด (แบบเคส 9): สอบผ่านสองคน = event สองตัวในคิว ·
+      // ใบ cert ผูก enrollment ของ B — แต่ "ยังไม่" tick และ "ยังไม่" เพิกถอน
+      const attemptA = await passExamViaRest(lockUser, "main");
+      const attemptB = await passExamViaRest(lockUserB, "main");
+      const enrollmentB = await psqlScalar(`
         select id::text from public.enrollments
-         where user_id = '${lockUser.id}' and course_id = '${E12_COURSE_MAIN}' limit 1;
+         where user_id = '${lockUserB.id}' and course_id = '${E12_COURSE_MAIN}' limit 1;
       `);
       await psql(`
         update public.enrollments set status = 'completed', completed_at = now()
-         where id = '${enrollmentId}';
+         where id = '${enrollmentB}';
       `);
       const issue = await svcRpc("admin_issue_certificate", {
         p_actor_user_id: STAFF_EXAM_DEMO_ID,
-        p_enrollment_id: enrollmentId,
+        p_enrollment_id: enrollmentB,
         p_request_id: crypto.randomUUID(),
       });
       expect(issue.status, issue.text.slice(0, 300)).toBe(200);
       const certId = (issue.json as { id: string }).id;
-      // session คู่แข่ง (psql() = session ใหม่ทุกครั้ง) ถือ advisory lock ระดับ enrollment
-      // คีย์เดียวกับ admin_revoke_certificate/credit_accrual_tick ~8 วินาที
+
+      // ── (ก) หลักฐาน lock domain เดียวกัน — session อื่น (psql = session ใหม่ทุกครั้ง)
+      //     ถือ advisory lock ระดับ enrollment คีย์เดียวกับ revoke/tick ~8 วินาที
       const holder = psql(`
         begin;
-        select pg_advisory_xact_lock(hashtext('ltc:credit:enr:${enrollmentId}')::bigint);
+        select pg_advisory_xact_lock(hashtext('ltc:credit:enr:${enrollmentB}')::bigint);
         select pg_sleep(8);
         commit;
       `);
       await new Promise((resolve) => setTimeout(resolve, 1500)); // ให้ทันจับ lock
-      // (1) revoke ต้องบล็อกที่ lock เดียวกัน → cancel ด้วย lock_timeout — psql helper
-      //     ปฏิเสธพร้อม stderr "canceling statement due to lock timeout"
+      // (1) revoke บล็อกที่ enr lock → cancel ด้วย lock_timeout — psql helper ปฏิเสธ
+      //     พร้อม stderr "canceling statement due to lock timeout"
       await expect(
         psql(`set lock_timeout='1500ms';
               select public.admin_revoke_certificate('${STAFF_EXAM_DEMO_ID}'::uuid,
@@ -1182,51 +1194,95 @@ describe.skipIf(!DB_URL)(
         `select status from public.certificates where id = '${certId}';`,
       );
       expect(statusDuring).toBe("valid");
-      // (2) tick บล็อกที่ lock เดียวกัน — subtransaction ต่อ event จับ exception ไว้ →
-      //     event กลับคิวพร้อม last_error breadcrumb · ยังไม่มี ledger เกิดขึ้น
-      await psql(`set lock_timeout='1500ms'; select public.credit_accrual_tick();`);
-      const ev = await psqlRows<{ last_error: string | null }>(`
-        select last_error from public.event_outbox
-         where topic = 'credit.accrual' and payload ->> 'source_id' = '${attemptId}';
+      // (2) tick บล็อกที่ lock เดียวกัน — สองเฟส: abort ทั้งฟังก์ชันที่ "เฟส 2" (จับ enr
+      //     lock ก่อนแตะ event แรก) → event ทั้งคู่ต้องยัง pending ไม่มี backoff ลวง
+      //     ไม่มี ledger — ความล้ำถูกยกเลิกสะอาดไม่ทิ้ง state ค้าง
+      await expect(
+        psql(`set lock_timeout='1500ms'; select public.credit_accrual_tick();`),
+      ).rejects.toThrow(/lock timeout/i);
+      const pending = await psqlRows<{ status: string; error: string | null }>(`
+        select status::text, last_error as error from public.event_outbox
+         where topic = 'credit.accrual'
+           and payload ->> 'source_id' in ('${attemptA}', '${attemptB}');
       `);
-      expect(ev[0]?.last_error ?? "").toMatch(/lock timeout/i);
+      expect(pending).toHaveLength(2);
+      for (const row of pending) {
+        expect(row.status).toBe("pending");
+        expect(row.error).toBeNull(); // ไม่มี breadcrumb/backoff — abort ก่อนเฟส 3
+      }
       const ledgerDuring = await psqlRows<{ n: number }>(`
         select count(*)::int as n from public.credit_ledger_entries
-         where user_id = '${lockUser.id}';
+         where user_id in ('${lockUser.id}', '${lockUserB.id}');
       `);
       expect(ledgerDuring[0]?.n).toBe(0);
-      // (3) ปล่อย lock (holder commit จบ) → tick ประมวลผล accrual ได้ตามปกติ —
-      //     แต่ความล้ำรอบแรกเข้าโหมด backoff (available_at = now()+60s×2^attempts)
-      //     จึงตั้งกลับมาเหมือน "รอ backoff ผ่านแล้ว" (คง attempts/last_error จริงไว้ —
-      //     การกระโดดข้ามเวลารอเป็นของ harness เท่านั้น)
-      await holder;
-      await psql(`
-        update public.event_outbox set available_at = now() - interval '1 second'
-         where topic = 'credit.accrual' and payload ->> 'source_id' = '${attemptId}';
+      await holder; // ปล่อย enr lock
+
+      // ── (ข) choreography deadlock ของ gate r3 BLOCKER-1 — interleaving ที่ฉบับ
+      //     per-event เดิมจะปิดวงรอ: tick{audit ของ event แรก} รอ enr_B ที่ revoke
+      //     ถืออยู่ · สองเฟส: tick ถือ enr ครบก่อนแตะ audit → revoke รอ enr_B เป็น
+      //     เส้นตรี ไม่มีใครรอใครเป็นวง
+      const auditHolder = psql(`
+        begin;
+        select pg_advisory_xact_lock(hashtext('ltc:audit_chain')::bigint);
+        select pg_sleep(8);
+        commit;
       `);
-      const tick = await runTick();
-      expect(tick.processed, JSON.stringify(tick)).toBeGreaterThanOrEqual(1);
-      const accrued = await psqlRows<{ amount: string }>(`
-        select amount::text from public.credit_ledger_entries
-         where user_id = '${lockUser.id}' and entry_type = 'accrual';
-      `);
-      expect(accrued).toHaveLength(1);
-      expect(accrued[0]?.amount).toBe(RULE_MAIN_CREDITS);
-      // (4) ตอนนี้ revoke ผ่านได้ — reversal = −accrual → credit_reversed_total ติดลบ
-      //     (BLOCKER-1 end-to-end: ค่าจริงจาก sum ใน TX ของ RPC ไม่ผ่าน zod ใด ๆ)
-      const revoke = await svcRpc("admin_revoke_certificate", {
+      await new Promise((resolve) => setTimeout(resolve, 1500)); // audit chain ถูกถือ
+      // tick จริง (ไม่มี lock_timeout — ต้องรอได้) — เฟส 2 จับ enr_A+enr_B แล้วจอด
+      // รอ audit ของ event แรกที่ H_audit ถืออยู่
+      const tickPromise = psql(`select public.credit_accrual_tick();`);
+      await new Promise((resolve) => setTimeout(resolve, 1800)); // tick จอดกลางทาง
+      // revoke จริงของ B (ไม่มี lock_timeout) — ต้องรอ enr_B ที่ tick ถืออยู่ ไม่ใช่
+      // ไปแย่ง audit chain (= จุดเกิด deadlock ของฉบับเดิม)
+      const revokePromise = svcRpc("admin_revoke_certificate", {
         p_actor_user_id: STAFF_EXAM_DEMO_ID,
         p_certificate_id: certId,
-        p_reason: "เพิกถอนหลัง accrual แล้ว — reversal ต้องติดลบเต็มจำนวนที่ accrual ไป",
+        p_reason: "เพิกถอนควบคู่ tick ที่กำลัง accrual — ต้องไม่เกิด deadlock ของเคสสิบสอง",
         p_request_id: crypto.randomUUID(),
       });
+      await auditHolder; // ปล่อย audit chain → tick ไหลต่อจน commit → revoke ไหลต่อ
+      const tickOut = await tickPromise;
+      const tick = JSON.parse(tickOut.trim()) as TickResult;
+      expect(tick.skipped).toBe(false);
+      expect(tick.processed, JSON.stringify(tick)).toBeGreaterThanOrEqual(2);
+      expect(tick.failed).toBe(0);
+      const revoke = await revokePromise;
       expect(revoke.status, revoke.text.slice(0, 300)).toBe(200);
       const revoked = revoke.json as {
         credit_reversed_rows: number;
         credit_reversed_total: string | number;
       };
+      // BLOCKER-1 sign end-to-end: ค่าจริงจาก sum ใน TX ของ RPC ไม่ผ่าน zod ใด ๆ
       expect(revoked.credit_reversed_rows).toBe(1);
       expect(Number(revoked.credit_reversed_total)).toBe(-Number(RULE_MAIN_CREDITS));
-    }, 30_000);
+      // สถานะสุดท้าย: A accrual เต็ม · B accrual + reversal · ใบ revoked · event ปิดครบ
+      const ledgerA = await psqlRows<{ type: string; amount: string }>(`
+        select entry_type::text as type, amount::text as amount
+          from public.credit_ledger_entries where user_id = '${lockUser.id}';
+      `);
+      expect(ledgerA).toHaveLength(1);
+      expect(ledgerA[0]?.type).toBe("accrual");
+      expect(ledgerA[0]?.amount).toBe(RULE_MAIN_CREDITS);
+      const ledgerB = await psqlRows<{ type: string; amount: string }>(`
+        select entry_type::text as type, amount::text as amount
+          from public.credit_ledger_entries where user_id = '${lockUserB.id}';
+      `);
+      expect(ledgerB).toHaveLength(2);
+      const accrualB = ledgerB.find((r) => r.type === "accrual");
+      const reversalB = ledgerB.find((r) => r.type === "reversal");
+      expect(accrualB?.amount).toBe(RULE_MAIN_CREDITS);
+      expect(reversalB?.amount).toBe(`-${RULE_MAIN_CREDITS}`);
+      const certStatus = await psqlScalar(
+        `select status from public.certificates where id = '${certId}';`,
+      );
+      expect(certStatus).toBe("revoked");
+      const closedEvents = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.event_outbox
+         where topic = 'credit.accrual'
+           and payload ->> 'source_id' in ('${attemptA}', '${attemptB}')
+           and status = 'processed';
+      `);
+      expect(closedEvents[0]?.n).toBe(2);
+    }, 45_000);
   },
 );

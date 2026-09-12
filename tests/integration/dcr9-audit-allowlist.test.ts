@@ -55,6 +55,11 @@ const RUN_ID = Date.now();
  *  CR-LTC-7xx ซึ่งมีกฎของ dev DB จริงปะปน) ต้องกรอง created_at >= จุดนี้ด้วย —
  *  ไม่งั้นชนรหัสกับกฎจริงที่สร้างก่อนหน้าแล้ว cleanup ลบกฎของคนอื่นทิ้ง */
 const SUITE_STARTED_AT = new Date().toISOString();
+/** gate r3 BLOCKER-2 (ownership) — เวลาอย่างเดียวพิสูจน์ความเป็นเจ้าไม่ได้: actor อื่น
+ *  สร้างกฎ "รหัสเดียวกัน" ระหว่าง suite รันได้ (beforeAll → afterAll) แล้ว belt ลบของ
+ *  เขาทิ้ง · ชื่อกฎ guard จึงฝัง RUN_ID (ไม่ซ้ำทุกรัน) แล้ว belt บังคับครบสามเงื่อนไข
+ *  code + name + created_at — เป็นการพิสูจน์ความเป็นเจ้าจากเนื้อหาของแถวเอง */
+const GUARD_NAME = `กฎทดสอบลำดับ guard (integration) ${RUN_ID}`;
 /** entity_id ของ audit_logs เป็นคอลัมน์ uuid — ทุก entity_id ของ suite ต้องเป็น uuid
  *  รูปแบบถูกต้อง (แถว accept ถูก rollback / reject ไม่เขียนแถว จึงไม่มีทางชนของจริง) */
 const ENTITY_PROBE = "aaaaaaaa-aaaa-4aaa-8aaa-0032000000a1";
@@ -211,10 +216,14 @@ async function cleanupAuditWorld(): Promise<void> {
   // (regression) — E12-DIRECT-% เป็นเนมสเปซของ suite · รหัส guard = ตัวที่เคส 6 เลือก
   //   จริง (guardCode) · gate r2 BLOCKER-4: ย่าน CR-LTC-7xx มีกฎของ dev DB จริง — ลบ
   //   เฉพาะแถวที่ถูกสร้างตั้งแต่ suite เริ่ม (created_at >= SUITE_STARTED_AT) เท่านั้น
+  //   · gate r3 BLOCKER-2: เวลาพิสูจน์เจ้าไม่พอ (actor อื่นสร้างรหัสเดียวกันระหว่าง
+  //   รันได้) — บังคับเพิ่ม name = GUARD_NAME (ผูก RUN_ID ไม่ซ้ำทุกรัน) = belt ลบได้
+  //   เฉพาะแถวที่เนื้อหาตรงกับของ suite เท่านั้น
   await psql(`
     delete from public.credit_rules
      where code like 'E12-DIRECT-%'
-        ${guardCode ? `or (code = '${guardCode}' and created_at >= '${SUITE_STARTED_AT}')` : ""};
+        ${guardCode ? `or (code = '${guardCode}' and name = '${GUARD_NAME}'
+                        and created_at >= '${SUITE_STARTED_AT}')` : ""};
   `);
   if (createdRuleId) {
     await psql(`delete from public.credit_rules where id = '${createdRuleId}';`);
@@ -491,7 +500,7 @@ describe.skipIf(!DB_URL)(
       }
       const body = {
         p_code: guardCode,
-        p_name: "กฎทดสอบลำดับ guard (integration)",
+        p_name: GUARD_NAME, // gate r3 BLOCKER-2 — ชื่อผูก RUN_ID = belt พิสูจน์เจ้าจากเนื้อหา
         p_course_id: null,
         p_credit_type: "general",
         p_credits: 3.5,

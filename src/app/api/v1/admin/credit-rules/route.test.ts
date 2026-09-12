@@ -167,6 +167,9 @@ function ruleBody(overrides: Record<string, unknown> = {}): Record<string, unkno
     code: "CR-LTC-001",
     name: "สอบผ่านหลักสูตรทั่วไป",
     credits: 3,
+    // gate r3 MINOR-1 — required ที่ BFF แล้ว: fixture ต้องส่งเสมอ ไม่งั้น happy-path
+    // เทสเองก็ 400 (ช่องว่างเดิมที่ทำให้ bug นี้มองไม่เห็นเพราะ RPC ถูก mock)
+    effectiveFrom: "2026-09-01",
     ...overrides,
   };
 }
@@ -402,6 +405,21 @@ describe("POST /admin/credit-rules — สร้างกฎ (draft) ผ่า�
     };
     expect(body.error.code).toBe("ERR-VAL-001");
     expect(body.error.details.fields.length).toBeGreaterThan(0);
+  });
+
+  it("ไม่กรอก effectiveFrom → 400 ERR-VAL-001 fields มี effectiveFrom และไม่ถึง RPC (gate r3 MINOR-1)", async () => {
+    const control = mockClient({ roles: [SR] });
+    const rest = ruleBody();
+    delete rest.effectiveFrom;
+    const res = await POST(postRequest(rest));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: { code: string; details: { fields: string[] } };
+    };
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(body.error.details.fields).toContain("effectiveFrom");
+    // กันที่ประตู BFF จริง — RPC ต้องไม่ถูกเรียกเลย (เดิม optional→null แล้วพังที่ชั้น 0032)
+    expect(control.rpcCalls.filter((c) => c.fn === "admin_create_credit_rule")).toHaveLength(0);
   });
 
   it.each([

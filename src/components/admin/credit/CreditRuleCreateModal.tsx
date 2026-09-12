@@ -267,6 +267,7 @@ export function CreditRuleCreateModal() {
                 <input
                   className={INPUT_CLASS}
                   type="date"
+                  required // gate r3 MINOR-1 — บังคับกรอกตั้งแต่ฟอร์ม (สัญญา required ตรง BFF/RPC)
                   value={form.effectiveFrom}
                   onChange={(event) => update({ effectiveFrom: event.target.value })}
                   disabled={submitting}

@@ -157,6 +157,13 @@ grant execute on function public.ensure_renewal_cycle(uuid, date, jsonb)
   to app_owner, service_role;
 
 -- ═══ (3) credit_accrual_tick — consumer ของ credit.accrual (C-1 · CRB-003 AC ≤5 นาที) ═══
+-- gate r3 BLOCKER-1 (ลำดับ lock): เดิมจับ advisory lock ระดับ enrollment "ต่อ event"
+-- ภายในลูป — แต่ audit ของ 0008 ถือ `ltc:audit_chain` ถึงจบ TX ของ tick (function =
+-- TX เดียว) เกิดวงรอได้: tick{audit จาก event A} รอ enr_B · revoke{enr_B} รอ audit →
+-- deadlock · แก้เป็นสองเฟส: เฟส 1 เก็บ event ทั้งหมด + resolve enrollment · เฟส 2 จับ
+-- advisory lock ของ "ทุก" enrollment เรียงตามคีย์ lock ก่อนประมวลผลแม้แต่ event เดียว —
+-- ลำดับคลาส lock ทั้งระบบจึงเป็น global_tick → enrollment → audit_chain เสมอ (revoke =
+-- enrollment → audit_chain) ใครรอใครเป็นเส้นตรง ไม่ปิดวง
 create or replace function public.credit_accrual_tick() returns jsonb
 language plpgsql security definer
 set search_path = public
@@ -172,7 +179,6 @@ declare
   v_event uuid;
   v_user uuid;
   v_attempt uuid;
-  v_enr uuid; -- gate r2 BLOCKER-2: enrollment ของ attempt (คีย์ advisory lock)
   v_rule jsonb;
   v_cycle uuid;
   v_ledger uuid;
@@ -182,19 +188,60 @@ begin
   if not pg_try_advisory_xact_lock(hashtext('ltc:credit_accrual')::bigint) then
     return jsonb_build_object('skipped', true, 'reason', 'already_running');
   end if;
-  <<batches>>
+
+  -- ── เฟส 1: เก็บ event ที่จะประมวลผลทั้งหมด (≤5 รอบ × 200) ── temp table
+  -- on commit drop · drop if exists กันซ้ำใน pooled session ที่ TX ก่อน abort
+  -- ค้างไว้ (tick ปกติจบ commit ตารางหายเอง)
+  drop table if exists _tick_events;
+  create temp table _tick_events (
+    seq bigint generated always as identity primary key,
+    event_id uuid not null unique,
+    payload jsonb not null,
+    enr uuid null
+  ) on commit drop;
+
+  <<collect>>
   loop
     v_rounds := v_rounds + 1;
     if v_rounds > 5 then exit; end if; -- ≤1,000 event/tick กัน TX ยาว (รอบถัดไป 1 นาที)
-    v_batch := 0;
-    for r in
-      select id, payload from public.event_outbox
-      where topic = 'credit.accrual' and status = 'pending' and available_at <= now()
-      order by available_at, id
-      limit 200
-    loop
-      v_batch := v_batch + 1;
-      v_event := r.id;
+    insert into _tick_events (event_id, payload)
+    select e.id, e.payload
+      from public.event_outbox e
+     where e.topic = 'credit.accrual' and e.status = 'pending'
+       and e.available_at <= now()
+       and not exists (select 1 from _tick_events t where t.event_id = e.id)
+     order by e.available_at, e.id
+     limit 200;
+    get diagnostics v_batch = row_count;
+    exit when v_batch = 0;        -- คิวหมด
+    exit when v_batch < 200;      -- เศษท้ายคิว
+  end loop collect;
+
+  -- resolve attempt → enrollment ของทุก event ที่เก็บไว้ (เฟส 2 ใช้จับ lock · เฟส 3
+  -- ใช้เฝ้า attempt_not_found — enroll ที่หายระหว่างทางคือ error ตามเดิม)
+  update _tick_events t
+     set enr = a.enrollment_id
+    from public.assessment_attempts a
+   where (t.payload ->> 'source_id')::uuid = a.id;
+
+  -- ── เฟส 2: จับ advisory lock ระดับ enrollment ของ "ทุก" event ก่อนประมวลผล event ──
+  -- แรก — คีย์เดียวกับ admin_revoke_certificate (gate r2 BLOCKER-2) เรียงตาม enrollment
+  -- id (deterministic — tick เป็นผู้ขอ lock หลายตัวพร้อมกันเพียงผู้เดียวและถูก serialize
+  -- ด้วย global lock อยู่แล้ว) · หลังเฟสนี้ tick จะถือ audit_chain เมื่อเขียน audit แรก
+  -- และ "ไม่ขอ" lock enrollment เพิ่มอีก = ปิดวงรอ deadlock (gate r3 BLOCKER-1)
+  for r in
+    select distinct t.enr as enr
+      from _tick_events t
+     where t.enr is not null
+     order by t.enr
+  loop
+    perform pg_advisory_xact_lock(
+      hashtext('ltc:credit:enr:' || r.enr::text)::bigint);
+  end loop;
+
+  -- ── เฟส 3: ประมวลผลตามลำดับเดิม (available_at, id) — ต่อ event 1 subtransaction ──
+  for r in select event_id, payload, enr from _tick_events order by seq loop
+      v_event := r.event_id;
       begin
         v_user := (r.payload ->> 'user_id')::uuid;
         v_attempt := (r.payload ->> 'source_id')::uuid;
@@ -220,17 +267,13 @@ begin
           where id = v_event;
           v_no_cycle := v_no_cycle + 1;
         else
-          -- gate r2 BLOCKER-2: จับ advisory lock ระดับ enrollment เดียวกับ
-          -- admin_revoke_certificate ก่อนอ่านสถานะ cert — serialize สองเส้นทาง
+          -- gate r2 BLOCKER-2: advisory lock ระดับ enrollment ถูกจับครบทุกตัวแล้วใน
+          -- เฟส 2 (ก่อน event แรก) — serialize กับ admin_revoke_certificate
           -- (เพิกถอนรอเรา commit → reversal เห็น accrual ที่เราเขียนครบ /
           --  เรารอเพิกถอน commit → เห็น revoked → skip ตาม BLOCKER-4)
-          select enrollment_id into v_enr from public.assessment_attempts
-          where id = v_attempt;
-          if v_enr is null then
+          if r.enr is null then
             raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|attempt_not_found)';
           end if;
-          perform pg_advisory_xact_lock(
-            hashtext('ltc:credit:enr:' || v_enr::text)::bigint);
           -- gate r1 BLOCKER-4: ความพยายามสอบที่ enrollment มีใบประกาศนียบัตรถูกเพิกถอน
           -- (revoked) อยู่ = ผลสอบถูก invalidate แล้ว — ห้าม accrual ไม่ว่า event มาถึง
           -- tick ช้าแค่ไหน (at-least-once re-delivery หลังเพิกถอนก็ห้าม) · ปิด event
@@ -294,9 +337,6 @@ begin
         v_failed := v_failed + 1;
       end;
     end loop;
-    exit when v_batch = 0;        -- คิวหมด
-    exit when v_batch < 200;      -- เศษท้ายคิว
-  end loop batches;
   return jsonb_build_object('skipped', false,
                             'processed', v_processed, 'already_accrued', v_already,
                             'no_cycle_target', v_no_cycle, 'revoked_skipped', v_revoked,

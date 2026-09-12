@@ -262,7 +262,10 @@ const CreateCreditRuleBody = z
       .nullish(),
     priority: z.number().int().min(0).max(2147483647).default(100),
     renewalCycle: z.string().trim().regex(CREDIT_TYPE_RE).nullish(),
-    effectiveFrom: z.iso.date().optional(),
+    // gate r3 MINOR-1 — RPC 0032 บังคับ p_effective_from (effective_from_required):
+    // ทำ optional ที่ BFF แล้วส่ง null ต่อ = ทุกคำขอไม่มีค่านี้พังที่ชั้น RPC ด้วย 500
+    // ทั้งที่ควรกันที่ประตูด้วย 400 ตั้งแต่แรก (ตรง schema ของ API-SPEC ที่ required)
+    effectiveFrom: z.iso.date(),
     effectiveTo: z.iso.date().nullish(),
   })
   .strict();
@@ -281,11 +284,7 @@ async function parseCreateBody(request: Request): Promise<z.infer<typeof CreateC
     throw new AppError("ERR-VAL-001", { details: { fields: fields.length > 0 ? fields : ["body"] } });
   }
   // cross-field: effective_to ต้องหลัง effective_from เมื่อระบุทั้งคู่ (DB ไม่มี CHECK คู่นี้ — กั้นที่ BFF)
-  if (
-    parsed.data.effectiveFrom !== undefined &&
-    parsed.data.effectiveTo != null &&
-    parsed.data.effectiveTo <= parsed.data.effectiveFrom
-  ) {
+  if (parsed.data.effectiveTo != null && parsed.data.effectiveTo <= parsed.data.effectiveFrom) {
     throw new AppError("ERR-VAL-001", { details: { fields: ["effective_to"] } });
   }
   return parsed.data;
@@ -334,7 +333,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       p_required_credits_per_cycle: body.requiredCreditsPerCycle ?? null,
       p_priority: body.priority,
       p_renewal_cycle: body.renewalCycle ?? null,
-      p_effective_from: body.effectiveFrom ?? null,
+      p_effective_from: body.effectiveFrom, // gate r3 MINOR-1 — required แล้ว ไม่มีทาง null
       p_effective_to: body.effectiveTo ?? null,
       p_request_id: options.requestId ?? null,
     });
