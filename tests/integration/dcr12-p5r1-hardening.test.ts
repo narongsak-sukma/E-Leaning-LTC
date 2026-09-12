@@ -434,10 +434,11 @@ describe.skipIf(!DB_URL)(
       expect(linkMatch, "เนื้อเมล์ไม่มี URL เต็มของ signed link").not.toBeNull();
       const link = new URL(linkMatch?.[0] ?? "");
       const base = new URL(REST_URL);
-      expect(link.host, "host ลิงก์ในเมล์ต้องเป็นมุมมองผู้รับ ไม่ใช่ kong:8000").toBe(base.host);
+      // gate p5-r3 NIT: assert ที่ origin (protocol+host พร้อมกัน — https ที่ผิดกับ
+      // gateway http ต้องไม่ผ่าน) แล้ว fetch "URL ดิบจากเมล์" ไม่เขียนกลับก่อนเปิด —
+      // ลิงก์ที่ผู้รับกดคือสิ่งที่ถูกพิสูจน์ ไม่ใช่ฉบับแปลงของเทส
+      expect(link.origin, "origin ลิงก์ในเมล์ต้องเป็นมุมมองผู้รับ ไม่ใช่ kong:8000").toBe(base.origin);
       expect(mailText).not.toContain("http://kong:8000");
-      link.protocol = base.protocol;
-      link.host = base.host;
       const dl = await fetch(link, { signal: AbortSignal.timeout(15_000) });
       expect(dl.status, `GET signed URL ต้อง 200 (ได้ ${dl.status})`).toBe(200);
       const document = (await dl.json()) as {

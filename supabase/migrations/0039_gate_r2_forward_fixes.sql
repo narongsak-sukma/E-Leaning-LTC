@@ -17,8 +17,16 @@
 
 -- ═══ §1 data_export_jobs: คอลัมน์ fencing + backfill งานค้าง (gate p5-r2 B4/M1) ═══
 
+-- gate p5-r3 BLOCKER: คอลัมน์ claimed_at เกิดที่ 0036 ฉบับแก้ (fix wave r1 — แก้ in-place
+-- ตอน branch ยังไม่ merge) ฐานข้อมูลที่ apply 0036 "ฉบับก่อนแก้" (baseline 0e69e00) แล้ว
+-- upgrade ด้วย runner จะข้าม 0036 ตาม ledger → ไม่มี claimed_at ให้ backfill ด้านล่างใช้
+-- (undefined column) — เพิ่มให้ตรงนี้แบบ IF NOT EXISTS ครอบทุกสถานะ: DB ใหม่ (0036 ฉบับแก่
+-- สร้างให้แล้ว = no-op) · baseline upgrade (เพิ่มให้ตรงนี้) · DB ที่ apply 0039 ไปแล้ว (skip
+-- ตาม ledger และมีคอลัมน์อยู่แล้วโดยสภาพ — 0039 ฉบับเดิม run ไม่ผ่านถ้าไม่มี claimed_at
+-- เพราะ runner ครอบ TX เดียวต่อไฟล์)
 alter table public.data_export_jobs
-  add column if not exists claim_token uuid;
+  add column if not exists claim_token uuid,
+  add column if not exists claimed_at timestamptz;
 comment on column public.data_export_jobs.claim_token is
   'gate p5-r2 M1: token ของ "รอบการถือครอง" ล่าสุด — complete/fail ต้องแนบค่าที่ตรงกัน (worker เก่าที่ lease ถูกยึดคืนใช้ปิดงานไม่ได้)';
 

@@ -85,9 +85,18 @@ begin
     raise notice '0035: storage schema ไม่มี (vanilla image) — ข้าม bucket/นโยบาย storage';
     return;
   end if;
-  insert into storage.buckets (id, name, public)
-  values ('license-evidence','license-evidence',false)
-  on conflict (id) do nothing;
+  -- คอลัมน์ buckets.public ถูกถอดใน storage-api v1 (ดู rationale เต็มที่ 0019 §storage)
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'storage' and table_name = 'buckets'
+                and column_name = 'public') then
+    insert into storage.buckets (id, name, public)
+    values ('license-evidence','license-evidence',false)
+    on conflict (id) do nothing;
+  else
+    insert into storage.buckets (id, name)
+    values ('license-evidence','license-evidence')
+    on conflict (id) do nothing;
+  end if;
   execute 'drop policy if exists objects_via_media_assets on storage.objects';
   execute $p$create policy objects_via_media_assets on storage.objects
     for select to authenticated
@@ -432,10 +441,6 @@ declare
   v_actor uuid;
 begin
   v_actor := public.admin_license_staff_guard();
-  -- gate p5-r1 B5: per-account lock ก่อนแตะ role_assignments — สอง TX ถอนคนละ
-  -- role พร้อมกันต้องไม่ผ่านด่าน last_role ทั้งคู่ (บัญชีไร้ role) · คู่กันกับ
-  -- confirm_account_deletion (0036 §6 — SoD recheck ใต้ lock เดียวกัน)
-  perform pg_advisory_xact_lock(hashtext('ltc:account:roles:' || p_user_id::text)::bigint);
   if p_reason is null or length(btrim(p_reason)) < 10 or length(p_reason) > 500 then
     raise exception 'ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 อักขระ (ERR-VAL-001|reason_required)'
       using errcode = '22023';
@@ -507,10 +512,6 @@ declare
   v_actor uuid;
 begin
   v_actor := public.admin_license_staff_guard();
-  -- gate p5-r1 B5: per-account lock ก่อนแตะ role_assignments — สอง TX ถอนคนละ
-  -- role พร้อมกันต้องไม่ผ่านด่าน last_role ทั้งคู่ (บัญชีไร้ role) · คู่กันกับ
-  -- confirm_account_deletion (0036 §6 — SoD recheck ใต้ lock เดียวกัน)
-  perform pg_advisory_xact_lock(hashtext('ltc:account:roles:' || p_user_id::text)::bigint);
   if p_reason is null or length(btrim(p_reason)) < 10 or length(p_reason) > 500 then
     raise exception 'ข้อมูลไม่ถูกต้อง: เหตุผลต้องยาว 10-500 อักขระ (ERR-VAL-001|reason_required)'
       using errcode = '22023';

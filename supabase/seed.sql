@@ -290,7 +290,13 @@ on conflict do nothing;
 
 -- == 11b) activate โจทย์ธนาคารข้อสอบ 5 ข้อ (ทางการตาม guard_question_activation —
 --          ต้องมีตัวเลือกครบก่อน (D20-M3) และผู้เปิดต้องเป็น staff:exam) ==
+-- ต้องตั้ง "สอง" GUC: image supabase/postgres 15.8.1 ของ auth.uid() อ่าน
+-- request.jwt.claim.sub (แบบแยกฟิลด์ของ PostgREST) ไม่ใช่ request.jwt.claims
+-- ก้อนเดียว — ตั้ง claims เพียงตัวเดียวทำให้ auth.uid() = NULL → my_roles() ว่าง
+-- → guard_question_activation ปฏิเสธ seed ทั้ง TX กลิ้ง (runtime ผ่าน PostgREST
+-- ไม่เจอเพราะ gateway ตั้งครบทั้งสองแบบ — เจอตอน reset-db จริงรอบ gate p5-r3)
 set local "request.jwt.claims" = '{"sub":"11111111-1111-4111-8111-000000000002","role":"authenticated"}';
+set local "request.jwt.claim.sub" = '11111111-1111-4111-8111-000000000002';
 update public.questions q set status = 'active'
   from seed_new_questions n
  where q.id = n.id; -- เฉพาะข้อที่ INSERT ใหม่จริงในรอบนี้ (0029 · codex gate r3 MINOR-3:

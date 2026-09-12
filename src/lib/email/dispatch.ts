@@ -265,12 +265,21 @@ async function processEmailRow(
       try {
         const rewritten = new URL(signed.data.signedUrl);
         const publicOrigin = new URL(config.supabasePublicUrl);
+        // gate p5-r3 MINOR: new URL() รับ scheme ใดก็ได้ (ftp:, mailto:) — ค่าที่ไม่ใช่
+        // http(s) หรือไม่มี hostname ต้อง fail แถว ไม่ใช่ส่งลิงก์ scheme ผิด/ลิงก์ kong
+        // ต้นฉบับออกไปเงียบ ๆ (เช่น mailto: ทำให้การเขียนทับ host เป็น no-op)
+        if (
+          (publicOrigin.protocol !== "http:" && publicOrigin.protocol !== "https:") ||
+          publicOrigin.hostname === ""
+        ) {
+          throw new Error("invalid_public_origin");
+        }
         rewritten.protocol = publicOrigin.protocol;
         rewritten.host = publicOrigin.host;
         downloadUrl = rewritten.toString();
       } catch {
-        // SUPABASE_PUBLIC_URL รูปแบบผิด (หรือ signedUrl เพี้ยน) = fail แถว ไม่ส่ง
-        // เมล์ลิงก์เปิดไม่ได้ (fail-closed ตามแบบ media_asset_missing)
+        // SUPABASE_PUBLIC_URL รูปแบบผิด/scheme ไม่ใช่ http(s) (หรือ signedUrl เพี้ยน) =
+        // fail แถว ไม่ส่งเมล์ลิงก์เปิดไม่ได้ (fail-closed ตามแบบ media_asset_missing)
         return { item: { id: row.id, ok: false, error: "download_url_invalid" }, sent: false };
       }
     }

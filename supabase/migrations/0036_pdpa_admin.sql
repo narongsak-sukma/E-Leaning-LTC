@@ -738,9 +738,18 @@ begin
     raise notice '0036: storage schema ไม่มี (vanilla image) — ข้าม bucket/นโยบาย storage';
     return;
   end if;
-  insert into storage.buckets (id, name, public)
-  values ('pdpa-exports','pdpa-exports',false)
-  on conflict (id) do nothing;
+  -- คอลัมน์ buckets.public ถูกถอดใน storage-api v1 (ดู rationale เต็มที่ 0019 §storage)
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'storage' and table_name = 'buckets'
+                and column_name = 'public') then
+    insert into storage.buckets (id, name, public)
+    values ('pdpa-exports','pdpa-exports',false)
+    on conflict (id) do nothing;
+  else
+    insert into storage.buckets (id, name)
+    values ('pdpa-exports','pdpa-exports')
+    on conflict (id) do nothing;
+  end if;
   execute 'drop policy if exists objects_via_media_assets on storage.objects';
   execute $p$create policy objects_via_media_assets on storage.objects
     for select to authenticated
