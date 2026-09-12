@@ -3,8 +3,8 @@
 |          |                                                                           |
 | -------- | ------------------------------------------------------------------------- |
 | เอกสาร   | RTM (Requirement Traceability Matrix)                                     |
-| เวอร์ชัน | 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B   |
-| วันที่    | 2026-09-09                                                                 |
+| เวอร์ชัน | 1.1.0 — DCR-11 (Wave E Phase 5): จัดคอลัมน์ "API/หน้าจอ" ให้ตรง API-SPEC 1.2.0 — IDENT-001 `/profile`→**`/me` (GET/PATCH)** · IDENT-002 ยื่นใบอนุญาต → **`PUT /me/license`** (multipart+หลักฐาน) · IDENT-003 → **`PATCH /admin/license-applications/{id}`** · IDENT-005 `/license/status`→**`GET /me/license`** · IDENT-008 เพิ่ม **`GET /profile/delete/confirm`** (สาธารณะ — ยืนยัน token ลบบัญชี) · AUD-003 ชี้ทั้งคู่ **หน้า `/admin/audit` + API `GET /admin/audit-logs`** (หน้าตาม RTM เดิม endpoint ตาม spec §3.8) — ตัวสิ่งที่ต้องพิสูจน์ของทุกแถวไม่เปลี่ยน · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B   |
+| วันที่    | 2026-09-12                                                                 |
 | สถานะ    | Approved — ผ่าน CTO gate (codex รอบ 5: PASS — D17)                          |
 | เจ้าของ   | worker-2 (Task A2)                                                         |
 | อ้างอิง  | SRS v0.2.0 (requirement ID ทั้งหมดมาจาก SRS) · PROJECT-BRIEF v0.2.1          |
@@ -55,14 +55,14 @@ Auth · Identity & License · Catalog · Learning & Progress · Assessment · Ce
 
 | Req ID | คำอธิบายย่อ | SDS Module | API group | Data table(s) | Test | TC ID | D |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| IDENT-001 | ดู/แก้โปรไฟล์ตนเอง | Identity & License | `/profile` (GET/PATCH) | profiles | I, E | TC-IDENT-01 | D13, D14 |
+| IDENT-001 | ดู/แก้โปรไฟล์ตนเอง | Identity & License | `/me` (GET/PATCH — self-edit เขต display_name/phone/preferred_locale) | profiles | I, E | TC-IDENT-01 | D13, D14 |
 | IDENT-002 | ยื่นผูกเลขที่ใบอนุญาต + เอกสาร | Identity & License | `/license/applications` (POST) | license_applications, storage | I, E | TC-IDENT-02 | D13, D14 |
-| IDENT-003 | เจ้าหน้าที่พิจารณาอนุมัติ/ปฏิเสธ | Identity & License | `/admin/license/applications/{id}/decision` | license_applications, audit_logs | I, E | TC-IDENT-03 | D13, D14 |
+| IDENT-003 | เจ้าหน้าที่พิจารณาอนุมัติ/ปฏิเสธ | Identity & License | `PATCH /admin/license-applications/{id}` | license_applications, audit_logs | I, E | TC-IDENT-03 | D13, D14 |
 | IDENT-004 | อนุมัติแล้วเพิ่มบทบาท lawyer | Identity & License | (workflow จาก IDENT-003) | role_assignments, audit_logs | I | TC-IDENT-04 | D13, D14 |
-| IDENT-005 | ดูสถานะ + ยื่นคำขอซ้ำ | Identity & License | `/license/status` | license_applications | E | TC-IDENT-05 | D13, D14 |
+| IDENT-005 | ดูสถานะ + ยื่นคำขอซ้ำ | Identity & License | `GET /me/license` (canResubmit) | license_applications, lawyer_licenses | E | TC-IDENT-05 | D13, D14 |
 | IDENT-006 | super_admin แต่งตั้ง/ถอดบทบาท | Identity & License | `/admin/users/{id}/roles` | role_assignments, audit_logs | I, SEC | TC-IDENT-06 | D13, D14 |
 | IDENT-007 | บัญชีเดียวหลายบทบาท (union, explicit) | Identity & License | ทุก endpoint (RBAC) | role_assignments | U, I | TC-IDENT-07 | D13, D14 |
-| IDENT-008 | PDPA: export/ลบบัญชี/consent | Identity & License | `/profile/export`, `/profile/delete`, `/profile/consents` | consents, profiles, audit_logs | I, E, SEC | TC-IDENT-08 | D13, D14, D17 |
+| IDENT-008 | PDPA: export/ลบบัญชี/consent | Identity & License | `/profile/export`, `/profile/delete`, `/profile/delete/confirm` (สาธารณะ), `/profile/consents` | consents, data_export_jobs, account_deletion_requests, audit_logs | I, E, SEC | TC-IDENT-08 | D13, D14, D17 |
 
 ### CAT (7)
 
@@ -164,7 +164,7 @@ Auth · Identity & License · Catalog · Learning & Progress · Assessment · Ce
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | AUD-001 | บันทึก audit ทุก action สำคัญ | Audit | (cross-cutting) | audit_logs | I | TC-AUD-01 | D13, D14 |
 | AUD-002 | append-only บังคับ DB (ห้าม UPDATE/DELETE) | Audit | (DB) | audit_logs | I, SEC | TC-AUD-02 | D13, D14, D15 |
-| AUD-003 | ค้นหา/กรอง audit (self-auditing) | Audit | `/admin/audit` | audit_logs | I, PERF | TC-AUD-03 | D13, D14 |
+| AUD-003 | ค้นหา/กรอง audit (self-auditing) | Audit | หน้า `/admin/audit` + API `GET /admin/audit-logs` | audit_logs | I, PERF | TC-AUD-03 | D13, D14 |
 | AUD-004 | ไม่บรรจุ PII (CI scan) | Audit | (serializer) | audit_logs | U, SEC | TC-AUD-04 | D13, D14, D17 |
 | AUD-005 | retention ตามนโยบาย (config) | Audit | (retention job) | audit_logs | I | TC-AUD-05 | D13, D14 |
 
