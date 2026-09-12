@@ -171,12 +171,43 @@ async function processEmailRow(
   // {notification_id, user_id, vars} — D-p4-7/8) · ไม่มี vars/ไม่ใช่ object = drift
   // รายแถว (fail-closed — ไม่พยายามเดาจาก payload แบน)
   const varsRaw = row.payload["vars"];
-  const vars: Record<string, unknown> | null =
+  let vars: Record<string, unknown> | null =
     varsRaw !== null && typeof varsRaw === "object" && !Array.isArray(varsRaw)
       ? (varsRaw as Record<string, unknown>)
       : null;
   if (vars === null) {
     return { item: { id: row.id, ok: false, error: "row_contract_drift" }, sent: false };
+  }
+  // gate r1 B4: ตรวจสัญญา payload ครบ "ก่อน" เรียก provider — notification_id/user_id
+  // ต้องเป็น UUID จริง (เดิมตรวจแค่ vars เป็น object: payload พิษ notification_id="bad"
+  // จะถูกส่งจริงก่อน แล้ว cast ใน email_complete ล้ม → subtx ย้อนสถานะคืน sending →
+  // reclaim มาส่งซ้ำได้โดย attempts ไม่โต) — ผิดสัญญา = fail รายแถวก่อนส่ง ให้
+  // complete นับ attempts ตามกติกา backoff
+  const notificationId = row.payload["notification_id"];
+  const payloadUserId = row.payload["user_id"];
+  if (
+    typeof notificationId !== "string" ||
+    !UUID_RE.test(notificationId) ||
+    typeof payloadUserId !== "string" ||
+    !UUID_RE.test(payloadUserId)
+  ) {
+    return { item: { id: row.id, ok: false, error: "row_contract_drift" }, sent: false };
+  }
+  // gate r1 B5 (NTF-003): template อีเมลใบประกาศฯ อ้าง {{verify_url}}/{{pdf_url}} —
+  // URL ประกอบที่ worker จาก config ของแอป (SQL ผู้ผลิตไม่รู้ env): vars มี
+  // verify_code = แถวใบประกาศฯ → ฉีดลิงก์หน้าตรวจสอบ (/verify/<code>) และ PDF
+  // (/api/v1/certificates/<code>/pdf) · template อื่นไม่อ้างตัวแปรคู่นี้ = ไม่กระทบ
+  // · certPublicBaseUrl มีที่ตั้ง (prod — โดเมน certificate สาธารณะ) ไม่มี = ใช้
+  // publicBaseUrl ของแอป (dev)
+  const verifyCode = vars["verify_code"];
+  if (typeof verifyCode === "string" && verifyCode.length > 0) {
+    const config = getConfig();
+    const base = config.certPublicBaseUrl ?? config.publicBaseUrl;
+    vars = {
+      ...vars,
+      verify_url: `${base}/verify/${verifyCode}`,
+      pdf_url: `${base}/api/v1/certificates/${verifyCode}/pdf`,
+    };
   }
   const tpl = await loadEmailTemplate(ctx.client, ctx.cache, row.template_key, row.locale);
   if (tpl === null) {

@@ -13,14 +13,18 @@
 --       certificate.issued · certificate.revoked · credit.adjusted — ไม่กิน credit.accrual):
 --       advisory-xact-lock global → temp table (≤5 รอบ×200) → ต่อ event 1 subtransaction
 --       (ทุก payload cast อยู่ "ใน" subtx ราย event — poison-tolerant โดยโครงสร้าง บทเรียน
---       gate r4 B1) · dedupe (D-p4-3) → render → INSERT notifications + recipients(in_app,
---       sent_at=now) → email? → INSERT email_outbox · ล้ม = attempts+1 + backoff 60s×2^n
+--       gate r4 B1) · dedupe (D-p4-3) → ประตูรายช่องทาง (gate r1 B3: in_app และ email
+--       ตัดสินแยก — ปิด in_app = ไม่สร้างแถว recipient · ปิดครบทั้งคู่ = ข้าม event) →
+--       render → INSERT notifications + recipients(in_app, sent_at=now) → email? →
+--       INSERT email_outbox · ล้ม = attempts+1 + backoff 60s×2^n
 --       cap 900s · ≥5 → failed (เหมือน credit_accrual_tick 0031 เป๊ะ)
 --       + renewal_reminder_scan() — NTF-004 (D-p4-6): cycle open + ends_on = +30/+7 วัน
 --   (5) ผู้ผลิต event 4 ตัว (D-p4-1) — create or replace คัดลอก byte-verbatim จากฉบับล่าสุด
 --       + เพิ่มบล็อก INSERT event_outbox จุดเดียว (แบบเดียวกับที่ 0031 ทำกับ 0020/0019):
---         submit_attempt_core v4   ← 0031 v3 + event exam.result (ทั้งผ่าน/ไม่ผ่าน)
---         admin_issue_certificate v2 ← 0019 v1 + event certificate.issued
+--         submit_attempt_core v4   ← 0031 v3 + event exam.result (ทั้งผ่าน/ไม่ผ่าน ·
+--                                     gate r1 B5: payload มี attempt_no ครั้งที่สอบ)
+--         admin_issue_certificate v2 ← 0019 v1 + event certificate.issued (gate r1 B5:
+--                                     payload มี verify_code สำหรับลิงก์ verify/PDF)
 --         admin_revoke_certificate v3 ← 0031 v2 + event certificate.revoked
 --         admin_credit_adjust v2   ← 0031 v1 + event credit.adjusted
 --   (6) RPC ผู้ใช้: my_notifications (unreadFirst + keyset) · my_notification_read
@@ -28,8 +32,10 @@
 --       ใน SQL + upsert ตาม D-p4-5) · my_consents_get / my_consents_update
 --       (marketing|email_notify · append-only · audit CONSENT_UPDATE)
 --   (7) email_claim_batch / email_complete — คิว worker (D-p4-7): FOR UPDATE SKIP LOCKED +
---       reclaim crash (sending เกิน 10 นาที) · ok → sent + recipients.sent_at · ไม่ ok →
---       attempts+1 · backoff 60s×2^n cap 3600s · ≥5 → failed · last_error left 500
+--       reclaim crash (lease 10 นาทีจากจุด claim — gate r1 M1) · claim ตรวจสิทธิ์ล่าสุด
+--       ก่อนส่ง (gate r1 B2: ถอน consent/ปิด settings หลัง enqueue → failed ไม่ส่ง) ·
+--       ok → sent + recipients.sent_at · ไม่ ok → attempts+1 · backoff 60s×2^n cap 3600s ·
+--       ≥5 → failed · last_error left 500
 --   (8) grants/policies ของ app_owner (definer ไม่มี BYPASSRLS — แบบแผน 0010 §6 / 0031 §9)
 --   (9) pg_cron 3 ตัว (upsert ตาม jobname — แบบแผน 0026/0031): ltc-notification-dispatch
 --       ทุก 1 นาที · ltc-renewal-reminder 03:17 · ltc-email-outbox-purge 04:19 (D-p4-10)
@@ -52,7 +58,7 @@ values
    'เรียน คุณ{{full_name}}
 
 ยินดีด้วย ท่านได้สอบผ่านการสอบหลักสูตร "{{course_title}}"
-ด้วยคะแนน {{score_pct}}% (เกณฑ์ผ่าน {{pass_pct}}%)
+ด้วยคะแนน {{score_pct}}% (เกณฑ์ผ่าน {{pass_pct}}%) — ครั้งที่สอบที่ {{attempt_no}}
 
 ด้วยความเคารพ
 สภาทนายความแห่งประเทศไทย — ระบบแจ้งเตือนอัตโนมัติ
@@ -66,7 +72,7 @@ values
    'ผลการสอบ: คุณยังไม่ผ่านการสอบ หลักสูตร {{course_title}}',
    'เรียน คุณ{{full_name}}
 
-จากการสอบหลักสูตร "{{course_title}}"
+จากการสอบหลักสูตร "{{course_title}}" ครั้งที่สอบที่ {{attempt_no}}
 ท่านได้คะแนน {{score_pct}}% ซึ่งยังไม่ผ่านเกณฑ์ผ่าน {{pass_pct}}%
 ท่านสามารถสอบใหม่ได้ตามกำหนดของหลักสูตร
 
@@ -85,6 +91,9 @@ values
 ทางสภาทนายความแห่งประเทศไทยได้ออกใบประกาศนียบัตรให้ท่านแล้ว
 หลักสูตร: {{course_title}}
 เลขที่ใบประกาศนียบัตร: {{cert_no}}
+
+ตรวจสอบความถูกต้องของใบประกาศนียบัตร: {{verify_url}}
+ดาวน์โหลด PDF: {{pdf_url}}
 
 ด้วยความเคารพ
 สภาทนายความแห่งประเทศไทย — ระบบแจ้งเตือนอัตโนมัติ
@@ -196,6 +205,34 @@ revoke execute on function public.notification_email_allowed(uuid, text)
 grant execute on function public.notification_email_allowed(uuid, text)
   to app_owner, service_role;
 
+-- ═══ (2b) notification_in_app_allowed — ประตู in_app ราย family (gate r1 B3 / NTF-005) ═══
+-- ต่างจากอีเมลตรงที่ "ไม่ผูก consent" (D-p4-4) — ตัดสินจาก settings ล่าสุดเท่านั้น:
+-- settings[family].in_app = false → ปิด · ไม่มีแถว/ไม่มีคีย์/ไม่ใช่ false = เปิด (default on)
+-- ใช้ ณ จุดผลิต (dispatch_tick/renewal_reminder_scan) — ปิดแล้ว "ไม่สร้างแถว recipient
+-- in_app เลย" (ไม่ใช่สร้างแล้วซ่อน) เพื่อให้ my_notifications/unread_count ไม่นับ
+create or replace function public.notification_in_app_allowed(p_user uuid, p_family text)
+returns boolean
+language plpgsql stable
+security definer
+set search_path = public
+as $fn$
+begin
+  if p_user is null then
+    return false;
+  end if;
+  return not exists (
+    select 1 from public.notification_settings ns
+    where ns.user_id = p_user
+      and coalesce((ns.settings -> p_family ->> 'in_app')::boolean, true) is false
+  );
+end;
+$fn$;
+alter function public.notification_in_app_allowed(uuid, text) owner to app_owner;
+revoke execute on function public.notification_in_app_allowed(uuid, text)
+  from public, anon, authenticated;
+grant execute on function public.notification_in_app_allowed(uuid, text)
+  to app_owner, service_role;
+
 -- ═══ (3) render_notification — active template + replace {{var}} ═══
 -- fail-loud (แผน §4.3): ตัวแปรที่ template ต้องการแต่ vars ไม่มี = raise → event ล้มเข้า
 -- backoff ไม่ส่งเมล์เพี้ยน · var เกินใน vars = ไม่เป็นไร
@@ -270,6 +307,7 @@ declare
   v_already int := 0;
   v_email int := 0;
   v_failed int := 0;
+  v_skipped int := 0;
   v_event uuid;
   v_user uuid;
   v_ref_id uuid;
@@ -282,6 +320,8 @@ declare
   v_vars jsonb;
   v_render jsonb;
   v_notif uuid;
+  v_in_app boolean;
+  v_email_ok boolean;
   r record;
 begin
   if not pg_try_advisory_xact_lock(hashtext('ltc:notification_dispatch')::bigint) then
@@ -363,12 +403,14 @@ begin
       end if;
 
       -- D-p4-3 dedupe (at-least-once → exactly-once) ก่อน INSERT เสมอ:
-      -- in_app แถวเดิม (topic, ref_id, user) มีอยู่ = ปิด event processed + นับ already_notified
+      -- แถวเดิม (topic, ref_id, user) ช่องทางใดก็ได้ มีอยู่ = ปิด event processed +
+      -- นับ already_notified — ไม่กรองช่องทาง (gate r1 B3: ผู้ใช้ปิด in_app แล้ว event
+      -- ถูกจัดการด้วยแถว email เดียว ก็ต้อง dedupe ได้เหมือนกัน)
       if exists (
         select 1
         from public.notifications n
         join public.notification_recipients nr
-          on nr.notification_id = n.id and nr.channel = 'in_app'
+          on nr.notification_id = n.id
         where n.topic = r.topic
           and n.ref_id = v_ref_id
           and nr.user_id = v_user
@@ -378,58 +420,82 @@ begin
         where id = v_event;
         v_already := v_already + 1;
       else
-        -- ชื่อเต็ม (แบบ holderNameOf — ชื่อ+นามสกุล, fallback display_name)
-        select coalesce(nullif(concat_ws(' ', nullif(pr.first_name, ''), nullif(pr.last_name, '')), ''),
-                        nullif(pr.display_name, ''), 'สมาชิก') into v_full_name
-        from public.profiles pr where pr.id = v_user;
-
-        -- ตัวแปร render ต่อ topic — ครบตามที่ template อ้าง (render จะ raise ถ้าขาด)
-        v_vars := jsonb_build_object('full_name', v_full_name);
-        if r.topic = 'exam.result' then
-          v_vars := v_vars || jsonb_build_object(
-            'course_title', r.payload ->> 'course_title_th',
-            'score_pct', r.payload ->> 'score_pct',
-            'pass_pct', r.payload ->> 'pass_pct');
-        elsif r.topic = 'certificate.issued' then
-          v_vars := v_vars || jsonb_build_object(
-            'course_title', r.payload ->> 'course_title_th',
-            'cert_no', r.payload ->> 'cert_no');
-        elsif r.topic = 'certificate.revoked' then
-          v_vars := v_vars || jsonb_build_object('cert_no', r.payload ->> 'cert_no');
-        elsif r.topic = 'credit.adjusted' then
-          v_amount := (r.payload ->> 'amount')::numeric;
-          v_vars := v_vars || jsonb_build_object('amount',
-            case when v_amount >= 0 then '+' else '' end
-            || to_char(v_amount, 'FM999999990.00'));
-        end if;
-
-        -- render in_app — template หาย/ตัวแปรขาด = raise → backoff (fail-loud)
-        v_render := public.render_notification(v_tpl_key, 'th', 'in_app', v_vars);
-        insert into public.notifications (topic, title, body, severity, ref_type, ref_id)
-        values (r.topic, v_render ->> 'subject', v_render ->> 'body', v_severity, v_ref_type, v_ref_id)
-        returning id into v_notif;
-        insert into public.notification_recipients (notification_id, user_id, channel, sent_at)
-        values (v_notif, v_user, 'in_app', now());
-
-        -- email? (D-p4-4 fail-closed สองชั้น) — tick เข้าคิวเท่านั้น · render+ส่งจริงที่
-        -- worker (D-p4-8) · payload ใส่ notification_id เสมอ (D-p4-8) + user_id + vars
-        if public.notification_email_allowed(v_user, v_family) then
-          insert into public.email_outbox (recipient_user_id, to_email, template_key, payload, locale)
-          select v_user, pr.email, v_tpl_key,
-                 jsonb_build_object('notification_id', v_notif, 'user_id', v_user, 'vars', v_vars),
-                 'th'
+        -- ประตูรายช่องทาง (gate r1 B3 / NTF-005): in_app และ email ตัดสินแยกจากกัน —
+        -- in_app ดู settings ของ family เท่านั้น (ไม่ผูก consent · D-p4-4) · email ยัง
+        -- fail-closed สองชั้นเหมือนเดิม · ปิดครบทั้งสองช่องทาง = ไม่สร้างแถวเลย
+        -- (ผู้ใช้ไม่ต้องการรับ — event ปิดเป็น processed ไม่ retry ไปเรื่อย ๆ)
+        v_in_app := public.notification_in_app_allowed(v_user, v_family);
+        v_email_ok := public.notification_email_allowed(v_user, v_family);
+        if not v_in_app and not v_email_ok then
+          update public.event_outbox
+          set status = 'processed', processed_at = now(), last_error = null
+          where id = v_event;
+          v_skipped := v_skipped + 1;
+        else
+          -- ชื่อเต็ม (แบบ holderNameOf — ชื่อ+นามสกุล, fallback display_name)
+          select coalesce(nullif(concat_ws(' ', nullif(pr.first_name, ''), nullif(pr.last_name, '')), ''),
+                          nullif(pr.display_name, ''), 'สมาชิก') into v_full_name
           from public.profiles pr where pr.id = v_user;
-          -- แถวผู้รับช่องทาง email (sent_at = null รอ worker ยืนยัน — D-p4-7)
-          insert into public.notification_recipients (notification_id, user_id, channel, sent_at)
-          values (v_notif, v_user, 'email', null)
-          on conflict (notification_id, user_id, channel) do nothing;
-          v_email := v_email + 1;
-        end if;
 
-        update public.event_outbox
-        set status = 'processed', processed_at = now(), last_error = null
-        where id = v_event;
-        v_processed := v_processed + 1;
+          -- ตัวแปร render ต่อ topic — ครบตามที่ template อ้าง (render จะ raise ถ้าขาด) ·
+          -- email ใบประกาศฯ ใช้ verify_code ประกอบลิงก์ verify/PDF ที่ worker สร้าง
+          -- (gate r1 B5 — ลิงก์มาจาก config ของแอป ไม่ฝังใน SQL)
+          v_vars := jsonb_build_object('full_name', v_full_name);
+          if r.topic = 'exam.result' then
+            v_vars := v_vars || jsonb_build_object(
+              'course_title', r.payload ->> 'course_title_th',
+              'score_pct', r.payload ->> 'score_pct',
+              'pass_pct', r.payload ->> 'pass_pct',
+              'attempt_no', r.payload ->> 'attempt_no');
+          elsif r.topic = 'certificate.issued' then
+            v_vars := v_vars || jsonb_build_object(
+              'course_title', r.payload ->> 'course_title_th',
+              'cert_no', r.payload ->> 'cert_no',
+              'verify_code', r.payload ->> 'verify_code');
+          elsif r.topic = 'certificate.revoked' then
+            v_vars := v_vars || jsonb_build_object('cert_no', r.payload ->> 'cert_no');
+          elsif r.topic = 'credit.adjusted' then
+            v_amount := (r.payload ->> 'amount')::numeric;
+            v_vars := v_vars || jsonb_build_object('amount',
+              case when v_amount >= 0 then '+' else '' end
+              || to_char(v_amount, 'FM999999990.00'));
+          end if;
+
+          -- render in_app — template หาย/ตัวแปรขาด = raise → backoff (fail-loud) ·
+          -- เนื้อหาแถว notification มาจาก template in_app เสมอ (แม้ผู้ใช้ปิด in_app
+          -- แต่ยังเปิด email — แถวเป็นที่เก็บเนื้อหาอ้างอิงของอีเมล)
+          v_render := public.render_notification(v_tpl_key, 'th', 'in_app', v_vars);
+          insert into public.notifications (topic, title, body, severity, ref_type, ref_id)
+          values (r.topic, v_render ->> 'subject', v_render ->> 'body', v_severity, v_ref_type, v_ref_id)
+          returning id into v_notif;
+
+          -- ปิด in_app แล้ว = ไม่สร้างแถว recipient in_app เลย (gate r1 B3 — badge/
+          -- inbox ไม่เห็น ไม่ใช่สร้างแล้วซ่อน)
+          if v_in_app then
+            insert into public.notification_recipients (notification_id, user_id, channel, sent_at)
+            values (v_notif, v_user, 'in_app', now());
+          end if;
+
+          -- email? (D-p4-4 fail-closed สองชั้น) — tick เข้าคิวเท่านั้น · render+ส่งจริงที่
+          -- worker (D-p4-8) · payload ใส่ notification_id เสมอ (D-p4-8) + user_id + vars
+          if v_email_ok then
+            insert into public.email_outbox (recipient_user_id, to_email, template_key, payload, locale)
+            select v_user, pr.email, v_tpl_key,
+                   jsonb_build_object('notification_id', v_notif, 'user_id', v_user, 'vars', v_vars),
+                   'th'
+            from public.profiles pr where pr.id = v_user;
+            -- แถวผู้รับช่องทาง email (sent_at = null รอ worker ยืนยัน — D-p4-7)
+            insert into public.notification_recipients (notification_id, user_id, channel, sent_at)
+            values (v_notif, v_user, 'email', null)
+            on conflict (notification_id, user_id, channel) do nothing;
+            v_email := v_email + 1;
+          end if;
+
+          update public.event_outbox
+          set status = 'processed', processed_at = now(), last_error = null
+          where id = v_event;
+          v_processed := v_processed + 1;
+        end if;
       end if;
     exception when others then
       -- ต่อ event: attempts+1 + backoff 60s×2^n cap 900s · ≥5 → failed (เหมือน 0031 เป๊ะ)
@@ -447,6 +513,7 @@ begin
                             'processed', v_processed,
                             'already_notified', v_already,
                             'email_queued', v_email,
+                            'skipped_no_channel', v_skipped,
                             'failed', v_failed);
 end;
 $fn$;
@@ -469,6 +536,7 @@ declare
   v_not_lawyer int := 0;
   v_email int := 0;
   v_failed int := 0;
+  v_skipped int := 0;
   v_topic text;
   v_full_name text;
   v_vars jsonb;
@@ -478,6 +546,8 @@ declare
   v_earned numeric;
   v_missing numeric;
   v_cycle_end text;
+  v_in_app boolean;
+  v_email_ok boolean;
   r record;
 begin
   if not pg_try_advisory_xact_lock(hashtext('ltc:renewal_reminder')::bigint) then
@@ -504,12 +574,13 @@ begin
 
       v_topic := 'renewal.reminder.' || r.days_left::text || 'd';
 
-      -- dedupe เงื่อนไขเดียวกับ D-p4-3 → scan รันซ้ำไม่สร้างซ้ำ
+      -- dedupe เงื่อนไขเดียวกับ D-p4-3 → scan รันซ้ำไม่สร้างซ้ำ — ไม่กรองช่องทาง
+      -- (เหตุผลเดียวกับ tick: แถว email เดี่ยวก็ต้อง dedupe ได้ — gate r1 B3)
       if exists (
         select 1
         from public.notifications n
         join public.notification_recipients nr
-          on nr.notification_id = n.id and nr.channel = 'in_app'
+          on nr.notification_id = n.id
         where n.topic = v_topic and n.ref_id = r.cycle_id and nr.user_id = r.user_id
       ) then
         v_already := v_already + 1;
@@ -540,15 +611,25 @@ begin
         'required', rtrim(to_char(v_required, 'FM999999990.00'), '.'),
         'missing', rtrim(to_char(v_missing, 'FM999999990.00'), '.'));
 
+      -- ประตูรายช่องทาง (gate r1 B3) — family 'renewal' · ปิดครบทั้งสองช่องทาง = ข้าม
+      v_in_app := public.notification_in_app_allowed(r.user_id, 'renewal');
+      v_email_ok := public.notification_email_allowed(r.user_id, 'renewal');
+      if not v_in_app and not v_email_ok then
+        v_skipped := v_skipped + 1;
+        continue;
+      end if;
+
       -- render in_app + เขียนแถว (ประตู consent/settings ใช้ family 'renewal')
       v_render := public.render_notification(v_topic, 'th', 'in_app', v_vars);
       insert into public.notifications (topic, title, body, severity, ref_type, ref_id)
       values (v_topic, v_render ->> 'subject', v_render ->> 'body', 'warning', 'renewal_cycle', r.cycle_id)
       returning id into v_notif;
-      insert into public.notification_recipients (notification_id, user_id, channel, sent_at)
-      values (v_notif, r.user_id, 'in_app', now());
+      if v_in_app then
+        insert into public.notification_recipients (notification_id, user_id, channel, sent_at)
+        values (v_notif, r.user_id, 'in_app', now());
+      end if;
 
-      if public.notification_email_allowed(r.user_id, 'renewal') then
+      if v_email_ok then
         insert into public.email_outbox (recipient_user_id, to_email, template_key, payload, locale)
         select r.user_id, pr.email, v_topic,
                jsonb_build_object('notification_id', v_notif, 'user_id', r.user_id, 'vars', v_vars),
@@ -572,6 +653,7 @@ begin
                             'already', v_already,
                             'not_lawyer', v_not_lawyer,
                             'email_queued', v_email,
+                            'skipped_no_channel', v_skipped,
                             'failed', v_failed);
 end;
 $fn$;
@@ -684,7 +766,9 @@ begin
   end if;
 
   -- 0034: เพิ่ม event exam.result (D-p4-1 · NTF-002) — เกิดทั้งผ่านและไม่ผ่าน in-TX เดียวกับ
-  -- grading · consumer dedupe ด้วย (topic, source_id, user_id) ตาม D-p4-3
+  -- grading · consumer dedupe ด้วย (topic, source_id, user_id) ตาม D-p4-3 ·
+  -- attempt_no = ครั้งที่สอบของผู้ใช้ในรอบนี้ (นับรวมแถวปัจจุบันที่กำลังตรวจ —
+  -- gate r1 B5: อีเมลผลสอบต้องมี "ครั้งที่" ตาม AC ของ NTF-002)
   insert into public.event_outbox (topic, payload)
   values ('exam.result', jsonb_build_object(
     'source_type', 'assessment_attempt',
@@ -694,6 +778,9 @@ begin
     'passed', v_passed,
     'score_pct', v_score,
     'pass_pct', v_rules.pass_pct,
+    'attempt_no', (select count(*) from public.assessment_attempts a2
+                    where a2.assessment_id = p_attempt.assessment_id
+                      and a2.user_id = p_attempt.user_id),
     'course_title_th', (select c.title_th
                         from public.assessments a
                         join public.courses c on c.id = a.course_id
@@ -745,14 +832,19 @@ begin
     raise exception 'ต้องระบุผู้ดำเนินการ (ERR-AUTH-001|actor_required)';
   end if;
   select public.cert_issue_core(p_actor_user_id, p_enrollment_id, null, p_request_id) into v_cert;
-  -- 0034: เพิ่ม event certificate.issued (D-p4-1 · NTF-003) — in-TX เดียวกับการออกใบ
+  -- 0034: เพิ่ม event certificate.issued (D-p4-1 · NTF-003) — in-TX เดียวกับการออกใบ ·
+  -- verify_code มาจาก certificates (gate r1 B5 — อีเมลต้องมีลิงก์ verify/PDF ตาม AC
+  -- ของ NTF-003; worker เป็นผู้ประกอบ URL จาก config ของแอป)
   insert into public.event_outbox (topic, payload)
-  values ('certificate.issued', jsonb_build_object(
+  select 'certificate.issued', jsonb_build_object(
     'user_id', (v_cert ->> 'user_id')::uuid,
     'cert_no', v_cert ->> 'cert_no',
     'certificate_id', (v_cert ->> 'id')::uuid,
+    'verify_code', c.verify_code,
     'course_title_th', v_cert ->> 'course_title',
-    'issued_at', (v_cert ->> 'issued_at')::timestamptz));
+    'issued_at', (v_cert ->> 'issued_at')::timestamptz)
+  from public.certificates c
+  where c.id = (v_cert ->> 'id')::uuid;
   return v_cert;
 end;
 $fn$;
@@ -1076,8 +1168,12 @@ begin
     and deleted_at is null
   returning read_at into v_read_at;
   if not found then
-    -- D-p4-12: ใช้ errcode default P0001 (ไม่ใช่ P0002) — PostgREST ส่ง message ของ
-    -- P0001/22023 ทะลุถึง BFF ได้ (P0002 โดนแทนเป็น "Something went wrong" เฉย ๆ)
+    -- D-p4-12: ใช้ errcode default P0001 (ไม่ใช่ P0002) — PostgREST (12.2 errors
+    -- table) แปลง P0001 เป็น HTTP 400 พร้อม "message ของ raise ทะลุถึง caller"
+    -- (ต่างจาก P0* อื่นที่กลายเป็น 500) · BFF อ่าน tag ERR-NF-001 ใน message ผ่าน
+    -- parseRpcErrorCode แล้วตอบ 404 ตามทะเบียน error ของ repo — ส่วน P0002 ถูก
+    -- ชั้น gateway แทน message เป็น "Something went wrong" (สังเกตจริงบน stack
+    -- นี้ระหว่าง D-p4-12 — เหตุผลที่เลิกใช้)
     raise exception 'ไม่พบข้อมูลที่ต้องการ (ERR-NF-001|notification_not_found)';
   end if;
   return jsonb_build_object('id', p_notification_id, 'read_at', v_read_at);
@@ -1231,7 +1327,17 @@ $fn$;
 --    D-p4-7: claim ด้วย FOR UPDATE SKIP LOCKED + reclaim งานค้าง sending เกิน 10 นาที
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- ── 7.1 email_claim_batch — ดึงงาน queued (หรือ sending ค้าง >10 นาที) แล้วตั้ง sending ──
+-- ── 7.1 email_claim_batch — ดึงงานพร้อมส่ง + ตรวจสิทธิ์ล่าสุดก่อนส่ง (gate r1 B2/M1) ──
+-- อธิบายความหมายของ scheduled_at (M1 — เลือกความหมายเดียวให้ตรงกันทั้งคิว):
+--   status='queued'  → เวลาที่แถว "พร้อมถูกเลือก" (backoff เลื่อนออกไป)
+--   status='sending' → กำหนดสิ้นสุด lease ของ worker (ตั้ง = claim_time + 10 นาที)
+-- reclaim งานที่ worker ตายกลางทาง = status='sending' และ lease หมดแล้ว
+-- (scheduled_at <= now()) — รวมเป็น 10 นาทีจริงจากจุด claim ไม่ใช่ 10+10
+-- B2: ก่อนส่งจริงต้องเช็กสิทธิ์ "ล่าสุด" อีกครั้ง ณ จุด claim — grant→enqueue→
+-- revoke ระหว่างนั้น ต้องไม่ส่ง: แถวที่ notification_email_allowed ตอบ false
+-- (consents ถูกถอน หรือ settings[family].email ถูกปิดหลัง enqueue — รวมงาน retry)
+-- ถูกปิดเป็น failed + last_error คงที่ (ไม่ใช่ send แล้วค่อยพบ) · family ของแถว
+-- อนุมานจาก template_key (ไม่รู้จัก → consent ยังตรวจ — fail-closed ฝั่ง consent)
 create or replace function public.email_claim_batch(p_limit int default 20)
 returns table (
   id uuid,
@@ -1247,26 +1353,42 @@ set search_path = public
 as $fn$
 begin
   return query
-  with claimed as (
+  with eligible as (
     select e.id
     from public.email_outbox e
     where (e.status = 'queued' and e.scheduled_at <= now())
-       or (e.status = 'sending' and e.scheduled_at < now() - interval '10 minutes')
+       or (e.status = 'sending' and e.scheduled_at <= now())
     order by e.scheduled_at, e.created_at
     limit greatest(least(coalesce(p_limit, 20), 100), 1)
     for update skip locked
   ),
-  upd as (
+  denied as (
+    update public.email_outbox e
+    set status = 'failed',
+        last_error = 'email_gate_denied_before_send'
+    where e.id in (select el.id from eligible el)
+      and not public.notification_email_allowed(e.recipient_user_id,
+        case
+          when e.template_key like 'exam.result.%' then 'exam.result'
+          when e.template_key like 'certificate.%' then 'certificate'
+          when e.template_key = 'credit.adjusted' then 'credit'
+          when e.template_key like 'renewal.reminder.%' then 'renewal'
+          else 'unknown'
+        end)
+    returning e.id
+  ),
+  claimed as (
     update public.email_outbox e
     set status = 'sending',
         scheduled_at = now() + interval '10 minutes'
-    where e.id in (select c.id from claimed c)
+    where e.id in (select el.id from eligible el)
+      and e.id not in (select d.id from denied d)
     returning e.id, e.recipient_user_id, e.to_email, e.template_key,
               e.payload, e.locale, e.attempts
   )
   select u.id, u.recipient_user_id, u.to_email, u.template_key,
          u.payload, u.locale, u.attempts
-  from upd u;
+  from claimed u;
 end;
 $fn$;
 

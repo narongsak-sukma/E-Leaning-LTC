@@ -1,9 +1,10 @@
 /**
- * route.test — POST /api/internal/jobs/email-dispatch (Wave E Phase 4 · D-p4-8)
+ * route.test — /api/internal/jobs/email-dispatch (Wave E Phase 4 · D-p4-8)
  *
  * mock config + dispatch (unit ล้วน) — จุดหลัก: ไม่มี CRON_SECRET = 404 fail-closed
  * เงียบ · secret ไม่ตรง/ไม่มี header = 404 เงียบ (timing-safe) · ผ่าน = 200
- * {processed:{claimed,sent,failed}} · GET = 405
+ * {processed:{claimed,sent,failed}} · POST = x-cron-secret (dev mailer) ·
+ * GET = Authorization: Bearer (รูปทรง Vercel Cron — gate r1 B1)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -131,17 +132,65 @@ describe("POST — secret gate", () => {
   });
 });
 
-describe("GET = 405 + header ความปลอดภัยของ response", () => {
-  it("GET → 405 + ไม่เรียก worker", async () => {
+describe("GET — รูปทรง Vercel Cron (Authorization: Bearer) — gate r1 B1", () => {
+  /** Request แบบ Vercel Cron ส่งจริง: GET + Authorization: Bearer <secret> */
+  function vercelCronRequest(authorization?: string): Request {
+    return new Request("http://localhost:3000/api/internal/jobs/email-dispatch", {
+      method: "GET",
+      headers:
+        authorization === undefined
+          ? {}
+          : { authorization },
+    });
+  }
+
+  it("Bearer ถูกต้อง → 200 {processed} + เรียก worker ครั้งเดียว + no-store", async () => {
     getConfigMock.mockReturnValue(configStub());
-    const res = await GET();
-    expect(res.status).toBe(405);
+    const res = await GET(vercelCronRequest(`Bearer ${SECRET}`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { processed: { claimed: number; sent: number; failed: number } };
+    expect(body).toEqual({ processed: { claimed: 3, sent: 2, failed: 1 } });
+    expect(runEmailDispatchMock).toHaveBeenCalledTimes(1);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("ไม่มี CRON_SECRET (config null) → GET 404 และไม่เรียก worker", async () => {
+    getConfigMock.mockReturnValue(configStub({ cronSecret: null }));
+    const res = await GET(vercelCronRequest(`Bearer ${SECRET}`));
+    expect(res.status).toBe(404);
     expect(runEmailDispatchMock).not.toHaveBeenCalled();
   });
 
-  it("200 ต้องมี Cache-Control: no-store (ป้องกัน cache ผล cron)", async () => {
+  it("Bearer ไม่ตรง → 404 เงียบ + ไม่เรียก worker", async () => {
     getConfigMock.mockReturnValue(configStub());
-    const res = await POST(cronRequest(SECRET));
-    expect(res.headers.get("cache-control")).toBe("no-store");
+    const res = await GET(vercelCronRequest("Bearer totally-wrong-secret"));
+    expect(res.status).toBe(404);
+    expect(runEmailDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("ไม่มี header Authorization เลย → 404 เงียบ", async () => {
+    getConfigMock.mockReturnValue(configStub());
+    const res = await GET(vercelCronRequest());
+    expect(res.status).toBe(404);
+    expect(runEmailDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("scheme อื่น (ไม่ใช่ Bearer) → 404 เงียบ", async () => {
+    getConfigMock.mockReturnValue(configStub());
+    const res = await GET(vercelCronRequest(`Basic ${SECRET}`));
+    expect(res.status).toBe(404);
+    expect(runEmailDispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("POST ไม่ยอมรับ Bearer (ทางเดียวของ POST = x-cron-secret — แยกสองช่องชัดเจน)", async () => {
+    getConfigMock.mockReturnValue(configStub());
+    const res = await POST(
+      new Request("http://localhost:3000/api/internal/jobs/email-dispatch", {
+        method: "POST",
+        headers: { authorization: `Bearer ${SECRET}` },
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(runEmailDispatchMock).not.toHaveBeenCalled();
   });
 });

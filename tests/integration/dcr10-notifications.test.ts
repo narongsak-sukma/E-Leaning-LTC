@@ -1,6 +1,6 @@
 /**
  * DCR-10 — integration tests ของ Wave E Phase 4 ระบบแจ้งเตือน (NTF) บน dev stack จริง
- * (migration 0034_notifications.sql — แผน §6 เคส 1..12):
+ * (migration 0034_notifications.sql — แผน §6 เคส 1..12 + gate r1 เคส 13..15):
  *   1) สอบผ่าน (RPC จริง start→save→submit) ผู้ใช้ grant email_notify ก่อน → event
  *      exam.result pending → notification_dispatch_tick() (psql ตรง) → in_app 1 แถว
  *      (severity success · title มี "สอบผ่าน") + email_outbox 1 แถว queued
@@ -38,6 +38,19 @@
  *  12) email backoff — ระบายคิวค้างด้วย worker จริงก่อน → insert email_outbox ตรง →
  *      email_claim_batch(5) (service_role) → email_complete ok:false ×5 รอบ (bypass เวลา
  *      ด้วย update scheduled_at) → attempts=5 status failed last_error มี smtp_test_fail
+ *  13) crash reclaim (gate r1 M1) — insert outbox ตรง → claim → status 'sending' +
+ *      lease = scheduled_at ในอนาคต → claim ซ้ำ "ไม่" ได้แถว (lease ยังมีชีวิต) →
+ *      หมด lease (บังคับ scheduled_at ย้อนหลัง คงสถานะ sending — จำลอง worker ตาย) →
+ *      claim ได้แถวเดิมกลับมา · attempts คงเดิม (reclaim ไม่นับเป็นความล้มเหลว)
+ *  14) claim-time deny (gate r1 B2) — insert outbox ตรงของผู้ใช้ consent grant แล้ว →
+ *      revoke email_notify ผ่าน RPC จริง → claim → แถว "ไม่" ถูกคืนให้ส่ง แต่ถูกปิด
+ *      เป็น failed + last_error 'email_gate_denied_before_send' (grant→enqueue→
+ *      revoke ต้องไม่ส่ง — รวมงาน retry ที่ค้างอยู่)
+ *  15) ประตูรายช่องทาง (gate r1 B3 / NTF-005) — settings credit.in_app=false ·
+ *      email=true → adjust → tick → notification เกิด (ที่เก็บเนื้อหา) แต่ "ไม่มี"
+ *      แถว recipient in_app · my_notifications มองไม่เห็น (0 รายการ) · อีเมลยังเข้า
+ *      คิว → ปิดครบทั้งสองช่องทาง → adjust ใหม่ → tick → skipped_no_channel ≥1 ·
+ *      ไม่เกิดแถวใหม่ทั้งระบบ · event ปิดเป็น processed (ไม่ retry ตลอดไป)
  *
  * การแยกโลกของ suite (แบบ DCR-9):
  *   - เนมสเปซ id ตายตัว e14 (cccccccc-cccc-4ccc-8ccc-...e14...) ของตัวเอง — ไม่ยืม
@@ -132,6 +145,12 @@ const E14_CYCLE_CREDIT = "cccccccc-cccc-4ccc-8ccc-e14c00000004";
 const E14_CYCLE_CITIZEN = "cccccccc-cccc-4ccc-8ccc-e14c00000006";
 /** email_outbox id ตายตัวของเคส 12 (backoff) */
 const E14_OUTBOX_BACKOFF = "cccccccc-cccc-4ccc-8ccc-e14c00000005";
+/** email_outbox id ตายตัวของเคส 13 (crash reclaim — gate r1 M1) */
+const E14_OUTBOX_RECLAIM = "cccccccc-cccc-4ccc-8ccc-e14c00000009";
+/** email_outbox id ตายตัวของเคส 14 (claim-time deny — gate r1 B2) */
+const E14_OUTBOX_REVOKE = "cccccccc-cccc-4ccc-8ccc-e14c00000007";
+/** renewal_cycles id ตายตัวของเคส 15 (ประตูรายช่องทาง — gate r1 B3) */
+const E14_CYCLE_GATE = "cccccccc-cccc-4ccc-8ccc-e14c00000008";
 
 // ─── ผู้ใช้ทดสอบ (GoTrue จริง) ────────────────────────────────────────────────
 
@@ -145,6 +164,7 @@ let listUser: TestUser; // เคส 10 — 3 notification (pagination/อ่า
 let r7User: TestUser; // เคส 11 — lawyer cycle ครบ +7 วัน
 let r30User: TestUser; // เคส 11 — lawyer cycle ครบ +30 วัน
 let citizenCycleUser: TestUser; // เคส 11 — citizen มี cycle → not_lawyer
+let gateUser: TestUser; // เคส 15 — ประตูรายช่องทาง in_app/email (gate r1 B3)
 let registrarUser: TestUser; // เคส 6 — staff:registrar (aal2 ผ่าน mintAal2Token)
 let registrarAal2Token = "";
 /** B8 — id ผู้ใช้ที่รันนี้สร้าง (cleanup ลบด้วย id ก่อน แล้วค่อย prefix sweep) */
@@ -163,6 +183,7 @@ interface TickResult {
   readonly processed: number;
   readonly already_notified: number;
   readonly email_queued: number;
+  readonly skipped_no_channel: number;
   readonly failed: number;
 }
 interface ScanResult {
@@ -171,6 +192,7 @@ interface ScanResult {
   readonly already: number;
   readonly not_lawyer: number;
   readonly email_queued: number;
+  readonly skipped_no_channel: number;
   readonly failed: number;
 }
 interface NotifItem {
@@ -472,6 +494,7 @@ async function cleanupE14World(): Promise<void> {
     delete from public.event_outbox
      where payload ->> 'source_id' like 'aaaaaaaa-aaaa-4aaa-8aaa-e14a%';
     delete from public.email_outbox where id = '${E14_OUTBOX_BACKOFF}';
+    delete from public.email_outbox where id in ('${E14_OUTBOX_RECLAIM}', '${E14_OUTBOX_REVOKE}');
     delete from public.question_options
      where question_id in (${E14_QUESTIONS.map((id) => `'${id}'`).join(",")});
     delete from public.questions where bank_id = '${E14_BANK}';
@@ -558,6 +581,7 @@ describe.skipIf(!DB_URL)(
       r7User = await createTestUser("dcr10-notif-r7", "lawyer");
       r30User = await createTestUser("dcr10-notif-r30", "lawyer");
       citizenCycleUser = await createTestUser("dcr10-notif-citizen", "citizen");
+      gateUser = await createTestUser("dcr10-notif-gate", "lawyer");
       registrarUser = await createTestUser("dcr10-notif-registrar", "staff:registrar");
       trackedUserIds = [
         passUser,
@@ -570,6 +594,7 @@ describe.skipIf(!DB_URL)(
         r7User,
         r30User,
         citizenCycleUser,
+        gateUser,
         registrarUser,
       ].map((u) => u.id);
       registrarAal2Token = await mintAal2Token(registrarUser);
@@ -577,11 +602,11 @@ describe.skipIf(!DB_URL)(
       for (const user of [passUser, failUser, noConsentUser, settingsUser, certUser, listUser]) {
         await enrollViaRpc(user, E14_COURSE);
       }
-      // grant email_notify ล่วงหน้า (เคส 1/2/4/5/6/11 — เคส 3 ตั้งใจไม่ grant)
-      for (const user of [passUser, failUser, settingsUser, certUser, creditUser, r7User, r30User]) {
+      // grant email_notify ล่วงหน้า (เคส 1/2/4/5/6/11/15 — เคส 3 ตั้งใจไม่ grant)
+      for (const user of [passUser, failUser, settingsUser, certUser, creditUser, r7User, r30User, gateUser]) {
         await grantEmailConsent(user);
       }
-      // รอบ renewal ของเคส 11 + รอบเป้า adjustment ของเคส 6 (insert ตรง — status open)
+      // รอบ renewal ของเคส 11 + รอบเป้า adjustment ของเคส 6/15 (insert ตรง — status open)
       await psql(`
         insert into public.renewal_cycles
           (id, user_id, cycle_no, starts_on, ends_on, required_credits, status) values
@@ -592,6 +617,8 @@ describe.skipIf(!DB_URL)(
           ('${E14_CYCLE_CREDIT}', '${creditUser.id}', 1, current_date - 1, current_date + 200,
            '{"general":12}'::jsonb, 'open'),
           ('${E14_CYCLE_CITIZEN}', '${citizenCycleUser.id}', 1, current_date - 1, current_date + 7,
+           '{"general":12}'::jsonb, 'open'),
+          ('${E14_CYCLE_GATE}', '${gateUser.id}', 1, current_date - 1, current_date + 200,
            '{"general":12}'::jsonb, 'open')
         on conflict (id) do nothing;
       `);
@@ -1115,8 +1142,11 @@ describe.skipIf(!DB_URL)(
       expect(readAgain.status).toBe(200);
       expect((readAgain.json as { read_at: string }).read_at).toBe(readAt1);
       // คนอื่นอ่านแทน → RPC ปฏิเสธ (≥400) และ read_at ต้องไม่ถูกแตะ (ผลลัพธ์จริงของ
-      // owner-check) — หมายเหตุ: PostgREST ปิดกั้น message ของ raise errcode P0002
-      // (คืน 500 "Something went wrong" — เฉพาะ P0001/22023 เท่านั้นที่ทะลุ message)
+      // owner-check) — หมายเหตุ (gate r1 adj-3): RPC นี้ raise ด้วย errcode default
+      // P0001 → PostgREST 12.2 แปลงเป็น HTTP 400 พร้อม message ของ raise ทะลุถึง
+      // caller (P0* อื่นกลายเป็น 500) · ส่วนการเปลี่ยน message เป็น "Something went
+      // wrong" ที่เคยเห็นกับ P0002 สังเกตที่ชั้น gateway ของ stack นี้ — ตรวจแยกที่
+      // gateway หากจะใช้ P0002 (เหตุผลที่ 0034 §6.2 เลือก P0001)
       const stranger = await userRpc("my_notification_read", noConsentUser.accessToken, {
         p_notification_id: middle?.id ?? "",
       });
@@ -1299,5 +1329,197 @@ describe.skipIf(!DB_URL)(
       expect(finalRow[0]?.attempts).toBe(5);
       expect(finalRow[0]?.error ?? "").toContain("smtp_test_fail");
     }, 45_000);
+
+    // ─── เคส 13: crash reclaim — lease 10 นาทีจากจุด claim (gate r1 M1) ─────────
+
+    it("เคส 13 crash reclaim: claim → sending + lease อนาคต → claim ซ้ำไม่ได้ → lease หมด (worker ตาย) → claim ได้แถวเดิม attempts คงเดิม", async () => {
+      // insert ตรง — เจ้าของ creditUser (consent grant อยู่ · เคส 14 จะ revoke ทีหลัง)
+      await psql(`
+        insert into public.email_outbox
+          (id, recipient_user_id, to_email, template_key, payload, locale, status, scheduled_at)
+        values ('${E14_OUTBOX_RECLAIM}', '${creditUser.id}', '${creditUser.email}',
+                'credit.adjusted',
+                jsonb_build_object('notification_id',
+                  'aaaaaaaa-aaaa-4aaa-8aaa-e14a00000003'::uuid,
+                  'user_id', '${creditUser.id}'::uuid,
+                  'vars', jsonb_build_object('full_name', 'ทดสอบ DCR-10', 'amount', '-1.25')),
+                'th', 'queued', now())
+        on conflict (id) do nothing;
+      `);
+      // claim ครั้งแรก — ได้แถว → status 'sending' + lease = now()+10 นาที (M1)
+      const claim1 = await svcRpc("email_claim_batch", { p_limit: 5 });
+      expect(claim1.status, claim1.text.slice(0, 300)).toBe(200);
+      const mine1 = (claim1.json as readonly ClaimRow[]).find(
+        (row) => row.id === E14_OUTBOX_RECLAIM,
+      );
+      expect(mine1, "claim ครั้งแรกต้องได้แถวของเคส 13").toBeDefined();
+      expect(mine1?.attempts).toBe(0);
+      const leased = await psqlRows<{ status: string; lease_future: boolean }>(`
+        select status::text, scheduled_at > now() as lease_future
+          from public.email_outbox where id = '${E14_OUTBOX_RECLAIM}';
+      `);
+      expect(leased[0]?.status).toBe("sending");
+      expect(leased[0]?.lease_future).toBe(true);
+      // claim ซ้ำระหว่าง lease ยังมีชีวิต — ต้อง "ไม่" ได้แถวนี้กลับ (ไม่ส่งซ้ำสอง worker)
+      const claim2 = await svcRpc("email_claim_batch", { p_limit: 5 });
+      expect(claim2.status).toBe(200);
+      const mine2 = (claim2.json as readonly ClaimRow[]).find(
+        (row) => row.id === E14_OUTBOX_RECLAIM,
+      );
+      expect(mine2, "lease ยังไม่หมดต้องไม่ถูก claim ซ้ำ").toBeUndefined();
+      // จำลอง worker ตายกลางทาง — คงสถานะ sending แต่บังคับ lease หมดอายุแล้ว
+      await psql(`
+        update public.email_outbox set scheduled_at = now() - interval '1 minute'
+         where id = '${E14_OUTBOX_RECLAIM}';
+      `);
+      const claim3 = await svcRpc("email_claim_batch", { p_limit: 5 });
+      expect(claim3.status).toBe(200);
+      const mine3 = (claim3.json as readonly ClaimRow[]).find(
+        (row) => row.id === E14_OUTBOX_RECLAIM,
+      );
+      expect(mine3, "lease หมดแล้วต้อง reclaim ได้").toBeDefined();
+      // reclaim ไม่ใช่ความล้มเหลว — attempts คง 0 (เพิ่มเฉพาะเมื่อ complete ok:false)
+      expect(mine3?.attempts).toBe(0);
+      // ปิดจ๊อบให้เรียบร้อย (sent) — ไม่ทิ้งแถวค้าง sending ให้ cron จริง
+      const complete = await svcRpc("email_complete", {
+        p_results: [{ id: E14_OUTBOX_RECLAIM, ok: true }],
+      });
+      expect(complete.status, complete.text.slice(0, 300)).toBe(200);
+      expect((complete.json as { sent: number }).sent).toBe(1);
+    }, 30_000);
+
+    // ─── เคส 14: grant→enqueue→revoke — claim ต้องปิดเป็น failed ไม่ส่ง (gate r1 B2) ──
+
+    it("เคส 14 claim-time deny: enqueue ตอน grant → revoke consent → claim → ไม่คืนแถว · status failed + last_error email_gate_denied_before_send", async () => {
+      // enqueue ขณะสิทธิ์ยัง valid (เลียนแบบสิ่งที่ tick ทำในคิวจริง)
+      await psql(`
+        insert into public.email_outbox
+          (id, recipient_user_id, to_email, template_key, payload, locale, status, scheduled_at)
+        values ('${E14_OUTBOX_REVOKE}', '${creditUser.id}', '${creditUser.email}',
+                'credit.adjusted',
+                jsonb_build_object('notification_id',
+                  'aaaaaaaa-aaaa-4aaa-8aaa-e14a00000004'::uuid,
+                  'user_id', '${creditUser.id}'::uuid,
+                  'vars', jsonb_build_object('full_name', 'ทดสอบ DCR-10', 'amount', '-1.25')),
+                'th', 'queued', now())
+        on conflict (id) do nothing;
+      `);
+      // revoke email_notify ผ่าน RPC จริง (append-only — ล่าสุดชนะ)
+      const revoke = await userRpc("my_consents_update", creditUser.accessToken, {
+        p_type: "email_notify",
+        p_action: "revoke",
+      });
+      expect(revoke.status, revoke.text.slice(0, 300)).toBe(200);
+      expect((revoke.json as { status: string }).status).toBe("revoked");
+      // claim — แถวต้องถูกปฏิเสธ "ก่อน" ถึงมือ provider: ไม่คืนใน result set เลย
+      const claim = await svcRpc("email_claim_batch", { p_limit: 5 });
+      expect(claim.status, claim.text.slice(0, 300)).toBe(200);
+      const mine = (claim.json as readonly ClaimRow[]).find(
+        (row) => row.id === E14_OUTBOX_REVOKE,
+      );
+      expect(mine, "แถวที่ถูกปฏิเสธต้องไม่ถูกคืนให้ worker ส่ง").toBeUndefined();
+      // และถูกปิดถาวรเป็น failed พร้อม last_error คงที่ (ไม่ reclaim วนซ้ำ)
+      const denied = await psqlRows<{ status: string; error: string | null; sent_at: string | null }>(`
+        select status::text, last_error as error, sent_at::text
+          from public.email_outbox where id = '${E14_OUTBOX_REVOKE}';
+      `);
+      expect(denied[0]?.status).toBe("failed");
+      expect(denied[0]?.error).toBe("email_gate_denied_before_send");
+      expect(denied[0]?.sent_at).toBeNull();
+      // claim ซ้ำอีกรอบ — แถว failed ไม่ถูกหยิบอีก (จบเรื่องจริง ไม่ retry)
+      const claimAgain = await svcRpc("email_claim_batch", { p_limit: 5 });
+      expect(claimAgain.status).toBe(200);
+      const mineAgain = (claimAgain.json as readonly ClaimRow[]).find(
+        (row) => row.id === E14_OUTBOX_REVOKE,
+      );
+      expect(mineAgain).toBeUndefined();
+    }, 30_000);
+
+    // ─── เคส 15: ประตูรายช่องทาง in_app/email แยกกัน (gate r1 B3 / NTF-005) ──────
+
+    it("เคส 15 ประตูรายช่องทาง: credit.in_app=false อย่างเดียว → notification มีแต่ไม่มี recipient in_app (inbox มองไม่เห็น) · ปิดครบทั้งคู่ → skipped_no_channel ≥1 ไม่เกิดแถวใหม่ · event ปิด processed", async () => {
+      // ขา A — ปิด in_app เฉพาะ family credit (email ยังเปิด + consent grant)
+      const offInApp = await userRpc("my_notification_settings_update", gateUser.accessToken, {
+        p_settings: { credit: { in_app: false, email: true } },
+      });
+      expect(offInApp.status, offInApp.text.slice(0, 300)).toBe(200);
+      const adjust1 = await userRpc("admin_credit_adjust", registrarAal2Token, {
+        p_user_id: gateUser.id,
+        p_cycle_id: E14_CYCLE_GATE,
+        p_credit_type: "general",
+        p_amount: -0.5,
+        p_reason: "ทดสอบประตูรายช่องทาง in_app ปิดของ DCR-10 ขา A",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(adjust1.status, adjust1.text.slice(0, 300)).toBe(200);
+      const ledger1 = (adjust1.json as { id: string }).id;
+      const tick1 = await runTick();
+      expect(tick1.skipped).toBe(false);
+      expect(tick1.processed, JSON.stringify(tick1)).toBeGreaterThanOrEqual(1);
+      // notification เกิด (ที่เก็บเนื้อหาอ้างอิงของอีเมล) แต่ "ไม่มี" recipient in_app —
+      // เหลือแค่ email · my_notifications จึงมองไม่เห็น (badge/inbox ไม่นับ)
+      const row1 = await psqlRows<{ in_app: number; email: number }>(`
+        select
+          count(*) filter (where nr.channel = 'in_app')::int as in_app,
+          count(*) filter (where nr.channel = 'email')::int as email
+        from public.notifications n
+        join public.notification_recipients nr on nr.notification_id = n.id
+        where n.topic = 'credit.adjusted' and n.ref_id = '${ledger1}';
+      `);
+      expect(row1[0]?.in_app).toBe(0);
+      expect(row1[0]?.email).toBe(1);
+      const inbox1 = await userRpc("my_notifications", gateUser.accessToken, {});
+      expect(inbox1.status).toBe(200);
+      const inbox1Body = inbox1.json as NotifListResult;
+      expect(inbox1Body.items).toHaveLength(0);
+      expect(inbox1Body.unread_count).toBe(0);
+      // อีเมลยังเข้าคิวตามสิทธิ์ (consent grant + email on)
+      const outbox1 = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.email_outbox
+         where recipient_user_id = '${gateUser.id}' and template_key = 'credit.adjusted';
+      `);
+      expect(outbox1[0]?.n).toBe(1);
+      // ขา B — ปิดครบทั้งสองช่องทาง → event ถูกข้าม ไม่เกิดแถวเลย และปิดเป็น processed
+      const offAll = await userRpc("my_notification_settings_update", gateUser.accessToken, {
+        p_settings: { credit: { in_app: false, email: false } },
+      });
+      expect(offAll.status, offAll.text.slice(0, 300)).toBe(200);
+      const adjust2 = await userRpc("admin_credit_adjust", registrarAal2Token, {
+        p_user_id: gateUser.id,
+        p_cycle_id: E14_CYCLE_GATE,
+        p_credit_type: "general",
+        p_amount: -0.75,
+        p_reason: "ทดสอบปิดครบทั้งสองช่องทางของ DCR-10 ขา B",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(adjust2.status, adjust2.text.slice(0, 300)).toBe(200);
+      const ledger2 = (adjust2.json as { id: string }).id;
+      const tick2 = await runTick();
+      expect(tick2.skipped).toBe(false);
+      expect(tick2.skipped_no_channel, JSON.stringify(tick2)).toBeGreaterThanOrEqual(1);
+      // event ของ adjust2 ปิดเป็น processed (ไม่ค้าง pending วน retry ตลอดไป)
+      const event2 = await psqlRows<{ status: string }>(`
+        select status::text from public.event_outbox
+         where topic = 'credit.adjusted' and payload ->> 'ledger_id' = '${ledger2}';
+      `);
+      expect(event2).toHaveLength(1);
+      expect(event2[0]?.status).toBe("processed");
+      // ไม่เกิด notification/recipients ใหม่สำหรับ ledger2 · outbox ยังเป็นของขา A แถวเดิม
+      const row2 = await psqlRows<{ notifs: number; recipients: number }>(`
+        select
+          (select count(*) from public.notifications where topic = 'credit.adjusted'
+             and ref_id = '${ledger2}')::int as notifs,
+          (select count(*) from public.notification_recipients nr
+             join public.notifications n on n.id = nr.notification_id
+            where n.topic = 'credit.adjusted' and n.ref_id = '${ledger2}')::int as recipients;
+      `);
+      expect(row2[0]?.notifs).toBe(0);
+      expect(row2[0]?.recipients).toBe(0);
+      const outbox2 = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.email_outbox
+         where recipient_user_id = '${gateUser.id}';
+      `);
+      expect(outbox2[0]?.n).toBe(1);
+    }, 60_000);
   },
 );

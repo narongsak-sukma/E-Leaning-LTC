@@ -6,6 +6,9 @@
  * template/var · drift fail-closed · ห้าม log to_email/payload
  */
 process.env.PUBLIC_BASE_URL = "https://elearning.lawyerthai.test";
+// ลบ CERT_PUBLIC_BASE_URL ของ container ออก (ถ้ามี) — ไม่งั้น certPublicBaseUrl
+// ชนะก่อน publicBaseUrl แล้วลิงก์ใบประกาศฯ (ทดสอบ B5) ได้ base ผิดของ container
+delete process.env.CERT_PUBLIC_BASE_URL;
 process.env.SUPABASE_URL = "https://stub.supabase.co";
 process.env.SUPABASE_ANON_KEY = "stub-anon-key";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub-service-role-key";
@@ -35,6 +38,8 @@ import {
 const ID_A = "a0000000-0000-4000-8000-000000000001";
 const ID_B = "a0000000-0000-4000-8000-000000000002";
 const ID_C = "a0000000-0000-4000-8000-000000000003";
+/** user_id ตามสัญญา payload (gate r1 B4 — ต้องเป็น UUID จริงเสมอ) */
+const USER_A = "c0000000-0000-4000-8000-000000000001";
 
 /** แถวคิวตามสัญญา lane A (แผน §4.7 + 0034 §4a/4b: payload = {notification_id,
  *  user_id, vars} — ตัวแปร render อยู่ใต้ vars ชื่อตามที่ tick ใส่จริง) */
@@ -47,7 +52,7 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     template_key: "exam.result.passed",
     payload: {
       notification_id: "b0000000-0000-4000-8000-000000000009",
-      user_id: null,
+      user_id: USER_A,
       vars: {
         full_name: "ทดสอบ ระบบ",
         course_title: "หลักสูตรทดสอบ",
@@ -148,6 +153,47 @@ describe("runEmailDispatch — flow หลัก claim→render→send→complet
     expect(rpc).toHaveBeenCalledTimes(1);
   });
 
+  it("certificate.issued + verify_code → ฉีดลิงก์ verify/PDF จาก base URL ของแอปก่อน render (gate r1 B5 — NTF-003 AC)", async () => {
+    const CODE = "LTC-VERIFY-2026-ABCD";
+    const { completeCalls } = mockClient({
+      batches: [
+        [
+          row({
+            template_key: "certificate.issued",
+            payload: {
+              notification_id: "b0000000-0000-4000-8000-000000000009",
+              user_id: USER_A,
+              vars: {
+                full_name: "ทดสอบ ระบบ",
+                course_title: "หลักสูตรทดสอบ",
+                cert_no: "LTC-2569-000123",
+                verify_code: CODE,
+              },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "certificate.issued|th": tpl(
+          "ใบประกาศ {{course_title}}",
+          "ตรวจสอบ: {{verify_url}} PDF: {{pdf_url}} เลขที่ {{cert_no}} คุณ{{full_name}}",
+        ),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 1, failed: 0 });
+    expect(senderStub).toHaveBeenCalledTimes(1);
+    const firstCall = senderStub.mock.calls[0];
+    expect(firstCall).toBeDefined();
+    const sentBody = (firstCall?.[0] as { body: string }).body;
+    expect(sentBody).toContain(`https://elearning.lawyerthai.test/verify/${CODE}`);
+    expect(sentBody).toContain(
+      `https://elearning.lawyerthai.test/api/v1/certificates/${CODE}/pdf`,
+    );
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: true }]]);
+  });
+
   it("send fail → complete รับ {ok:false,error} + นับ failed", async () => {
     senderStub.mockResolvedValue({ ok: false, error: "smtp_econnrefused" });
     const { completeCalls } = mockClient({
@@ -180,7 +226,7 @@ describe("runEmailDispatch — template/var/drift fail-closed", () => {
           row({
             payload: {
               notification_id: "b0000000-0000-4000-8000-000000000009",
-              user_id: null,
+              user_id: USER_A,
               vars: { full_name: "ทดสอบ ระบบ" },
             },
           }),
@@ -216,6 +262,54 @@ describe("runEmailDispatch — template/var/drift fail-closed", () => {
     });
     const summary = await runEmailDispatch();
     expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "row_contract_drift" }]]);
+  });
+
+  it("payload notification_id ไม่ใช่ UUID → row_contract_drift + ห้ามเรียก provider (gate r1 B4 — ส่งก่อนแล้วค่อยพบว่า complete ไม่ได้)", async () => {
+    const { completeCalls } = mockClient({
+      batches: [
+        [
+          row({
+            payload: {
+              notification_id: "bad",
+              user_id: USER_A,
+              vars: { full_name: "ทดสอบ ระบบ", course_title: "หลักสูตรทดสอบ" },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "exam.result.passed|th": tpl("หัว {{course_title}}", "เนื้อ {{full_name}}"),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
+    expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "row_contract_drift" }]]);
+  });
+
+  it("payload user_id ไม่ใช่ UUID (null) → row_contract_drift + ห้ามเรียก provider (gate r1 B4)", async () => {
+    const { completeCalls } = mockClient({
+      batches: [
+        [
+          row({
+            payload: {
+              notification_id: "b0000000-0000-4000-8000-000000000009",
+              user_id: null,
+              vars: { full_name: "ทดสอบ ระบบ", course_title: "หลักสูตรทดสอบ" },
+            },
+          }),
+        ],
+        [],
+      ],
+      templates: {
+        "exam.result.passed|th": tpl("หัว {{course_title}}", "เนื้อ {{full_name}}"),
+      },
+    });
+    const summary = await runEmailDispatch();
+    expect(summary).toEqual({ claimed: 1, sent: 0, failed: 1 });
+    expect(senderStub).not.toHaveBeenCalled();
     expect(completeCalls).toEqual([[{ id: ID_A, ok: false, error: "row_contract_drift" }]]);
   });
 

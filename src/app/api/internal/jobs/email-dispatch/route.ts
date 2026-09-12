@@ -1,17 +1,20 @@
 /**
- * POST /api/internal/jobs/email-dispatch — ทริกเกอร์ email worker (Wave E Phase 4 · D-p4-8)
+ * /api/internal/jobs/email-dispatch — ทริกเกอร์ email worker (Wave E Phase 4 · D-p4-8)
  *
  * ประตูเดียวที่ทำให้ worker ทำงานในทุก environment:
- * - **prod** = Vercel Cron ยิง POST พร้อม header `x-cron-secret` (เทียบ env CRON_SECRET
- *   ผ่าน config — timing-safe)
- * - **dev** = compose service `mailer` (curlimages/curl) ยิง loop ทุก 30 วินาที
+ * - **prod** = Vercel Cron ยิง **GET** พร้อม `Authorization: Bearer <CRON_SECRET>`
+ *   (รูปทรงที่ Vercel ส่งให้อัตโนมัติ — gate r1 B1: เดิมรับ POST + x-cron-secret
+ *   เท่านั้น ทำให้ Vercel Cron เรียกไม่ได้จริงใน production)
+ * - **dev** = compose service `mailer` (curlimages/curl) ยิง POST + header
+ *   `x-cron-secret` loop ทุก 30 วินาที
  *
- * ความปลอดภัย (fail-closed เงียบ):
+ * ความปลอดภัย (fail-closed เงียบ — เหมือนกันทั้งสอง method):
  * - **ไม่มี CRON_SECRET ใน env = 404 เสมอ** (endpoint ไม่มีอยู่จากมุมผู้ยิง —
  *   ไม่เปิดเผยสถานะระบบ ไม่สนใจ header)
- * - secret ไม่ตรง = 404 เงียบ ๆ เช่นกัน (ไม่เฉลยว่า endpoint มีจริง) — เทียบแบบ
- *   timing-safe · ความยาวไม่เท่า = เทียบ dummy เท่าตัวก่อนเพื่อไม่ให้เวลาเฉลยความยาว
- * - GET = 405 (cron ใช้ POST เท่านั้น)
+ * - secret ไม่ตรง/ไม่มี header = 404 เงียบ ๆ เช่นกัน (ไม่เฉลยว่า endpoint มีจริง) —
+ *   เทียบแบบ timing-safe · ความยาวไม่เท่า = เทียบ dummy เท่าตัวก่อนเพื่อไม่ให้เวลา
+ *   เฉลยความยาว
+ * - method อื่น (PUT/DELETE/…) = 405 โดย Next เอง (ไม่ export)
  * - ผ่าน secret = runEmailDispatch() แล้วตอบ 200 {processed: {claimed, sent, failed}}
  *   (ตัวเลขเมตาเท่านั้น — ไม่มี to_email/payload ใน response/log ตามกติกาโปรเจกต์)
  */
@@ -21,8 +24,10 @@ import { runEmailDispatch } from "@/lib/email/dispatch";
 
 export const dynamic = "force-dynamic";
 
-/** header ที่ cron ต้องแนบมา (Vercel Cron ส่ง CRON_SECRET ใน header นี้ให้อัตโนมัติ) */
+/** header ที่ dev mailer แนบมา (POST) */
 const CRON_SECRET_HEADER = "x-cron-secret";
+/** scheme ที่ Vercel Cron ใช้ (GET): `Authorization: Bearer <CRON_SECRET>` */
+const BEARER_PREFIX = "Bearer ";
 
 /**
  * เทียบ secret แบบ timing-safe — ความยาวไม่เท่า = เทียบ dummy เท่าตัวก่อนแล้วคืน
@@ -41,22 +46,18 @@ function secretsMatch(provided: string, secret: string): boolean {
   return false;
 }
 
-/** POST — cron endpoint (auth ด้วย x-cron-secret เท่านั้น ไม่มี session/rate-limit) */
-export async function POST(request: Request): Promise<Response> {
-  let secret: string | null;
+/** แก้ secret จาก env — null = config ไม่ครบ/ไม่ตั้ง → ประตูปิดเงียบ (404) */
+function resolveSecret(): string | null {
   try {
-    secret = getConfig().cronSecret;
+    return getConfig().cronSecret;
   } catch {
     // config พัง (env ไม่ครบ) — fail-closed เงียบเช่นเดียวกับไม่มี secret
-    return new Response(null, { status: 404 });
+    return null;
   }
-  if (secret === null) {
-    return new Response(null, { status: 404 });
-  }
-  const provided = request.headers.get(CRON_SECRET_HEADER) ?? "";
-  if (!secretsMatch(provided, secret)) {
-    return new Response(null, { status: 404 });
-  }
+}
+
+/** รัน worker แล้วตอบ 200 — ใช้ร่วมทั้ง GET (Vercel) และ POST (dev mailer) */
+async function runDispatch(): Promise<Response> {
   try {
     const processed = await runEmailDispatch();
     return Response.json(
@@ -69,7 +70,31 @@ export async function POST(request: Request): Promise<Response> {
   }
 }
 
-/** GET — ห้าม (cron เป็น POST เท่านั้น ตาม D-p4-8) */
-export async function GET(): Promise<Response> {
-  return new Response(null, { status: 405 });
+/** POST — dev mailer endpoint (auth ด้วย x-cron-secret เท่านั้น ไม่มี session/rate-limit) */
+export async function POST(request: Request): Promise<Response> {
+  const secret = resolveSecret();
+  if (secret === null) {
+    return new Response(null, { status: 404 });
+  }
+  const provided = request.headers.get(CRON_SECRET_HEADER) ?? "";
+  if (!secretsMatch(provided, secret)) {
+    return new Response(null, { status: 404 });
+  }
+  return runDispatch();
+}
+
+/** GET — Vercel Cron endpoint (auth ด้วย Authorization: Bearer เท่านั้น — gate r1 B1) */
+export async function GET(request: Request): Promise<Response> {
+  const secret = resolveSecret();
+  if (secret === null) {
+    return new Response(null, { status: 404 });
+  }
+  const authorization = request.headers.get("authorization") ?? "";
+  if (!authorization.startsWith(BEARER_PREFIX)) {
+    return new Response(null, { status: 404 });
+  }
+  if (!secretsMatch(authorization.slice(BEARER_PREFIX.length), secret)) {
+    return new Response(null, { status: 404 });
+  }
+  return runDispatch();
 }
