@@ -188,6 +188,18 @@ describe("GET /me/credits — envelope + ขอบเขตเจ้าของ
   });
 });
 
+describe("GET /me/credits — query strict (MINOR-2)", () => {
+  it("query key แปลกปลอม (?user_id=...) → 400 ERR-VAL-001 (ไม่เรียก RPC)", async () => {
+    const client = mockClient(summaryFixture());
+    const res = await GET(meUrl("?user_id=b0000000-0000-4000-8000-000000000099"));
+    const body = (await res.json()) as { error: { code: string } };
+
+    expect(res.status).toBe(400);
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(client.rpc).not.toHaveBeenCalled();
+  });
+});
+
 describe("GET /me/credits — rate READ (§5)", () => {
   it("เกิน 120/min → 429 ERR-RATE-001 details.group=READ", async () => {
     mockClient(summaryFixture());

@@ -112,12 +112,27 @@ begin
     v_years := greatest(0, floor((p_on_date - v_anchor::date)::numeric / 365.25)::int);
     v_start := (v_anchor::date::timestamp + make_interval(years => v_years))::date;
   end if;
-  -- กัน calendar drift ของปีอธิกสุรทิน (floor บน 365.25 + make_interval ปีจริง):
-  -- หาก start เลยวันที่สนใจไป 1 วัน ให้ถอยหนึ่งปี — รอบต้อง cover p_on_date เสมอ
-  if v_start > p_on_date then
+  -- กัน calendar drift ของปีอธิกสุรทิน (floor บน 365.25 + make_interval ปีจริง) สองทิศ:
+  -- gate r1 BLOCKER-5 — floor((on-anchor)/365.25) ตัดทิศลง ทำให้ "วันครบรอบปีแรกพอดี"
+  -- (เช่น anchor 2025-09-12 + on_date 2026-09-12 → 365 วัน → floor(365/365.25)=0)
+  -- ได้หน้าต่าง [2025-09-12, 2026-09-11] ที่ **ไม่ครอบ** on_date → ledger เข้ารอบผิด
+  -- แก้: ปรับบน "โครงปี" (lattice) ของ anchor สองทิศ — ถอยหลังก่อนจน start ≤ on_date
+  -- (ครอบทั้ง drift เกินของ leap year และ event เก่ามาถึงช้ากว่ารอบล่าสุด) แล้วเดิน
+  -- หน้าทีละปีจนหน้าต่างครอบ on_date · invariant ตรวจ cover จริงก่อน INSERT
+  while v_start > p_on_date loop
     v_start := (v_start::timestamp - interval '1 year')::date;
-  end if;
+  end loop;
+  while (v_start::timestamp + make_interval(years => 1) - interval '1 day')::date
+        < p_on_date loop
+    v_start := (v_start::timestamp + make_interval(years => 1))::date;
+  end loop;
   v_end := (v_start::timestamp + make_interval(years => 1) - interval '1 day')::date;
+  -- invariant fail-closed: รอบที่จะ INSERT ต้องครอบ p_on_date จริง (ทุก path มาถึง
+  -- ตรงนี้ต้องผ่าน — ถ้าไม่ผ่านคือ logic พัง ห้ามเขียนรอบเงียบ)
+  if not (p_on_date between v_start and v_end) then
+    raise exception 'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง (ERR-SYS-002|cycle_window_mismatch)'
+      using errcode = 'P0001';
+  end if;
 
   -- (d) snapshot เกณฑ์ ณ สร้างรอบ (DD §3.5 renewal_cycles.required_credits)
   if p_required_credits is null or p_required_credits = '{}'::jsonb then
@@ -160,6 +175,7 @@ declare
   v_already int := 0;
   v_no_cycle int := 0;
   v_failed int := 0;
+  v_revoked int := 0; -- gate r1 BLOCKER-4: event ที่ถูกข้ามเพราะ cert revoked
   v_event uuid;
   v_user uuid;
   v_attempt uuid;
@@ -210,6 +226,23 @@ begin
           where id = v_event;
           v_no_cycle := v_no_cycle + 1;
         else
+          -- gate r1 BLOCKER-4: ความพยายามสอบที่ enrollment มีใบประกาศนียบัตรถูกเพิกถอน
+          -- (revoked) อยู่ = ผลสอบถูก invalidate แล้ว — ห้าม accrual ไม่ว่า event มาถึง
+          -- tick ช้าแค่ไหน (at-least-once re-delivery หลังเพิกถอนก็ห้าม) · ปิด event
+          -- พร้อม breadcrumb ใน last_error (สถานะ processed — ไม่ retry ไม่ failed)
+          if exists (
+            select 1
+            from public.certificates c
+            join public.assessment_attempts a on a.enrollment_id = c.enrollment_id
+            where a.id = v_attempt
+              and c.status = 'revoked'
+          ) then
+            update public.event_outbox
+            set status = 'processed', processed_at = now(),
+                last_error = 'skipped: certificate revoked'
+            where id = v_event;
+            v_revoked := v_revoked + 1;
+          else
           -- INSERT idempotent: partial UNIQUE(source_type, source_id, credit_type)
           -- WHERE accrual ของ 0006 กัน consume ซ้ำ (at-least-once → exactly-once ที่ ledger)
           insert into public.credit_ledger_entries (
@@ -241,6 +274,7 @@ begin
           update public.event_outbox
           set status = 'processed', processed_at = now(), last_error = null
           where id = v_event;
+          end if; -- ปิด gate r1 BLOCKER-4 (revoked → skip)
         end if;
       exception when others then
         -- ต่อ event: บันทึกความล้ม + backoff (60s × 2^attempts สูงสุด 15 นาที) ·
@@ -260,7 +294,8 @@ begin
   end loop batches;
   return jsonb_build_object('skipped', false,
                             'processed', v_processed, 'already_accrued', v_already,
-                            'no_cycle_target', v_no_cycle, 'failed', v_failed);
+                            'no_cycle_target', v_no_cycle, 'revoked_skipped', v_revoked,
+                            'failed', v_failed);
 end;
 $fn$;
 alter function public.credit_accrual_tick() owner to app_owner;
@@ -464,9 +499,11 @@ begin
            'certificate_revocation', p_certificate_id, src.orig_id,
            'เพิกถอนประกาศนียบัตร ' || v_cert_no, p_actor_user_id
     from src
-    returning id, amount
+    -- gate r1 MINOR-4: returning original_entry_id (id ของแถว accrual ต้นทาง) —
+    -- คีย์ original_entry_ids ของ audit ต้องหมายถึงแถวต้นทาง ไม่ใช่ id แถว reversal
+    returning original_entry_id, amount
   )
-  select count(*), coalesce(sum(amount), 0), coalesce(jsonb_agg(id), '[]'::jsonb)
+  select count(*), coalesce(sum(amount), 0), coalesce(jsonb_agg(original_entry_id), '[]'::jsonb)
   into v_rev_rows, v_rev_total, v_rev_ids
   from ins;
 
@@ -513,6 +550,13 @@ begin
   end if;
   if not public.has_any_role(array['staff:registrar', 'super_admin']) then
     raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้ (ERR-RBAC-001|credit_adjust_forbidden)';
+  end if;
+  -- gate r1 BLOCKER-3: JWT aal1 (ยังไม่ผ่าน MFA) เรียก RPC ตรงที่ PostgREST ข้าม
+  -- MFA gate ของ BFF ไม่ได้ — event CRITICAL ของ ledger บังคับ aal2 (API-SPEC §1.2
+  -- · แบบแผนเดียวกับ admin_create/update_credit_rule_status ของ 0032)
+  if coalesce(auth.jwt() ->> 'aal', '') <> 'aal2' then
+    raise exception 'กรุณายืนยันตัวตนสองชั้น (MFA) ก่อนดำเนินการต่อ (ERR-AUTH-004|mfa_required)'
+      using errcode = '42501';
   end if;
   if p_user_id is null or p_cycle_id is null then
     raise exception 'ข้อมูลไม่ถูกต้อง: ต้องระบุผู้ใช้และรอบ (ERR-VAL-001|adjust_args)'

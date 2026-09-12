@@ -5,7 +5,8 @@
  * ถือ permission แต่ดูได้เฉพาะ owner-view ของตน ไม่ผ่าน endpoint admin) · :userId uuid ·
  * query strict (key แปลกปลอม/limit เกิน/after_* ครึ่งเดี่ยว → 400) · keyset (created_at,id)
  * DESC + or-filter row-wise · join renewal_cycles เอา cycle_no (embed null → cycleNo 0 →
- * ล้ม schema → 503 fail-closed) · drift ค่าผิดชนิด → 503
+ * ล้ม schema → 503 fail-closed) · drift ค่าผิดชนิด → 503 · audit PII_ACCESS fail-closed —
+ * ล้มซ้ำ 2 ครั้ง → 503 ERR-SYS-002 ไม่มี disclosure โดยไม่มี audit (gate BLOCKER-7)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -84,7 +85,8 @@ function mockLedger(options: {
   rows?: readonly Record<string, unknown>[];
   dbError?: { message: string } | null;
   aal?: "aal1" | "aal2";
-  auditRpcError?: unknown;
+  /** ผล error ของ rpc audit ตามลำดับครั้ง — เกินความยาว array = สำเร็จ (error null) */
+  auditRpcErrors?: readonly unknown[];
 }): BuilderCalls & {
   readonly auditCalls: ReadonlyArray<{ fn: string; args: Record<string, unknown> }>;
 } {
@@ -96,7 +98,8 @@ function mockLedger(options: {
   const auditCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const serviceRpc = vi.fn(async (fn: string, args: Record<string, unknown>) => {
     auditCalls.push({ fn, args });
-    return { data: null, error: options.auditRpcError ?? null };
+    // push ก่อนคืนค่า — index ปัจจุบัน = auditCalls.length - 1
+    return { data: null, error: options.auditRpcErrors?.[auditCalls.length - 1] ?? null };
   });
   vi.mocked(createSupabaseServiceRoleClient).mockReturnValue({ rpc: serviceRpc } as never);
   const profilesBuilder = {
@@ -313,7 +316,7 @@ describe("GET /admin/credits/{userId} — โครง query + keyset", () => {
   });
 });
 
-describe("GET /admin/credits/{userId} — audit PII_ACCESS (best-effort)", () => {
+describe("GET /admin/credits/{userId} — audit PII_ACCESS (fail-closed)", () => {
   it("อ่านสำเร็จ → append_audit_event 1 ครั้ง: PII_ACCESS/user/{userId} + context ครบ 4 คีย์", async () => {
     const calls = mockLedger({ roles: [SV], rows: [ledgerRow()] });
     const res = await GET(ledgerUrl(), { params: Promise.resolve({ userId: USER_ID }) } as never);
@@ -332,16 +335,41 @@ describe("GET /admin/credits/{userId} — audit PII_ACCESS (best-effort)", () =>
     expect(call.args["p_request_id"]).toBe("req-e11-4");
   });
 
-  it("audit rpc deny (42501) → ยัง 200 (WARN tripwire ไม่ล้ม response)", async () => {
-    mockLedger({
+  it("audit rpc ล้มซ้ำ 2 ครั้ง (42501 ทั้งคู่) → 503 ERR-SYS-002 fail-closed ไม่มี disclosure", async () => {
+    const calls = mockLedger({
       roles: [SV],
       rows: [ledgerRow()],
-      auditRpcError: { code: "42501", message: "denied" },
+      auditRpcErrors: [
+        { code: "42501", message: "permission denied" },
+        { code: "42501", message: "permission denied" },
+      ],
+    });
+    const res = await GET(ledgerUrl(), { params: Promise.resolve({ userId: USER_ID }) } as never);
+    expect(res.status).toBe(503);
+    expect(calls.auditCalls).toHaveLength(2);
+    const body = (await res.json()) as {
+      data?: unknown;
+      error: { code: string; details: { reason: string } };
+    };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details.reason).toBe("credit_ledger_pii_audit_unavailable");
+    // ไม่มี disclosure — ตอบ 503 (ล้ม) จึงไม่มี data หลุดออกไปโดยไม่มี audit
+    expect("data" in body).toBe(false);
+    // ข้อความ error ไม่ leak รายละเอียด DB (SDS §6.1)
+    expect(JSON.stringify(body.error)).not.toContain("42501");
+  });
+
+  it("audit ล้มครั้งแรก สำเร็จครั้งที่สอง (retry) → 200 + เขียน audit ครบ 2 ครั้ง", async () => {
+    const calls = mockLedger({
+      roles: [SV],
+      rows: [ledgerRow()],
+      auditRpcErrors: [{ code: "42501", message: "permission denied" }],
     });
     const res = await GET(ledgerUrl(), { params: Promise.resolve({ userId: USER_ID }) } as never);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: unknown[] };
     expect(body.data).toHaveLength(1);
+    expect(calls.auditCalls).toHaveLength(2);
   });
 
   it("drift 503 (ตอบไม่สำเร็จ) → ไม่เขียน audit", async () => {

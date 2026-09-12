@@ -12,6 +12,11 @@
  *
  * หน้า /my/credits กำลังถูกสร้างโดย worker E-10 — spec ผูกกับ "สัญญาหน้า" แบบหลวม ๆ
  * (ข้อความไทย "หน่วยกิต" และ/หรือตัวเลข credit ด้วย getByText ที่ไม่อิง markup เฉพาะ)
+ *
+ * B8 (per-run scoping): cleanup ลบด้วย id ผู้ใช้ที่รันนี้สร้างเท่านั้น (tracked-first —
+ * afterAll วนเฉพาะ [lawyer, citizen] ที่ beforeAll จดไว้) ไม่มีการกวาดด้วย prefix/email
+ * แพ่งออกไป · seed ของ FAST-A (หลักสูตร 3 + ข้อสอบ + กฎ CR-LTC-103) เป็น seed ร่วม
+ * idempotent (on conflict do nothing) ที่ spec อื่นของชุด D-9 ใช้ร่วมกัน — จึงไม่ลบ
  */
 import { expect, test } from "@playwright/test";
 

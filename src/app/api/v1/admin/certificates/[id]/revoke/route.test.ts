@@ -41,6 +41,8 @@ const revoked = {
   status: "revoked",
   revokedAt: "2026-09-08T05:00:00+00:00",
   revokedReason: "ตรวจพบการทุจริตในการสอบ",
+  creditReversedRows: 2,
+  creditReversedTotal: 12.5,
 };
 
 function mockAuth(roles: readonly string[], aal: "aal1" | "aal2" = "aal2") {

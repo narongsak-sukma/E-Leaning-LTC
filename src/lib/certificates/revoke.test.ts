@@ -31,9 +31,16 @@ const CERT_NO = "LTC-2026-000777";
 const REVOKED_AT = "2026-09-08T05:00:00+00:00";
 const REASON = "ตรวจพบการทุจริตในการสอบ";
 
-/** แถวที่ RPC คืน (id/cert_no/revoked_at จาก TX เดียวกัน) */
+/** แถวที่ RPC คืน (5 คีย์ exact ของ 0031 v2 — gate p3-r1 B1: reversal counters
+ *  มาใน TX เดียวกัน ห้ามหายจาก strict schema) */
 function revokedRow(): Row {
-  return { id: CERT_ID, cert_no: CERT_NO, revoked_at: REVOKED_AT };
+  return {
+    id: CERT_ID,
+    cert_no: CERT_NO,
+    revoked_at: REVOKED_AT,
+    credit_reversed_rows: 2,
+    credit_reversed_total: 12.5,
+  };
 }
 
 function revokeClient(result: RpcResult) {
@@ -103,6 +110,8 @@ describe("revokeCertificate", () => {
       status: "revoked",
       revokedAt: REVOKED_AT,
       revokedReason: REASON,
+      creditReversedRows: 2,
+      creditReversedTotal: 12.5,
     });
     expect(rpc).toHaveBeenCalledTimes(1);
     expect(rpc).toHaveBeenCalledWith("admin_revoke_certificate", {
@@ -183,6 +192,17 @@ describe("revokeCertificate", () => {
   it("แถว RPC ขาด revoked_at → revoked_row_drift (ไม่ fabricate เวลา)", async () => {
     const row = revokedRow();
     delete row.revoked_at;
+    revokeClient({ data: row, error: null });
+    const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
+      (e: unknown) => e,
+    );
+    expect((error as AppError).code).toBe("ERR-SYS-002");
+    expect((error as AppError).details).toEqual({ reason: "revoked_row_drift" });
+  });
+
+  it("gate p3-r1 B1: แถว RPC ขาด credit_reversed_rows → revoked_row_drift (คีย์ใหม่ของ 0031 v2 ห้ามหาย)", async () => {
+    const row = revokedRow();
+    delete row.credit_reversed_rows;
     revokeClient({ data: row, error: null });
     const error = await revokeCertificate({ actorId: STAFF_ID, certificateId: CERT_ID, reason: REASON }).catch(
       (e: unknown) => e,

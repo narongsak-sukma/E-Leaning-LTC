@@ -3,8 +3,11 @@
  *
  * GET — RBAC credit_rule:view (sv/sr/sa) · query strict · keyset (created_at,id) ·
  *       drift → 503 · rate STAFF_WRITE
- * POST — RBAC credit_rule:create (sr/sa) · body strict · INSERT ไม่รับ status ·
- *       23505/23503 mapping · audit best-effort (deny ไม่ล้ม mutation)
+ * POST — RBAC credit_rule:create (sr/sa) · body strict · atomic RPC
+ *       admin_create_credit_rule (0032 — validate + INSERT + audit CREDIT_RULE_CREATE ใน TX
+ *       เดียว · status 'draft' ตั้งใน RPC ไม่รับจาก client) · error tags
+ *       "(ERR-XXX-NNN|tag)" แกะผ่าน lib/api/rpc-errors → AppError · ไม่มีป้าย = ERR-SYS-002
+ *       opaque (ห้าม leak ข้อความ SQL)
  *
  * mock ตามแบบ src/app/api/v1/admin/courses/route.test.ts (vi.mock supabase/ssr ·
  * auth.getUser + mfa + profiles active + rpc my_roles · thenable builder)
@@ -95,17 +98,20 @@ function makeBuilder() {
 type BuilderControl = ReturnType<typeof makeBuilder>;
 
 /**
- * client ครบชั้น RBAC — from("profiles") active · from("credit_rules") → builder หลัก ·
- * then คืน `rows` (GET) · single() คืน createdRow/insertError (POST)
+ * client ครบชั้น RBAC — from("profiles") active · from("credit_rules") → builder หลัก (GET) ·
+ * then คืน `rows` · rpc("admin_create_credit_rule") คืน `createResult` (POST — atomic RPC 0032)
  */
 function mockClient(options: {
   rows?: unknown[];
-  createdRow?: unknown;
-  insertError?: { code?: string | null; message?: string } | null;
+  /** ผลของ rpc admin_create_credit_rule — data = แถว jsonb (หรือ [แถว]) · error มีป้าย/ไม่มีป้าย */
+  createResult?: { data?: unknown; error?: unknown } | null;
   roles: readonly string[];
   aal?: "aal1" | "aal2";
-}): BuilderControl {
+}): BuilderControl & {
+  readonly rpcCalls: ReadonlyArray<{ fn: string; args: Record<string, unknown> }>;
+} {
   const { builder, calls } = makeBuilder();
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const profilesBuilder = {
     select: vi.fn(() => profilesBuilder),
     eq: vi.fn(() => profilesBuilder),
@@ -121,31 +127,25 @@ function mockClient(options: {
         })),
       },
     },
-    rpc: vi.fn(async (fn: string) =>
-      fn === "my_roles" ? { data: options.roles, error: null } : { data: null, error: null }),
+    rpc: vi.fn(async (fn: string, args: Record<string, unknown> = {}) => {
+      rpcCalls.push({ fn, args });
+      if (fn === "my_roles") {
+        return { data: options.roles, error: null };
+      }
+      if (fn === "admin_create_credit_rule") {
+        return {
+          data: options.createResult?.data ?? null,
+          error: options.createResult?.error ?? null,
+        };
+      }
+      return { data: null, error: null };
+    }),
     from: vi.fn((table: string) => (table === "profiles" ? profilesBuilder : builder)),
   };
   builder.then = (res: (v: { data: unknown; error: null }) => unknown) =>
     res({ data: options.rows ?? [], error: null });
-  builder.single = vi.fn(async () => ({
-    data: options.insertError != null ? null : (options.createdRow ?? null),
-    error: options.insertError ?? null,
-  }));
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
-  return { builder, calls };
-}
-
-/** service client (audit best-effort) — ควบคุมผล rpc ได้ */
-function mockServiceClient(
-  rpcResult: { data: null; error: unknown } = { data: null, error: null },
-) {
-  const auditCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
-  const serviceRpc = vi.fn(async (fn: string, args: Record<string, unknown>) => {
-    auditCalls.push({ fn, args });
-    return rpcResult;
-  });
-  vi.mocked(createSupabaseServiceRoleClient).mockReturnValue({ rpc: serviceRpc } as never);
-  return { serviceRpc, auditCalls };
+  return { builder, calls, rpcCalls };
 }
 
 function adminUrl(query = ""): Request {
@@ -342,28 +342,48 @@ describe("GET — query strict + keyset", () => {
   });
 });
 
-describe("POST /admin/credit-rules — สร้างกฎ (draft)", () => {
-  it("registrar สร้างสำเร็จ → 201 + resource + INSERT ไม่ส่ง status + audit CREDIT_RULE_CREATE", async () => {
-    const control = mockClient({ rows: [], createdRow: ruleRow(), roles: [SR] });
-    const { auditCalls } = mockServiceClient();
+describe("POST /admin/credit-rules — สร้างกฎ (draft) ผ่าน RPC atomic 0032", () => {
+  it("registrar สร้างสำเร็จ → 201 + resource + rpc args ครบ 13 พารามิเตอร์ (ไม่มี p_status) + ไม่แตะ service client", async () => {
+    const control = mockClient({ rows: [], createResult: { data: ruleRow() }, roles: [SR] });
     const res = await POST(postRequest(ruleBody()));
     expect(res.status).toBe(201);
     const body = (await res.json()) as { data: Record<string, unknown> };
     expect(body.data["code"]).toBe("CR-LTC-001");
     expect(body.data["status"]).toBe("draft");
-    const inserted = control.calls.insert[0] as Record<string, unknown>;
-    expect(inserted).not.toHaveProperty("status");
-    expect(auditCalls.length).toBeGreaterThan(0);
-    expect(auditCalls[0]?.fn).toBe("append_audit_event");
-    const args = auditCalls[0]?.args ?? {};
-    expect(args["p_action"]).toBe("CREDIT_RULE_CREATE");
-    expect(args["p_entity_type"]).toBe("credit_rule");
+    const createCalls = control.rpcCalls.filter((c) => c.fn === "admin_create_credit_rule");
+    expect(createCalls).toHaveLength(1);
+    const args = createCalls[0]?.args ?? {};
+    expect(Object.keys(args).sort()).toEqual([
+      "p_carry_over",
+      "p_code",
+      "p_course_id",
+      "p_credit_type",
+      "p_credits",
+      "p_effective_from",
+      "p_effective_to",
+      "p_name",
+      "p_priority",
+      "p_renewal_cycle",
+      "p_request_id",
+      "p_required_credits_per_cycle",
+      "p_valid_days",
+    ]);
+    expect(args["p_code"]).toBe("CR-LTC-001");
+    expect(args["p_name"]).toBe("สอบผ่านหลักสูตรทั่วไป");
+    expect(args["p_credits"]).toBe(3);
+    expect(args["p_request_id"]).toBe("req-e11-1");
+    // status ไม่รับจาก client — RPC ตั้ง 'draft' เอง
+    expect(args).not.toHaveProperty("p_status");
+    // audit CREDIT_RULE_CREATE อยู่ใน TX ของ RPC แล้ว — service client ต้องไม่ถูกแตะ
+    expect(createSupabaseServiceRoleClient).not.toHaveBeenCalled();
+    expect(control.calls.insert).toHaveLength(0);
   });
 
-  it("viewer ไม่ถือ credit_rule:create → 403 + ไม่แตะ DB", async () => {
+  it("viewer ไม่ถือ credit_rule:create → 403 + ไม่เรียก rpc mutation", async () => {
     const control = mockClient({ rows: [], roles: [SV] });
     const res = await POST(postRequest(ruleBody()));
     expect(res.status).toBe(403);
+    expect(control.rpcCalls.filter((c) => c.fn === "admin_create_credit_rule")).toHaveLength(0);
     expect(control.calls.insert).toHaveLength(0);
   });
 
@@ -384,30 +404,114 @@ describe("POST /admin/credit-rules — สร้างกฎ (draft)", () => {
     expect(body.error.details.fields.length).toBeGreaterThan(0);
   });
 
-  it("23505 (code ซ้ำ) → 400 ERR-VAL-001 field code duplicate", async () => {
-    mockClient({ roles: [SR], insertError: { code: "23505", message: "dup" } });
+  it.each([
+    [
+      "code ซ้ำ (23505)",
+      'duplicate key value violates unique constraint "credit_rules_code_key" (ERR-VAL-001|code_duplicate)',
+      "code_duplicate",
+    ],
+    [
+      "course_id ไม่มีจริง (23503)",
+      'insert or update on table "credit_rules" violates foreign key constraint (ERR-VAL-001|course_not_found)',
+      "course_not_found",
+    ],
+  ])("RPC ป้าย error %s → 400 ERR-VAL-001 reason ตรง tag (ไม่ leak SQL)", async (_label, message, reason) => {
+    mockClient({ rows: [], createResult: { error: { message } }, roles: [SR] });
     const res = await POST(postRequest(ruleBody()));
     expect(res.status).toBe(400);
     const body = (await res.json()) as {
-      error: { details: { field: string; reason: string } };
+      error: { code: string; details: { reason: string } };
     };
-    expect(body.error.details.field).toBe("code");
-    expect(body.error.details.reason).toBe("duplicate");
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(body.error.details.reason).toBe(reason);
+    // ข้อความ SQL ดิบห้ามหลุดออก client (SDS §6.1)
+    expect(JSON.stringify(body)).not.toContain("credit_rules_code_key");
+    expect(JSON.stringify(body)).not.toContain("violates foreign key");
   });
 
-  it("23503 (course_id ไม่มีจริง) → 400 field courseId", async () => {
-    mockClient({ roles: [SR], insertError: { code: "23503", message: "fk" } });
-    const body = ruleBody({ courseId: CAT_ID });
-    const res = await POST(postRequest(body));
-    expect(res.status).toBe(400);
-    const parsed = (await res.json()) as { error: { details: { field: string } } };
-    expect(parsed.error.details.field).toBe("courseId");
+  it("RPC ป้าย (ERR-AUTH-004|mfa_required) → 403 ERR-AUTH-004 reason mfa_required", async () => {
+    mockClient({
+      rows: [],
+      createResult: {
+        error: { message: "ต้องยืนยันตัวตนระดับ aal2 (ERR-AUTH-004|mfa_required)" },
+      },
+      roles: [SR],
+    });
+    const res = await POST(postRequest(ruleBody()));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as {
+      error: { code: string; details: { reason: string } };
+    };
+    expect(body.error.code).toBe("ERR-AUTH-004");
+    expect(body.error.details.reason).toBe("mfa_required");
   });
 
-  it("audit rpc deny → ยัง 201 (best-effort — WARN tripwire ไม่ล้ม mutation)", async () => {
-    mockClient({ rows: [], createdRow: ruleRow(), roles: [SR] });
-    mockServiceClient({ data: null, error: { code: "42501", message: "denied" } });
+  it("RPC ป้าย (ERR-RBAC-001|credit_rule_forbidden) → 403 ERR-RBAC-001", async () => {
+    mockClient({
+      rows: [],
+      createResult: {
+        error: { message: "บทบาทไม่ได้รับอนุญาต (ERR-RBAC-001|credit_rule_forbidden)" },
+      },
+      roles: [SR],
+    });
+    const res = await POST(postRequest(ruleBody()));
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as {
+      error: { code: string; details: { reason: string } };
+    };
+    expect(body.error.code).toBe("ERR-RBAC-001");
+    expect(body.error.details.reason).toBe("credit_rule_forbidden");
+  });
+
+  it("RPC error ไม่มีป้าย → 503 ERR-SYS-002 reason credit_rule_create_failed ไม่ leak SQL", async () => {
+    mockClient({
+      rows: [],
+      createResult: {
+        error: { message: 'new row violates check constraint "credit_rules_check" (SQLSTATE 23514)' },
+      },
+      roles: [SR],
+    });
+    const res = await POST(postRequest(ruleBody()));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as {
+      error: { code: string; details: { reason: string } };
+    };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details.reason).toBe("credit_rule_create_failed");
+    expect(JSON.stringify(body)).not.toContain("SQLSTATE");
+    expect(JSON.stringify(body)).not.toContain("credit_rules_check");
+  });
+
+  it("แถวที่ RPC คืน drift (credits ผิดชนิด) → 503 credit_rule_created_drift", async () => {
+    mockClient({ rows: [], createResult: { data: ruleRow({ credits: "3" }) }, roles: [SR] });
+    const res = await POST(postRequest(ruleBody()));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as {
+      error: { code: string; details: { reason: string } };
+    };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details.reason).toBe("credit_rule_created_drift");
+  });
+
+  it("PostgREST wrap scalar jsonb เป็น [แถวเดียว] → unwrap แล้ว 201", async () => {
+    mockClient({ rows: [], createResult: { data: [ruleRow()] }, roles: [SR] });
     const res = await POST(postRequest(ruleBody()));
     expect(res.status).toBe(201);
+    const body = (await res.json()) as { data: Record<string, unknown> };
+    expect(body.data["code"]).toBe("CR-LTC-001");
+  });
+
+  it("rate STAFF_WRITE เกิน 60/min → 429 ERR-RATE-001 (POST)", async () => {
+    mockClient({ rows: [], createResult: { data: ruleRow() }, roles: [SR] });
+    let last: Response | null = null;
+    for (let i = 0; i < 61; i += 1) {
+      last = await POST(postRequest(ruleBody()));
+    }
+    expect(last?.status).toBe(429);
+    const body = (await last?.json()) as {
+      error: { code: string; details: { group: string } };
+    };
+    expect(body.error.code).toBe("ERR-RATE-001");
+    expect(body.error.details.group).toBe("STAFF_WRITE");
   });
 });

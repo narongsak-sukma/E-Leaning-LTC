@@ -1,34 +1,33 @@
 /**
  * PATCH /api/v1/admin/credit-rules/{id} — lifecycle เท่านั้น (Wave E Phase 3 · Credit Bank
- * · API-SPECIFICATION §3.7 แถว 200 v1.1.0)
+ * · API-SPECIFICATION §3.7 แถว 200 v1.1.1)
  *
  * - requirePermission("credit_rule:update") — staff:registrar / super_admin
  * - rate STAFF_WRITE (§5 — /api/v1/admin/* ทุก method)
  * - body strict { status: "active" | "retired" } เท่านั้น — ห้ามแก้ฟิลด์อื่นผ่าน PATCH
  *   (semantic immutability — แก้กฎที่ใช้งาน = สร้างฉบับใหม่ DD §3.5/F17 · DB บังคับด้วย
- *   trigger guard_credit_rule_versioning 0010 B6 — BFF รับแค่ status อยู่แล้ว)
- * - transition ที่อนุญาต (ตรง trigger 0010): draft→active · active→retired — ตรวจซ้ำฝั่ง
- *   BFF ก่อน UPDATE เพื่อข้อความไทยเจาะจง (400 ERR-VAL-001) ก่อนถึง guard ของ DB
- * - 404 ERR-NF-001 เมื่อไม่พบกฎ · 200 { data: CreditRuleResource } หลัง UPDATE สำเร็จ
- * - audit CREDIT_RULE_UPDATE — 0010 ไม่มี DB trigger audit บน credit_rules (ตรวจแล้ว)
- *   จึงเขียนฝั่ง BFF best-effort ตามแบบแผน ADMIN_EXPORT (0025 — reports/export):
- *   allowlist เปิดแล้วโดย migration 0032 — เขียนแถว audit จริงหลัง mutation สำเร็จ ·
- *   ล้มจริง (strict-key reject 22023 / DB ล่ม) → WARN tripwire ไม่ล้ม mutation
+ *   trigger guard_credit_rule_versioning 0010 B6)
+ * - เขียนผ่าน RPC atomic admin_update_credit_rule_status (0032) ด้วย user-JWT client —
+ *   guard (auth.uid + has_any_role + aal2) + transition ตรวจ (draft→active / active→retired
+ *   เท่านั้น) + UPDATE + audit CREDIT_RULE_UPDATE อยู่ใน TX เดียว · คืนแถวเต็ม (jsonb) ·
+ *   direct UPDATE บน credit_rules ถูก REVOKE แล้ว
+ * - error จาก RPC ฝังป้าย "(ERR-XXX-NNN|tag)" ท้ายข้อความ — แกะผ่าน lib/api/rpc-errors
+ *   แล้ว map เป็น AppError: ERR-NF-001 rule_not_found → 404 · ERR-VAL-001
+ *   invalid_transition/status_value → 400 · ไม่มีป้าย / code นอกทะเบียน = ERR-SYS-002
+ *   opaque (ห้าม leak ข้อความ SQL — SDS §6.1)
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { parseRpcErrorCodeDetailed, type RpcErrorLike } from "@/lib/api/rpc-errors";
 import {
   jsonErrorResponse,
   jsonOk,
   parseOutgoingView,
   type JsonResponseOptions,
 } from "@/lib/api/response";
-import { getConfig } from "@/lib/config";
 import { AppError } from "@/lib/errors";
-import { createLogger } from "@/lib/logger";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
 /** เวลา ISO 8601 (ยอมทั้ง Z และ +00:00 — เดียวกับ schema กลางของ repo) */
@@ -39,11 +38,6 @@ const CreditRuleStatus = z.enum(["draft", "active", "retired"]);
 
 /** รูปแบบ uuid ของ :id — ผิดรูป → 400 ก่อนแตะ DB (แบบเดียวกับ reissue) */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** select คอลัมน์แคบของ credit_rules (0006) — คอลัมน์เดียวกับ resource ที่ตอบกลับ */
-const CREDIT_RULE_COLUMNS =
-  "id,code,name,course_id,credit_type,credits,valid_days,carry_over," +
-  "required_credits_per_cycle,priority,renewal_cycle,effective_from,effective_to,status,created_at";
 
 /** แถวดิบจาก DB — ตรวจชนิดก่อน map (untyped client ตามแบบแผน repo) */
 interface CreditRuleDbRow {
@@ -87,21 +81,6 @@ const CreditRuleResource = z
 
 type CreditRuleResourceParsed = z.infer<typeof CreditRuleResource>;
 
-/**
- * transition ที่อนุญาต (mirror trigger guard_rule_semantics 0010) — draft→active และ
- * active→retired · คู่อื่นทั้งหมด = invalid
- */
-function isAllowedTransition(
-  from: "draft" | "active" | "retired",
-  to: "active" | "retired",
-): boolean {
-  return (from === "draft" && to === "active") || (from === "active" && to === "retired");
-}
-
-/** ข้อความไทยเจาะจงของ transition ที่ผิดกติกา (AppError ปรับข้อความตามบริบทได้) */
-const INVALID_TRANSITION_MESSAGE =
-  "เปลี่ยนสถานะกฎเครดิตไม่ได้: ทำได้เฉพาะเผยแพร่จากฉบับร่าง (ร่าง→ใช้งาน) หรือปลดระวัง (ใช้งาน→ปลดระวัง)";
-
 /** สะท้อน x-request-id (SDS §5.4) — exactOptionalPropertyTypes-safe */
 function optionsOf(request: Request): JsonResponseOptions {
   const requestId = request.headers.get("x-request-id");
@@ -138,38 +117,21 @@ const UpdateCreditRuleStatusBody = z
   .strict();
 
 /**
- * audit CREDIT_RULE_UPDATE — best-effort แบบเดียวกับ ADMIN_EXPORT (0025 — reports/export):
- * allowlist เปิดแล้วโดย migration 0032 — เขียนแถว audit จริงหลัง mutation สำเร็จ ·
- * ล้มจริง (strict-key reject 22023 / DB ล่ม) = WARN tripwire ไม่ล้ม mutation ·
- * context.user_id ถูก RPC ยกเป็น actor แล้ว strip ออกจาก context ที่เก็บจริง (0008/0019)
+ * error ของ RPC → AppError — มีป้าย "(ERR-XXX-NNN|tag)" ที่อยู่ในทะเบียน = map ตรง
+ * (สถานะ + ข้อความไทยจากทะเบียน lib/errors) · ไม่มีป้าย / code นอกทะเบียน =
+ * ERR-SYS-002 opaque (ไม่ leak ข้อความ SQL ออก client — SDS §6.1) — pattern เดียวกับ
+ * /admin/credits/adjustments
  */
-async function auditCreditRuleEvent(input: {
-  readonly action: "CREDIT_RULE_CREATE" | "CREDIT_RULE_UPDATE";
-  readonly ruleId: string;
-  readonly context: Record<string, string>;
-  readonly actorId: string;
-  readonly requestId: string | null;
-}): Promise<void> {
-  const service = createSupabaseServiceRoleClient();
-  const { error } = await service.rpc("append_audit_event", {
-    p_action: input.action,
-    p_entity_type: "credit_rule",
-    p_entity_id: input.ruleId,
-    p_before: null,
-    p_after: null,
-    p_context: { ...input.context, user_id: input.actorId },
-    p_actor_roles: null,
-    p_ip_hash: null,
-    p_user_agent: null,
-    p_request_id: input.requestId,
-  });
-  if (error !== null) {
-    const logger = createLogger(getConfig().logLevel);
-    logger.warn("credit_rule_audit_rpc_denied", {
-      route: `credit-rules:${input.action}`,
-      user_id: input.actorId,
-    });
+function mapRpcError(error: RpcErrorLike, fallbackReason: string): AppError {
+  const parsed = parseRpcErrorCodeDetailed(error);
+  if (parsed !== undefined) {
+    const details: Record<string, string> = {};
+    if (parsed.reason !== null) {
+      details.reason = parsed.reason;
+    }
+    return new AppError(parsed.code, { details });
   }
+  return new AppError("ERR-SYS-002", { details: { reason: fallbackReason } });
 }
 
 /** แถว DB → resource (map ตรง ไม่ fabricate ค่า) */
@@ -208,68 +170,28 @@ export async function PATCH(
     const ruleId = parseRuleId((await context.params).id);
     // 4) body strict — { status } เท่านั้น ห้ามฟิลด์อื่น
     const body = await parseStatusBody(request);
-    // 5) อ่านสถานะปัจจุบันเพื่อตรวจ transition ฝั่ง BFF (ข้อความไทยก่อนถึง trigger 0010)
+    // 5) RPC atomic admin_update_credit_rule_status (0032) ด้วย user-JWT client —
+    //    guard + transition (draft→active / active→retired) + UPDATE + audit ใน TX เดียว
     const supabase = await createSupabaseSsrClient();
-    const current = await supabase
-      .from("credit_rules")
-      .select("id, status")
-      .eq("id", ruleId)
-      .maybeSingle();
-    if (current.error !== null) {
-      throw new AppError("ERR-SYS-002", { details: { reason: "credit_rule_query_failed" } });
+    const rpc = await supabase.rpc("admin_update_credit_rule_status", {
+      p_rule_id: ruleId,
+      p_status: body.status,
+      p_request_id: options.requestId ?? null,
+    });
+    if (rpc.error !== null) {
+      throw mapRpcError(rpc.error as RpcErrorLike, "credit_rule_update_failed");
     }
-    const currentRow = current.data as { id: string; status: "draft" | "active" | "retired" } | null;
-    if (currentRow === null) {
-      throw new AppError("ERR-NF-001", { details: { field: "id" } });
+    // 6) แถว jsonb ที่ RPC คืน — PostgREST อาจ wrap scalar เป็น array หลักเดียว (r8-N2)
+    const rawRow: unknown = Array.isArray(rpc.data) && rpc.data.length === 1 ? rpc.data[0] : rpc.data;
+    if (rawRow === null || typeof rawRow !== "object") {
+      throw new AppError("ERR-SYS-002", { details: { reason: "credit_rule_updated_drift" } });
     }
-    // 6) transition check ฝั่ง BFF — draft→active / active→retired เท่านั้น (400 เมื่อผิด)
-    if (!isAllowedTransition(currentRow.status, body.status)) {
-      throw new AppError("ERR-VAL-001", {
-        message: INVALID_TRANSITION_MESSAGE,
-        details: { field: "status", reason: "invalid_transition" },
-      });
-    }
-    // 7) UPDATE เฉพาะ status — semantic columns อื่นแก้ไม่ได้ทั้งที่ BFF และ DB (0010 B6)
-    const updated = await supabase
-      .from("credit_rules")
-      .update({ status: body.status })
-      .eq("id", ruleId)
-      .select(CREDIT_RULE_COLUMNS)
-      .single();
-    if (updated.error !== null) {
-      // P0001 = trigger guard_credit_rule_versioning ปฏิเสธ (race กับผู้ใช้อื่น) —
-      // ข้อความ SQL ห้ามออก client (SDS §6.1) — ตอบข้อความไทยเดียวกับที่ BFF ตรวจเอง
-      if (updated.error.code === "P0001") {
-        throw new AppError("ERR-VAL-001", {
-          message: INVALID_TRANSITION_MESSAGE,
-          details: { field: "status", reason: "invalid_transition" },
-        });
-      }
-      throw new AppError("ERR-SYS-002", { details: { reason: "credit_rule_update_failed" } });
-    }
-    const updatedRow = updated.data as unknown as CreditRuleDbRow | null;
-    if (updatedRow === null) {
-      // แถวหายระหว่าง read/update — ไม่เดา ตอบ 404
-      throw new AppError("ERR-NF-001", { details: { field: "id" } });
-    }
+    // 7) ขาออก strict ก่อนตอบ — drift → 503 ไม่ strip เงียบ (r6-L1)
     const resource = parseOutgoingView(
       CreditRuleResource,
-      toCreditRuleResource(updatedRow),
+      toCreditRuleResource(rawRow as unknown as CreditRuleDbRow),
       "credit_rule_updated_drift",
     );
-    // 8) audit best-effort (0032 เปิด allowlist แล้ว — ล้มจริง = WARN tripwire ดูหัวไฟล์)
-    await auditCreditRuleEvent({
-      action: "CREDIT_RULE_UPDATE",
-      ruleId: resource.id,
-      context: {
-        rule_id: resource.id,
-        code: resource.code,
-        status_from: currentRow.status,
-        status_to: resource.status,
-      },
-      actorId: userId,
-      requestId: options.requestId ?? null,
-    });
     return jsonOk(resource, options);
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);

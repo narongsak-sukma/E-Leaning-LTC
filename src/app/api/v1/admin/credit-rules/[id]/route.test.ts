@@ -1,9 +1,11 @@
 /**
  * route.test — PATCH /api/v1/admin/credit-rules/{id} (Wave E Phase 3 · Credit Bank)
  *
- * RBAC credit_rule:update (sr/sa) · :id uuid · body strict { status } เท่านั้น ·
- * transition ตรวจซ้ำฝั่ง BFF (draft→active / active→retired เท่านั้น — ข้อความไทยเจาะจง) ·
- * 404 เมื่อไม่พบ · P0001 (trigger race) → ข้อความไทยเดียวกัน · audit best-effort
+ * RBAC credit_rule:update (sr/sa) · body strict { status: active|retired } เท่านั้น ·
+ * :id uuid ตรวจก่อนแตะ DB · เขียนผ่าน RPC atomic admin_update_credit_rule_status (0032)
+ * ด้วย user-JWT client เท่านั้น (guard + transition + audit อยู่ใน TX เดียวของ RPC) ·
+ * error มีป้าย "(ERR-XXX-NNN|tag)" → map ตามทะเบียน · ไม่มีป้าย = 503 opaque ·
+ * แถว jsonb ขาเข้า drift → 503 fail-closed · rate STAFF_WRITE
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -41,7 +43,7 @@ const SA = "super_admin";
 const STAFF_ID = "a0000000-0000-4000-8000-000000000001";
 const RULE_ID = "c1000000-0000-4000-8000-000000000001";
 
-/** แถวเต็ม (ใช้เป็น current + updated) — คอลัมน์เดียวกับ COLUMNS ของ route */
+/** แถว jsonb ที่ RPC คืน — snake_case 15 คอลัมน์ (0006 ผ่าน RPC 0032) */
 function ruleRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: RULE_ID,
@@ -57,65 +59,33 @@ function ruleRow(overrides: Record<string, unknown> = {}): Record<string, unknow
     renewal_cycle: null,
     effective_from: "2026-09-01T00:00:00+00:00",
     effective_to: null,
-    status: "draft",
+    status: "active",
     created_at: "2026-08-01T00:00:00+00:00",
     ...overrides,
   };
 }
 
-interface PatchMocks {
-  readonly calls: {
-    readonly update: unknown[];
-    readonly select: unknown[];
-  };
+interface RpcCallRecord {
+  readonly fn: string;
+  readonly args: Record<string, unknown>;
 }
 
 /**
- * mock PATCH flow — from("credit_rules") เรียก 2 ครั้ง: ครั้งแรก = อ่าน current
- * (select().eq().maybeSingle()) · ครั้งที่สอง = UPDATE (update().eq().select().single())
+ * mock PATCH — route ไม่แตะ from() ใด ๆ นอกจาก profiles (requirePermission) ·
+ * rpc แยกตามชื่อ: my_roles (RBAC) / admin_update_credit_rule_status (mutation)
  */
 function mockPatch(options: {
-  roles: readonly string[];
-  currentRow?: unknown;
-  currentError?: { message: string } | null;
-  updatedRow?: unknown;
-  updateError?: { code?: string | null; message: string } | null;
+  roles?: readonly string[] | undefined;
+  rpcResult?: { data?: unknown; error?: unknown } | null;
   aal?: "aal1" | "aal2";
-}): PatchMocks {
-  const updateCalls: unknown[] = [];
-  const selectCalls: unknown[] = [];
+}): { readonly rpcCalls: readonly RpcCallRecord[] } {
+  const roles = options.roles ?? [SR];
+  const rpcCalls: RpcCallRecord[] = [];
   const profilesBuilder = {
     select: vi.fn(() => profilesBuilder),
     eq: vi.fn(() => profilesBuilder),
     maybeSingle: vi.fn(async () => ({ data: { is_active: true, deleted_at: null }, error: null })),
   };
-  const currentBuilder = {
-    select: vi.fn((s: unknown) => {
-      selectCalls.push(s);
-      return currentBuilder;
-    }),
-    eq: vi.fn(() => currentBuilder),
-    maybeSingle: vi.fn(async () => ({
-      data: options.currentError != null ? null : (options.currentRow ?? null),
-      error: options.currentError ?? null,
-    })),
-  };
-  const updateBuilder = {
-    update: vi.fn((payload: unknown) => {
-      updateCalls.push(payload);
-      return updateBuilder;
-    }),
-    eq: vi.fn(() => updateBuilder),
-    select: vi.fn((s: unknown) => {
-      selectCalls.push(s);
-      return updateBuilder;
-    }),
-    single: vi.fn(async () => ({
-      data: options.updateError != null ? null : (options.updatedRow ?? null),
-      error: options.updateError ?? null,
-    })),
-  };
-  let creditRulesCalls = 0;
   const client = {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: STAFF_ID } }, error: null })),
@@ -126,47 +96,43 @@ function mockPatch(options: {
         })),
       },
     },
-    rpc: vi.fn(async (fn: string) =>
-      fn === "my_roles" ? { data: options.roles, error: null } : { data: null, error: null }),
-    from: vi.fn((table: string) => {
-      if (table === "profiles") {
-        return profilesBuilder;
+    rpc: vi.fn(async (fn: string, args?: Record<string, unknown>) => {
+      rpcCalls.push({ fn, args: args ?? {} });
+      if (fn === "my_roles") {
+        return { data: roles, error: null };
       }
-      creditRulesCalls += 1;
-      return creditRulesCalls === 1 ? currentBuilder : updateBuilder;
+      if (fn === "admin_update_credit_rule_status") {
+        if (options.rpcResult == null) {
+          return { data: ruleRow(), error: null };
+        }
+        return {
+          data: options.rpcResult.data ?? null,
+          error: options.rpcResult.error ?? null,
+        };
+      }
+      return { data: null, error: null };
     }),
+    from: vi.fn((table: string) => (table === "profiles" ? profilesBuilder : {})),
   };
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
-  return { calls: { update: updateCalls, select: selectCalls } };
+  return { rpcCalls };
 }
 
-/** service client (audit best-effort) */
-function mockServiceClient(
-  rpcResult: { data: null; error: unknown } = { data: null, error: null },
-) {
-  const auditCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
-  const serviceRpc = vi.fn(async (fn: string, args: Record<string, unknown>) => {
-    auditCalls.push({ fn, args });
-    return rpcResult;
-  });
-  vi.mocked(createSupabaseServiceRoleClient).mockReturnValue({ rpc: serviceRpc } as never);
-  return { serviceRpc, auditCalls };
-}
-
-function patchUrl(ruleId = RULE_ID): Request {
-  return new Request(`http://localhost:3000/api/v1/admin/credit-rules/${ruleId}`, {
+function patchRequest(body: unknown): Request {
+  return new Request(`http://localhost:3000/api/v1/admin/credit-rules/${RULE_ID}`, {
     method: "PATCH",
-    headers: { "x-forwarded-for": "10.5.0.1", "x-request-id": "req-e11-2" },
-    body: JSON.stringify({ status: "active" }),
-  });
-}
-
-function patchRequest(ruleId: string, body: unknown): Request {
-  return new Request(`http://localhost:3000/api/v1/admin/credit-rules/${ruleId}`, {
-    method: "PATCH",
-    headers: { "x-forwarded-for": "10.5.0.1", "x-request-id": "req-e11-2" },
+    headers: { "x-forwarded-for": "10.5.0.2", "x-request-id": "req-e11-2" },
     body: JSON.stringify(body),
   });
+}
+
+/** เรียก PATCH กับ :id ที่ต่างจากของ patchRequest (เช่น uuid ผิดรูป) */
+async function patchWithId(id: string, body: unknown): Promise<Response> {
+  return PATCH(new Request(`http://localhost:3000/api/v1/admin/credit-rules/${id}`, {
+    method: "PATCH",
+    headers: { "x-forwarded-for": "10.5.0.2", "x-request-id": "req-e11-2" },
+    body: JSON.stringify(body),
+  }), { params: Promise.resolve({ id }) } as never);
 }
 
 beforeEach(() => {
@@ -176,198 +142,226 @@ beforeEach(() => {
 });
 
 describe("PATCH /admin/credit-rules/{id} — สิทธิ์ + รูปแบบ", () => {
-  it("registrar เผยแพร่ draft→active → 200 + resource + audit CREDIT_RULE_UPDATE แนบ status_from/to", async () => {
-    mockPatch({
-      roles: [SR],
-      currentRow: ruleRow({ status: "draft" }),
-      updatedRow: ruleRow({ status: "active" }),
-    });
-    const { auditCalls } = mockServiceClient();
-    const res = await PATCH(patchUrl(), {
+  it("registrar active → 200 + resource + RPC args ครบ 3 (ไม่มีฟิลด์อื่น) + ไม่ใช้ service_role", async () => {
+    const { rpcCalls } = mockPatch({ roles: [SR] });
+    const res = await PATCH(patchRequest({ status: "active" }), {
       params: Promise.resolve({ id: RULE_ID }),
     } as never);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: Record<string, unknown> };
-    expect(body.data["status"]).toBe("active");
     expect(body.data["id"]).toBe(RULE_ID);
-    expect(auditCalls[0]?.fn).toBe("append_audit_event");
-    const args = auditCalls[0]?.args ?? {};
-    expect(args["p_action"]).toBe("CREDIT_RULE_UPDATE");
-    const context = args["p_context"] as Record<string, unknown>;
-    expect(context["status_from"]).toBe("draft");
-    expect(context["status_to"]).toBe("active");
+    expect(body.data["status"]).toBe("active");
+    expect(body.data["credits"]).toBe(3);
+    expect(body.data["code"]).toBe("CR-LTC-001");
+    const updateCall = rpcCalls.find((call) => call.fn === "admin_update_credit_rule_status");
+    expect(updateCall).toBeDefined();
+    expect(updateCall?.args["p_rule_id"]).toBe(RULE_ID);
+    expect(updateCall?.args["p_status"]).toBe("active");
+    expect(updateCall?.args["p_request_id"]).toBe("req-e11-2");
+    expect(Object.keys(updateCall?.args ?? {}).sort()).toEqual([
+      "p_request_id",
+      "p_rule_id",
+      "p_status",
+    ]);
+    // RPC เดินด้วย user-JWT เท่านั้น — service client ห้ามถูกแตะ (audit อยู่ใน TX ของ RPC)
+    expect(createSupabaseServiceRoleClient).not.toHaveBeenCalled();
   });
 
-  it("super_admin ถือ credit_rule:update → 200 (เผยแพร่ draft→active)", async () => {
-    mockPatch({
-      roles: [SA],
-      currentRow: ruleRow({ status: "draft" }),
-      updatedRow: ruleRow({ status: "active" }),
-    });
-    mockServiceClient();
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
+  it("super_admin → 200", async () => {
+    mockPatch({ roles: [SA] });
+    const res = await PATCH(patchRequest({ status: "retired" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { data: { status: string } };
-    expect(body.data.status).toBe("active");
   });
 
-  it("viewer ไม่ถือ credit_rule:update → 403 ERR-RBAC-001 + ไม่แตะ credit_rules", async () => {
-    const mocks = mockPatch({ roles: [SV] });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
+  it("viewer ไม่ถือ credit_rule:update → 403 ERR-RBAC-001 + ไม่เรียก RPC mutation", async () => {
+    const { rpcCalls } = mockPatch({ roles: [SV] });
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
     expect(res.status).toBe(403);
-    const body = (await res.json()) as { error: { code: string; details: Record<string, unknown> } };
+    const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-RBAC-001");
-    expect(mocks.calls.update).toHaveLength(0);
+    expect(rpcCalls.some((call) => call.fn === "admin_update_credit_rule_status")).toBe(false);
   });
 
-  it("registrar MFA aal1 → 403 ERR-AUTH-004 + ไม่แตะ credit_rules", async () => {
-    const mocks = mockPatch({ roles: [SR], aal: "aal1", currentRow: ruleRow() });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
+  it("registrar MFA aal1 → 403 ERR-AUTH-004 + ไม่เรียก RPC mutation", async () => {
+    const { rpcCalls } = mockPatch({ roles: [SR], aal: "aal1" });
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-AUTH-004");
-    expect(mocks.calls.update).toHaveLength(0);
+    expect(rpcCalls.some((call) => call.fn === "admin_update_credit_rule_status")).toBe(false);
   });
 
-  it(":id ผิดรูป uuid → 400 ERR-VAL-001 ก่อนแตะ DB", async () => {
-    const mocks = mockPatch({ roles: [SR], currentRow: ruleRow() });
-    const res = await PATCH(patchUrl("not-a-uuid"), {
-      params: Promise.resolve({ id: "not-a-uuid" }),
-    } as never);
+  it(":id ผิดรูป uuid → 400 ERR-VAL-001 field id + ไม่เรียก RPC mutation", async () => {
+    const { rpcCalls } = mockPatch({ roles: [SR] });
+    const res = await patchWithId("not-a-uuid", { status: "active" });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { details: { field: string } } };
     expect(body.error.details.field).toBe("id");
-    expect(mocks.calls.update).toHaveLength(0);
+    expect(rpcCalls.some((call) => call.fn === "admin_update_credit_rule_status")).toBe(false);
   });
 
   it.each([
-    ["ไม่มี status", {}],
-    ["มีคีย์แปลกปลอม", { status: "active", name: "แก้ชื่อ" }],
-    ["status นอกค่าที่ยอม", { status: "draft" }],
-    ["status ผิดชนิด", { status: 1 }],
-  ])("body %s → 400 ERR-VAL-001 (strict)", async (_label, body) => {
-    const mocks = mockPatch({ roles: [SR], currentRow: ruleRow() });
-    const res = await PATCH(patchRequest(RULE_ID, body), {
+    ["ว่าง ({})", {}],
+    ["มี key แปลกปลอม", { status: "active", name: "แก้ชื่อห้าม" }],
+    ["status 'draft' (PATCH lifecycle ยอม active|retired เท่านั้น)", { status: "draft" }],
+    ["status ไม่ใช่ string", { status: 1 }],
+  ])("body ผิด (%s) → 400 ERR-VAL-001 + ไม่เรียก RPC mutation", async (_label, body) => {
+    const { rpcCalls } = mockPatch({ roles: [SR] });
+    const res = await PATCH(patchRequest(body), {
       params: Promise.resolve({ id: RULE_ID }),
     } as never);
     expect(res.status).toBe(400);
     const parsed = (await res.json()) as { error: { code: string } };
     expect(parsed.error.code).toBe("ERR-VAL-001");
-    expect(mocks.calls.update).toHaveLength(0);
-  });
-
-  it("current read error ฝั่ง DB → 503 ERR-SYS-002 credit_rule_query_failed", async () => {
-    mockPatch({ roles: [SR], currentError: { message: "SQLSTATE XX000" } });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
-    expect(res.status).toBe(503);
-    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
-    expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details.reason).toBe("credit_rule_query_failed");
-  });
-
-  it("ไม่พบกฎ → 404 ERR-NF-001 + ไม่ UPDATE", async () => {
-    const mocks = mockPatch({ roles: [SR], currentRow: null });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("ERR-NF-001");
-    expect(mocks.calls.update).toHaveLength(0);
+    expect(rpcCalls.some((call) => call.fn === "admin_update_credit_rule_status")).toBe(false);
   });
 });
 
-describe("PATCH — lifecycle transition (trigger 0010 mirror)", () => {
-  const EXPECTED_INVALID =
-    "เปลี่ยนสถานะกฎเครดิตไม่ได้: ทำได้เฉพาะเผยแพร่จากฉบับร่าง (ร่าง→ใช้งาน) หรือปลดระวัง (ใช้งาน→ปลดระวัง)";
-
-  it("draft→retired ผิดกติกา → 400 + ข้อความไทยเจาะจง + ไม่ UPDATE", async () => {
-    const mocks = mockPatch({ roles: [SR], currentRow: ruleRow({ status: "draft" }) });
-    const res = await PATCH(patchRequest(RULE_ID, { status: "retired" }), {
-      params: Promise.resolve({ id: RULE_ID }),
-    } as never);
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: { code: string; message: string } };
-    expect(body.error.code).toBe("ERR-VAL-001");
-    expect(body.error.message).toBe(EXPECTED_INVALID);
-    expect(mocks.calls.update).toHaveLength(0);
-  });
-
-  it("retired→active ผิดกติกา → 400 + ข้อความไทยเดียวกัน", async () => {
-    const mocks = mockPatch({ roles: [SR], currentRow: ruleRow({ status: "retired" }) });
-    const res = await PATCH(patchRequest(RULE_ID, { status: "active" }), {
-      params: Promise.resolve({ id: RULE_ID }),
-    } as never);
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: { message: string } };
-    expect(body.error.message).toBe(EXPECTED_INVALID);
-    expect(mocks.calls.update).toHaveLength(0);
-  });
-
-  it("active→retired ถูกกติกา → 200 + สถานะใหม่ + audit สรุป transition", async () => {
+describe("PATCH /admin/credit-rules/{id} — RPC error mapping + drift", () => {
+  it("RPC ป้าย (ERR-NF-001|rule_not_found) → 404", async () => {
     mockPatch({
       roles: [SR],
-      currentRow: ruleRow({ status: "active" }),
-      updatedRow: ruleRow({ status: "retired" }),
+      rpcResult: { data: null, error: { code: "P0001", message: "ไม่พบกฎ (ERR-NF-001|rule_not_found)" } },
     });
-    const { auditCalls } = mockServiceClient();
-    const res = await PATCH(patchRequest(RULE_ID, { status: "retired" }), {
+    const res = await PATCH(patchRequest({ status: "active" }), {
       params: Promise.resolve({ id: RULE_ID }),
     } as never);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { data: { status: string } };
-    expect(body.data.status).toBe("retired");
-    const args = auditCalls[0]?.args ?? {};
-    const context = args["p_context"] as Record<string, unknown>;
-    expect(context["status_from"]).toBe("active");
-    expect(context["status_to"]).toBe("retired");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("ERR-NF-001");
+    expect(body.error.details.reason).toBe("rule_not_found");
   });
 
-  it("P0001 (trigger ปฏิเสธ — race กับผู้ใช้อื่น) → 400 + ข้อความไทยเดียวกัน ไม่ leak SQL", async () => {
+  it.each([
+    [
+      "invalid_transition",
+      "draft→retired ห้าม (ERR-VAL-001|invalid_transition)",
+      "invalid_transition",
+    ],
+    [
+      "status_value",
+      "สถานะไม่ถูกต้อง (ERR-VAL-001|status_value)",
+      "status_value",
+    ],
+  ])("RPC ป้าย %s → 400 ERR-VAL-001 reason ตรง tag", async (_label, message, reason) => {
+    mockPatch({ roles: [SR], rpcResult: { data: null, error: { code: "P0001", message } } });
+    const res = await PATCH(patchRequest({ status: "retired" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(body.error.details.reason).toBe(reason);
+  });
+
+  it("RPC ป้าย (ERR-AUTH-004|mfa_required) → 403 ERR-AUTH-004", async () => {
     mockPatch({
       roles: [SR],
-      currentRow: ruleRow({ status: "draft" }),
-      updateError: { code: "P0001", message: "ข้อความ SQL ภายใน — ห้ามออก client" },
+      rpcResult: { data: null, error: { code: "P0001", message: "ต้องยืนยัน aal2 (ERR-AUTH-004|mfa_required)" } },
     });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: { code: string; message: string } };
-    expect(body.error.code).toBe("ERR-VAL-001");
-    expect(body.error.message).toBe(EXPECTED_INVALID);
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("ERR-AUTH-004");
+    expect(body.error.details.reason).toBe("mfa_required");
+  });
+
+  it("RPC ป้าย (ERR-RBAC-001|credit_rule_forbidden) → 403", async () => {
+    mockPatch({
+      roles: [SR],
+      rpcResult: { data: null, error: { code: "P0001", message: "ห้าม (ERR-RBAC-001|credit_rule_forbidden)" } },
+    });
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("ERR-RBAC-001");
+    expect(body.error.details.reason).toBe("credit_rule_forbidden");
+  });
+
+  it("RPC error ไม่มีป้าย (SQL ดิบ) → 503 ERR-SYS-002 opaque credit_rule_update_failed", async () => {
+    mockPatch({
+      roles: [SR],
+      rpcResult: {
+        data: null,
+        error: { code: "XX000", message: "SQLSTATE XX000 internal detail ห้ามออก client" },
+      },
+    });
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as {
+      error: { code: string; details: { reason: string }; message: string };
+    };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details.reason).toBe("credit_rule_update_failed");
     expect(body.error.message).not.toContain("SQLSTATE");
   });
 
-  it("UPDATE error อื่น → 503 ERR-SYS-002 credit_rule_update_failed", async () => {
+  it("RPC ป้ายแต่ code นอกทะเบียน (ERR-FOO-999) → 503 fallback", async () => {
     mockPatch({
       roles: [SR],
-      currentRow: ruleRow({ status: "draft" }),
-      updateError: { code: "XX000", message: "boom" },
+      rpcResult: { data: null, error: { code: "P0001", message: "ล้ม (ERR-FOO-999|weird)" } },
     });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
     expect(res.status).toBe(503);
-    const body = (await res.json()) as { error: { details: { reason: string } } };
+    const body = (await res.json()) as { error: { code: string; details: { reason: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details.reason).toBe("credit_rule_update_failed");
   });
 
-  it("updated row หายระหว่าง read/update → 404", async () => {
+  it("แถว jsonb drift (credits ผิดชนิด) → 503 credit_rule_updated_drift", async () => {
     mockPatch({
       roles: [SR],
-      currentRow: ruleRow({ status: "draft" }),
-      updatedRow: null,
+      rpcResult: { data: ruleRow({ credits: "3" }), error: null },
     });
-    const res = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
-    expect(res.status).toBe(404);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("ERR-NF-001");
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { details: { reason: string } } };
+    expect(body.error.details.reason).toBe("credit_rule_updated_drift");
   });
 
-  it("rate STAFF_WRITE เกิน 60/min → 429 ERR-RATE-001", async () => {
-    mockPatch({
-      roles: [SR],
-      currentRow: ruleRow({ status: "draft" }),
-      updatedRow: ruleRow({ status: "active" }),
-    });
+  it("RPC คืน data null (ไม่มีแถว) → 503 credit_rule_updated_drift", async () => {
+    mockPatch({ roles: [SR], rpcResult: { data: null, error: null } });
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { details: { reason: string } } };
+    expect(body.error.details.reason).toBe("credit_rule_updated_drift");
+  });
+
+  it("PostgREST wrap array [row] หลักเดียว → 200 ปกติ", async () => {
+    mockPatch({ roles: [SR], rpcResult: { data: [ruleRow()], error: null } });
+    const res = await PATCH(patchRequest({ status: "active" }), {
+      params: Promise.resolve({ id: RULE_ID }),
+    } as never);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { id: string } };
+    expect(body.data.id).toBe(RULE_ID);
+  });
+
+  it("rate STAFF_WRITE เกิน 60/min → 429 ERR-RATE-001 group STAFF_WRITE", async () => {
+    mockPatch({});
     let last: Response | null = null;
     for (let i = 0; i < 61; i += 1) {
-      last = await PATCH(patchUrl(), { params: Promise.resolve({ id: RULE_ID }) } as never);
+      last = await PATCH(patchRequest({ status: "active" }), {
+        params: Promise.resolve({ id: RULE_ID }),
+      } as never);
     }
     expect(last?.status).toBe(429);
     const body = (await last?.json()) as { error: { code: string; details: { group: string } } };

@@ -2,8 +2,9 @@
  * route.test — GET /api/v1/me/transcript (Wave E Phase 3 · API-SPECIFICATION 1.1.0 §3)
  *
  * mock ssr client (requireUser จริง) + rate-limit จริง (resetRateLimitStore) ตามแบบ
- * me/certificates/route.test.ts — จุดหลัก: ?format=json|csv (default json · อื่น = 400
- * ERR-VAL-001) · csv = text/csv BOM + header ไทย + กันสูตร · drift → 503 · rate READ
+ * me/certificates/route.test.ts — จุดหลัก: ?format=json|csv|pdf (default json · อื่น/
+ * unknown key = 400 ERR-VAL-001) · pdf = application/pdf + %PDF · csv = text/csv BOM +
+ * header ไทย + กันสูตร · drift → 503 · rate READ
  */
 process.env.PUBLIC_BASE_URL = "https://elearning.lawyerthai.test";
 process.env.SUPABASE_URL = "https://stub.supabase.co";
@@ -11,6 +12,8 @@ process.env.SUPABASE_ANON_KEY = "stub-anon-key";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub-service-role-key";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PDFDocument } from "pdf-lib";
+
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { resetRateLimitStore } from "@/lib/rate-limit";
 import { TranscriptView } from "@/lib/api/credits";
@@ -170,14 +173,49 @@ describe("GET /me/transcript — format csv", () => {
   });
 });
 
-describe("GET /me/transcript — query ไม่ถูกต้อง", () => {
-  it("format=pdf → 400 ERR-VAL-001", async () => {
+describe("GET /me/transcript — format pdf (B6 — เรนเดอร์ฝั่ง BFF)", () => {
+  it("format=pdf → 200 application/pdf + content-disposition attachment + %PDF + x-request-id", async () => {
     mockClient(transcriptFixture());
     const res = await GET(meUrl("?format=pdf"));
+    const raw = await res.arrayBuffer();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/pdf");
+    expect(res.headers.get("content-disposition")).toBe(
+      'attachment; filename="credit-transcript.pdf"',
+    );
+    expect(res.headers.get("x-request-id")).toBe("req-e10-2");
+    expect(Buffer.from(raw).toString("latin1").startsWith("%PDF-")).toBe(true);
+  });
+
+  it("format=pdf → body parse ด้วย PDFDocument.load ได้ (1 หน้า)", async () => {
+    mockClient(transcriptFixture());
+    const res = await GET(meUrl("?format=pdf"));
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const loaded = await PDFDocument.load(bytes);
+
+    expect(loaded.getPageCount()).toBe(1);
+  });
+});
+
+describe("GET /me/transcript — query ไม่ถูกต้อง", () => {
+  it("format=xml → 400 ERR-VAL-001", async () => {
+    mockClient(transcriptFixture());
+    const res = await GET(meUrl("?format=xml"));
     const body = (await res.json()) as { error: { code: string } };
 
     expect(res.status).toBe(400);
     expect(body.error.code).toBe("ERR-VAL-001");
+  });
+
+  it("query key แปลกปลอม (?format=csv&foo=1) → 400 ERR-VAL-001 (strict — ไม่เรียก RPC)", async () => {
+    const client = mockClient(transcriptFixture());
+    const res = await GET(meUrl("?format=csv&foo=1"));
+    const body = (await res.json()) as { error: { code: string } };
+
+    expect(res.status).toBe(400);
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(client.rpc).not.toHaveBeenCalled();
   });
 
   it("format=JSON (case-sensitive) → 400 ERR-VAL-001", async () => {

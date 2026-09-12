@@ -15,17 +15,14 @@
  * - requirePermission("credit_rule:create") — staff:registrar / super_admin
  * - body strict zod — code CR-LTC-### · credits >0 ทศนิยม ≤2 (numeric(6,2)) ·
  *   credit_type identifier ตัวพิมพ์เล็ก (สัญญาเดียวกับ p_credit_type ของ admin_credit_adjust
- *   0031 §6) · priority int ≥0 · effective_from เป็น ISO date (DB cast เป็น timestamptz) ·
- *   ฟิลด์อื่น optional — ผิดรูป → 400 ERR-VAL-001 (รายชื่อ field)
- * - INSERT ผ่าน user-JWT client — RLS cr_insert บังคับ staff:registrar/super_admin ซ้ำ ·
- *   status ไม่รับจาก client เด็ดขาด (DB default 'draft')
- * - 23505 (code ซ้ำ) → 400 ERR-VAL-001 field code · 23503 (course_id ไม่มีจริง) →
- *   400 ERR-VAL-001 field course_id
- * - audit CREDIT_RULE_CREATE — 0006/0010 ไม่มี DB trigger audit บน credit_rules (ตรวจแล้ว)
- *   จึงเขียนฝั่ง BFF ตามแบบแผน ADMIN_EXPORT (0025 — reports/export): best-effort ผ่าน
- *   RPC append_audit_event — allowlist เปิดแล้วโดย migration 0032 (service_role บันทึก
- *   CREDIT_RULE_* ได้จริง · strict keys ตรง p_context ที่ส่ง) · ล้มจริง (เช่น strict-key
- *   reject 22023 / DB ล่ม) → WARN tripwire ไม่ล้ม mutation
+ *   0031 §6) · priority int ≥0 · effective_from เป็น ISO date · ฟิลด์อื่น optional —
+ *   ผิดรูป → 400 ERR-VAL-001 (รายชื่อ field)
+ * - เขียนผ่าน RPC atomic admin_create_credit_rule (0032) ด้วย user-JWT client —
+ *   validate + INSERT + audit CREDIT_RULE_CREATE อยู่ใน TX เดียวกัน · status ไม่รับจาก
+ *   client เด็ดขาด (RPC ตั้ง 'draft' เอง) · direct INSERT บน credit_rules ถูก REVOKE แล้ว
+ * - error จาก RPC ฝังป้าย "(ERR-XXX-NNN|tag)" ท้ายข้อความ — แกะผ่าน lib/api/rpc-errors
+ *   แล้ว map เป็น AppError (สถานะ + ข้อความไทยจากทะเบียน) เช่น code_duplicate/course_not_found ·
+ *   ไม่มีป้าย / code นอกทะเบียน = ERR-SYS-002 opaque (ห้าม leak ข้อความ SQL — SDS §6.1)
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -37,12 +34,10 @@ import {
   parseOutgoingView,
   type JsonResponseOptions,
 } from "@/lib/api/response";
-import { getConfig } from "@/lib/config";
+import { parseRpcErrorCodeDetailed, type RpcErrorLike } from "@/lib/api/rpc-errors";
 import { AppError } from "@/lib/errors";
-import { createLogger } from "@/lib/logger";
 import { requirePermission } from "@/lib/rbac";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
 /** รูปแบบรหัสกฎ — CR-LTC-### (ตามสัญญา endpoint ของ Wave E Phase 3) */
@@ -297,39 +292,21 @@ async function parseCreateBody(request: Request): Promise<z.infer<typeof CreateC
 }
 
 /**
- * audit CREDIT_RULE_CREATE/UPDATE — best-effort แบบเดียวกับ ADMIN_EXPORT ของ reports/export
- * (0025): 0006/0010 ไม่มี DB trigger audit บน credit_rules — allowlist เปิดแล้วโดย
- * migration 0032 จึงเขียนแถว audit จริงหลัง mutation สำเร็จ · ล้มจริง (strict-key
- * reject 22023 / DB ล่ม) = WARN tripwire ไม่ล้ม mutation · context.user_id ถูก RPC
- * ยกเป็น actor แล้ว strip ออกก่อนเก็บ
+ * error ของ RPC → AppError — มีป้าย "(ERR-XXX-NNN|tag)" ที่อยู่ในทะเบียน = map ตรง
+ * (สถานะ + ข้อความไทยจากทะเบียน lib/errors) · ไม่มีป้าย / code นอกทะเบียน =
+ * ERR-SYS-002 opaque (ไม่ leak ข้อความ SQL ออก client — SDS §6.1) — pattern เดียวกับ
+ * /admin/credits/adjustments
  */
-async function auditCreditRuleEvent(input: {
-  readonly action: "CREDIT_RULE_CREATE" | "CREDIT_RULE_UPDATE";
-  readonly ruleId: string;
-  readonly context: Record<string, string>;
-  readonly actorId: string;
-  readonly requestId: string | null;
-}): Promise<void> {
-  const service = createSupabaseServiceRoleClient();
-  const { error } = await service.rpc("append_audit_event", {
-    p_action: input.action,
-    p_entity_type: "credit_rule",
-    p_entity_id: input.ruleId,
-    p_before: null,
-    p_after: null,
-    p_context: { ...input.context, user_id: input.actorId },
-    p_actor_roles: null,
-    p_ip_hash: null,
-    p_user_agent: null,
-    p_request_id: input.requestId,
-  });
-  if (error !== null) {
-    const logger = createLogger(getConfig().logLevel);
-    logger.warn("credit_rule_audit_rpc_denied", {
-      route: `credit-rules:${input.action}`,
-      user_id: input.actorId,
-    });
+function mapRpcError(error: RpcErrorLike, fallbackReason: string): AppError {
+  const parsed = parseRpcErrorCodeDetailed(error);
+  if (parsed !== undefined) {
+    const details: Record<string, string> = {};
+    if (parsed.reason !== null) {
+      details.reason = parsed.reason;
+    }
+    return new AppError(parsed.code, { details });
   }
+  return new AppError("ERR-SYS-002", { details: { reason: fallbackReason } });
 }
 
 /** POST — สร้างกฎใหม่ สถานะ 'draft' (201) */
@@ -342,59 +319,36 @@ export async function POST(request: Request): Promise<NextResponse> {
     enforceRateLimit(request, { group: "STAFF_WRITE", secondaryKey: userId });
     // 3) body strict — ผิดรูป → 400 ERR-VAL-001
     const body = await parseCreateBody(request);
-    // 4) INSERT ผ่าน user-JWT client — RLS cr_insert (0010) บังคับ staff ซ้ำ ·
-    //    status ไม่ส่ง = DB default 'draft'
+    // 4) RPC atomic admin_create_credit_rule (0032) ด้วย user-JWT client —
+    //    validate + INSERT + audit CREDIT_RULE_CREATE ใน TX เดียว · status 'draft'
+    //    ตั้งใน RPC (ไม่รับจาก client) · defaults coalesce ใน RPC (p_* null ได้)
     const supabase = await createSupabaseSsrClient();
-    const { data, error } = await supabase
-      .from("credit_rules")
-      .insert({
-        code: body.code,
-        name: body.name,
-        course_id: body.courseId ?? null,
-        credit_type: body.creditType,
-        credits: body.credits,
-        valid_days: body.validDays ?? null,
-        carry_over: body.carryOver,
-        required_credits_per_cycle: body.requiredCreditsPerCycle ?? null,
-        priority: body.priority,
-        renewal_cycle: body.renewalCycle ?? null,
-        ...(body.effectiveFrom === undefined ? {} : { effective_from: body.effectiveFrom }),
-        effective_to: body.effectiveTo ?? null,
-      })
-      .select(CREDIT_RULE_COLUMNS)
-      .single();
-    if (error !== null) {
-      // 23505 = code ซ้ำ (uq_credit_rules_code) · 23503 = course_id ไม่มีจริง (FK)
-      if (error.code === "23505") {
-        throw new AppError("ERR-VAL-001", {
-          details: { field: "code", reason: "duplicate" },
-        });
-      }
-      if (error.code === "23503") {
-        throw new AppError("ERR-VAL-001", { details: { field: "courseId" } });
-      }
-      throw new AppError("ERR-SYS-002", { details: { reason: "credit_rule_insert_failed" } });
+    const rpc = await supabase.rpc("admin_create_credit_rule", {
+      p_code: body.code,
+      p_name: body.name,
+      p_course_id: body.courseId ?? null,
+      p_credit_type: body.creditType,
+      p_credits: body.credits,
+      p_valid_days: body.validDays ?? null,
+      p_carry_over: body.carryOver,
+      p_required_credits_per_cycle: body.requiredCreditsPerCycle ?? null,
+      p_priority: body.priority,
+      p_renewal_cycle: body.renewalCycle ?? null,
+      p_effective_from: body.effectiveFrom ?? null,
+      p_effective_to: body.effectiveTo ?? null,
+      p_request_id: options.requestId ?? null,
+    });
+    if (rpc.error !== null) {
+      throw mapRpcError(rpc.error as RpcErrorLike, "credit_rule_create_failed");
     }
-    if (data === null || typeof data !== "object") {
+    // 5) แถว jsonb ที่ RPC คืน — PostgREST อาจ wrap scalar เป็น array หลักเดียว (r8-N2)
+    const rawRow: unknown = Array.isArray(rpc.data) && rpc.data.length === 1 ? rpc.data[0] : rpc.data;
+    if (rawRow === null || typeof rawRow !== "object") {
       throw new AppError("ERR-SYS-002", { details: { reason: "credit_rule_created_row_drift" } });
     }
-    const created = toCreditRuleResource(data as unknown as CreditRuleDbRow);
-    // r6-L1: ขาออกตรวจ strict ก่อนตอบ — drift → 503 ไม่ strip เงียบ
+    const created = toCreditRuleResource(rawRow as unknown as CreditRuleDbRow);
+    // 6) ขาออกตรวจ strict ก่อนตอบ — drift → 503 ไม่ strip เงียบ (r6-L1)
     const resource = parseOutgoingView(CreditRuleResource, created, "credit_rule_created_drift");
-    // 5) audit best-effort (0032 เปิด allowlist แล้ว — ล้มจริง = WARN tripwire ดูหัวไฟล์)
-    await auditCreditRuleEvent({
-      action: "CREDIT_RULE_CREATE",
-      ruleId: resource.id,
-      context: {
-        rule_id: resource.id,
-        code: resource.code,
-        credit_type: resource.creditType,
-        credits: String(resource.credits),
-        effective_from: resource.effectiveFrom,
-      },
-      actorId: userId,
-      requestId: options.requestId ?? null,
-    });
     return jsonCreated(resource, options);
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);

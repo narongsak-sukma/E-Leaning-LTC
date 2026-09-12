@@ -16,10 +16,11 @@
  *   created_at DESC + id tiebreaker · keyset (created_at, id) DESC · cursor signed
  *   (encode/decode ผ่าน lib/api/pagination)
  * - อ่านผ่าน user-JWT client — RLS credits_self_read (0010) เป็นชั้นที่สอง
- * - audit PII_ACCESS best-effort (API-SPECIFICATION §3.7 v1.1.1) — หลัง query ledger
+ * - audit PII_ACCESS fail-closed (API-SPECIFICATION §3.7 v1.1.1) — หลัง query ledger
  *   สำเร็จ เขียน event ทาง service_role (allowlist เปิดอยู่แล้ว: v_keys ของ PII_ACCESS =
  *   endpoint/target_user_id/purpose — context.user_id ถูก RPC lift เป็น actor แล้ว strip)
- *   · ล้ม (strict-key reject 22023 / DB ล่ม) = WARN tripwire ไม่ล้ม response
+ *   · RPC ล้ม = retry อีกครั้งเดียว ยังล้ม → WARN กลาง (ไม่มี PII) + 503 ERR-SYS-002 —
+ *   ห้ามเปิดเผย ledger โดยไม่มี audit (gate r1 BLOCKER-7)
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -175,11 +176,10 @@ function cursorFilterOf(payload: { sortKey: string; id: string }): string {
 }
 
 /**
- * audit PII_ACCESS — best-effort ทาง service_role ตามแบบแผน ADMIN_EXPORT (0025):
- * allowlist เปิดอยู่แล้ว (PII_ACCESS เป็น action เดิมของ allowlist) — เขียนแถวจริง
- * หลัง query สำเร็จ · ล้มจริง (strict-key reject 22023 / DB ล่ม) = WARN tripwire
- * ไม่ล้ม response · context.user_id ถูก RPC ยกเป็น actor แล้ว strip ออกก่อนเก็บ
- * (0008/0019 — 5W "ใคร")
+ * audit PII_ACCESS — fail-closed (gate r1 BLOCKER-7): RPC ล้ม (strict-key reject 22023 /
+ * DB ล่ม) = retry อีกครั้งเดียว · ยังล้ม → WARN กลางบรรทัดเดียว (ไม่มี PII) แล้ว throw
+ * ERR-SYS-002 (503) — ห้าม disclosure ledger โดยไม่มี audit · context.user_id ถูก RPC
+ * ยกเป็น actor แล้ว strip ออกก่อนเก็บ (0008/0019 — 5W "ใคร")
  */
 async function auditLedgerPiiAccess(input: {
   readonly targetUserId: string;
@@ -187,30 +187,38 @@ async function auditLedgerPiiAccess(input: {
   readonly requestId: string | null;
 }): Promise<void> {
   const service = createSupabaseServiceRoleClient();
-  const { error } = await service.rpc("append_audit_event", {
-    p_action: "PII_ACCESS",
-    p_entity_type: "user",
-    p_entity_id: input.targetUserId,
-    p_before: null,
-    p_after: null,
-    p_context: {
-      endpoint: "/api/v1/admin/credits/{userId}",
-      target_user_id: input.targetUserId,
-      purpose: "credit_ledger_view",
-      user_id: input.actorId,
-    },
-    p_actor_roles: null,
-    p_ip_hash: null,
-    p_user_agent: null,
-    p_request_id: input.requestId,
-  });
-  if (error !== null) {
-    const logger = createLogger(getConfig().logLevel);
-    logger.warn("credit_ledger_pii_audit_rpc_denied", {
-      route: "credits:ledger_view",
-      user_id: input.actorId,
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const { error } = await service.rpc("append_audit_event", {
+      p_action: "PII_ACCESS",
+      p_entity_type: "user",
+      p_entity_id: input.targetUserId,
+      p_before: null,
+      p_after: null,
+      p_context: {
+        endpoint: "/api/v1/admin/credits/{userId}",
+        target_user_id: input.targetUserId,
+        purpose: "credit_ledger_view",
+        user_id: input.actorId,
+      },
+      p_actor_roles: null,
+      p_ip_hash: null,
+      p_user_agent: null,
+      p_request_id: input.requestId,
     });
+    if (error === null) {
+      return;
+    }
+    lastError = error;
   }
+  void lastError; // รายละเอียด DB ห้ามออก log/response (SDS §6.1)
+  const logger = createLogger(getConfig().logLevel);
+  logger.warn("credit_ledger_pii_audit_rpc_denied", {
+    route: "credits:ledger_view",
+  });
+  throw new AppError("ERR-SYS-002", {
+    details: { reason: "credit_ledger_pii_audit_unavailable" },
+  });
 }
 
 /** GET — บัญชีเครดิตของผู้ใช้รายคน (200 + keyset page) */
@@ -262,7 +270,7 @@ export async function GET(
     const resources = page.data.map((row) =>
       parseOutgoingView(LedgerRowResource, toLedgerRowResource(row), "ledger_row_drift"),
     );
-    // 8) audit PII_ACCESS best-effort — เฉพาะเมื่อตอบกลับด้วยข้อมูลจริง (ดูหัวไฟล์)
+    // 8) audit PII_ACCESS fail-closed — ล้ม = 503 ไม่มี disclosure (ดูหัวไฟล์)
     await auditLedgerPiiAccess({
       targetUserId: targetUserId,
       actorId: actorId,

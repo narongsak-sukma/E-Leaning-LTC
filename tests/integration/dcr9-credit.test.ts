@@ -14,11 +14,19 @@
  *      แต่ไม่สร้างรอบ/ledger ให้ (C-4)
  *   5) reversal — ออกใบ → เพิกถอน (admin_revoke_certificate v2): reversal −accrual ใน TX
  *      เดียวกับการเพิกถอน + audit CREDIT_REVERSAL · เพิกถอนซ้ำปฏิเสธ (ERR-VAL-001|not_valid)
- *   6) adjustment authz — admin_credit_adjust: staff:viewer โดน ERR-RBAC-001 · registrar
- *      reason สั้นโดน ERR-CRD-002 · registrar ครบชุด → แถว adjustment + audit CREDIT_ADJUST
+ *   6) adjustment authz — admin_credit_adjust (guard: login → RBAC → aal2): staff:viewer
+ *      (aal1) โดน ERR-RBAC-001 · registrar aal1 โดน ERR-AUTH-004 (B3 — RPC บังคับ MFA) ·
+ *      registrar aal2 reason สั้นโดน ERR-CRD-002 · ครบชุด (aal2) → แถว adjustment + audit
+ *      CREDIT_ADJUST
  *   7) append-only — UPDATE/DELETE credit_ledger_entries ถูกปฏิเสธ (revoke + trigger 0010)
  *   8) summary math — ledger 3 รายการ (+3.50 / −3.50 / −1.25) → my_credit_summary ของเจ้าของ
  *      earned −1.25 · missing 13.25 (เกณฑ์ default Q1 {general: 12})
+ *   9) revoke-before-tick (gate r1 BLOCKER-4) — ผ่านสอบ → ออกใบ → เพิกถอนใบ "ก่อน" tick
+ *      กลืน event → tick ข้าม accrual (ไม่มีแถว ledger) ปิด event processed พร้อม
+ *      last_error 'skipped: certificate revoked' + ตัวนับ revoked_skipped
+ *  10) anniversary lattice (gate r1 BLOCKER-5) — anchor ใบอนุญาต 2025-09-12:
+ *      ensure_renewal_cycle('2026-09-12') → [2026-09-12, 2027-09-11] ครบรอบปีพอดี ·
+ *      '2026-09-11' → รอบก่อนหน้า [2025-09-12, 2026-09-11] (walk-back สองทิศ) · ซ้ำ idempotent
  *
  * การแยกโลกของ suite (ไม่ชน seed/ชุดอื่น):
  *   - หลักสูตร fixture 2 หลักสูตรของตัวเอง (is_public=true ให้ citizen ลงทะเบียนได้) +
@@ -37,6 +45,9 @@
  *     trigger trg_append_only_rows → delete → enable คืน (transactional DDL — ถ้าตายกลาง
  *     ทาง TX rollback ทำให้ trigger กลับมา enabled เองเสมอ) · ขอบเขตลบ = user_id ของผู้ใช้
  *     ทดสอบ suite นี้เท่านั้น (email pattern 'dcr9-credit-%')
+ *   - B8: ผู้ใช้ fixture ถูกลบด้วย id ที่รันนี้จดไว้ (tracked-first) แล้วค่อยกวาด
+ *     prefix 'dcr9-credit-%' เป็นเข็มขัดชั้นสอง · session aal2 ของเคส 6 มาจาก
+ *     GoTrue จริง (helpers-aal2 — enroll TOTP → challenge → verify รหัส RFC 6238)
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -51,6 +62,7 @@ import {
   type RestResult,
   type TestUser,
 } from "./helpers.js";
+import { mintAal2Token } from "./helpers-aal2.js";
 import { jwtPayload, knownCorrectAnswers, STAFF_EXAM_DEMO_ID } from "./helpers-d8.js";
 
 const DB_URL = process.env.TEST_DATABASE_URL;
@@ -155,6 +167,12 @@ let cycleUser: TestUser; // cycle (lawyer) — เคส 3 lazy cycle
 let citizenUser: TestUser; // citizen — เคส 4 citizen skip
 let viewerUser: TestUser; // staff:viewer — เคส 6 ฝั่งถูกปฏิเสธ
 let registrarUser: TestUser; // staff:registrar — เคส 6 ฝั่งดำเนินการสำเร็จ
+let revokeUser: TestUser; // lawyer — เคส 9 revoke-before-tick
+let licenseUser: TestUser; // lawyer — เคส 10 anniversary lattice
+/** session aal2 จริงของ registrar (helpers-aal2 — B3: admin_credit_adjust บังคับ MFA) */
+let registrarAal2Token = "";
+/** B8 — id ผู้ใช้ที่รันนี้สร้าง (cleanup ลบด้วย id เหล่านี้ก่อน แล้วค่อย prefix sweep) */
+let trackedUserIds: readonly string[] = [];
 
 interface StartResult {
   readonly attempt_id: string;
@@ -169,6 +187,8 @@ interface TickResult {
   readonly processed: number;
   readonly already_accrued: number;
   readonly no_cycle_target: number;
+  /** gate r1 BLOCKER-4 — event ที่ถูกข้ามเพราะ enrollment มี cert สถานะ revoked อยู่ */
+  readonly revoked_skipped: number;
   readonly failed: number;
 }
 interface LedgerRow {
@@ -256,9 +276,14 @@ async function purgeLedgerOf(userIds: readonly string[]): Promise<void> {
 /** ล้างโลกของ suite ทั้งชุด (เรียงตาม FK — RESTRICT) ครอบคลุมของค้างจากรอบที่พังกลางทาง ·
  *  audit_logs เป็น append-only ตามดีไซน์ — ตั้งใจคงไว้ (เหมือนชุด D-8) */
 async function cleanupE12World(): Promise<void> {
-  const users = await psqlRows<{ id: string }>(
-    `select id::text from auth.users where email like 'dcr9-credit-%';`,
-  );
+  // B8 — tracked-first: ลบด้วย id ที่รันนี้จดไว้ก่อน แล้วค่อยกวาด prefix 'dcr9-credit-%'
+  // เป็นเข็มขัดชั้นสอง (ครอบของค้างจากรันที่พังกลางทาง — ไม่แตะผู้ใช้ของชุดอื่น)
+  const trackedList = trackedUserIds.map((id) => `'${id}'`).join(",");
+  const users = await psqlRows<{ id: string }>(`
+    select id::text from auth.users
+     where email like 'dcr9-credit-%'
+       ${trackedList.length > 0 ? `or id in (${trackedList})` : ""}
+  `);
   // ก้อน user-scoped — รันเมื่อมีผู้ใช้ทดสอบค้างอยู่เท่านั้น (กัน `in ('')` uuid พัง)
   if (users.length > 0) {
     const list = users.map((u) => `'${u.id}'`).join(",");
@@ -279,6 +304,7 @@ async function cleanupE12World(): Promise<void> {
     await purgeLedgerOf(users.map((u) => u.id));
     await psql(`
       delete from public.renewal_cycles where user_id in (${list});
+      delete from public.license_applications where user_id in (${list});
       delete from public.lesson_progress
        where enrollment_id in (select id from public.enrollments where user_id in (${list}));
       delete from public.enrollments where user_id in (${list});
@@ -469,10 +495,27 @@ describe.skipIf(!DB_URL)(
       citizenUser = await createTestUser("dcr9-credit-citizen", "citizen");
       viewerUser = await createTestUser("dcr9-credit-viewer", "staff:viewer");
       registrarUser = await createTestUser("dcr9-credit-registrar", "staff:registrar");
+      revokeUser = await createTestUser("dcr9-credit-revoke", "lawyer");
+      licenseUser = await createTestUser("dcr9-credit-license", "lawyer");
+      // B8 — จด id ผู้ใช้ทั้งหมดของรันนี้ (ลบด้วย id ก่อน — prefix sweep เป็นชั้นสอง)
+      trackedUserIds = [
+        mainUser,
+        snapUser,
+        cycleUser,
+        citizenUser,
+        viewerUser,
+        registrarUser,
+        revokeUser,
+        licenseUser,
+      ].map((u) => u.id);
+      // session aal2 จริงของ registrar (helpers-aal2 — enroll TOTP → challenge →
+      // verify ผ่าน GoTrue /auth/v1/factors; B3: admin_credit_adjust บังคับ MFA)
+      registrarAal2Token = await mintAal2Token(registrarUser);
       await enrollViaRpc(mainUser, E12_COURSE_MAIN);
       await enrollViaRpc(cycleUser, E12_COURSE_MAIN);
       await enrollViaRpc(citizenUser, E12_COURSE_MAIN);
       await enrollViaRpc(snapUser, E12_COURSE_SNAP);
+      await enrollViaRpc(revokeUser, E12_COURSE_MAIN); // เคส 9 — หลักสูตรหลัก
     }, 300_000);
 
     afterAll(async () => {
@@ -701,6 +744,15 @@ describe.skipIf(!DB_URL)(
       for (const row of audits) {
         expect(row.n).toBe(1);
       }
+      // gate r1 MINOR-4 — original_entry_ids ของ audit ต้องเป็น id ของ "แถว accrual
+      // ต้นทาง" ไม่ใช่ id ของแถว reversal ที่เพิ่งเกิด
+      const reversalAudit = await psqlRows<{ ids: readonly string[] }>(`
+        select context -> 'original_entry_ids' as ids
+          from public.audit_logs
+         where action = 'CREDIT_REVERSAL' and entity_id::text = '${certId}';
+      `);
+      expect(reversalAudit).toHaveLength(1);
+      expect(reversalAudit[0]?.ids).toEqual([accrualId]);
       // เพิกถอนซ้ำ → ปฏิเสธ (ใบไม่ได้อยู่ในสถานะ valid) และ reversal ไม่เพิ่ม
       const again = await svcRpc("admin_revoke_certificate", {
         p_actor_user_id: STAFF_EXAM_DEMO_ID,
@@ -721,12 +773,12 @@ describe.skipIf(!DB_URL)(
 
     // ─── เคส 6: adjustment authz (โจทย์ข้อ 6) ───────────────────────────────────
 
-    it("เคส 6 adjustment authz: staff:viewer โดน ERR-RBAC-001 · registrar reason สั้นโดน ERR-CRD-002 · registrar ครบชุด → แถว adjustment −1.25 + audit CREDIT_ADJUST", async () => {
+    it("เคส 6 adjustment authz (guard: login → RBAC → aal2): viewer (aal1) โดน ERR-RBAC-001 · registrar aal1 โดน ERR-AUTH-004 (B3) · registrar aal2 reason สั้นโดน ERR-CRD-002 · ครบชุด → แถว adjustment −1.25 + audit CREDIT_ADJUST", async () => {
       const cycleId = await psqlScalar(
         `select id::text from public.renewal_cycles where user_id = '${mainUser.id}' limit 1;`,
       );
       expect(cycleId).toMatch(/^[0-9a-f-]{36}$/);
-      // staff:viewer — ไม่มีสิทธิ์ปรับ credit
+      // staff:viewer — ไม่มีสิทธิ์ปรับ credit (RBAC ตรวจ "ก่อน" aal2 ตามลำดับ guard ของ 0031)
       const denied = await userRpc(
         "admin_credit_adjust",
         viewerUser.accessToken,
@@ -741,10 +793,29 @@ describe.skipIf(!DB_URL)(
       );
       expect(denied.status).toBeGreaterThanOrEqual(400);
       expect(((denied.json ?? {}) as { message?: string }).message ?? "").toContain("ERR-RBAC-001");
-      // staff:registrar — reason สั้นกว่า 10 ตัวอักษร = ERR-CRD-002
-      const shortReason = await userRpc(
+      // staff:registrar — aal1 (ยังไม่ผ่าน MFA): role ผ่านแต่โดน aal2 gate (gate r1
+      // BLOCKER-3 — RPC บังคับ MFA ก่อน validation ใด ๆ · token aal1 ของ session แรก
+      // ยังใช้ได้เพราะ mintAal2Token ยิง fresh password grant แยกภายใน)
+      const aal1Denied = await userRpc(
         "admin_credit_adjust",
         registrarUser.accessToken,
+        {
+          p_user_id: mainUser.id,
+          p_cycle_id: cycleId,
+          p_credit_type: "general",
+          p_amount: -1.25,
+          p_reason: "สั้นไป", // สั้น — ถ้า aal2 gate หลุด จะโดน ERR-CRD-002 ไม่ใช่ 200
+          p_request_id: crypto.randomUUID(),
+        },
+      );
+      expect(aal1Denied.status).toBeGreaterThanOrEqual(400);
+      expect(((aal1Denied.json ?? {}) as { message?: string }).message ?? "").toContain(
+        "ERR-AUTH-004",
+      );
+      // registrar (aal2) — reason สั้นกว่า 10 ตัวอักษร = ERR-CRD-002 (validation หลัง aal2)
+      const shortReason = await userRpc(
+        "admin_credit_adjust",
+        registrarAal2Token,
         {
           p_user_id: mainUser.id,
           p_cycle_id: cycleId,
@@ -756,10 +827,10 @@ describe.skipIf(!DB_URL)(
       );
       expect(shortReason.status).toBeGreaterThanOrEqual(400);
       expect(((shortReason.json ?? {}) as { message?: string }).message ?? "").toContain("ERR-CRD-002");
-      // registrar ครบชุด — สำเร็จ: แถว adjustment + audit CREDIT_ADJUST
+      // registrar (aal2) ครบชุด — สำเร็จ: แถว adjustment + audit CREDIT_ADJUST
       const ok = await userRpc(
         "admin_credit_adjust",
-        registrarUser.accessToken,
+        registrarAal2Token,
         {
           p_user_id: mainUser.id,
           p_cycle_id: cycleId,
@@ -869,6 +940,129 @@ describe.skipIf(!DB_URL)(
       expect(body.history).toHaveLength(1);
       expect(body.history[0]?.cycle_no).toBe(1);
       expect(body.history[0]?.balances.general?.earned).toBe(-1.25);
+    });
+
+    // ─── เคส 9: revoke-before-tick (gate r1 BLOCKER-4) ──────────────────────────
+
+    it("เคส 9 revoke-before-tick: สอบผ่าน → ออกใบ → เพิกถอนใบก่อน tick กลืน event → tick ข้าม accrual (ไม่มีแถว ledger) ปิด event processed + last_error 'skipped: certificate revoked' + ตัวนับ revoked_skipped", async () => {
+      // สอบผ่าน — event credit.accrual เข้าคิว (cron ถูกพัก ยังไม่มีใครกลืน)
+      const attemptId = await passExamViaRest(revokeUser, "main");
+      // ปิดการเรียน + ออกใบ + เพิกถอนใบ — ทั้งหมด "ก่อน" tick แรก
+      const enrollmentId = await psqlScalar(`
+        select id::text from public.enrollments
+         where user_id = '${revokeUser.id}' and course_id = '${E12_COURSE_MAIN}' limit 1;
+      `);
+      await psql(`
+        update public.enrollments set status = 'completed', completed_at = now()
+         where id = '${enrollmentId}';
+      `);
+      const issue = await svcRpc("admin_issue_certificate", {
+        p_actor_user_id: STAFF_EXAM_DEMO_ID,
+        p_enrollment_id: enrollmentId,
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(issue.status, issue.text.slice(0, 300)).toBe(200);
+      const certId = (issue.json as { id: string }).id;
+      // เพิกถอน — reversal ต้องเป็น 0 แถว (ยังไม่มี accrual ให้หัก)
+      const revoke = await svcRpc("admin_revoke_certificate", {
+        p_actor_user_id: STAFF_EXAM_DEMO_ID,
+        p_certificate_id: certId,
+        p_reason: "เพิกถอนก่อนบันทึกหน่วยกิต เพื่อพิสูจน์ว่า tick ต้องไม่ accrual ให้ใบที่โดนเพิกถอน",
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(revoke.status, revoke.text.slice(0, 300)).toBe(200);
+      expect((revoke.json as { credit_reversed_rows: number }).credit_reversed_rows).toBe(0);
+      // ตอนนี้ค่อย tick — event ของผู้สอบที่ใบโดนเพิกถอนต้องถูก "ข้าม"
+      const tick = await runTick();
+      expect(tick.revoked_skipped, JSON.stringify(tick)).toBeGreaterThanOrEqual(1);
+      // ไม่มีแถว ledger ให้เจ้าของใบที่โดนเพิกถอนเด็ดขาด
+      const ledgerRows = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.credit_ledger_entries
+         where user_id = '${revokeUser.id}';
+      `);
+      expect(ledgerRows[0]?.n).toBe(0);
+      // event ปิดเป็น processed พร้อม breadcrumb ที่อ่านรู้เรื่อง (ไม่ retry ไม่ failed)
+      const events = await psqlRows<{ status: string; error: string | null }>(`
+        select status::text, last_error as error
+          from public.event_outbox
+         where topic = 'credit.accrual' and payload ->> 'source_id' = '${attemptId}';
+      `);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.status).toBe("processed");
+      expect(events[0]?.error).toBe("skipped: certificate revoked");
+      // รอบ lazy ที่ cover วันสอบยังถูกสร้าง (ensure_renewal_cycle รันก่อน gate —
+      // พฤติกรรมตามดีไซน์ B4) — ledger เท่านั้นที่ต้องว่าง
+      const cycles = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.renewal_cycles where user_id = '${revokeUser.id}';
+      `);
+      expect(cycles[0]?.n).toBe(1);
+    });
+
+    // ─── เคส 10: anniversary lattice (gate r1 BLOCKER-5) ─────────────────────────
+
+    it("เคส 10 anniversary lattice: anchor ใบอนุญาต 2025-09-12 → ensure_renewal_cycle('2026-09-12') = ครบรอบปีพอดี [2026-09-12, 2027-09-11] · '2026-09-11' = รอบก่อนหน้า [2025-09-12, 2026-09-11] (walk-back สองทิศ) · เรียกซ้ำ idempotent", async () => {
+      // ใบอนุญาตอนุมัติ — decided_at = anchor ครบรอบปี 2025-09-12
+      await psql(`
+        insert into public.license_applications (user_id, license_no, status, decided_at)
+        values ('${licenseUser.id}', 'LT-E12-${RUN_ID}', 'approved', '2025-09-12 09:00:00+00');
+      `);
+      // (a) วันครบรอบปีแรกพอดี — เดิม floor((365)/365.25)=0 ทำหน้าต่างไม่ครอบ on_date
+      //     ต้องได้รอบที่ "เริ่มวันครบรอบ" [2026-09-12, 2027-09-11] รอบที่ 1
+      const anniversary = await psqlScalar(
+        `select public.ensure_renewal_cycle('${licenseUser.id}', '2026-09-12', null)::text;`,
+      );
+      const afterFirst = await psqlRows<{
+        id: string;
+        cycle_no: number;
+        starts_on: string;
+        ends_on: string;
+        required_general: string;
+      }>(`
+        select id::text, cycle_no, starts_on::text, ends_on::text,
+               required_credits ->> 'general' as required_general
+          from public.renewal_cycles
+         where user_id = '${licenseUser.id}' order by cycle_no;
+      `);
+      expect(afterFirst).toHaveLength(1);
+      expect(anniversary).toBe(afterFirst[0]?.id ?? "");
+      expect(afterFirst[0]?.cycle_no).toBe(1);
+      expect(afterFirst[0]?.starts_on).toBe("2026-09-12");
+      expect(afterFirst[0]?.ends_on).toBe("2027-09-11");
+      // เกณฑ์ default Q1 จาก credit_cycle_defaults() (ไม่ใช่ snapshot ของกฎ)
+      expect(afterFirst[0]?.required_general).toBe("12");
+      // (b) '2026-09-11' = วันก่อนครบรอบ — ต้องได้รอบ "ก่อนหน้า" [2025-09-12,
+      //     2026-09-11] (walk-back ข้ามสองปีโครง — walk-forward ไม่ทำงาน)
+      const beforeAnchor = await psqlScalar(
+        `select public.ensure_renewal_cycle('${licenseUser.id}', '2026-09-11', null)::text;`,
+      );
+      const afterSecond = await psqlRows<{
+        id: string;
+        cycle_no: number;
+        starts_on: string;
+        ends_on: string;
+      }>(`
+        select id::text, cycle_no, starts_on::text, ends_on::text
+          from public.renewal_cycles
+         where user_id = '${licenseUser.id}' order by cycle_no;
+      `);
+      expect(afterSecond).toHaveLength(2);
+      expect(beforeAnchor).toBe(afterSecond[1]?.id ?? "");
+      expect(afterSecond[1]?.cycle_no).toBe(2);
+      expect(afterSecond[1]?.starts_on).toBe("2025-09-12");
+      expect(afterSecond[1]?.ends_on).toBe("2026-09-11");
+      // (c) เรียกซ้ำ — หน้าต่างที่ครอบอยู่แล้ว = รอบเดิม ไม่สร้างเพิ่ม (idempotent)
+      const again = await psqlScalar(
+        `select public.ensure_renewal_cycle('${licenseUser.id}', '2026-09-11', null)::text;`,
+      );
+      expect(again).toBe(beforeAnchor);
+      const anniversaryAgain = await psqlScalar(
+        `select public.ensure_renewal_cycle('${licenseUser.id}', '2026-09-12', null)::text;`,
+      );
+      expect(anniversaryAgain).toBe(anniversary);
+      const count = await psqlRows<{ n: number }>(`
+        select count(*)::int as n from public.renewal_cycles where user_id = '${licenseUser.id}';
+      `);
+      expect(count[0]?.n).toBe(2);
     });
   },
 );
