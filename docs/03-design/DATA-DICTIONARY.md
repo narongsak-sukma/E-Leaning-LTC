@@ -29,7 +29,7 @@
 | ---- | -- |
 | `role_key` | citizen, lawyer, instructor, staff:viewer, staff:content, staff:exam, staff:registrar, super_admin (colon ตาม brief §4 — Postgres enum label ใส่ ':' ได้) |
 | `license_status` | pending, verified, rejected, expired |
-| `course_status` | draft, pending_review, published, archived |
+| `course_status` | draft, pending_review, published, archived, **returned** (0035 — ส่งกลับให้ผู้สร้างแก้พร้อมความเห็น เกิดจาก RPC admin_decide_course เท่านั้น) |
 | `course_level` | beginner, intermediate, advanced (DCR-4) |
 | `lesson_type` | video, document, quiz |
 | `enrollment_status` | active, completed, expired, cancelled |
@@ -94,7 +94,7 @@ Retention: อายุบัญชี + 10 ปีหลังลบ — **anony
 | rejected_reason | text | NULL (เมื่อ status='rejected' ต้อง NOT NULL — CHECK) |
 | deleted_at | timestamptz | NULL |
 คีย์/Index: UNIQUE(user_id, license_no) WHERE deleted_at IS NULL; **UNIQUE(license_no) WHERE revoked_at IS NULL** (เลขใบอนุญาตหนึ่งเลขผูกกับบัญชี active ได้เดียว — F20/D12); INDEX(license_no) WHERE deleted_at IS NULL; CHECK (status='rejected' ↔ rejected_reason IS NOT NULL) — หมายเหตุ: approval function ตรวจ conflict ของ license_no **แบบ atomic ใน TX เดียวกับการ grant** ก่อนอนุมัติ (ชน → ERR-PRF-001)
-RLS: **SELECT** เจ้าของแถว หรือ staff:exam/registrar + super_admin; **INSERT** service_role เท่านั้น (สร้างอัตโนมัติเมื่อ `license_applications` ได้รับอนุมัติ); **UPDATE** เจ้าหน้าที่ staff:registrar/super_admin เท่านั้น (เปลี่ยน status/verified_by/rejected_reason); **DELETE** ไม่อนุญาต
+RLS: **SELECT** เจ้าของแถว หรือ staff:exam/registrar + super_admin; **INSERT** ผ่าน RPC `admin_decide_license_application` เท่านั้น (0035 — REVOKE จาก service_role แล้ว สร้างอัตโนมัติเมื่อคำขอได้รับอนุมัติ พร้อม audit ใน TX เดียว); **UPDATE** ไม่มี path แอป (ยังไม่มีกรณีใช้งาน — เพิกถอนใบทำผ่าน revoked_at โดยงานอนาคตต้องผ่าน RPC เท่านั้น); **DELETE** ไม่อนุญาต
 Retention: ตลอดอายุบัญชี + 10 ปี (เกี่ยวเนื่องสิทธิต่อใบอนุญาต)
 
 #### `license_applications` — คำขอผูกเลขที่ใบอนุญาต **(PII — PDPA)**
@@ -113,7 +113,7 @@ Retention: ตลอดอายุบัญชี + 10 ปี (เกี่ย�
 | rejected_reason | text | NULL (CHECK: status='rejected' → NOT NULL) |
 | resulting_license_id | uuid | NULL FK→lawyer_licenses (แถวที่สร้างเมื่ออนุมัติ) |
 คีย์/Index: UNIQUE(user_id) WHERE status='pending' (กันยื่นซ้อน); INDEX(status, submitted_at)
-RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin; **INSERT** เจ้าของบัญชีผ่าน BFF (ได้เฉพาะ status='pending'); **UPDATE** service_role เท่านั้น (registrar ตัดสินผ่าน admin endpoint + audit `LICENSE_VERIFY`); **DELETE** ไม่อนุญาต
+RLS: **SELECT** เจ้าของแถว หรือ staff:registrar/super_admin; **INSERT** ผ่าน RPC `my_submit_license_application` เท่านั้น (0035 — REVOKE จาก authenticated/service_role · แถวคำขอ + audit `LICENSE_BIND` TX เดียว); **UPDATE** ผ่าน RPC `admin_decide_license_application` เท่านั้น (0035 — REVOKE จาก service_role · registrar ตัดสิน + audit `LICENSE_VERIFY` atomic); **DELETE** ไม่อนุญาต
 Retention: ตลอดอายุบัญชี + 10 ปี (หลักฐานการตัดสิน)
 
 #### `role_assignments` — บทบาทของผู้ใช้
@@ -129,7 +129,7 @@ Retention: ตลอดอายุบัญชี + 10 ปี (หลักฐ�
 | revoked_at | timestamptz | NULL |
 | reason | text | NULL |
 คีย์/Index: UNIQUE(user_id, role) WHERE revoked_at IS NULL; INDEX(user_id) WHERE revoked_at IS NULL; INDEX(role)
-RLS: **SELECT** เจ้าของแถว (ดูบทบาทตัวเอง) หรือ `has_any_role('staff:viewer','staff:registrar','super_admin')` (ดูบทบาทผู้อื่น = user:view — RBAC §2); **INSERT/UPDATE** service_role เท่านั้น (บังคับผ่าน BFF + audit ทุกครั้ง); **DELETE** ไม่อนุญาต (ใช้ revoked_at)
+RLS: **SELECT** เจ้าของแถว (ดูบทบาทตัวเอง) หรือ `has_any_role('staff:viewer','staff:registrar','super_admin')` (ดูบทบาทผู้อื่น = user:view — RBAC §2); **INSERT** = trigger `on_auth_user_created` (สมัครสมาชิก · owner app_owner · granted_by null) หรือ RPC `admin_grant_role`/`admin_decide_license_application` เท่านั้น (0035 — REVOKE จาก service_role); **UPDATE** (revoke) ผ่าน RPC `admin_revoke_role` เท่านั้น (0035 — ทุก path มี audit คู่ mutation ใน TX เดียว); **DELETE** ไม่อนุญาต (ใช้ revoked_at)
 Retention: ถาวร (ประวัติการมอบ/เพิกถอนบทบาท)
 
 #### `consents` — บันทึกความยินยอม PDPA **(PII — PDPA)**

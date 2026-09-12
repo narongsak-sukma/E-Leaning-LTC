@@ -53,7 +53,7 @@
 | USER_DISABLE | super_admin | target_user_id, reason | WARN | จำกัดการเข้าถึง |
 | PROFILE_DELETE | เจ้าของบัญชี (ยืนยันผ่าน token อีเมล) — ผู้บันทึกจริง = RPC `confirm_account_deletion` (0036 atomic · token hash ตรวจใน RPC · single-use): ban + profiles.deleted_at + audit ใน TX เดียว · บัญชี staff/instructor ห้ามลบเอง (SoD) | target_user_id (= ผู้ยื่น), retention_note | WARN | สิทธิลบข้อมูล (SEC-012 soft-delete — ผลสอบ/audit เก็บต่อ) |
 | LICENSE_BIND | citizen, lawyer — จุดเขียน = BFF `PUT /me/license` ขณะ INSERT license_applications (user-JWT ผ่าน RLS · audit ผ่าน service wrapper best-effort ได้เพราะแถวคำขอเองตรวจย้อนได้ — แต่ 0035 ทำเป็น RPC `my_submit_license_application` atomic ตาม §1.5) | target_user_id, license_hash (hash เท่านั้น), สถานะ=pending | NOTICE | ข้อมูลส่วนบุคคล (วิชาชีพ) |
-| LICENSE_VERIFY | staff:registrar, super_admin — ผู้บันทึกจริง = RPC `admin_decide_license_application` (0035 atomic): UPDATE คำขอ + (อนุมัติ) INSERT lawyer_licenses + INSERT role_assignments lawyer + audit + event `license.application.*` ทั้งหมดใน TX เดียว | target_user_id, ผล(อนุมัติ/ปฏิเสธ), หลักฐานอ้างอิง (application_id, license_no) | NOTICE | การยืนยันข้อมูลส่วนบุคคล |
+| LICENSE_VERIFY | staff:registrar, super_admin — ผู้บันทึกจริง = RPC `admin_decide_license_application` (0035 atomic): UPDATE คำขอ + (อนุมัติ) INSERT lawyer_licenses + INSERT role_assignments lawyer + audit + event `license.application.*` ทั้งหมดใน TX เดียว | target_user_id, ผล(อนุมัติ/ปฏิเสธ), หลักฐานอ้างอิง (application_id, resulting_license_id เมื่ออนุมัติ) — **ห้าม license_no ใน audit (PII §1.3 — เลขจริงอยู่เฉพาะ event_outbox เพื่อเทมเพลตอีเมล)** | NOTICE | การยืนยันข้อมูลส่วนบุคคล |
 
 ### 2.3 เนื้อหา / การเรียน
 
