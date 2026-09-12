@@ -186,7 +186,7 @@ sequenceDiagram
     BFF-->>U: 202 รอเจ้าหน้าที่ตัดสิน (Q3)
     Note over DB: ภายหลัง staff:registrar ตัดสินผ่าน PATCH /api/v1/admin/license-applications/{id} (API-SPEC §3.8)
     alt อนุมัติ
-        DB->>DB: TX atomic: INSERT lawyer_licenses (verified) + role_assignments (lawyer) + audit ROLE_GRANT — function ตรวจ conflict license_no ก่อน grant (ERR-PRF-001)
+        DB->>DB: TX atomic: INSERT lawyer_licenses (verified) + role_assignments (lawyer) + audit ROLE_GRANT — function ตรวจ conflict license_no ก่อน grant (ERR-VAL-001|license_no_conflict)
     else ปฏิเสธ
         DB->>DB: status=rejected + เหตุผล + audit
     end
