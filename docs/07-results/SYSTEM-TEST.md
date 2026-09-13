@@ -2,7 +2,7 @@
 
 |          |                                                                                                                              |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| เวอร์ชัน | 1.0.0 — ฉบับแรก: ผลลัพธ์ชุดทดสอบระบบครบทุกชุด (battery 1.2.0 หลังปิด gate r1+r2 · **gate r3 = PASS 0B/0M/0m** ที่ `96f99c0`) + ตาราง coverage RTM must-have ↔ ชุดเทสที่พิสูจน์ด้วยเลขจริง + วิธี rerun ทุกชุด + known limitations ตาม D-f-7 |
+| เวอร์ชัน | 1.0.1 — แก้วิธี rerun ให้ตรงความจริงของ repo (สคริปต์ `scripts/integration-fresh-replay.sh` ไม่มีอยู่จริง · ชุด integration รันด้วย `npm run test:integration` บน dev DB ที่ยืนอยู่ ไม่ได้ wipe/replay — §2.4 และแถว 5 ของตาราง §2) · 1.0.0 — ฉบับแรก: ผลลัพธ์ชุดทดสอบระบบครบทุกชุด (battery 1.2.0 หลังปิด gate r1+r2 · **gate r3 = PASS 0B/0M/0m** ที่ `96f99c0`) + ตาราง coverage RTM must-have ↔ ชุดเทสที่พิสูจน์ด้วยเลขจริง + วิธี rerun ทุกชุด + known limitations ตาม D-f-7 |
 | วันที่    | 2026-09-13                                                                                                                    |
 | อ้างอิง  | RTM.md 1.1.0 (83 FR + PERF 8 + SEC 16 + NFR อื่น 27) · VA-PENTEST.md 1.2.0 · SECURITY-REMEDIATION.md 1.1.0 · `.omc/artifacts/battery-phase0-r2/` · `.omc/plans/wave-f-plan.md` (D-f-7 · D-f-8 · D-f-13) |
 | ขอบเขต  | ผลการทดสอบระบบบน **local Docker dev stack** (Next.js BFF :3000 · Supabase/Kong :8000 — Mailpit/สื่อจริง) ตามลำดับ battery เดียว วันที่ 2026-09-13 · สิ่งที่เอกสารนี้ไม่ครอบคลุม: load test ระดับ production (PERF → PROD-CHECKLIST D-f-13) และ UAT โดยมนุษย์ (D18 = Phase 3) |
@@ -11,7 +11,7 @@
 
 ## 1. สรุปผู้บริหาร
 
-- **ทุกชุดทดสอบที่รันผ่านครบในลำดับเดียว** (battery 1.2.0 · บน tree ที่ fix batch ทั้งหมดถูก commit — anchor G5): unit **170 ไฟล์ / 2,363 เทส** · tsc **0 error** · eslint **0 problems** · build **RC=0** (66/66 หน้า · static เหลือเฉพาะ `/_not-found`) · integration **20 ไฟล์ / 173 เทส** (fresh replay · 125.19 วิ) · health **200** · e2e **34/34** (33 first-attempt + 1 ผ่าน retry · 11.1 นาที · `E2E-EXIT=0`) — ตารางเต็ม §2
+- **ทุกชุดทดสอบที่รันผ่านครบในลำดับเดียว** (battery 1.2.0 · บน tree ที่ fix batch ทั้งหมดถูก commit — anchor G5): unit **170 ไฟล์ / 2,363 เทส** · tsc **0 error** · eslint **0 problems** · build **RC=0** (66/66 หน้า · static เหลือเฉพาะ `/_not-found`) · integration **20 ไฟล์ / 173 เทส** (บน dev DB ที่ยืนอยู่ · 125.19 วิ) · health **200** · e2e **34/34** (33 first-attempt + 1 ผ่าน retry · 11.1 นาที · `E2E-EXIT=0`) — ตารางเต็ม §2
 - **CTO gate (codex) ปิดครบสามรอบ** บนโค้ดชุดเดียวกับตัวเลขนี้: r1 FAIL(F1-F10) → แก้ครบ → r2 FAIL(G1-G5) → แก้ครบ → **r3 PASS 0 BLOCKER/0 MAJOR/0 MINOR** (คำวินิจฉัย `.omc/artifacts/gate-f-p0-r3-output.md` · ทบทวนที่ `96f99c0`)
 - **Coverage ตาม RTM must-have: 83 FR นำไปพิสูจน์ได้จริง 78/83** (ผ่าน 74 · ผ่านบางส่วน 4) — อีก 5 รายการคือสิ่งที่ **ไม่มีใน as-built v1** (AUTH-004/005/010 · ASM-012(S) · LRN-009) จดเป็นหนี้ทะเบียนพร้อมเหตุผลที่ §5 — **ไม่มีแถวใดถูกอ้างว่า "ผ่าน" โดยไม่มีหลักฐาน**
 - **PERF 8 รายการ = ยังไม่พิสูจน์ใน wave นี้โดยตั้งใจ** — เป้าหมายระดับ production (100k ผู้ใช้ · p95 ≤ 500ms · LCP ≤ 2.5s) วัดไม่ได้บน dev stack เครื่องเดียว · ส่งต่อเป็นเงื่อนไข PROD-CHECKLIST (D-f-13) — §5.2
@@ -27,7 +27,7 @@
 | 2 | tsc --noEmit (isolated) | **0 error** · `TSC_RC=0` | `tsc.txt` (ว่าง) |
 | 3 | eslint | **0 problems** · `ESLINT_RC=0` | `eslint.txt` (ว่าง) |
 | 4 | next build (**บน host เท่านั้น** — ห้าม build ในคอนเทนเนอร์ที่ dev ถือ `next_cache`) | **BUILD_RC=0** · 66/66 หน้า · prerender เหลือ `["/_not-found"]` | `build.txt` |
-| 5 | integration (fresh replay — ยกเลิก seed เดิม replay migration+seed ใหม่) | **20 ไฟล์ / 173 เทส ALL PASS** · 125.19 วิ · `INTEGRATION-EXIT=0` | `integration.txt` |
+| 5 | integration (รันบน dev DB ที่ยืนอยู่ — สร้าง/ลบผู้ใช้และแถวจริง · dcr8 replay `supabase/seed.sql` ผ่าน isoSql ระหว่างรัน · **ห้ามรันพร้อม e2e**) | **20 ไฟล์ / 173 เทส ALL PASS** · 125.19 วิ · `INTEGRATION-EXIT=0` | `integration.txt` |
 | 6 | health wait | `health=200` ก่อนปล่อย e2e เสมอ | `run.log` |
 | 7 | e2e (Playwright · 1 worker · retries:1) | **34/34 เขียว** — 33 first-attempt + 1 flaky ผ่าน retry (e2e-15 ฟอร์มใบอนุญาต · timing ของ dev stack — §5.1) · 11.1 นาที · `E2E-EXIT=0` | `e2e.txt` |
 | 8 | gitleaks staged (ทุก commit ของ fix batch) | **0 leaks** | `gitleaks-wf-r2fix*-staged.json` = `[]` |
@@ -91,11 +91,11 @@
 
 ### 2.4 วิธี rerun ทุกชุด (ลำดับบังคับ — ห้ามสลับ)
 
-> กฎ: **ห้ามรัน integration กับ e2e พร้อมกัน** (fresh replay ของ integration เช็ด dev DB กลางคัน) · build บน host เท่านั้น · dev stack ต้อง `health=200` ก่อน e2e
+> กฎ: **ห้ามรัน integration กับ e2e พร้อมกัน** (ชุด integration เขียน/ลบแถวจริงใน dev DB กลางคัน — สร้าง-ลบผู้ใช้ · dcr8 replay `supabase/seed.sql` ระหว่างรัน) · build บน host เท่านั้น · dev stack ต้อง `health=200` ก่อน e2e
 
 ```bash
-# 0) dev stack พร้อม
-docker compose -f docker/supabase/docker-compose.yml up -d   # + ltc-dev-app (:3000)
+# 0) dev stack พร้อม (compose อยู่ที่รากของ repo)
+docker compose up -d
 curl -sf localhost:3000/api/health >/dev/null && echo health=200
 
 # 1-4) unit → tsc → eslint → build (host)
@@ -104,9 +104,9 @@ npx tsc --noEmit                                                # TSC_RC=0
 npm run lint                                                    # ESLINT_RC=0
 npm run build                                                   # BUILD_RC=0 · static=/_not-found
 
-# 5) integration แบบ fresh replay (เช็ด DB → migrations+seed ใหม่ → รัน)
-bash scripts/integration-fresh-replay.sh 2>&1 | tee /tmp/integration.log
-curl -sf localhost:3000/api/health >/dev/null && echo health=200   # รอกลับมาก่อน
+# 5) integration — รันบน dev DB ที่ยืนอยู่ (สคริปต์จริงตาม package.json:16)
+npm run test:integration 2>&1 | tee /tmp/integration.log        # = npx vitest run --config vitest.integration.config.ts · INTEGRATION-EXIT=0
+curl -sf localhost:3000/api/health >/dev/null && echo health=200   # ยืนยันก่อนปล่อย e2e
 
 # 6) e2e รอบเต็ม (1 worker · retries:1 — ใช้ dev server ที่รันอยู่)
 E2E_NO_SERVER=1 npx playwright test 2>&1 | tee /tmp/e2e.log      # E2E-EXIT=0 · 34/34
@@ -286,7 +286,7 @@ PERF-001..008 เป็นเป้าหมายระดับ production (10
 | USA-004 error ไทย+วิธีแก้ | ผ่าน | ทะเบียน ERR-* fixed copy ไทย (unit errors.test.ts) · e2e เห็นจริงทุก negative path |
 | I18N-003 ฟอร์แมตวันที่ พ.ศ. | ผ่าน | dcr10 เคส 11 (วัน DD/MM/พ.ศ. ในอีเมล renewal — assert จริง) |
 | MAINT-001 TS strict+lint | ผ่าน | battery: tsc 0 · eslint 0 ทุกรอบ (CI gate) |
-| MAINT-003 schema ผ่าน migration เท่านั้น | ผ่าน | fresh replay รัน migrations 0040-0046 ได้ทุกรอบ (integration 20/173) |
+| MAINT-003 schema ผ่าน migration เท่านั้น | ผ่าน | migrations 0040-0046 ถูก apply โดย `docker/db/migrate.sh` ทุกครั้งที่ยก dev stack (ติดตามใน `_dev.migrations`) · ชุด integration 173 เทสรันผ่านบน DB ที่เกิดจาก migration เหล่านั้น |
 | MAINT-005 dependency scan | ผ่าน (ตัดสินแล้ว) | npm audit 4 findings = accept-with-expiry ตาม D29 (register ที่ SECURITY-REMEDIATION §4) |
 | MAINT-006 merge gates | ผ่าน | ทุก commit ผ่าน gitleaks staged · codex gate 3 รอบ (r1/r2/r3) กลุ่ม auth/security/data |
 | OPE-002 /api/health | ผ่าน | health=200 ทุกรอบ battery (บังคับในลำดับ) |
@@ -302,7 +302,7 @@ PERF-001..008 เป็นเป้าหมายระดับ production (10
 2. **เคส flaky เดียวของรอบ: e2e-15 ฟอร์มยื่นใบอนุญาต** — ผ่าน retry ในรอบเดียว (เคสเดียวกับรอบ r1 · timing ของ dev stack) — ตาม D-f-7: รอบเต็ม 1 ครั้งต่อ battery + isolated-rerun เป็นหลักฐานเสริมเมื่อมีเคสตก
 3. **e2e-05 ช้าสุด 7.4 นาที** (วิดีโอ heartbeat จริงจน watch_pct ≥ 80%) — known dev-stack cost
 4. **HMR-history**: รอบ 34/34 ของ 1.0.0 เคยผ่าน document-attestation 4 เคสด้วยโชค HMR — ปิดแล้วด้วยการแก้ `document-viewer.tsx` (router.refresh) + battery สด — บทเรียนบันทึกที่ SECURITY-REMEDIATION §3 · **VideoPlayer/QuizPanel มีช่องว่าง live-update แนวเดียวกัน** = งานตาม wave ถัดไป (ไม่มี assertion ที่ตายจากมันในรอบนี้)
-5. **integration กับ e2e ห้ามรันพร้อมกัน** — fresh replay เช็ด dev DB กลางคัน (กฎ §2.4)
+5. **integration กับ e2e ห้ามรันพร้อมกัน** — ชุด integration เขียน/ลบแถวจริงใน dev DB กลางคัน (สร้าง-ลบผู้ใช้ · dcr8 replay `supabase/seed.sql` ผ่าน isoSql — กฎ §2.4)
 
 ### 5.2 ขอบเขตที่ dev battery พิสูจน์ไม่ได้ (ส่งต่อ prod/UAT — ไม่อ้างผ่าน)
 
