@@ -36,7 +36,9 @@ const PASSWORD_STATUS_BY_FAILURE: Record<PasswordChangeFailure, string> = {
   confirm_mismatch: "password-confirm",
   wrong_current: "password-wrong-current",
   rate_limited: "password-rate-limited",
-  audit_failed: "password-failed",
+  // gate r1 MINOR-1: การ์ดเฉพาะ — รหัสเปลี่ยนแล้วจริง เหลือแค่ชั้น audit ล้ม (ใช้
+  // ข้อความเดียวกับ route ที่มาจาก PASSWORD_CHANGE_MESSAGES.audit_failed)
+  audit_failed: "password-audit-failed",
   system: "password-failed",
 };
 

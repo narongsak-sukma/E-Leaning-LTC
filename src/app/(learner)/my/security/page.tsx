@@ -58,6 +58,9 @@ const SECURITY_STATUSES = [
   "password-confirm",
   "password-rate-limited",
   "password-failed",
+  // gate r1 MINOR-1: การ์ดเฉพาะของ audit_failed — รหัสเปลี่ยนแล้วจริง (ข้อความ
+  // ตรงความจริง ไม่ใช่การ์ด system กลาง)
+  "password-audit-failed",
 ] as const;
 
 const STATUS_MESSAGES: Record<(typeof SECURITY_STATUSES)[number], string> = {
@@ -77,6 +80,7 @@ const STATUS_MESSAGES: Record<(typeof SECURITY_STATUSES)[number], string> = {
   "password-confirm": PASSWORD_CHANGE_MESSAGES.confirm_mismatch,
   "password-rate-limited": PASSWORD_CHANGE_MESSAGES.rate_limited,
   "password-failed": PASSWORD_CHANGE_MESSAGES.system,
+  "password-audit-failed": PASSWORD_CHANGE_MESSAGES.audit_failed,
 };
 
 /** status ของโค้ดสำรองจาก RPC `mfa_backup_codes_status` (metadata ล้วน — ไม่มีโค้ดเด็ดขาด) */

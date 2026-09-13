@@ -25,12 +25,13 @@ import { createSupabaseSsrClientBuffered } from "@/lib/supabase/ssr";
 import { isDefinitiveAuthError } from "@/lib/supabase/auth-errors";
 import { AppError, fromUnknown, toErrorBody } from "@/lib/errors";
 import { getConfig } from "@/lib/config";
-import { enforceRateLimit } from "@/lib/rate-limit";
+import { clientIpFrom, enforceRateLimit } from "@/lib/rate-limit";
 import {
   auditSessionRevokeFailClosed,
   revokeAllSessions,
   sessionIdFromAccessToken,
 } from "@/lib/auth/logout-all";
+import { subFromAccessToken } from "@/lib/auth/token-claims";
 
 /** 400/401/403 จาก GoTrue = ปฏิเสธชัด ๆ (invalid_grant / bad_jwt) — ต่างจาก 429/5xx ที่ลองใหม่ได้ */
 function isRejected(status: number): boolean {
@@ -41,8 +42,9 @@ export async function POST(request: Request): Promise<NextResponse> {
   try {
     const { supabaseUrl, supabaseAnonKey } = getConfig();
     // rate limit ก่อนทุกอย่าง (รวมก่อนแตะ GoTrue) — group AUTH ตาม ROUTE_RULES
-    // ของ /api/v1/auth/* · คีย์นับ = IP (คีย์รองอีเมลไม่มีใน request นี้)
-    enforceRateLimit(request, { group: "AUTH" });
+    // ของ /api/v1/auth/* · คีย์รอง mirror IP (gate r1 M1: ไม่ใส่ = bucket `g:AUTH:`
+    // เดียวรวมทุก IP — request นี้ยังไม่มี user id ที่พิสูจน์แล้วให้ใช้ตอนนับ)
+    enforceRateLimit(request, { group: "AUTH", secondaryKey: clientIpFrom(request) });
     const { client, commit, clearAuthCookies, hasPendingAuthWrite } =
       await createSupabaseSsrClientBuffered();
 
@@ -112,10 +114,22 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     if (revoke.ok) {
-      // ยืนยัน revoke ทุกเซสชันแล้ว — audit ก่อนล้าง cookie: audit ล้ม = 503 ไม่ล้าง
-      // (ดูหัวไฟล์) · sessionId = claim ของ token ที่ใช้ revoke (rotation คง session เดิม)
+      // ยืนยัน revoke ทุกเซสชันแล้ว — เผยแพร่ rotation ที่เกิดไปแล้วก่อนเข้าชั้น audit
+      // (gate r1 MINOR-3: audit ล้ม = 503 โดย rotation ต้องไม่หายไปกับ response —
+      // claim "commit ก่อน 503 เสมอ" ต้องจริงทุกสายรวมสายนี้) แล้ว audit ก่อนล้าง
+      // cookie: audit ล้ม = 503 ไม่ล้าง (ดูหัวไฟล์) · sessionId = claim ของ token
+      // ที่ใช้ revoke (rotation คง session เดิม)
+      if (rotated) {
+        commit();
+      }
+      // gate r1 M4: actor ของ audit จาก claim sub ของ token ที่เพิ่งใช้ revoke ผ่าน
+      // GoTrue ใน request เดียวกัน — user object ใน cookie เป็น JSON ฝังตัวปลอมได้
+      const actorId = subFromAccessToken(accessToken);
+      if (actorId === null) {
+        throw new AppError("ERR-SYS-002");
+      }
       await auditSessionRevokeFailClosed({
-        userId: sessionData.session.user.id,
+        userId: actorId,
         sessionId: sessionIdFromAccessToken(accessToken),
         requestId: request.headers.get("x-request-id"),
       });

@@ -64,6 +64,7 @@ const IP_B = `10.16.${RUN_NONCE}.2`;
 const IP_RL = `10.16.${RUN_NONCE}.3`;
 const IP_CONFIRM = `10.16.${RUN_NONCE}.4`;
 const IP_G = `10.16.${RUN_NONCE}.5`;
+const IP_H = `10.16.${RUN_NONCE}.6`;
 
 /** ชื่อ cookie session ฝั่งแอป (แอปในคอนเทนเนอร์เห็น GoTrue ที่ http://kong:8000) */
 const AUTH_COOKIE = "sb-kong-auth-token";
@@ -443,4 +444,42 @@ describe.skipIf(DB_URL === undefined)("DCR-16 — password reset (AUTH-004)", ()
       setCookies.some((line) => line.startsWith(AUTH_COOKIE) && /[Mm]ax-[Aa]ge=0/.test(line)),
     ).toBe(true);
   }, 90_000);
+
+  it("(h) session login ปกติ (password grant) ยิง confirm → 400 ERR-AUTH-005 ไม่ล้าง cookie ไม่แตะรหัส (gate r1 B1)", async () => {
+    // ผู้ใช้ปกติที่ login ด้วยรหัสผ่าน (amr method = password ตาม probe จริง) —
+    // ไม่มีหลักฐาน recovery ต้องถูกปฏิเสธ: ไม่งั้นผู้ถือ session ปกติเปลี่ยนรหัสผ่าน
+    // ได้โดยไม่ต้องพิสูจน์อะไรเลย (ข้าม re-auth ของ AUTH-005)
+    const normal = await createTestUser("dcr16-mail-normal", "citizen");
+    const grant = await restCall("POST", "/auth/v1/token?grant_type=password", {}, {
+      email: normal.email,
+      password: TEST_PASSWORD,
+    });
+    expect(grant.status).toBe(200);
+    const tokens = JSON.parse(grant.text) as { access_token: string; refresh_token: string };
+
+    const res = await fetch(`${APP_URL}/api/v1/auth/password-reset/confirm`, {
+      method: "POST",
+      headers: {
+        origin: APP_URL,
+        "content-type": "application/json",
+        cookie: `${AUTH_COOKIE}=${sessionCookieValue(tokens.access_token, tokens.refresh_token)}`,
+        "x-forwarded-for": IP_H,
+      },
+      body: JSON.stringify({ password: "Dcr16B1Normal#2026" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ERR-AUTH-005");
+
+    // session นี้ยังมีชีวิตและไม่ใช่ recovery — ห้ามมี Set-Cookie แตะ session เลย
+    const setCookies = res.headers.getSetCookie();
+    expect(setCookies.some((line) => line.startsWith(AUTH_COOKIE))).toBe(false);
+
+    // รหัสผ่านไม่ถูกเปลี่ยน — grant ด้วยรหัสเดิมยังผ่าน
+    const regrant = await restCall("POST", "/auth/v1/token?grant_type=password", {}, {
+      email: normal.email,
+      password: TEST_PASSWORD,
+    });
+    expect(regrant.status).toBe(200);
+  }, 60_000);
 });

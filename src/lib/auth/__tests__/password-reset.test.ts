@@ -112,12 +112,13 @@ describe("ipHashOf", () => {
 // ─── error mapping ───────────────────────────────────────────────────────────
 
 describe("PASSWORD_RESET_CONFIRM_ERROR_CODES", () => {
-  it("no_session→ERR-AUTH-001 · expired_link→ERR-AUTH-005 · weak_password→ERR-VAL-001 · system→ERR-SYS-002", () => {
+  it("no_session→ERR-AUTH-001 · expired_link→ERR-AUTH-005 · weak_password→ERR-VAL-001 · system/audit_failed→ERR-SYS-002", () => {
     expect(PASSWORD_RESET_CONFIRM_ERROR_CODES).toEqual({
       no_session: "ERR-AUTH-001",
       expired_link: "ERR-AUTH-005",
       weak_password: "ERR-VAL-001",
       system: "ERR-SYS-002",
+      audit_failed: "ERR-SYS-002",
     });
   });
 });
@@ -314,14 +315,14 @@ describe("confirmPasswordReset", () => {
     expect(calls).toEqual(["update", "logout"]);
   });
 
-  it("audit ล้ม 2 ครั้ง → failure system (cookie ถูกล้างไปแล้วเพราะ revoke สำเร็จ)", async () => {
+  it("audit ล้ม 2 ครั้ง → failure audit_failed (cookie ถูกล้างไปแล้วเพราะ revoke สำเร็จ — gate r1 M3)", async () => {
     const { calls, deps } = makeDeps();
     deps.audit = vi.fn<PasswordResetConfirmDeps["audit"]>(async () => {
       calls.push("audit");
       return { ok: false } as const;
     });
     const result = await confirmPasswordReset(input, deps);
-    expect(result).toEqual({ ok: false, failure: "system" });
+    expect(result).toEqual({ ok: false, failure: "audit_failed" });
     expect(calls).toEqual(["update", "logout", "clear", "audit", "audit"]);
   });
 });

@@ -151,7 +151,10 @@ export type PasswordResetConfirmFailure =
   | "no_session"
   | "expired_link"
   | "weak_password"
-  | "system";
+  | "system"
+  // gate r1 M3: PUT+logout สำเร็จแล้ว เหลือแค่ชั้น audit ล้ม — แยกkind เพื่อให้
+  // route รู้ว่า "ต้อง flush การล้าง cookie แล้ว" (ต่างจาก system ก่อน mutation)
+  | "audit_failed";
 
 /** failure → code จากทะเบียน src/lib/errors.ts (API-SPEC §2) — ห้ามคิดนอกทะเบียน */
 export const PASSWORD_RESET_CONFIRM_ERROR_CODES: Readonly<
@@ -161,6 +164,7 @@ export const PASSWORD_RESET_CONFIRM_ERROR_CODES: Readonly<
   expired_link: "ERR-AUTH-005",
   weak_password: "ERR-VAL-001",
   system: "ERR-SYS-002",
+  audit_failed: "ERR-SYS-002",
 };
 
 export interface PasswordResetConfirmDeps {
@@ -261,7 +265,10 @@ export async function confirmPasswordReset(
     auditedOk = audited.ok;
   }
   if (!auditedOk) {
-    return { ok: false, failure: "system" };
+    // gate r1 M3: ตรงนี้ PUT+logout สำเร็จและ cookie ถูกล้างไปแล้ว — แยกจาก
+    // "system" (ที่ยังไม่เกิด mutation) เพื่อให้ route commit การล้าง cookie
+    // อย่างเดียวกับทางสำเร็จก่อนตอบ 503
+    return { ok: false, failure: "audit_failed" };
   }
   return { ok: true };
 }

@@ -3,17 +3,24 @@
  *
  * ทำงานกับ session recovery ที่หน้า /reset-password ตั้งไว้ (fragment → server action
  * establishRecoverySession → setSession ตรวจกับ GoTrue แล้วเขียนลง cookie):
- * - rate limit group PWD_RESET (คีย์ IP) ก่อนแตะ GoTrue ตามสัญญาร่วมของ lane
+ * - rate limit group PWD_RESET (คีย์ IP + คีย์รอง mirror IP) ก่อนแตะ GoTrue ตาม
+ *   สัญญาร่วมของ lane
  * - body {password} ≥ 12 (GOTRUE_PASSWORD_MIN_LENGTH) — ไม่ผ่าน = 400 ERR-VAL-001
  *   ด้วยข้อความ policy เดียวกับหน้า register
+ * - **หลักฐาน recovery (gate r1 B1)**: access token ต้องมี amr method "otp"
+ *   (ลิงก์ recovery ของ GoTrue v2.164 · probe จริง) — session จาก login ปกติ
+ *   (method "password") ถูกปฏิเสธ 400 ERR-AUTH-005 โดยไม่ล้าง cookie
  * - ลำดับคงที่ (ห้ามสลับ): PUT /auth/v1/user {password} → logout scope=global
  *   (เพิกถอนทุกเซสชันทันที) → ล้าง cookie → audit AUTH_PASSWORD_RESET_DONE → 200
- * - ไม่มี session = 401 ERR-AUTH-001 · GoTrue ปฏิเสธ token (400/401/403 ที่ PUT) =
+ * - ไม่มี session = 401 ERR-AUTH-001 · error ที่ไม่ยืนยันตาย (429/5xx/network ที่
+ *   getSession) = 503 คง cookie (M2) · GoTrue ปฏิเสธ token (400/401/403 ที่ PUT) =
  *   ลิงก์หมดอายุ/ใช้แล้ว = 400 ERR-AUTH-005 + ล้าง cookie ที่ตายแล้ว · 422
- *   weak_password = 400 ERR-VAL-001 ข้อความ policy · 429/5xx/network = 503
- *   ERR-SYS-002 (คง cookie ไว้ให้กดใหม่ — แบบเดียวกับ logout route)
+ *   weak_password = 400 ERR-VAL-001 ข้อความ policy · 429/5xx/network ที่ PUT/logout
+ *   = 503 ERR-SYS-002 (คง cookie ไว้ให้กดใหม่ — แบบเดียวกับ logout route) · audit
+ *   ล้มหลัง mutation สำเร็จ = 503 โดยการล้าง cookie ถูก flush จริง (M3)
  * - audit ผ่าน service-role RPC append_audit_event context {ip_hash} เท่านั้น
- *   (0008:471) · PII (รหัสผ่าน/JWT/อีเมล) ห้ามลง log/response
+ *   (0008:471) · actor = claim sub ของ access token (M4 — ไม่ใช่ user object ใน
+ *   cookie ที่ปลอมได้) · PII (รหัสผ่าน/JWT/อีเมล) ห้ามลง log/response
  */
 import { NextResponse } from "next/server";
 
@@ -34,6 +41,7 @@ import {
   PASSWORD_RESET_POLICY_MESSAGE,
   parsePasswordResetConfirm,
 } from "@/lib/auth/password-reset";
+import { amrMethodsFromAccessToken, subFromAccessToken } from "@/lib/auth/token-claims";
 
 /** options ของ response — สะท้อน x-request-id (SDS §5.4) */
 function optionsOf(request: Request): JsonResponseOptions {
@@ -136,8 +144,9 @@ export async function POST(request: Request): Promise<NextResponse> {
         options,
       );
     }
-    // PWD_RESET — ไม่มีอีเมลใน confirm → คีย์ IP (secondary ว่างโดน IP cap ก่อนเสมอ)
-    enforceRateLimit(request, { group: "PWD_RESET" });
+    // PWD_RESET — ไม่มีอีเมลใน confirm → คีย์รอง mirror IP (gate r1 M1: rule ของ
+    // PWD_RESET มีช่องรอง — ไม่ใส่ = bucket `g:PWD_RESET:` เดียวรวมทุก IP ทั้งระบบ)
+    enforceRateLimit(request, { group: "PWD_RESET", secondaryKey: clientIpFrom(request) });
 
     const { supabaseUrl, supabaseAnonKey } = getConfig();
     const { client, commit, clearAuthCookies, hasPendingAuthWrite } =
@@ -145,17 +154,52 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     // session recovery จาก cookie — ไม่มี (หรือตายยืนยันแล้ว) = 401
     const { data: sessionData, error: sessionError } = await client.auth.getSession();
-    if (sessionError !== null && isDefinitiveAuthError(sessionError)) {
-      clearAuthCookies();
-      commit();
-      return jsonError("ERR-AUTH-001", options);
+    if (sessionError !== null) {
+      if (isDefinitiveAuthError(sessionError)) {
+        clearAuthCookies();
+        commit();
+        return jsonError("ERR-AUTH-001", options);
+      }
+      // gate r1 M2: 429/5xx/network ไม่ใช่หลักฐานว่า session ตาย — ห้ามล้าง
+      // credential ที่ยังมีชีวิต (แบบเดียวกับ logout-all): 503 คง cookie เก็บ
+      // rotation ถ้ามี ให้กดใหม่ภายหลัง
+      if (hasPendingAuthWrite()) {
+        commit();
+      }
+      throw new AppError("ERR-SYS-002");
     }
     if (sessionData.session === null) {
       commit();
       return jsonError("ERR-AUTH-001", options);
     }
     const session = sessionData.session;
-    const userId = typeof session.user?.id === "string" ? session.user.id : null;
+    // gate r1 B1: session ต้องเป็น "session recovery จากลิงก์อีเมล" จริง — auth-js
+    // ไม่ re-validate token ที่ยังไม่หมดอายุ การผ่าน getSession จึงไม่ใช่หลักฐาน
+    // พอ · อ่าน amr จากตัว access token เอง: ลิงก์ recovery ของ GoTrue v2.164 =
+    // method "otp" (probe จริง 2026-09-14 · refresh คง method ไว้ — guard รอด
+    // ผ่าน rotation ของ middleware) · login ด้วยรหัสผ่านปกติ = "password" ต้อง
+    // ถูกปฏิเสธ (ไม่งั้นผู้ถือ session ปกติเปลี่ยนรหัสผ่านโดยไม่ต้องพิสูจน์อะไรเลย —
+    // ข้าม re-auth ของ AUTH-005) · ยอมรับ "recovery" ด้วยกันเวอร์ชัน GoTrue อื่น
+    const amrMethods = amrMethodsFromAccessToken(session.access_token);
+    const isRecoverySession =
+      amrMethods !== null && amrMethods.some((m) => m === "otp" || m === "recovery");
+    if (!isRecoverySession) {
+      // session มีชีวิตแต่ไม่ได้มาจากลิงก์รีเซ็ต — ตอบแบบ "ลิงก์ไม่ถูกต้อง" โดยไม่
+      // ล้าง cookie (อย่าถือว่า session ตายแล้ว log out ผู้ใช้ปกติ) เผยแพร่
+      // rotation ที่ getSession ทำไว้ (ถ้ามี) ก่อนตอบ
+      commit();
+      return jsonError("ERR-AUTH-005", options);
+    }
+    // gate r1 M4: actor ของ audit จาก claim sub ของ token ที่ GoTrue จะได้ตรวจ
+    // ใน request เดียวกัน (PUT/logout ด้านล่าง) — user object ใน cookie เป็น JSON
+    // ฝังตัวที่ปลอมได้ ใช้เป็นตัวตนใน audit ไม่ได้
+    const userId = subFromAccessToken(session.access_token);
+    if (userId === null) {
+      if (hasPendingAuthWrite()) {
+        commit();
+      }
+      throw new AppError("ERR-SYS-002");
+    }
 
     const result = await confirmPasswordReset(
       {
@@ -190,6 +234,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (result.failure === "expired_link") {
       // token ถูก GoTrue ปฏิเสธชัด ๆ (400/401/403) = ตายยืนยันแล้ว — ล้าง cookie ที่เหลือ
       clearAuthCookies();
+      commit();
+    } else if (result.failure === "audit_failed") {
+      // gate r1 M3: PUT+logout สำเร็จแล้ว — การล้าง cookie ที่ clearCookies วางไว้
+      // ต้องถูก flush จริงแม้ audit ล้ม (hasPendingAuthWrite ไม่นับ "การลบ") ไม่งั้น
+      // recovery session ตายแล้วยังค้างในเครื่องผู้ใช้ — commit ก่อน 503 เสมอ
       commit();
     } else if (result.failure === "system") {
       if (hasPendingAuthWrite()) {

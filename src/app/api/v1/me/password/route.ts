@@ -9,7 +9,8 @@
  * - ลำดับภายใน lib: validate → re-auth (standalone signInWithPassword) → PUT /auth/v1/user
  *   {password} ด้วย session ผู้ใช้ → audit AUTH_PASSWORD_CHANGE (service-role RPC,
  *   context strict ['method','session_id']) → 200 — เซสชันปัจจุบันคงไว้ (ห้าม sign out)
- * - rate: AUTH group (secondary = userId — นับ ip + user แยกกัน D12-11)
+ * - rate: AUTH group (secondary = claim sub จาก cookie — นับ ip + user แยกกัน
+ *   D12-11 · นับก่อนแตะ GoTrue ใด ๆ ตาม MINOR-2)
  */
 import { NextResponse } from "next/server";
 
@@ -17,7 +18,8 @@ import { jsonErrorResponse, jsonOk, parseOutgoingView, type JsonResponseOptions 
 import { AppError } from "@/lib/errors";
 import { buildPasswordChangeDeps, changePassword, PASSWORD_CHANGE_MESSAGES, PASSWORD_POLICY_MESSAGE } from "@/lib/auth/password-change";
 import { requireUser } from "@/lib/auth/session";
-import { enforceRateLimit } from "@/lib/rate-limit";
+import { clientIpFrom, enforceRateLimit } from "@/lib/rate-limit";
+import { subFromAccessToken } from "@/lib/auth/token-claims";
 import { readJwtSessionClaim } from "@/lib/schemas/v1/exam";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { PasswordChangeBody, PasswordChangeView } from "./schema";
@@ -58,10 +60,20 @@ async function parsePasswordBody(request: Request) {
 export async function POST(request: Request): Promise<NextResponse> {
   const options = responseOptions(request);
   try {
-    const user = await requireUser();
     const supabase = await createSupabaseSsrClient();
-    // นับ quota AUTH ก่อนพิสูจน์รหัสผ่านเสมอ (กรอกผิดก็นับ — D72)
-    enforceRateLimit(request, { group: "AUTH", secondaryKey: user.userId });
+    // นับ quota AUTH ก่อนพิสูจน์รหัสผ่านเสมอ (กรอกผิดก็นับ — D72) และ**ก่อนแตะ
+    // GoTrue ด้วย** (gate r1 MINOR-2): requireUser คือ getUser+aal+profiles หลาย
+    // round-trip — ต้องนับก่อน ไม่งั้น request ขยะไหลเข้า GoTrue โดยไม่ถูกนับ ·
+    // คีย์รอง = claim sub จาก access token ใน cookie (getSession+decode ในเครื่อง
+    // ไม่มี network — ปลอม sub ได้แค่แยก bucket ของตัวเอง ขณะ bucket IP หลักนับ
+    // ทุกครั้งเสมอ) · ไม่มี sub = mirror IP (แบบแผน lead fix ของ reset action)
+    const { data: sessionPreview } = await supabase.auth.getSession();
+    const previewSub = subFromAccessToken(sessionPreview.session?.access_token ?? "");
+    enforceRateLimit(request, {
+      group: "AUTH",
+      secondaryKey: previewSub ?? clientIpFrom(request),
+    });
+    const user = await requireUser();
     const body = await parsePasswordBody(request);
     // claim session_id ของ session ปัจจุบัน (audit) — fail-closed เมื่อไม่มี session จริง
     const sessionId = await readJwtSessionClaim(supabase);
