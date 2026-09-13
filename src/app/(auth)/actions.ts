@@ -9,11 +9,12 @@
  *   ไม่สำเร็จ → กลับมาที่หน้าเดิมพร้อม error code จากทะเบียน (API-SPEC §2) เท่านั้น
  * - ห้าม log PII — ไม่ log email/รหัสผ่าน ใด ๆ ทั้งสิ้น (SDS §6.2)
  */
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import type { ErrorCode } from "@/lib/errors";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { resolveSafeNextPath, DEFAULT_POST_LOGIN_PATH } from "@/lib/auth/session";
 import {
   MFA_PENDING_COOKIE,
@@ -134,12 +135,35 @@ function registerUrl(next: string, outcome: ActionOutcome): string {
  * เข้าสู่ระบบ (signInWithPassword) — สำเร็จ redirect ไป next (ปลอดภัยแล้วจาก
  * resolveSafeNextPath) · ไม่สำเร็จ redirect กลับ /login พร้อม error code จากทะเบียน
  *
+ * Wave G P1 — ปิดช่อง rate limit: server action นี้เดิมไม่มีการจำกัดเลย (AUTH group
+ * ของ rate-limit.ts ผูก path /api/v1/auth/* อยู่ route เดียว) — เพิ่มการนับเข้ากลุ่ม
+ * AUTH เดิม (10 ครั้ง/นาที ต่อ IP + คีย์รองอีเมล normalized · D12-11 นับแยกทั้งคู่
+ * "ใครถึงขีดก่อนถูกจำกัดก่อน") ก่อนยิง GoTrue เสมอ · IP อ่านจาก headers() ของ
+ * server action (Next 15) แบบเดียวกับ clientIpFrom ของ rate-limit.ts (x-forwarded-for
+ * ตัวแรกก่อน แล้ว x-real-ip) · เกิน = ตอบ ERR-RATE-001 ตามรูปแบบ error ของ action
+ * (redirect กลับ /login?error=… — หน้า login render ข้อความไทยจากทะเบียน error)
+ *
  * Wave F · D-f-1 login สองขั้น: ถ้าบัญชีมี factor TOTP ที่ verified (บทบาทบังคับ MFA
  * และผู้ใช้ที่เปิดเอง) จะ **ไม่มี session cookie ถูกเขียน** ณ ขั้น password — token
  * ถูกเก็บใน cookie ชั่วคราว `ltc_mfa_pending` (httpOnly · sameSite=lax · path=/login ·
  * อายุ 5 นาที · secure เมื่อ production) แล้วพาไป /login/verify เพื่อยืนยันรหัส 6 หลัก
  * (หรือโค้ดสำรอง) ก่อนจึงออก session จริง aal2
  */
+function ipFromHeaders(headerList: Headers): string {
+  const forwarded = headerList.get("x-forwarded-for");
+  if (forwarded !== null) {
+    const first = forwarded.split(",")[0]?.trim();
+    if (first !== undefined && first.length > 0) {
+      return first;
+    }
+  }
+  const realIp = headerList.get("x-real-ip");
+  if (realIp !== null && realIp.trim().length > 0) {
+    return realIp.trim();
+  }
+  return "unknown";
+}
+
 export async function loginAction(formData: FormData): Promise<void> {
   const next = resolveSafeNextPath(formData.get("next"));
   const parsed = loginSchema.safeParse({
@@ -148,6 +172,17 @@ export async function loginAction(formData: FormData): Promise<void> {
   });
   if (!parsed.success) {
     redirect(loginUrl(next, { error: "ERR-VAL-001" }));
+  }
+  // Wave G P1 — ปิดช่อง: loginAction เดิมไม่มี rate limit เลย — นับเข้ากลุ่ม AUTH
+  // (10 ครั้ง/นาที ต่อ IP + คีย์รองอีเมล normalized — D12-11 นับแยกทั้งคู่) ก่อนยิง
+  // GoTrue เสมอ · เกิน = redirect กลับ /login พร้อม ERR-RATE-001 (หน้าเว็บ render
+  // ข้อความไทยจากทะเบียน error — รูปแบบ return เดิมของ action ทั้งหมด)
+  const limit = checkRateLimit(
+    "AUTH",
+    { ip: ipFromHeaders(await headers()), secondary: parsed.data.email },
+  );
+  if (!limit.allowed) {
+    redirect(loginUrl(next, { error: "ERR-RATE-001" }));
   }
   // Wave F · D-f-1: ขั้น password ผ่าน client เดี่ยว (ไม่ผูก cookie) — บัญชีที่มี
   // factor TOTP verified ยัง "ไม่เข้าระบบจริง" ณ จุดนี้ (ไม่มี session cookie เขียน)

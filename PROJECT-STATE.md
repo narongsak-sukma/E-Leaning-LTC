@@ -187,7 +187,7 @@
 
 | Task | งาน | Owner | Status |
 | ---- | --- | ----- | ------ |
-| G-P1 | AUTH completeness: AUTH-004 ลืมรหัสผ่าน · AUTH-005 เปลี่ยนรหัสผ่าน · AUTH-010 ออกจากระบบทุกเซสชัน (+ ปิดช่อง loginAction ไม่มี rate limit) | lead + workers (haiku · D9) | 🧰 แผนพร้อม · 3 lanes (W1/W2/W3) บน `feat/wave-g-p1` |
+| G-P1 | AUTH completeness: AUTH-004 ลืมรหัสผ่าน · AUTH-005 เปลี่ยนรหัสผ่าน · AUTH-010 ออกจากระบบทุกเซสชัน (+ ปิดช่อง loginAction ไม่มี rate limit) | lead + workers (haiku · D9) | 🧪 lanes ครบ (W1 26u+7i · W2 17u+7i · W3 23u+5i) · lead verify จบ + แก้ 2 บั๊กจากการตรวจ (establishRecoverySession ทิ้งผลลัพธ์ checkRateLimit · คีย์รอง null = bucket รวมทั้งระบบ) + ปิดช่อง audit-DONE ด้วย dcr16(g) · ลบ test.skip เงื่อนไขของ e2e-18 · แก้ e2e-17 step(8) ขาด goto /login (บั๊กเทส — browser ค้าง /my/security) · battery §2.4 ครบเขียว: unit 2434/2434 · tsc/lint/build 0 · IT 192/192 (24 ไฟล์ · dcr16 7 · auth005 7 · logout-all 2 · login-rl 3) · e2e 39/39 (RC=0 · e2e-10 flaky ผ่าน retry) |
 | G-P2 | หน้าจอ admin คลังข้อสอบ: แก้ไข/เปิดใช้งานข้อรายข้อ + version-lock (กลไก+API มีแล้วพิสูจน์ด้วยเทส — ขาดแค่ UI ตาม manual §2.5) | workers | ⏳ ต่อจาก P1 |
 | G-P3 | Exam UX: ASM-012(S) ทบทวนข้อสอบหลังส่ง · LRN-009 resume กลางสอบ (ต้อง DCR endpoint ใหม่ตาม D37 — ห้ามเปิดลับ ๆ) | workers | ⏳ ต่อจาก P2 |
 
