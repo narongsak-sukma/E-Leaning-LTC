@@ -6,12 +6,14 @@
 --   + หลักสูตร/บทเรียน/ควิซ/ข้อสอบ/กฎ credit ชุด UAT (แยกจาก dev seed — คำนำหน้า [UAT])
 --
 -- วิธีรัน (มีสคริปต์ครอบให้): scripts/uat-seed.sh
---   สคริปต์สุ่มรหัสผ่าน (หรือรับจาก env UAT_DEMO_PASSWORD) แล้วเรียก:
---   docker compose exec -T -e UAT_PASS="$UAT_DEMO_PASSWORD" db sh -c \
+--   สคริปต์สุ่มรหัสผ่าน (หรือรับจาก env UAT_DEMO_PASSWORD) แล้วส่งรหัสเข้า psql
+--   ทาง stdin เท่านั้น: รวมบรรทัด \set uat_pass '<ค่าที่ escape แล้ว>' ไว้หัว
+--   stream แล้ว pipe ตามด้วยไฟล์นี้เข้า "docker compose exec -T db sh -c \
 --     'PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres \
---      -v ON_ERROR_STOP=1 -v uat_pass="$UAT_PASS" -f -' < supabase/seed-uat.sql
+--      -v ON_ERROR_STOP=1 -f -'" — รหัสผ่านไม่ผ่าน argv ของโปรเซสใด (ps มองเห็น)
 --
--- รหัสผ่าน: ผ่าน psql variable :'uat_pass' เท่านั้น — ไม่มีค่าจริงอยู่ในไฟล์นี้/ใน repo
+-- รหัสผ่าน: ผ่าน psql variable :'uat_pass' จาก \set ทาง stdin เท่านั้น — ไม่มีค่าจริง
+--   อยู่ในไฟล์นี้/ใน repo · ห้ามใช้ -v uat_pass=... หรือ -e UAT_PASS=... (ติด argv — gate p4-r2 M1)
 --   (เก็บที่ .env ของเครื่องสาธิต = UAT_DEMO_PASSWORD=... — ดู .env.example)
 --   เข้ารหัส bcrypt ($2a$10) ด้วย pgcrypto — GoTrue (golang bcrypt) ยืนยันได้ทันที
 --
@@ -34,7 +36,7 @@
 
 \if :{?uat_pass}
 \else
-\echo 'ERROR: ต้องส่งรหัสผ่านผ่าน -v uat_pass=... (รันผ่าน scripts/uat-seed.sh)'
+\echo 'ERROR: ต้องตั้ง psql variable uat_pass ผ่าน \set ที่ส่งเข้าทาง stdin ของ psql (รันผ่าน scripts/uat-seed.sh)'
 \quit 15
 \endif
 
