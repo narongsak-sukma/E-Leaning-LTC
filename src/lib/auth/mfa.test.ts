@@ -2,6 +2,7 @@
  * mfa.test.ts — unit tests ของห้องเครื่อง MFA (Wave F · D-f-1)
  */
 import { describe, expect, it } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   BACKUP_CODE_COUNT,
@@ -10,6 +11,7 @@ import {
   assertMfaDisableAllowed,
   backupCodeHash,
   base32Decode,
+  consumePendingMfaTokens,
   decodeJwtPayload,
   decodePendingStashKey,
   decryptPendingStashPayload,
@@ -18,6 +20,7 @@ import {
   generateBackupCodes,
   hasRecentMfa,
   normalizeBackupCodeInput,
+  pendingStashAad,
   totpCode,
 } from "./mfa";
 
@@ -158,24 +161,60 @@ describe("cookie ชั่วคราว (pending — stash uuid · gate r1 F2/
 
   it("encrypt/decrypt stash payload ตรงกัน · ค่าเพี้ยน/คีย์ผิด = null (GCM ตรวจแก้ไข)", () => {
     const key = Buffer.alloc(32, 7);
-    const payload = encryptPendingStashPayload({ accessToken: "tok-a.b.c", refreshToken: "rt-1" }, key);
+    const aad = pendingStashAad("u-1", 1_800_000_100);
+    const payload = encryptPendingStashPayload({ accessToken: "tok-a.b.c", refreshToken: "rt-1" }, key, aad);
     expect(payload).toMatch(/^v1\./);
-    expect(decryptPendingStashPayload(payload ?? "", key)).toEqual({
+    expect(decryptPendingStashPayload(payload ?? "", key, aad)).toEqual({
       accessToken: "tok-a.b.c",
       refreshToken: "rt-1",
     });
     // ผิดรูป
-    expect(decryptPendingStashPayload("not-json", key)).toBeNull();
-    expect(decryptPendingStashPayload("v2.a.b.c", key)).toBeNull();
-    expect(decryptPendingStashPayload("v1.only-three", key)).toBeNull();
+    expect(decryptPendingStashPayload("not-json", key, aad)).toBeNull();
+    expect(decryptPendingStashPayload("v2.a.b.c", key, aad)).toBeNull();
+    expect(decryptPendingStashPayload("v1.only-three", key, aad)).toBeNull();
     // แก้ ciphertext หนึ่งตัวอักษร = tag ไม่ผ่าน (tamper-evidence ของ GCM)
     const parts = (payload ?? "").split(".");
     const tampered = `${parts[0]}.${parts[1]}.${parts[2]}.${(parts[3] ?? "").slice(0, -2)}xx`;
-    expect(decryptPendingStashPayload(tampered, key)).toBeNull();
+    expect(decryptPendingStashPayload(tampered, key, aad)).toBeNull();
     // คีย์ผิด
-    expect(decryptPendingStashPayload(payload ?? "", Buffer.alloc(32, 9))).toBeNull();
+    expect(decryptPendingStashPayload(payload ?? "", Buffer.alloc(32, 9), aad)).toBeNull();
     // token ไม่ครบรูป = ไม่เข้ารหัส
-    expect(encryptPendingStashPayload({ accessToken: "", refreshToken: "y" }, key)).toBeNull();
+    expect(encryptPendingStashPayload({ accessToken: "", refreshToken: "y" }, key, aad)).toBeNull();
+  });
+
+  it("AAD (userId:deadlineSec) — เจ้าของแถวหรือ deadline เพี้ยนถอดไม่ได้ (pin G1: re-host)", () => {
+    const key = Buffer.alloc(32, 7);
+    const tokens = { accessToken: "tok-a.b.c", refreshToken: "rt-1" };
+    expect(pendingStashAad("u-1", 1_800_000_100)).toBe("u-1:1800000100");
+    const payload = encryptPendingStashPayload(tokens, key, pendingStashAad("victim", 1_800_000_100));
+    expect(payload).toMatch(/^v1\./);
+    // roundtrip เมื่อ AAD ตรง
+    expect(decryptPendingStashPayload(payload ?? "", key, pendingStashAad("victim", 1_800_000_100))).toEqual(tokens);
+    // ผู้โจมตีขโมย ciphertext ไป re-host เป็นแถวของตัวเอง (user_id ใหม่ + deadline ใหม่
+    // — RPC 0046 ออก deadline ใหม่ให้แถวใหม่เสมอ) = GCM auth ไม่ผ่าน → null
+    expect(decryptPendingStashPayload(payload ?? "", key, pendingStashAad("attacker", 1_800_000_100))).toBeNull();
+    expect(decryptPendingStashPayload(payload ?? "", key, pendingStashAad("victim", 1_800_000_101))).toBeNull();
+    expect(decryptPendingStashPayload(payload ?? "", key, "")).toBeNull();
+  });
+
+  it("consumePendingMfaTokens — true เฉพาะ RPC ยืนยัน · false/throw fail-closed (pin G3)", async () => {
+    const stashId = "0f0e0d0c-1b2a-4c3d-8e9f-aabbccddeeff";
+    // stub client แทน standalone จริง (พารามิเตอร์ client ฉีดได้เพื่อ unit test)
+    const stub = (data: unknown, error: { message: string } | null = null) =>
+      ({ rpc: async () => ({ data, error }) }) as unknown as SupabaseClient;
+    expect(await consumePendingMfaTokens(stashId, stub(true))).toBe(true);
+    expect(await consumePendingMfaTokens(stashId, stub(false))).toBe(false);
+    // id รูปเพี้ยน = false โดยไม่ยิง RPC เลย
+    const never = {
+      rpc: async () => {
+        throw new Error("must not be called");
+      },
+    } as unknown as SupabaseClient;
+    await expect(consumePendingMfaTokens("not-a-uuid", never)).resolves.toBe(false);
+    // RPC ล้ม = throw ERR-SYS-001 (caller ตอบ error ระบบ ไม่ใช่ออก session)
+    await expect(consumePendingMfaTokens(stashId, stub(null, { message: "boom" }))).rejects.toMatchObject({
+      code: "ERR-SYS-001",
+    });
   });
 
   it("decodePendingStashKey รับ base64 32 ไบต์เท่านั้น", () => {

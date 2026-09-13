@@ -122,9 +122,21 @@ export async function verifyMfaStepTwoAction(formData: FormData): Promise<void> 
     redirect(verifyUrl(next, state));
   }
   // verify ผ่าน — ปิด stash ให้ uuid ตายจริง (single-use: replay คุกกี้เดิมไม่ได้
-  // token คืน) ก่อนออก session · ล้มไม่ขวาง login (แถวหมดอายุเอง ≤300 วิ)
+  // token คืน) **ก่อนออก session และ gate การออก session ด้วยผลลัพธ์** (gate r2
+  // G3 fail-closed): consume ไม่สำเร็จเต็มรูปแบบ (แถวถูกใช้ไปแล้ว/หมดอายุ/
+  // RPC ล้ม) = ไม่มี session — ผู้ใช้กลับไปเริ่ม login ใหม่ ไม่ใช่ออก session
+  // จาก pending ที่ตายแล้ว
   if (stashId !== null) {
-    await consumePendingMfaTokens(stashId);
+    let consumed: boolean;
+    try {
+      consumed = await consumePendingMfaTokens(stashId);
+    } catch {
+      redirect(loginErrorUrl(next));
+    }
+    if (!consumed) {
+      store.set(MFA_PENDING_COOKIE, "", { path: "/login", maxAge: 0 });
+      redirect(verifyUrl(next, "expired"));
+    }
   }
   // ออก session จริง — setSession ตรวจ token กับ GoTrue ก่อนบันทึกลง cookie ผ่าน ssr.ts
   const ssr = await createSupabaseSsrClient();

@@ -173,10 +173,16 @@ export async function loginAction(formData: FormData): Promise<void> {
     // gate r1 F2/F5: token จริงหยุดอยู่ฝั่ง server — เข้ารหัส AES-256-GCM เก็บใน
     // mfa_pending_stash ผ่าน RPC (single-use · อายุ 300 วิบังคับที่ DB) · cookie
     // เก็บ uuid อย่างเดียว — Set-Cookie รั่วก็ไม่ได้ session ใด ๆ
-    const stashId = await stashPendingMfaTokens(auth, {
-      accessToken: session.access_token,
-      refreshToken: session.refresh_token,
-    });
+    // gate r2 G1: AAD ผูก ciphertext กับ (userId, deadlineSec) — สำเนาที่ถูก
+    // re-host ไปแถวของคนอื่นถอดไม่ได้ (RPC 0046 ตรวจกรอบ p_expires_at เอง)
+    const stashId = await stashPendingMfaTokens(
+      auth,
+      {
+        accessToken: session.access_token,
+        refreshToken: session.refresh_token,
+      },
+      session.user.id,
+    );
     if (stashId === null) {
       redirect(loginUrl(next, { error: "ERR-SYS-001" }));
     }

@@ -13,6 +13,13 @@
  *   d) ปิด MFA: บทบาทบังคับถูก 403 ERR-RBAC-001 (ข้อความไทยมีคำ MFA — แม้ recent-MFA
  *      ผ่าน) · aal1 ล้วน → 403 ERR-AUTH-004 · citizen มี factor + recent-MFA →
  *      200 disabled · factor หายจริง + ชุดโค้ดสำรองถูก invalidate
+ *   e) lockout ของ consume: ผิด 5 ครั้ง/15 นาที = ล็อก (โค้ดถูกก็ถูกกัน) ·
+ *      สำเร็จ = รีเซ็ตตัวนับ
+ *   f) gate r2: f1 re-host ciphertext ของ stash (G1) — ขโมย uuid → take ได้
+ *      jsonb → ปลูกแถวใหม่ในชื่อตัวเอง → ยื่นผ่าน app จริง = state=expired
+ *      (AAD ผูก user_id เจ้าของแถว) · f2 สัญญา RPC ตรง DB (G1/G3/G4): กรอบ
+ *      p_expires_at · deadline ณ consume · single-use · invalidate/replace ถือ
+ *      advisory lock เดียวกัน (replace ตรวจ factor ใต้ lock)
  *
  * การแยกโลกของ suite: email prefix 'dcr14-mfa-%' (cleanup ตามลำดับ FK —
  * mfa_factors/mfa_challenges ของ GoTrue cascade ตาม auth.users) · ห้าม log
@@ -27,6 +34,7 @@ import {
   ANON_KEY,
   createTestUser,
   psql,
+  psqlRows,
   restCall,
   SERVICE_KEY,
   TEST_PASSWORD,
@@ -546,6 +554,15 @@ describe.skipIf(!DB_URL)(
       expect((replay.json as { valid?: boolean }).valid).toBe(false);
       const after = await bffMfa("GET", "/api/v1/me/mfa/backups", aal2, mfaUser.id);
       expect((after.json as { data?: { unused?: number } }).data?.unused).toBe(7);
+      // (5) ยิง RPC ตรง Kong ด้วย aal1 (gate r1 F1) — DB ปฏิเสธเองแม้ไม่ผ่าน BFF:
+      //     replace/invalidate ต้อง aal2 (guard ที่ตัว RPC ก่อนตรวจอย่างอื่น)
+      const directAal1 = await freshAal1(mfaUser);
+      const directReplace = await userRpc("mfa_backup_codes_replace", directAal1, { p_hashes: [] });
+      expect(directReplace.status).toBeGreaterThanOrEqual(400);
+      expect(directReplace.text).toContain("ERR-AUTH-004");
+      const directInvalidate = await userRpc("mfa_backup_codes_invalidate", directAal1, {});
+      expect(directInvalidate.status).toBeGreaterThanOrEqual(400);
+      expect(directInvalidate.text).toContain("ERR-AUTH-004");
     }, 60_000);
 
     // ─── เคส c: login สองขั้นจริง (staff:viewer — บทบาทบังคับ MFA) ───────────────
@@ -574,10 +591,12 @@ describe.skipIf(!DB_URL)(
       expect(pendingRaw).not.toBeNull();
       // ไม่มี session cookie (รวม chunk) ใด ๆ — password step ห้ามออก session
       expect(sessionValueFromCookies(post1.setCookies)).toBeNull();
-      // pending decode ได้ {a, r} (คู่ token จริง — ห้าม log)
-      const decoded = JSON.parse(decodeURIComponent(pendingRaw ?? "")) as { a?: unknown; r?: unknown };
-      expect(typeof decoded.a === "string" && decoded.a.length > 40).toBe(true);
-      expect(typeof decoded.r === "string" && decoded.r.length > 10).toBe(true);
+      // pending คือ uuid v4 ของ stash เท่านั้น (gate r1 F2/F5) — ไม่มี token ใด ๆ
+      // ใน cookie (JWT มี "." uuid ไม่มี · ความยาว 36 กว่า ๆ ไม่ใช่ token จริง)
+      expect(pendingRaw).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect((pendingRaw ?? "").includes(".")).toBe(false);
 
       // (3) GET /login/verify พร้อม pending → ฟอร์มยืนยันจริง
       const pendingCookie = `${PENDING_COOKIE}=${pendingRaw}`;
@@ -624,6 +643,14 @@ describe.skipIf(!DB_URL)(
       expect(staffAal2.length).toBeGreaterThan(40);
       // pending ถูกล้าง (value ว่าง + maxAge=0)
       expect(setCookieValue(right.setCookies, PENDING_COOKIE)).toBe("");
+      // (6) replay คุกกี้เดิมหลังสำเร็จ → state=expired (gate r1 F5: stash ถูก
+      //     consume ที่ DB — single-use จริง ไม่ใช่แค่เคลียร์ cookie ฝั่ง browser)
+      const replayPending = await appFormPost("/login/verify", verifyActionId, {
+        next: "/",
+        code: totpAt(staffSecret, Date.now() / 1000),
+      }, pendingCookie);
+      expect(replayPending.status).toBe(303);
+      expect(replayPending.location).toContain("state=expired");
     }, 60_000);
 
     // ─── เคส d: ปิด MFA — guard บทบาท + recent-MFA + ผลข้างเคียงจริง ─────────────
@@ -666,6 +693,176 @@ describe.skipIf(!DB_URL)(
       expect(stillVerified).toHaveLength(0);
       const backups = await bffMfa("GET", "/api/v1/me/mfa/backups", aal2, plainUser.id);
       expect((backups.json as { data?: { generated?: boolean } }).data?.generated).toBe(false);
+    }, 60_000);
+
+    // ─── เคส e: lockout ของ consume — ผิด 5 ครั้ง/ล็อก 15 นาที · สำเร็จ = รีเซ็ต ──
+
+    it("เคส e consume lockout (gate r1 F4): ผิด 2 ครั้ง→ถูก = รีเซ็ต · ผิด 5 ครั้ง = ล็อก · โค้ดถูกก็ถูกกันขณะล็อก", async (ctx) => {
+      ctx.skip(!appReachable);
+      expect(mfaUser).toBeDefined();
+      expect(mfaFactorId).not.toBe("");
+      // ชุดโค้ดใหม่ผ่าน BFF (recent-MFA จาก aal2 ที่ mint ตอนนี้) — codes ท้องถิ่นของเคส
+      const aal2 = await mintAal2WithFactor(mfaUser, mfaFactorId, mfaSecret);
+      const regen = await bffMfa("POST", "/api/v1/me/mfa/backups/regenerate", aal2, mfaUser.id);
+      expect(regen.status, JSON.stringify(regen.json)).toBe(200);
+      const codes = (regen.json as { data?: { codes?: string[] } }).data?.codes ?? [];
+      expect(codes).toHaveLength(8);
+      // consume คือเส้นทาง login — ใช้ aal1 ได้โดยดีไซน์ (ไม่มี guard aal2)
+      const token = await freshAal1(mfaUser);
+      // (1) ผิด 2 ครั้ง → ยังไม่ล็อก
+      for (let i = 0; i < 2; i += 1) {
+        const wrong = await userRpc("mfa_backup_codes_consume", token, { p_code: "zzzz-zzzz" });
+        expect((wrong.json as { valid?: boolean; locked?: boolean }).valid).toBe(false);
+        expect((wrong.json as { locked?: boolean }).locked).toBe(false);
+      }
+      // (2) ถูก → valid + ตัวนับถูกรีเซ็ต (แถวถูกลบ)
+      const good = await userRpc("mfa_backup_codes_consume", token, { p_code: codes[0] ?? "" });
+      expect((good.json as { valid?: boolean }).valid).toBe(true);
+      expect((good.json as { remaining?: number }).remaining).toBe(7);
+      // (3) ผิด 5 ครั้งรวดเดียว (นับใหม่ตั้งแต่ 1) → ครั้งที่ 5 = ล็อก
+      let fifth: { json: unknown } | null = null;
+      for (let i = 0; i < 5; i += 1) {
+        fifth = await userRpc("mfa_backup_codes_consume", token, { p_code: "zzzz-zzzz" });
+      }
+      expect((fifth?.json as { valid?: boolean; locked?: boolean }).valid).toBe(false);
+      expect((fifth?.json as { locked?: boolean }).locked).toBe(true);
+      // (4) โค้ดถูกต้องก็ถูกกันขณะล็อก (locked ตรวจก่อนแมตช์ — โค้ดไม่ถูกเผา)
+      const blocked = await userRpc("mfa_backup_codes_consume", token, { p_code: codes[1] ?? "" });
+      expect((blocked.json as { valid?: boolean; locked?: boolean }).valid).toBe(false);
+      expect((blocked.json as { locked?: boolean }).locked).toBe(true);
+      const status = await bffMfa("GET", "/api/v1/me/mfa/backups", aal2, mfaUser.id);
+      expect((status.json as { data?: { unused?: number } }).data?.unused).toBe(7);
+    }, 60_000);
+
+    // ─── เคส f1: re-host ciphertext ของ stash (gate r2 G1) ผ่าน app จริง ────────
+
+    it("เคส f1 (G1) re-host: ขโมย uuid ของ staff → take ได้ ciphertext → ปลูกแถวใหม่ในชื่อตัวเอง → app ปฏิเสธ state=expired", async (ctx) => {
+      ctx.skip(!appReachable);
+      expect(staffUser).toBeDefined();
+      expect(mfaUser).toBeDefined();
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+      // (1) staff login ขั้น password → stash ใหม่ (แถวของ staff) + pending uuid
+      //     ("Set-Cookie รั่ว" จำลองของจริง — คนร้ายได้ uuid แต่ไม่มี token ใด ๆ)
+      const loginPage = await appGet("/login", "");
+      const loginActionId = parseActionId(loginPage.html);
+      const post = await appFormPost(
+        "/login",
+        loginActionId,
+        { next: "/", email: staffUser.email, password: TEST_PASSWORD },
+        "",
+      );
+      expect(post.status).toBe(303);
+      expect(post.location).toBe("/login/verify");
+      const victimUuid = setCookieValue(post.setCookies, PENDING_COOKIE) ?? "";
+      expect(victimUuid).toMatch(UUID_RE);
+
+      // (2) คนร้าย (authenticated คนละราย) take ด้วย uuid ที่ขโมย — RPC คืน jsonb
+      //     {payload, user_id, expires_at} ของแถวจริง (premise ของ G1: ciphertext
+      //     อ่านได้ — ประตูต่อไปคือ AAD ต้องกัน)
+      const attackerToken = await freshAal1(mfaUser);
+      const stolen = await userRpc("mfa_pending_stash_take", attackerToken, { p_id: victimUuid });
+      expect(stolen.status, stolen.text.slice(0, 300)).toBe(200);
+      const row = (stolen.json ?? {}) as { payload?: unknown; user_id?: unknown; expires_at?: unknown };
+      expect(typeof row.payload === "string" && (row.payload as string).startsWith("v1.")).toBe(true);
+      expect(row.user_id).toBe(staffUser.id); // เจ้าของแถว = staff — ค่าที่ AAD ผูก
+      expect(typeof row.expires_at === "string" && row.expires_at !== "").toBe(true);
+
+      // (3) re-host: create แถวใหม่ "ในชื่อคนร้าย" ด้วย ciphertext เดิม + deadline
+      //     เดิม (ผ่านกรอบของ RPC — ค่ายังอยู่ใน now()+305 วิ)
+      const rehost = await userRpc("mfa_pending_stash_create", attackerToken, {
+        p_payload: row.payload,
+        p_expires_at: row.expires_at,
+      });
+      expect(rehost.status, rehost.text.slice(0, 300)).toBe(200);
+      const attackerUuid = typeof rehost.json === "string" ? rehost.json : "";
+      expect(attackerUuid).toMatch(UUID_RE);
+
+      // (4) ยื่น uuid ปลอมผ่าน app จริง — AAD ประกอบจากแถว (attacker:deadline)
+      //     ไม่ตรง ciphertext (staff:deadline) → take = null → state=expired และ
+      //     ไม่มี session cookie ใด ๆ ออกมา (โค้ด 000000 ไม่เคยถูกตรวจด้วยซ้ำ)
+      const evilCookie = `${PENDING_COOKIE}=${attackerUuid}`;
+      const verifyPage = await appGet("/login/verify", evilCookie);
+      expect(verifyPage.status).toBe(200);
+      const verifyActionId = parseActionId(verifyPage.html);
+      const attempt = await appFormPost(
+        "/login/verify",
+        verifyActionId,
+        { next: "/", code: "000000" },
+        evilCookie,
+      );
+      expect(attempt.status).toBe(303);
+      expect(attempt.location).toContain("state=expired");
+      expect(sessionValueFromCookies(attempt.setCookies)).toBeNull();
+    }, 60_000);
+
+    // ─── เคส f2: สัญญา RPC ตรง DB (gate r2 G1/G3/G4) — ไม่พึ่ง app (db+kong พอ) ──
+
+    it("เคส f2 (G1/G3/G4) กรอบ p_expires_at · deadline ณ consume · single-use · invalidate/replace ถือ lock เดียวกัน", async () => {
+      const token = await freshAal1(mfaUser);
+      const UUID_RE = /^[0-9a-f-]{36}$/;
+      // (1) G1 กรอบ deadline ของ create: อดีต / เกิน now()+305 วิ = ปฏิเสธ
+      //     (ต่ออายุหน้าต่างโจมตีไม่ได้)
+      const past = await userRpc("mfa_pending_stash_create", token, {
+        p_payload: "v1.pin",
+        p_expires_at: new Date(Date.now() - 60_000).toISOString(),
+      });
+      expect(past.status).toBeGreaterThanOrEqual(400);
+      expect(past.text).toContain("ERR-VAL-001");
+      const tooFar = await userRpc("mfa_pending_stash_create", token, {
+        p_payload: "v1.pin",
+        p_expires_at: new Date(Date.now() + 400_000).toISOString(),
+      });
+      expect(tooFar.status).toBeGreaterThanOrEqual(400);
+      expect(tooFar.text).toContain("ERR-VAL-001");
+
+      // (2) G3 deadline ณ consume: create ถูกกฎ → ดัน expires_at เป็นอดีตด้วย psql
+      //     (จำลอง take ผ่านตอนยังมีชีวิต → verify ช้า → consume หลัง deadline)
+      //     → consume = false (แม้แถวยังไม่ถูกใช้)
+      const ok = await userRpc("mfa_pending_stash_create", token, {
+        p_payload: "v1.pin-deadline",
+        p_expires_at: new Date(Date.now() + 300_000).toISOString(),
+      });
+      expect(ok.status, ok.text.slice(0, 300)).toBe(200);
+      const id1 = typeof ok.json === "string" ? ok.json : "";
+      expect(id1).toMatch(UUID_RE);
+      await psql(`update public.mfa_pending_stash set expires_at = now() - interval '1 second' where id = '${id1}';`);
+      const late = await userRpc("mfa_pending_stash_consume", token, { p_id: id1 });
+      expect(late.status, late.text.slice(0, 300)).toBe(200);
+      expect(late.json).toBe(false);
+
+      // (3) single-use ณ consume: ครั้งแรก true · ยิงซ้ำ false (take ผ่านก็ตาม)
+      const ok2 = await userRpc("mfa_pending_stash_create", token, {
+        p_payload: "v1.pin-single-use",
+        p_expires_at: new Date(Date.now() + 300_000).toISOString(),
+      });
+      const id2 = typeof ok2.json === "string" ? ok2.json : "";
+      expect(id2).toMatch(UUID_RE);
+      const first = await userRpc("mfa_pending_stash_consume", token, { p_id: id2 });
+      expect(first.status, first.text.slice(0, 300)).toBe(200);
+      expect(first.json).toBe(true);
+      const second = await userRpc("mfa_pending_stash_consume", token, { p_id: id2 });
+      expect(second.status, second.text.slice(0, 300)).toBe(200);
+      expect(second.json).toBe(false);
+
+      // (4) G4 โครงสร้าง: invalidate/replace ถือ advisory lock คีย์เดียวกัน ·
+      //     replace ตรวจ factor-verified "หลัง" การขอ lock (serialize จริง)
+      const defs = await psqlRows<{ def: string }>(`
+        select pg_get_functiondef('public.mfa_backup_codes_invalidate()'::regprocedure) as def
+        union all
+        select pg_get_functiondef('public.mfa_backup_codes_replace(text[])'::regprocedure) as def;
+      `);
+      expect(defs).toHaveLength(2);
+      const invalidateDef = defs[0]?.def ?? "";
+      const replaceDef = defs[1]?.def ?? "";
+      expect(invalidateDef).toContain("pg_advisory_xact_lock");
+      expect(invalidateDef).toContain("mfa_backup_codes:");
+      expect(replaceDef).toContain("pg_advisory_xact_lock");
+      expect(replaceDef).toContain("mfa_backup_codes:");
+      const lockAt = replaceDef.indexOf("pg_advisory_xact_lock");
+      const factorAt = replaceDef.indexOf("mfa_factors");
+      expect(lockAt).toBeGreaterThanOrEqual(0);
+      expect(factorAt).toBeGreaterThan(lockAt); // factor check อยู่ "ใต้" lock
     }, 60_000);
   },
 );
