@@ -476,6 +476,8 @@ export async function takeExamViaUi(
 export interface Aal2Session {
   readonly accessToken: string;
   readonly refreshToken: string;
+  /** secret base32 ของ factor ที่ helper ผูก — ให้ loginViaForm กรอกขั้นสองได้ (Wave F) */
+  readonly totpSecret: string;
 }
 
 /** ถอด payload ของ JWT (สำหรับ assert claim `aal` — ไม่ log token) */
@@ -488,7 +490,7 @@ function jwtAal(token: string): string {
 }
 
 /** TOTP 6 หลัก กรอบเวลา 30 วินาที (RFC 6238 — HMAC-SHA1) จาก secret base32 ของ GoTrue */
-function totpNow(secretBase32: string): string {
+export function totpNow(secretBase32: string): string {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
   let bits = "";
   for (const ch of secretBase32.replace(/=+$/u, "").toUpperCase()) {
@@ -587,7 +589,7 @@ export async function enrollMfaTotp(email: string): Promise<Aal2Session> {
   if (aal !== "aal2") {
     throw new Error(`access token หลัง mfa/verify ไม่มี claim aal=aal2 (ได้ aal="${aal}")`);
   }
-  return { accessToken: verifyBody.access_token, refreshToken: verifyBody.refresh_token };
+  return { accessToken: verifyBody.access_token, refreshToken: verifyBody.refresh_token, totpSecret: secret };
 }
 
 /**

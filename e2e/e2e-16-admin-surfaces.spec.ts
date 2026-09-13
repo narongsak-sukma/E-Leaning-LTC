@@ -163,7 +163,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
     page,
   }) => {
     expect(superAdmin).toBeDefined();
-    await loginViaForm(page, superAdmin?.email ?? "");
+    await loginViaForm(page, superAdmin?.email ?? "", { totpSecret: saAal2?.totpSecret });
     if (saAal2 === undefined) throw new Error("beforeAll ต้อง enroll sa สำเร็จก่อน");
     await injectSession(page, saAal2);
 
@@ -207,7 +207,8 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
     expect(found, "ค้นหาเจอผู้ใช้ e16-target ด้วยอีเมลเต็ม").toBeDefined();
     // pin รูปร่างแถวขาออกให้ตายตัว — หลักฐานว่า BFF ไม่มี status/disabledReason (ธง drift)
     expect(Object.keys(found ?? {}).sort().join(",")).toBe(
-      "createdAt,deletedAt,displayName,email,hasVerifiedLicense,id,roles",
+      // D-f-5 (0041 · 1.2.8): additive isBanned/bannedUntil เข้ามาในแถวขาออกด้วย
+      "bannedUntil,createdAt,deletedAt,displayName,email,hasVerifiedLicense,id,isBanned,roles",
     );
     expect(found?.roles ?? []).toContain("citizen");
     expect(found?.hasVerifiedLicense).toBe(false);
@@ -276,7 +277,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
   }) => {
     expect(superAdmin).toBeDefined();
     expect(target).toBeDefined();
-    await loginViaForm(page, superAdmin?.email ?? "");
+    await loginViaForm(page, superAdmin?.email ?? "", { totpSecret: saAal2?.totpSecret });
     if (saAal2 === undefined) throw new Error("beforeAll ต้อง enroll sa สำเร็จก่อน");
     await injectSession(page, saAal2);
     await page.goto("/admin/dashboard"); // หน้า same-origin ของ staff — คุกกี้ใช้ได้ทั้งโดเมน
@@ -330,7 +331,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
   }) => {
     expect(superAdmin).toBeDefined();
     expect(target).toBeDefined();
-    await loginViaForm(page, superAdmin?.email ?? "");
+    await loginViaForm(page, superAdmin?.email ?? "", { totpSecret: saAal2?.totpSecret });
     if (saAal2 === undefined) throw new Error("beforeAll ต้อง enroll sa สำเร็จก่อน");
     await injectSession(page, saAal2);
     await page.goto("/admin/dashboard");
@@ -409,7 +410,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
   }) => {
     expect(registrar).toBeDefined();
     expect(target).toBeDefined();
-    await loginViaForm(page, registrar?.email ?? "");
+    await loginViaForm(page, registrar?.email ?? "", { totpSecret: regAal2?.totpSecret });
     if (regAal2 === undefined) throw new Error("beforeAll ต้อง enroll registrar สำเร็จก่อน");
     await injectSession(page, regAal2);
     await page.goto("/admin/dashboard");
@@ -435,7 +436,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
 
   test("dashboard: registrar เห็นแดชบอร์ด (UI + BFF) + from>to → 400 fields[\"from\"]", async ({ page }) => {
     expect(registrar).toBeDefined();
-    await loginViaForm(page, registrar?.email ?? "");
+    await loginViaForm(page, registrar?.email ?? "", { totpSecret: regAal2?.totpSecret });
     if (regAal2 === undefined) throw new Error("beforeAll ต้อง enroll registrar สำเร็จก่อน");
     await injectSession(page, regAal2);
     await page.goto("/admin/dashboard");
@@ -480,7 +481,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
     expect(superAdmin).toBeDefined();
 
     // registrar — UI /admin/audit: ผ่าน gate หน้า (staff) แต่ BFF 403 → แผง forbidden
-    await loginViaForm(page, registrar?.email ?? "");
+    await loginViaForm(page, registrar?.email ?? "", { totpSecret: regAal2?.totpSecret });
     if (regAal2 === undefined) throw new Error("beforeAll ต้อง enroll registrar สำเร็จก่อน");
     await injectSession(page, regAal2);
     await page.goto("/admin/audit");
@@ -495,7 +496,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
     expect(errorOf({ status: regRead.status, body: regRead.text }).code).toBe("ERR-RBAC-001");
 
     // super_admin — อ่านได้ (200 + แถวมี action) + ทุกการอ่านเกิด audit AUDIT_READ
-    await loginViaForm(page, superAdmin?.email ?? "");
+    await loginViaForm(page, superAdmin?.email ?? "", { totpSecret: saAal2?.totpSecret });
     if (saAal2 === undefined) throw new Error("beforeAll ต้อง enroll sa สำเร็จก่อน");
     await injectSession(page, saAal2);
     await page.goto("/admin/dashboard"); // หน้า staff same-origin ก่อนยิง fetch อ่าน audit
@@ -529,7 +530,7 @@ test.describe("E2E-16 ผิวหลังบ้าน (ผู้ใช้/บ�
     page,
   }) => {
     expect(superAdmin).toBeDefined();
-    await loginViaForm(page, superAdmin?.email ?? "");
+    await loginViaForm(page, superAdmin?.email ?? "", { totpSecret: saAal2?.totpSecret });
     if (saAal2 === undefined) throw new Error("beforeAll ต้อง enroll sa สำเร็จก่อน");
     await injectSession(page, saAal2);
     await page.goto("/admin/dashboard");

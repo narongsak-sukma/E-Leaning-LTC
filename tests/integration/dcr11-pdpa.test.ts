@@ -399,6 +399,50 @@ describe.skipIf(!DB_URL)(
       expect(job[0]?.error).toBe(reason);
     }, 45_000);
 
+    // ─── เคส d2: P0002 pin — complete บนงานที่มีอยู่จริงแต่ไม่ processing ────────
+    // เจตนา pin พฤติกรรมจริงตาม D-f-6 (ไม่เปลี่ยน errcode การผลิตกลาง wave — ทางเลือก
+    // เปลี่ยนเป็น 22023 เปิดไว้ใน API-SPEC หมายเหตุ): job_not_processing ของ 0039 §2
+    // (select … where status='processing' for update → not found → raise errcode P0002)
+    // ผ่าน Kong gateway = 500 ทึบ (ร่าง error ถูกตัด — ไม่มี envelope ERR-NF-001|… ให้
+    // ผู้เรียก) และ statement abort ต้องไม่แตะแถวงานแม้แต่คอลัมน์เดียว
+    it("เคส d2 complete (service_role) บนงาน pending ที่มีอยู่จริง → opaque 500 (P0002 job_not_processing — ไม่มี envelope ERR-) และแถวงานไม่เปลี่ยนสภาพ (pin ตาม D-f-6)", async () => {
+      // งานจริงของ suite: ยื่นใหม่เป็น exportB (งานเก่าเคส b ปิดด้วย fail แล้ว — uq active
+      // ยอม) → ได้แถว pending ที่ "มีอยู่จริงแต่ไม่ processing" โดยไม่ต้อง seed มือ
+      const res = await userRpc("my_request_data_export", exportB.accessToken, {
+        p_request_id: crypto.randomUUID(),
+      });
+      expect(res.status, res.text.slice(0, 300)).toBe(200);
+      const jobId = (res.json as JobResult).jobId ?? "";
+      expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
+      // สแนปชอตแถวเต็มก่อนเรียก — เทียบทึบว่า TX ที่ abort ไม่เปลี่ยนแม้คอลัมน์เดียว
+      const before = await psqlScalar(`
+        select to_jsonb(j)::text from public.data_export_jobs j where id = '${jobId}';
+      `);
+      expect(before).toBeTruthy();
+      const failed = await svcRpc("complete_data_export_job", {
+        p_job_id: jobId,
+        p_file_media_id: E16_MEDIA_DONE,
+        p_chunks: 1,
+        p_request_id: crypto.randomUUID(),
+        p_claim_token: crypto.randomUUID(), // token ใด ๆ — ด่านสถานะมาก่อนด่าน lease (0039)
+      });
+      // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|job_not_processing หายที่ gateway
+      expect(failed.status, failed.text.slice(0, 300)).toBe(500);
+      expect(failed.json, "P0002 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
+      expect(failed.text).not.toContain("ERR-");
+      expect(failed.text).not.toContain("job_not_processing");
+      // P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวงานคงสภาพเดิมทุกคอลัมน์
+      expect(
+        await psqlScalar(
+          `select to_jsonb(j)::text from public.data_export_jobs j where id = '${jobId}';`,
+        ),
+      ).toBe(before);
+      const statusAfter = await psqlScalar(`
+        select status::text from public.data_export_jobs where id = '${jobId}';
+      `);
+      expect(statusAfter).toBe("pending");
+    }, 45_000);
+
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──
 
     it("เคส e ขอลบบัญชี: ผู้ถือ staff role → ERR-RBAC-001|account_delete_sod · RPC ออก token จริง 43 อักขระครั้งเดียว (r3) · ขอซ้ำ → delete_pending · DB เก็บ sha256 เท่านั้น", async () => {
