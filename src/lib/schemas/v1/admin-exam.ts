@@ -574,6 +574,181 @@ export function toQuestionResource(row: QuestionRow): QuestionResourceParsed {
   };
 }
 
+/* ─── Wave G P2 — read surfaces + status toggle (D74/D75/D78 · API-SPECIFICATION §3.8 1.3.0) ─── */
+
+/** body ของ PATCH .../questions/{qid}/status (D75) — strict { status: active|retired } เท่านั้น */
+export const QuestionStatusBody = z
+  .object({ status: z.enum(["active", "retired"]) })
+  .strict();
+
+export type QuestionStatusBodyParsed = z.infer<typeof QuestionStatusBody>;
+
+/** path params ของ status PATCH — รูปแบบเดียวกับ QuestionPatchParams ([id]/questions/[qid]/status) */
+export const QuestionStatusParams = z
+  .object({ bankId: z.uuid(), questionId: z.uuid() })
+  .strict();
+
+export type QuestionStatusParamsParsed = z.infer<typeof QuestionStatusParams>;
+
+/**
+ * ตัวเลือกของ EditQuestionResource — เพิ่ม isCorrect จาก QuestionOptionView (D74):
+ * เฉลยปรากฏเฉพาะ edit GET — list/PATCH ยังตัด is_correct ตั้งแต่ SELECT เหมือนเดิม
+ */
+export const EditQuestionOption = z
+  .object({
+    id: z.uuid(),
+    optionText: z.string(),
+    sortOrder: z.number().int(),
+    isCorrect: z.boolean(),
+  })
+  .strict();
+
+export type EditQuestionOptionParsed = z.infer<typeof EditQuestionOption>;
+
+/**
+ * resource ข้อสอบสำหรับฟอร์มแก้ (GET .../questions/{qid} — D74) — DTO แยกจาก
+ * QuestionResource เพื่อไม่ให้เส้นอื่นเริ่มคืนเฉลยโดยอ้อม (list/PATCH ไม่มี isCorrect)
+ */
+export const EditQuestionResource = z
+  .object({
+    id: z.uuid(),
+    bankId: z.uuid(),
+    type: z.enum(ADMIN_QUESTION_TYPES),
+    difficulty: z.enum(ADMIN_QUESTION_DIFFICULTIES),
+    questionText: z.string(),
+    explanation: z.string().nullable(),
+    points: z.number().int().min(1),
+    status: z.enum(ADMIN_QUESTION_STATUSES),
+    tags: z.array(z.string()),
+    version: z.number().int().min(1),
+    createdAt: IsoTimestamp,
+    options: z.array(EditQuestionOption),
+  })
+  .strict();
+
+export type EditQuestionResourceParsed = z.infer<typeof EditQuestionResource>;
+
+/**
+ * แถว questions + embed options "รวม is_correct" (edit GET เท่านั้น — r4-H2a ตรวจขาเข้า
+ * ก่อน map แบบเดียวกับ QuestionRowSchema — drift → ERR-SYS-002 503 fail-closed)
+ */
+export const EditQuestionRowSchema = z
+  .object({
+    id: z.uuid(),
+    bank_id: z.uuid(),
+    type: z.enum(ADMIN_QUESTION_TYPES),
+    difficulty: z.enum(ADMIN_QUESTION_DIFFICULTIES),
+    question_text: z.string().min(1),
+    explanation: z.string().nullable(),
+    points: z.number().int().min(1),
+    status: z.enum(ADMIN_QUESTION_STATUSES),
+    tags: z.array(z.string()),
+    version: z.number().int().min(1),
+    created_at: IsoTimestamp,
+    // to-many embed คืน array เสมอ ( [] เมื่อไม่มีตัวเลือก) → null = drift ไม่ fabricate []
+    question_options: z.array(
+      z
+        .object({
+          id: z.uuid(),
+          option_text: z.string().min(1),
+          sort_order: z.number().int(),
+          is_correct: z.boolean(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+/** แถว questions + embed options รวม is_correct (หลังผ่านการตรวจ EditQuestionRowSchema) */
+export interface EditQuestionRow {
+  readonly id: string;
+  readonly bank_id: string;
+  readonly type: string;
+  readonly difficulty: string;
+  readonly question_text: string;
+  readonly explanation: string | null;
+  readonly points: number;
+  readonly status: string;
+  readonly tags: readonly string[];
+  readonly version: number;
+  readonly created_at: string;
+  readonly question_options: readonly {
+    readonly id: string;
+    readonly option_text: string;
+    readonly sort_order: number;
+    readonly is_correct: boolean;
+  }[];
+}
+
+export function parseEditQuestionRow(row: unknown): EditQuestionRow {
+  const parsed = EditQuestionRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "edit_question_row_drift" } });
+  }
+  return parsed.data;
+}
+
+/** map แถว edit → EditQuestionResource (options รวม isCorrect — เส้นเดียวที่คืนเฉลย) */
+export function toEditQuestionResource(row: EditQuestionRow): EditQuestionResourceParsed {
+  return {
+    id: row.id,
+    bankId: row.bank_id,
+    type: row.type as EditQuestionResourceParsed["type"],
+    difficulty: row.difficulty as EditQuestionResourceParsed["difficulty"],
+    questionText: row.question_text,
+    explanation: row.explanation,
+    points: row.points,
+    status: row.status as EditQuestionResourceParsed["status"],
+    tags: [...row.tags],
+    version: row.version,
+    createdAt: row.created_at,
+    options: row.question_options.map((option) => ({
+      id: option.id,
+      optionText: option.option_text,
+      sortOrder: option.sort_order,
+      isCorrect: option.is_correct,
+    })),
+  };
+}
+
+/**
+ * แถว jsonb ที่ RPC admin_set_question_status คืน ({question_id, status, version}) —
+ * ตรวจขาเข้าก่อน map (drift → ERR-SYS-002 503 ตามแบบ r4-H2a)
+ */
+export const QuestionStatusRpcRowSchema = z
+  .object({
+    question_id: z.uuid(),
+    status: z.enum(["active", "retired"]),
+    version: z.number().int().min(1),
+  })
+  .strict();
+
+export type QuestionStatusRpcRow = z.infer<typeof QuestionStatusRpcRowSchema>;
+
+export function parseQuestionStatusRpcRow(row: unknown): QuestionStatusRpcRow {
+  const parsed = QuestionStatusRpcRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "question_status_rpc_row_drift" } });
+  }
+  return parsed.data;
+}
+
+/** response ของ PATCH .../status — {questionId, status, version} (API-SPECIFICATION แถว 222) */
+export const QuestionStatusResult = z
+  .object({
+    questionId: z.uuid(),
+    status: z.enum(["active", "retired"]),
+    version: z.number().int().min(1),
+  })
+  .strict();
+
+export type QuestionStatusResultParsed = z.infer<typeof QuestionStatusResult>;
+
+/** map แถว RPC → response resource (map ตรง ไม่ fabricate ค่า) */
+export function toQuestionStatusResult(row: QuestionStatusRpcRow): QuestionStatusResultParsed {
+  return { questionId: row.question_id, status: row.status, version: row.version };
+}
+
 /* ─── mapping error ฝั่ง DB (insert/update ธรรมดา — ไม่ใช่ RPC) ─── */
 
 /** รูป error ที่ PostgREST คืนกับ insert/update (supabase PostgrestError — เฉพาะฟิลด์ที่ใช้) */

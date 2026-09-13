@@ -1,6 +1,6 @@
 /**
- * PATCH /api/v1/admin/question-banks/{id}/questions/{qid} — แก้ข้อสอบ (Wave D · D-3 ·
- * API-SPECIFICATION §3.8 L214 "แก้ข้อสอบ (version ใหม่ — ข้อที่ใช้แล้วอ่านอย่างเดียว)")
+ * GET/PATCH /api/v1/admin/question-banks/{id}/questions/{qid} — ข้อเดี่ยวสำหรับฟอร์มแก้ (GET)
+ * และแก้ข้อสอบ (PATCH — Wave D · D-3 · API-SPECIFICATION §3.8 L214)
  *
  * version mechanism ที่เลือก: แก้ในแถวเดิม + bump version เสมอ — อ้าง DD §3.4
  * (DATA-DICTIONARY L391: questions.version "bump เมื่อแก้โจทย์/ตัวเลือก —
@@ -34,11 +34,14 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 import { requirePermission } from "@/lib/rbac";
 import {
   parseAdminExam,
+  parseEditQuestionRow,
   parseQuestionRow,
+  EditQuestionResource,
   QuestionPatchBody,
   type QuestionPatchBodyParsed,
   QuestionPatchParams,
   QuestionResource,
+  toEditQuestionResource,
   toQuestionResource,
 } from "@/lib/schemas/v1/admin-exam";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
@@ -167,5 +170,79 @@ export async function PATCH(
     );
   } catch (error: unknown) {
     return jsonErrorResponse(error, options);
+  }
+}
+
+/** select ของ edit GET — options embed รวม is_correct (เส้นเดียวที่คืนเฉลย — D74) */
+const EDIT_QUESTION_SELECT =
+  "id,bank_id,type,difficulty,question_text,explanation,points,status,tags,version,created_at," +
+  "question_options(id,option_text,sort_order,is_correct)";
+
+/**
+ * Cache-Control: private, no-store บนทุกทางออกของ edit GET (D74) — เฉลยอยู่ใน response
+ * ห้ามเก็บ cache ทุกชั้น (private กัน shared cache เก็บ, no-store ห้ามเก็บแม้ private) —
+ * helper response ไม่ตั้งให้เอง จึงใส่หลังสร้าง response ทุกทางออกรวมทาง error ทุก status
+ */
+function withNoStore(response: NextResponse): NextResponse {
+  response.headers.set("cache-control", "private, no-store");
+  return response;
+}
+
+/**
+ * GET — ข้อเดี่ยวสำหรับฟอร์มแก้ (Wave G P2 · D74 · API-SPECIFICATION §3.8 แถว 220 · 1.3.0)
+ * - question_bank:update + user-scoped client กรองทั้ง bankId+qid → qid ผิด bank /
+ *   instructor ต่างเจ้าของ = 404 ไม่เปิดเผยการมีอยู่ (แบบ selectQuestion ของ PATCH :113)
+ * - คืน EditQuestionResource (options มี isCorrect) — DTO แยกจาก QuestionResource เส้นอื่น
+ * - Cache-Control: private, no-store ทุก response รวมทาง error ทุก status · ห้าม log
+ *   payload/เฉลยใน error path (ไม่มี logger เรียก payload ใด ๆ ใน route นี้)
+ */
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ id: string; qid: string }> },
+): Promise<NextResponse> {
+  const options = optionsOf(request);
+  try {
+    // 1) RBAC — question_bank:update (instructor เจ้าของ/staff:exam/super_admin — viewer ตก 403)
+    const { userId } = await requirePermission("question_bank:update");
+    // 2) rate STAFF_WRITE — หลัง RBAC เพื่อไม่นับคำขอที่ยังไม่ผ่านสิทธิ์
+    enforceRateLimit(request, { group: "STAFF_WRITE", secondaryKey: userId });
+    // 3) path params — ผิดรูปแบบ = ERR-VAL-001 400
+    const { id, qid } = await context.params;
+    const { bankId, questionId } = parseAdminExam(QuestionPatchParams, {
+      bankId: id,
+      questionId: qid,
+    });
+    // 4) user-scoped client กรองทั้ง bankId+qid — RLS ซ่อนคลัง/ข้อที่เข้าไม่ถึง → 404
+    const supabase = await createSupabaseSsrClient();
+    const { data, error } = await supabase
+      .from("questions")
+      .select(EDIT_QUESTION_SELECT)
+      .eq("id", questionId)
+      .eq("bank_id", bankId)
+      .maybeSingle();
+    if (error !== null) {
+      throw new AppError("ERR-SYS-002", {
+        details: { reason: "admin_question_edit_query_failed" },
+      });
+    }
+    // ผิดบริบท (qid ไม่อยู่ใน bank / ไม่มีสิทธิ์เห็น) → 404 ไม่เปิดเผยการมีอยู่
+    if (data === null) {
+      throw new AppError("ERR-NF-001", { details: { reason: "question_not_found" } });
+    }
+    // 5) ขาเข้า/ขาออก strict — drift → 503 (r4-H2a/r6-L1)
+    const row = parseEditQuestionRow(data);
+    return withNoStore(
+      jsonOk(
+        parseOutgoingView(
+          EditQuestionResource,
+          toEditQuestionResource(row),
+          "edit_question_resource_drift",
+        ),
+        options,
+      ),
+    );
+  } catch (error: unknown) {
+    // error path ก็ no-store เดียวกัน (D74) — และไม่ log payload/เฉลย (ไม่มี logger ที่นี่)
+    return withNoStore(jsonErrorResponse(error, options));
   }
 }
