@@ -3,7 +3,8 @@
  *
  * GET — RBAC license:verify (registrar/super_admin · aal2) · query strict · keyset
  * (submitted_at,id) DESC · แถวตรงสัญญา lane F ครบ 9 key · evidenceUrl signed 5 นาที ·
- * audit PII_ACCESS fail-closed · drift → 503
+ * audit PII_ACCESS fail-closed · drift → 503 · Wave G P2 (D76): p_ip_hash/p_user_agent
+ * จาก request จริงของ handler (ipHashOf + userAgentHashOf) — ไม่ใช่ null
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,7 +33,9 @@ vi.mock("@/lib/supabase/server", () => ({
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import { ipHashOf } from "@/lib/auth/password-reset";
 import { resetRateLimitStore } from "@/lib/rate-limit";
+import { userAgentHashOf } from "@/lib/security/hash";
 import { encodeCursor } from "@/lib/api/pagination";
 import { GET } from "./route";
 
@@ -160,9 +163,9 @@ function mockStaffClient(options: {
   return { calls, auditCalls };
 }
 
-function listUrl(query = ""): Request {
+function listUrl(query = "", extraHeaders: Record<string, string> = {}): Request {
   return new Request("http://localhost:3000/api/v1/admin/license-applications" + query, {
-    headers: { "x-forwarded-for": "10.9.0.1", "x-request-id": "req-admin-lic-1" },
+    headers: { "x-forwarded-for": "10.9.0.1", "x-request-id": "req-admin-lic-1", ...extraHeaders },
   });
 }
 
@@ -295,6 +298,36 @@ describe("GET /api/v1/admin/license-applications", () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { details: { reason?: string } } };
     expect(body.error.details.reason).toBe("license_applications_pii_audit_unavailable");
+  });
+
+  it("D76: audit รับ p_ip_hash/p_user_agent จาก request จริง (10.9.0.1 + UA ของ header) — ไม่ใช่ null · UA ต่างกัน = hash ต่างกัน", async () => {
+    const { auditCalls } = mockStaffClient({ rows: [appRow()] });
+    const ua = "Mozilla/5.0 (d76-license-route)";
+    const res = await GET(listUrl("", { "user-agent": ua }));
+    expect(res.status).toBe(200);
+    expect(auditCalls).toHaveLength(1);
+    const call = auditCalls[0] ?? { fn: "", args: {} };
+    expect(call.fn).toBe("append_audit_event");
+    expect(call.args["p_ip_hash"]).toBe(ipHashOf("10.9.0.1"));
+    expect(call.args["p_ip_hash"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(call.args["p_user_agent"]).toBe(
+      userAgentHashOf(new Request("http://localhost/", { headers: { "user-agent": ua } })),
+    );
+    expect(call.args["p_user_agent"]).toMatch(/^[0-9a-f]{64}$/);
+    const { auditCalls: auditCalls2 } = mockStaffClient({ rows: [appRow()] });
+    const res2 = await GET(listUrl("", { "user-agent": ua + "-variant-2" }));
+    expect(res2.status).toBe(200);
+    const call2 = auditCalls2[0] ?? { fn: "", args: {} };
+    expect(call2.args["p_user_agent"]).not.toBe(call.args["p_user_agent"]);
+  });
+
+  it("D76: request ไม่มี header user-agent → p_user_agent เป็น null (ตาม helper — ไม่ hash ค่าว่าง)", async () => {
+    const { auditCalls } = mockStaffClient({ rows: [appRow()] });
+    const res = await GET(listUrl());
+    expect(res.status).toBe(200);
+    const call = auditCalls[0] ?? { fn: "", args: {} };
+    expect(call.args["p_user_agent"]).toBeNull();
+    expect(call.args["p_ip_hash"]).toBe(ipHashOf("10.9.0.1"));
   });
 
   it("ไม่มี session → 401", async () => {

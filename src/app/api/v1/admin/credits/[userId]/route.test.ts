@@ -36,7 +36,9 @@ vi.mock("@/lib/supabase/server", () => ({
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { decodeCursor } from "@/lib/api/pagination";
+import { ipHashOf } from "@/lib/auth/password-reset";
 import { resetRateLimitStore } from "@/lib/rate-limit";
+import { userAgentHashOf } from "@/lib/security/hash";
 import { GET } from "./route";
 
 const SV = "staff:viewer";
@@ -169,10 +171,10 @@ function mockLedger(options: {
   };
 }
 
-function ledgerUrl(userId = USER_ID, search = ""): Request {
+function ledgerUrl(userId = USER_ID, search = "", extraHeaders: Record<string, string> = {}): Request {
   return new Request(`http://localhost:3000/api/v1/admin/credits/${userId}${search}`, {
     method: "GET",
-    headers: { "x-forwarded-for": "10.7.0.1", "x-request-id": "req-e11-4" },
+    headers: { "x-forwarded-for": "10.7.0.1", "x-request-id": "req-e11-4", ...extraHeaders },
   });
 }
 
@@ -377,6 +379,41 @@ describe("GET /admin/credits/{userId} — audit PII_ACCESS (fail-closed)", () =>
     const res = await GET(ledgerUrl(), { params: Promise.resolve({ userId: USER_ID }) } as never);
     expect(res.status).toBe(503);
     expect(calls.auditCalls).toHaveLength(0);
+  });
+
+  it("D76: audit รับ p_ip_hash/p_user_agent จาก request จริง (10.7.0.1 + UA ของ header) — ไม่ใช่ null", async () => {
+    const calls = mockLedger({ roles: [SV], rows: [ledgerRow()] });
+    const ua = "Mozilla/5.0 (d76-credits-route)";
+    const res = await GET(ledgerUrl(USER_ID, "", { "user-agent": ua }), {
+      params: Promise.resolve({ userId: USER_ID }),
+    } as never);
+    expect(res.status).toBe(200);
+    expect(calls.auditCalls).toHaveLength(1);
+    const call = calls.auditCalls[0] ?? { fn: "", args: {} };
+    expect(call.fn).toBe("append_audit_event");
+    expect(call.args["p_ip_hash"]).toBe(ipHashOf("10.7.0.1"));
+    expect(call.args["p_ip_hash"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(call.args["p_user_agent"]).toBe(
+      userAgentHashOf(new Request("http://localhost/", { headers: { "user-agent": ua } })),
+    );
+    expect(call.args["p_user_agent"]).toMatch(/^[0-9a-f]{64}$/);
+    // D76 สองทิศ: UA ต่างกัน → hash ต่างกัน (ค่ามาจาก header จริง ไม่ใช่ค่าคงที่)
+    const calls2 = mockLedger({ roles: [SV], rows: [ledgerRow()] });
+    const res2 = await GET(ledgerUrl(USER_ID, "", { "user-agent": ua + "-variant-2" }), {
+      params: Promise.resolve({ userId: USER_ID }),
+    } as never);
+    expect(res2.status).toBe(200);
+    const call2 = calls2.auditCalls[0] ?? { fn: "", args: {} };
+    expect(call2.args["p_user_agent"]).not.toBe(call.args["p_user_agent"]);
+  });
+
+  it("D76: request ไม่มี header user-agent → p_user_agent เป็น null (ตาม helper — ไม่ hash ค่าว่าง)", async () => {
+    const calls = mockLedger({ roles: [SV], rows: [ledgerRow()] });
+    const res = await GET(ledgerUrl(), { params: Promise.resolve({ userId: USER_ID }) } as never);
+    expect(res.status).toBe(200);
+    const call = calls.auditCalls[0] ?? { fn: "", args: {} };
+    expect(call.args["p_user_agent"]).toBeNull();
+    expect(call.args["p_ip_hash"]).toBe(ipHashOf("10.7.0.1"));
   });
 });
 

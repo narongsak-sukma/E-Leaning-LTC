@@ -9,7 +9,9 @@
  *   ทุกรูป (null / วันในอดีตผ่านตรง ๆ = "เคยถูกแบนแล้วหมดอายุ") · แถว drift ขาด
  *   is_banned = schema ตัด (fail-closed)
  * - auditUsersPiiAccessFailClosed — fail-closed: ผ่านครั้งเดียวจบ · ล้ม retry อีกครั้ง ·
- *   ล้มครบ 2 ครั้ง = ERR-SYS-002 (503) — ไม่ปล่อย disclosure ผ่านโดยไม่มี audit
+ *   ล้มครบ 2 ครั้ง = ERR-SYS-002 (503) — ไม่ปล่อย disclosure ผ่านโดยไม่มี audit ·
+ *   Wave G P2 (D76): input มี ipHash/userAgentHash จาก request จริงของ handler —
+ *   pass-through ไป p_ip_hash/p_user_agent ของ RPC (ไม่ fabricated ไม่ strip)
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -153,7 +155,7 @@ describe("auditUsersPiiAccessFailClosed — fail-closed retry (แบบแผ�
     serviceRpcMock.mockReset();
   });
 
-  it("rpc ผ่านครั้งเดียว → resolve · เรียก rpc ครั้งเดียว · payload ตรง allowlist PII_ACCESS (0008/0025)", async () => {
+  it("rpc ผ่านครั้งเดียว → resolve · เรียก rpc ครั้งเดียว · payload ตรง allowlist PII_ACCESS (0008/0025) · hash pass-through (D76)", async () => {
     serviceRpcMock.mockResolvedValue({ error: null });
     await expect(
       auditUsersPiiAccessFailClosed({
@@ -162,6 +164,8 @@ describe("auditUsersPiiAccessFailClosed — fail-closed retry (แบบแผ�
         purpose: "admin_users_search",
         actorId: "11111111-1111-4111-8111-111111111111",
         requestId: "req-unit-1",
+        ipHash: "a".repeat(64),
+        userAgentHash: "b".repeat(64),
       }),
     ).resolves.toBeUndefined();
     expect(serviceRpcMock).toHaveBeenCalledTimes(1);
@@ -176,6 +180,8 @@ describe("auditUsersPiiAccessFailClosed — fail-closed retry (แบบแผ�
           purpose: "admin_users_search",
           user_id: "11111111-1111-4111-8111-111111111111",
         },
+        p_ip_hash: "a".repeat(64),
+        p_user_agent: "b".repeat(64),
         p_request_id: "req-unit-1",
       }),
     );
@@ -192,9 +198,18 @@ describe("auditUsersPiiAccessFailClosed — fail-closed retry (แบบแผ�
         purpose: "unit_purpose",
         actorId: "11111111-1111-4111-8111-111111111111",
         requestId: "req-unit-2",
+        ipHash: "c".repeat(64),
+        userAgentHash: null,
       }),
     ).resolves.toBeUndefined();
     expect(serviceRpcMock).toHaveBeenCalledTimes(2);
+    expect(serviceRpcMock).toHaveBeenLastCalledWith(
+      "append_audit_event",
+      expect.objectContaining({
+        p_ip_hash: "c".repeat(64),
+        p_user_agent: null,
+      }),
+    );
   });
 
   it("ล้มครบ 2 ครั้ง → ERR-SYS-002 (503) · เรียก rpc พอดี 2 ครั้ง (retry ครั้งเดียว)", async () =>  {
@@ -206,6 +221,8 @@ describe("auditUsersPiiAccessFailClosed — fail-closed retry (แบบแผ�
         purpose: "admin_users_search",
         actorId: "11111111-1111-3111-8111-111111111111",
         requestId: "req-unit-3",
+        ipHash: "d".repeat(64),
+        userAgentHash: "e".repeat(64),
       }),
     ).rejects.toMatchObject({
       code: "ERR-SYS-002",

@@ -33,9 +33,11 @@ import {
   parseOutgoingView,
   type JsonResponseOptions,
 } from "@/lib/api/response";
+import { ipHashOf } from "@/lib/auth/password-reset";
 import { AppError } from "@/lib/errors";
 import { requirePermission } from "@/lib/rbac";
-import { enforceRateLimit } from "@/lib/rate-limit";
+import { clientIpFrom, enforceRateLimit } from "@/lib/rate-limit";
+import { userAgentHashOf } from "@/lib/security/hash";
 
 /** ความยาวคำค้นสูงสุด — ตรงขอบเขตที่ RPC admin_list_users ตรวจ (ERR-VAL-001|query_length) */
 const QUERY_MAX_LENGTH = 100;
@@ -145,13 +147,16 @@ export async function GET(request: Request): Promise<NextResponse> {
         "admin_user_row_drift",
       ),
     );
-    // 6) audit PII_ACCESS fail-closed — ก่อนคืนแถว (แบบแผน 1.1.2 B7)
+    // 6) audit PII_ACCESS fail-closed — ก่อนคืนแถว (แบบแผน 1.1.2 B7) · D76: hash จาก
+    //    request จริง (ip_hash + user_agent_hash) — ไม่ส่ง null เหมือนเดิมอีก
     await auditUsersPiiAccessFailClosed({
       endpoint: "/api/v1/admin/users",
       targetUserId: null,
       purpose: "admin_users_search",
       actorId: userId,
       requestId: options.requestId ?? null,
+      ipHash: ipHashOf(clientIpFrom(request)),
+      userAgentHash: userAgentHashOf(request),
     });
     // 7) keyset page — nextCursor เซ็น (§1.2) จาก (created_at, id) ของแถวสุดท้าย
     const nextCursor =
