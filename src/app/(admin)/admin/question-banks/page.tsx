@@ -76,7 +76,14 @@ export default async function AdminQuestionBanksPage({
     {
       id: "code",
       header: "รหัสคลัง",
-      render: (bank) => <span className="font-semibold text-ink-900">{bank.code}</span>,
+      render: (bank) => (
+        <Link
+          href={`/admin/question-banks/${bank.id}`}
+          className="font-semibold text-brand-700 hover:underline"
+        >
+          {bank.code}
+        </Link>
+      ),
     },
     {
       id: "name",
