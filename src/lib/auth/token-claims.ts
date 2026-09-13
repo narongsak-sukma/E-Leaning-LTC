@@ -101,7 +101,8 @@ function cookieMapOf(cookieHeader: string): Map<string, string> {
  * — SDK ใส่ prefix `base64-` **ครั้งเดียวก่อนแบ่ง chunk** (cookies.ts:
  * `encoded = BASE64_PREFIX + …` แล้ว createChunks) ดังนั้น prefix อยู่ที่หัว
  * ของ chunk `.0` เท่านั้น · การอ่านตาม SDK (chunker combineChunks): อ่าน `.0`
- * เรียงขึ้นไปจนพบเลขที่หาย **หยุด** ที่ช่องว่างแรก
+ * เรียงขึ้นไปจนพบเลขที่หาย **หยุด** ที่ช่องว่างแรก · ค่า cookie ที่เป็นค่าว่าง
+ * ถือเป็น "ไม่มี" ตาม truthiness ของ SDK (gate g-p1-r4 MINOR-1)
  * - ผิดรูป/ไม่มี cookie/decode ไม่ได้ = null (ไม่ throw) — ผู้เรียก fallback เอง
  */
 export function accessTokenFromAuthCookie(
@@ -114,8 +115,12 @@ export function accessTokenFromAuthCookie(
   const base = authCookieBaseName(supabaseUrl);
   const map = cookieMapOf(cookieHeader);
   let encoded: string | null = null;
-  if (map.has(base)) {
-    encoded = map.get(base) ?? null;
+  // gate g-p1-r4 MINOR-1: SDK ตรวจ truthiness (chunker.ts) — ค่าว่าง = ไม่มี
+  // cookie นั้น · base ค่าว่างจึงตกไปอ่าน chunk ต่อ ส่วน chunk ที่ว่างคั่นกลาง
+  // = ช่องว่าง ต้องหยุด (ไม่ข้ามไปเลขถัดไป)
+  const baseValue = map.get(base);
+  if (baseValue !== undefined && baseValue !== "") {
+    encoded = baseValue;
   } else {
     // chunked — อ่าน `.0`, `.1`, ... ตามลำดับจนพบเลขที่หาย (แบบ combineChunks
     // ของ SDK — หยุดที่ช่องว่างแรก ไม่รวมเลขกระโดด) แล้วต่อค่าดิบทั้งหมดก่อน
@@ -123,7 +128,7 @@ export function accessTokenFromAuthCookie(
     const chunks: string[] = [];
     for (let i = 0; ; i += 1) {
       const chunk = map.get(`${base}.${i}`);
-      if (chunk === undefined) {
+      if (chunk === undefined || chunk === "") {
         break;
       }
       chunks.push(chunk);

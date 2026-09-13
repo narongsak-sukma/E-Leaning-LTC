@@ -105,6 +105,19 @@ describe("accessTokenFromAuthCookie (r2 MINOR-2 — ไม่ผ่าน SDK)",
     expect(accessTokenFromAuthCookie(header, KONG)).toBeNull();
   });
 
+  it("gate g-p1-r4 MINOR-1: base ค่าว่าง + chunk .0 สมบูรณ์ — truthiness ของ SDK ถือว่า base ไม่มี → อ่าน chunk ได้ token", () => {
+    const encoded = `base64-${Buffer.from(JSON.stringify({ access_token: TOKEN })).toString("base64url")}`;
+    const header = `sb-kong-auth-token=; sb-kong-auth-token.0=${encoded}`;
+    expect(accessTokenFromAuthCookie(header, KONG)).toBe(TOKEN);
+  });
+
+  it("gate g-p1-r4 MINOR-1: chunk .1 ค่าว่างคั่น .0/.2 — SDK หยุดที่ค่าว่าง (ไม่ข้าม) → decode ไม่ผ่าน = null", () => {
+    const encoded = `base64-${Buffer.from(JSON.stringify({ access_token: TOKEN })).toString("base64url")}`;
+    const cut = [encoded.slice(0, 12), encoded.slice(12)];
+    const header = `sb-kong-auth-token.0=${cut[0]}; sb-kong-auth-token.1=; sb-kong-auth-token.2=${cut[1]}`;
+    expect(accessTokenFromAuthCookie(header, KONG)).toBeNull();
+  });
+
   it("ไม่มี cookie / ไม่มีชื่อ base / JSON ไม่มี access_token / ขยะ → null ไม่ throw", () => {
     expect(accessTokenFromAuthCookie(null, KONG)).toBeNull();
     expect(accessTokenFromAuthCookie("", KONG)).toBeNull();

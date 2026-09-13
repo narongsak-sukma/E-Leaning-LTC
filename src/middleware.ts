@@ -139,11 +139,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // "การเขียน" (rotation) เผยแพร่เสมอ
   const isLogoutPath =
     request.method === "POST" && request.nextUrl.pathname === "/api/v1/auth/logout";
-  // gate g-p1-r3 MAJOR: POST /api/v1/me/password สัญญา "นับ quota AUTH ก่อนแตะ
-  // GoTrue/SDK ใด ๆ" — middleware ต้องไม่หมุน token (getSession/refreshSession =
-  // network) ก่อน route นับ · rotation ของ browser เกิดที่ request ก่อนหน้าแล้ว
-  // (เช่น GET /my/security ที่เปิดฟอร์ม) · ถ้า access token หมดอายุจริงตอนนี้
-  // requireUser จะตอบ 401 เอง (fail-closed ไม่ใช่หลุดโควตา)
+  // gate g-p1-r3 MAJOR + r4 MINOR-2: POST /api/v1/me/password สัญญา "นับ quota
+  // AUTH ก่อน network แรกของ request" — middleware ต้องไม่หมุน token
+  // (getSession/refreshSession = network) ก่อน route นับ · rotation ของ browser
+  // เกิดที่ request ก่อนหน้าแล้ว (เช่น GET /my/security ที่เปิดฟอร์ม) · ถ้า
+  // access token หมดอายุจริงตอนนี้ getUser ของ SDK จะ refresh เอง **หลังนับ
+  // แล้ว** (สำเร็จ = เดินต่อ · พลาด = 401) — quota ถูกนับก่อนเสมอไม่ว่าอย่างไร
   const isPreCountPasswordChangePath =
     request.method === "POST" && request.nextUrl.pathname === "/api/v1/me/password";
   // gate-cleanup r1 M1: ขาในของ server component (RSC loader เรียก BFF ของตัวเอง —
