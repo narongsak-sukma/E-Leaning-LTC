@@ -66,6 +66,11 @@ export default function EmailChangeCallbackPage() {
   const [state, setState] = useState<CardState>("unknown");
   useEffect(() => {
     setState(classifyHash(window.location.hash));
+    // gate r1 F9: fragment ของ GoTrue บรรจุ access/refresh token (ขั้น 2 ของ 2) —
+    // ตัดสินเสร็จแล้วตัด fragment ออกจาก URL ทันที (history.replaceState ไม่เพิ่ม
+    // รายการประวัติ) ไม่ให้ค้างใน address bar/ปุ่มย้อนหลัง/คัดลอกลิงก์ต่อ —
+    // idempotent เมื่อ effect รันซ้ำ (React strict mode)
+    window.history.replaceState(null, "", window.location.pathname);
   }, []);
   const view = VIEW[state];
 

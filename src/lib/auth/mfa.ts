@@ -12,7 +12,8 @@
  *    ที่ GoTrue ออกให้ (claim ลงนามโดย GoTrue — อ่านค่าหลัง requireUser ตรวจกับ Auth server
  *    แล้วเท่านั้น)
  * 4) client interop — client เดี่ยว (ไม่ผูก cookie) สำหรับขั้น password ของ login สองขั้น
- *    + การเปิด session จาก token ใน cookie ชั่วคราว (`ltc_mfa_pending`)
+ *    + stash ฝั่ง server ของ token ขั้น password (cookie `ltc_mfa_pending` เก็บ uuid
+ *    เท่านั้น — gate r1 F2/F5)
  *
  * ข้อจำกัดของ GoTrue v2.164.0 (probe จริง 2026-09-13):
  * - GET /admin/users/{id}/factors **ไม่คืน secret** และ POST /admin/users/{id}/factors
@@ -25,7 +26,7 @@
  *   ดู mintAal2ForBackupLogin()
  */
 import "server-only";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -224,7 +225,7 @@ export function assertMfaDisableAllowed(roles: readonly string[]): void {
  * client เดี่ยว (ไม่ผูก cookie — persistSession:false) สำหรับ:
  * - ขั้น password ของ login สองขั้น (ห้ามเขียน session cookie ตั้งแต่ขั้นนี้ —
  *   ผู้ใช้ที่ต้องยืนยัน MFA ยังไม่ "เข้าระบบจริง" จนกว่า step-2 จะผ่าน)
- * - ต่อ session จาก token ใน cookie ชั่วคราว (setSession อ่านเข้า memory เท่านั้น)
+ * - ต่อ session จาก token ของ stash ฝั่ง server (setSession อ่านเข้า memory เท่านั้น)
  */
 export function createStandaloneAuthClient(): SupabaseClient {
   const { supabaseUrl, supabaseAnonKey } = getConfig();
@@ -233,39 +234,152 @@ export function createStandaloneAuthClient(): SupabaseClient {
   });
 }
 
-/** token pair ที่เก็บใน cookie ชั่วคราว (refresh token จำเป็น — setSession ของ SDK ต้องใช้) */
+/** token pair ของขั้น password ที่ยังไม่ยืนยัน MFA (refresh token จำเป็น — setSession ของ SDK ต้องใช้) */
 export interface PendingMfaTokens {
   readonly accessToken: string;
   readonly refreshToken: string;
 }
 
-/** แพ็ก token เป็นค่า cookie (JSON) — คืน null เมื่อ token ไม่ครบรูป */
-export function encodePendingMfaValue(tokens: PendingMfaTokens): string | null {
+// ─── 4a) stash ฝั่ง server (gate r1 F2/F5 · migration 0045) ───────────────────
+//
+// เดิม (รูปแบบที่ gate ปฏิเสธ): แพ็ก token จริงเป็น JSON ลง cookie — ใครก็ตาม
+// อ่าน Set-Cookie ได้ (client ที่ไม่ใช่ browser/HTTPS proxy log) ถือ session aal1
+// เต็มตัวโดยไม่ต้องผ่านขั้นสอง · ใหม่: token ถูกเข้ารหัส (AES-256-GCM) เก็บใน
+// ตาราง mfa_pending_stash ผ่าน RPC — cookie เก็บ uuid ของแถวอย่างเดียว · อายุ/
+// single-use บังคับที่ DB (expires_at/consumed_at) ไม่ใช่ browser maxAge
+
+/** รูป uuid v4 — ค่าเดียวที่ cookie ชั่วคราวมีสิทธิ์บรรจุ */
+const PENDING_STASH_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** ค่า cookie ชั่วคราว → uuid ของ stash — ค่าอื่นทุกชนิด = null (fail-closed) */
+export function parsePendingStashCookie(raw: string): string | null {
+  return PENDING_STASH_ID_RE.test(raw) ? raw : null;
+}
+
+/** ถอด base64 → คีย์ 32 ไบต์ของ AES-256 — รูปอื่น = null (ผู้เรียกตอบ fail-closed) */
+export function decodePendingStashKey(b64: string): Buffer | null {
+  try {
+    const key = Buffer.from(b64, "base64");
+    return key.length === 32 ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+/** เข้ารหัส token pair เป็น payload ของ stash: `v1.<iv>.<tag>.<ct>` (base64url) */
+export function encryptPendingStashPayload(tokens: PendingMfaTokens, key: Buffer): string | null {
   const { accessToken, refreshToken } = tokens;
   if (typeof accessToken !== "string" || accessToken === "" || typeof refreshToken !== "string" || refreshToken === "") {
     return null;
   }
-  return JSON.stringify({ a: accessToken, r: refreshToken });
-}
-
-/** แกะค่า cookie ชั่วคราวเป็น token pair — คืน null เมื่อค่าเพี้ยน/ไม่ครบ (fail-closed) */
-export function decodePendingMfaValue(raw: string): PendingMfaTokens | null {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const plaintext = Buffer.from(JSON.stringify({ a: accessToken, r: refreshToken }), "utf8");
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return ["v1", iv.toString("base64url"), tag.toString("base64url"), ciphertext.toString("base64url")].join(".");
   } catch {
     return null;
   }
-  if (typeof parsed !== "object" || parsed === null) {
+}
+
+/** ถอด payload ของ stash กลับเป็น token pair — ค่าเพี้ยน/แก้ไข/คีย์ผิด = null (GCM ตรวจ) */
+export function decryptPendingStashPayload(payload: string, key: Buffer): PendingMfaTokens | null {
+  const parts = payload.split(".");
+  if (parts.length !== 4 || parts[0] !== "v1") {
     return null;
   }
-  const record = parsed as Record<string, unknown>;
-  const accessToken = record["a"];
-  const refreshToken = record["r"];
-  if (typeof accessToken !== "string" || accessToken === "" || typeof refreshToken !== "string" || refreshToken === "") {
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(parts[1]!, "base64url"));
+    decipher.setAuthTag(Buffer.from(parts[2]!, "base64url"));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(parts[3]!, "base64url")),
+      decipher.final(),
+    ]).toString("utf8");
+    const parsed: unknown = JSON.parse(plaintext);
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const record = parsed as Record<string, unknown>;
+    const accessToken = record["a"];
+    const refreshToken = record["r"];
+    if (typeof accessToken !== "string" || accessToken === "" || typeof refreshToken !== "string" || refreshToken === "") {
+      return null;
+    }
+    return { accessToken, refreshToken };
+  } catch {
     return null;
   }
-  return { accessToken, refreshToken };
+}
+
+/**
+ * เก็บ token pair ลง stash ฝั่ง server — คืน uuid ให้ใส่ cookie หรือ null เมื่อ
+ * ไม่มีคีย์ (LTC_MFA_PENDING_KEY)/เข้ารหัสไม่ได้/RPC ปฏิเสธ (ทุกกรณี = ERR-SYS-001
+ * ที่ caller — fail-closed ห้าม fallback กลับไปแพ็ก token ใน cookie)
+ */
+export async function stashPendingMfaTokens(client: SupabaseClient, tokens: PendingMfaTokens): Promise<string | null> {
+  const { mfaPendingKey } = getConfig();
+  if (mfaPendingKey === null) {
+    return null;
+  }
+  const key = decodePendingStashKey(mfaPendingKey);
+  if (key === null) {
+    return null;
+  }
+  const payload = encryptPendingStashPayload(tokens, key);
+  if (payload === null) {
+    return null;
+  }
+  const { data, error } = await client.rpc("mfa_pending_stash_create", { p_payload: payload });
+  if (error !== null || typeof data !== "string" || !PENDING_STASH_ID_RE.test(data)) {
+    return null;
+  }
+  return data;
+}
+
+/**
+ * ขอคืน token pair จาก stash (ขั้นสอง — ยังไม่มี session: ยิง RPC ด้วย anon key
+ * ของ standalone client · uuid คือ bearer secret 122 บิต + อายุ 300 วิที่ DB) ·
+ * **peek ไม่ใช่ consume** — รหัสผิดพยายามใหม่ได้เท่าอายุที่เหลือ (single-use
+ * ตัดสินที่ consumePendingMfaTokens หลัง verify สำเร็จเท่านั้น) · ไม่มี/ใช้แล้ว/
+ * หมดอายุ/ถอดไม่ได้ = null → caller ตอบ state=expired
+ */
+export async function takePendingMfaTokens(stashId: string): Promise<PendingMfaTokens | null> {
+  if (!PENDING_STASH_ID_RE.test(stashId)) {
+    return null;
+  }
+  const { mfaPendingKey } = getConfig();
+  if (mfaPendingKey === null) {
+    return null;
+  }
+  const key = decodePendingStashKey(mfaPendingKey);
+  if (key === null) {
+    return null;
+  }
+  const client = createStandaloneAuthClient();
+  const { data, error } = await client.rpc("mfa_pending_stash_take", { p_id: stashId });
+  if (error !== null || typeof data !== "string" || data === "") {
+    return null;
+  }
+  return decryptPendingStashPayload(data, key);
+}
+
+/**
+ * ปิด stash หลัง verify สำเร็จ (single-use จริง — uuid ตายทันทีที่ออก session:
+ * replay คุกกี้เดิมไม่มีทางกลับมาได้ token) · ล้มก็ไม่ถือเป็นความล้มเหลวของ
+ * login (แถวหมดอายุเองภายใน 300 วิ — caller เรียกหลัง mint สำเร็จเท่านั้น)
+ */
+export async function consumePendingMfaTokens(stashId: string): Promise<void> {
+  if (!PENDING_STASH_ID_RE.test(stashId)) {
+    return;
+  }
+  try {
+    await createStandaloneAuthClient().rpc("mfa_pending_stash_consume", { p_id: stashId });
+  } catch {
+    // แถวหมดอายุเอง ≤300 วิ — ไม่ขวางการออก session ของผู้ใช้
+  }
 }
 
 /** client ที่ถือ pending session (token จาก cookie ชั่วคราว) — เรียก auth.mfa และ rpc ผ่านตัวนี้ */

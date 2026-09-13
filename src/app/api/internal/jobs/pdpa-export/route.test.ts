@@ -36,6 +36,7 @@ function configStub(overrides: Partial<AppConfig> = {}): AppConfig {
     supabasePublicUrl: null,
     cursorHmacSecret: null,
     ipHashSalt: null,
+    mfaPendingKey: null,
     mediaProvider: "supabase_storage",
     mediaSignedUrlTtlSec: 900,
     r2: null,

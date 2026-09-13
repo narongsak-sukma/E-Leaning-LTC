@@ -23,11 +23,13 @@ import {
   MFA_PENDING_COOKIE,
   type PendingMfaTokens,
   challengeAndVerifyTotp,
+  consumePendingMfaTokens,
   createPendingMfaClient,
-  decodePendingMfaValue,
   firstVerifiedTotpFactor,
   mintAal2ForBackupLogin,
   normalizeBackupCodeInput,
+  parsePendingStashCookie,
+  takePendingMfaTokens,
 } from "@/lib/auth/mfa";
 
 /** URL ของหน้ายืนยัน (แนบ next/state เฉพาะเมื่อต่างจากค่า default) */
@@ -63,9 +65,14 @@ export async function verifyMfaStepTwoAction(formData: FormData): Promise<void> 
   let state: "invalid" | "expired" | "error" = "error";
   let minted: PendingMfaTokens | null = null;
 
-  const tokens = decodePendingMfaValue(raw);
+  // gate r1 F2/F5: cookie เก็บ uuid ของ stash เท่านั้น — ขอ token คืนจาก server
+  // (single-use · อายุ 300 วิ บังคับที่ DB) · ไม่มี/ใช้แล้ว/หมดอายุ/ค่าหลอน = expired
+  // พร้อมเคลียร์ cookie ทันที (รีเพลย์ค่าเดิมซ้ำไม่ต้องเข้ามาถึงจุดนี้อีก)
+  const stashId = parsePendingStashCookie(raw);
+  const tokens = stashId === null ? null : await takePendingMfaTokens(stashId);
   if (tokens === null) {
     state = "expired";
+    store.set(MFA_PENDING_COOKIE, "", { path: "/login", maxAge: 0 });
   } else {
     try {
       const pending = await createPendingMfaClient(tokens);
@@ -113,6 +120,11 @@ export async function verifyMfaStepTwoAction(formData: FormData): Promise<void> 
 
   if (minted === null) {
     redirect(verifyUrl(next, state));
+  }
+  // verify ผ่าน — ปิด stash ให้ uuid ตายจริง (single-use: replay คุกกี้เดิมไม่ได้
+  // token คืน) ก่อนออก session · ล้มไม่ขวาง login (แถวหมดอายุเอง ≤300 วิ)
+  if (stashId !== null) {
+    await consumePendingMfaTokens(stashId);
   }
   // ออก session จริง — setSession ตรวจ token กับ GoTrue ก่อนบันทึกลง cookie ผ่าน ssr.ts
   const ssr = await createSupabaseSsrClient();

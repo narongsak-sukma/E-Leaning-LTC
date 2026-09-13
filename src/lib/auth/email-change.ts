@@ -273,22 +273,30 @@ export async function requestEmailChange(
     return fail("mfa_required");
   }
 
-  // (e) updateUser — GoTrue ส่งลิงก์ยืนยันไปที่อีเมลใหม่ (AUTOCONFIRM=false) ·
-  // emailRedirectTo ต้องอยู่ใน GOTRUE_URI_ALLOW_LIST จึงจะถูกใช้จริง
+  // (e) audit durable USER_EMAIL_CHANGE_REQUEST **ก่อน** mutation (gate r1 F3:
+  // เดิมเขียน audit หลัง updateUser — RPC ปฏิเสธ (เช่น aal guard ของ 0044) ตอน
+  // นั้น GoTrue ส่งลิงก์ไปแล้ว = เปลี่ยนจริงแต่บอกผู้ใช้ว่าล้มเหลว) · ลำดับใหม่:
+  // RPC ตรวจ aal/role + เขียนหลักฐานก่อน แล้วจึงให้ updateUser ทำงาน — audit ไม่
+  // ผ่าน = ไม่มี mutation เกิดขึ้นเด็ดขาด (fail-closed) · กรณี email ซ้ำที่ถูกกลบ
+  // เป็นคำสำเร็จกัน enumeration: คำขอถูกบันทึกไว้เป็นหลักฐานภายใน (sha256 ล้วน —
+  // ไม่มีอะไรรั่วออกนอกระบบ ผู้ใช้ได้รับคำตอบเดิมทุกประการ)
+  const audited = await deps.auditRequest(newEmailSha256);
+  if (!audited.ok) {
+    return fail(classifyAuditRpcError(audited.message));
+  }
+
+  // (f) updateUser — GoTrue ส่งลิงก์ยืนยันไปที่อีเมลใหม่ (AUTOCONFIRM=false) ·
+  // emailRedirectTo ต้องอยู่ใน GOTRUE_URI_ALLOW_LIST จึงจะถูกใช้จริง ·
+  // ล้มเมื่อนี้ = มีคำขอถูกบันทึกแต่ยังไม่มีอีเมลออก (append-only บันทึก "คำขอ
+  // เกิดจริง" — ตรงความหมายของ event ชื่อ REQUEST อยู่แล้ว)
   const updated = await deps.updateUserEmail(newEmail, input.callbackUrl);
   if (!updated.ok) {
     const kind = classifyUpdateUserError(updated);
     if (kind === "email_taken_masked") {
-      // กัน enumeration — ตอบเหมือนสำเร็จ (ไม่มีอีเมลส่งจริง ไม่มี audit REQUEST)
+      // กัน enumeration — ตอบเหมือนสำเร็จ (ไม่มีอีเมลส่งจริง)
       return { ok: true, newEmail, newEmailSha256 };
     }
     return fail(kind === "rate_limited" ? "rate_limited" : "system");
-  }
-
-  // (f) audit durable USER_EMAIL_CHANGE_REQUEST (หลัง updateUser สำเร็จเท่านั้น)
-  const audited = await deps.auditRequest(newEmailSha256);
-  if (!audited.ok) {
-    return fail(classifyAuditRpcError(audited.message));
   }
 
   return { ok: true, newEmail, newEmailSha256 };

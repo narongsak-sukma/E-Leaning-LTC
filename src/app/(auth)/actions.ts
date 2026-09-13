@@ -19,8 +19,8 @@ import {
   MFA_PENDING_COOKIE,
   MFA_PENDING_COOKIE_MAX_AGE,
   createStandaloneAuthClient,
-  encodePendingMfaValue,
   firstVerifiedTotpFactor,
+  stashPendingMfaTokens,
 } from "@/lib/auth/mfa";
 import { buildSignupConsents, SIGNUP_CONSENT_POLICY_VERSION } from "./signup-consents";
 
@@ -170,15 +170,18 @@ export async function loginAction(formData: FormData): Promise<void> {
   }
   const pendingFactor = factorsData === null ? null : firstVerifiedTotpFactor(factorsData.all);
   if (pendingFactor !== null) {
-    const value = encodePendingMfaValue({
+    // gate r1 F2/F5: token จริงหยุดอยู่ฝั่ง server — เข้ารหัส AES-256-GCM เก็บใน
+    // mfa_pending_stash ผ่าน RPC (single-use · อายุ 300 วิบังคับที่ DB) · cookie
+    // เก็บ uuid อย่างเดียว — Set-Cookie รั่วก็ไม่ได้ session ใด ๆ
+    const stashId = await stashPendingMfaTokens(auth, {
       accessToken: session.access_token,
       refreshToken: session.refresh_token,
     });
-    if (value === null) {
+    if (stashId === null) {
       redirect(loginUrl(next, { error: "ERR-SYS-001" }));
     }
     const store = await cookies();
-    store.set(MFA_PENDING_COOKIE, value, {
+    store.set(MFA_PENDING_COOKIE, stashId, {
       httpOnly: true,
       sameSite: "lax",
       path: "/login",

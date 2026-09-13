@@ -182,7 +182,7 @@ describe("requestEmailChange (orchestration)", () => {
     audit?: "ok" | "mfa_required" | "boom";
   }
 
-  /** mock deps ที่บันทึกลำดับการเรียก: verify -> update -> audit */
+  /** mock deps ที่บันทึกลำดับการเรียก: verify -> audit -> update (gate r1 F3: audit ก่อน mutation) */
   function makeDeps(options: MakeDepsOptions): EmailChangeDeps & { calls: string[] } {
     const calls: string[] = [];
     return {
@@ -237,7 +237,7 @@ describe("requestEmailChange (orchestration)", () => {
     resetRateLimitStore();
   });
 
-  it("normal path: order verify -> update -> audit, result ok with correct sha256", async () => {
+  it("normal path: order verify -> audit -> update, result ok with correct sha256", async () => {
     const deps = makeDeps({});
     const result = await requestEmailChange(input(), deps);
     expect(result).toEqual({
@@ -245,7 +245,7 @@ describe("requestEmailChange (orchestration)", () => {
       newEmail: NEW,
       newEmailSha256: hashEmailForAudit(NEW),
     });
-    expect(deps.calls).toEqual(["verify", "update", "audit"]);
+    expect(deps.calls).toEqual(["verify", "audit", "update"]);
   });
 
   it("wrong password -> password_mismatch, updateUser+audit never called", async () => {
@@ -273,26 +273,30 @@ describe("requestEmailChange (orchestration)", () => {
     const deps = makeDeps({});
     const result = await requestEmailChange(input({ roles: ["instructor"], aal: "aal2" }), deps);
     expect(result.ok).toBe(true);
-    expect(deps.calls).toEqual(["verify", "update", "audit"]);
+    expect(deps.calls).toEqual(["verify", "audit", "update"]);
   });
 
-  it("email_exists -> masked as success, audit never called", async () => {
+  it("email_exists -> masked as success · คำขอยังถูก audit ก่อน (หลักฐานภายใน sha256 ล้วน)", async () => {
     const deps = makeDeps({ update: "email_exists" });
     const result = await requestEmailChange(input(), deps);
     expect(result).toEqual({ ok: true, newEmail: NEW, newEmailSha256: hashEmailForAudit(NEW) });
-    expect(deps.calls).toEqual(["verify", "update"]);
+    expect(deps.calls).toEqual(["verify", "audit", "update"]);
   });
 
-  it("updateUser unknown failure -> system", async () => {
+  it("updateUser unknown failure -> system (คำขอถูก audit ไปแล้ว — ตรงความหมาย REQUEST)", async () => {
     const deps = makeDeps({ update: "boom" });
     const result = await requestEmailChange(input(), deps);
     expect(result).toEqual({ ok: false, failure: "system", errorCode: "ERR-SYS-001" });
+    expect(deps.calls).toEqual(["verify", "audit", "update"]);
   });
 
-  it("audit mfa_required (role changed mid-flight) -> ERR-AUTH-004", async () => {
+  it("audit mfa_required (role changed mid-flight) -> ERR-AUTH-004 · updateUser ไม่ถูกเรียกเด็ดขาด", async () => {
     const deps = makeDeps({ audit: "mfa_required" });
     const result = await requestEmailChange(input(), deps);
     expect(result).toEqual({ ok: false, failure: "mfa_required", errorCode: "ERR-AUTH-004" });
+    // gate r1 F3: หัวใจของการสลับลำดับ — RPC ปฏิเสธ = ไม่มี mutation (เดิม
+    // updateUser ทำไปแล้วก่อน RPC ตรวจ จึงเปลี่ยนจริงแต่บอกผู้ใช้ว่าล้มเหลว)
+    expect(deps.calls).toEqual(["verify", "audit"]);
   });
 
   it("audit unknown failure -> system", async () => {

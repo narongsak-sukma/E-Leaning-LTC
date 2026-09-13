@@ -37,6 +37,42 @@ import { getConfig } from "./lib/config";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
+ * สร้าง nonce ต่อ request (base64 — ตามแบบแผบคู่มือ Next.js เรื่อง CSP)
+ * crypto.randomUUID ของ Edge runtime = CSPRNG · btoa → 24 อักขระ (≥16 ตาม OWASP)
+ */
+export function generateCspNonce(): string {
+  return btoa(crypto.randomUUID());
+}
+
+/**
+ * CSP แบบ nonce (gate r1 F8 — เดิม script-src 'unsafe-inline' ทุก environment):
+ * - script-src 'self' 'nonce-…' 'strict-dynamic' — Next.js อ่าน CSP จาก request
+ *   header แล้วปัก nonce ให้ inline bootstrap script ของมันเองโดยอัตโนมัติ ·
+ *   'strict-dynamic' ให้ script ที่ nonce แล้วโหลด dependency ต่อได้ (chunk ของ
+ *   Next) · 'self' เหลือเป็น fallback ของ browser รุ่นเก่าที่ไม่รู้จัก strict-dynamic
+ * - style-src 'unsafe-inline' ยังจำเป็น (Next/Tailwind ฝัง <style> ที่ไม่มี nonce —
+ *   เวกเตอร์ของ style ไม่รันสคริปต์ ต่างจาก script-src · บันทึกไว้ใน VA-PENTEST)
+ * - dev เท่านั้น: +'unsafe-eval' (React Refresh) + media/img เปิด localhost:8000
+ *   (สื่อ+signed URL ของ Kong ตอนพัฒนา) — production ไม่มีทั้งคู่
+ */
+export function buildContentSecurityPolicy(nonce: string, isDev: boolean): string {
+  const devMediaSources = isDev ? ["http://localhost:8000", "http://127.0.0.1:8000"] : [];
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
+    "style-src 'self' 'unsafe-inline'",
+    `img-src 'self' data: blob:${devMediaSources.join(" ")}`,
+    `media-src 'self' blob: data:${devMediaSources.join(" ")}`,
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+/**
  * ตรวจ CSRF เชิงโครงสร้าง (SDS §5.4 — "ต่าง origin = ปฏิเสธ") — ทุก mutating request
  * - มี Origin → เทียบ origin เต็ม (scheme+host+port) กับ origin ของ request —
  *   เทียบเฉพาะ host ไม่พอ: Origin: http://x ต่อ request https://x เป็นคนละ origin
@@ -66,15 +102,27 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-request-id", requestId);
 
+  // nonce CSP (gate r1 F8) — ต้อง set "ก่อน" NextResponse.next ทั้งสองจุด: Next
+  // อ่าน CSP จาก request header เพื่อดึง nonce ไปปักให้ inline script ของมันเอง
+  // (คู่มือทางการ "Content Security Policy" ของ Next.js) · nonce เปลี่ยนทุก
+  // request — ห้าม cache HTML ที่บรรจุ nonce (matcher ไม่แตะ _next/static อยู่แล้ว)
+  const nonce = generateCspNonce();
+  const csp = buildContentSecurityPolicy(nonce, process.env.NODE_ENV === "development");
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("content-security-policy", csp);
+
   // CSRF คุมเฉพาะ API (SDS §5.4) — หน้าเว็บ/server action มีการตรวจ origin ของ
   // Next เอง (การขยาย matcher ไปหน้าเว็บใน r10 M2 เป็นการเพิ่ม session refresh
   // เท่านั้น ไม่ใช่ขยายขอบเขต CSRF)
   const isApi = request.nextUrl.pathname.startsWith("/api/v1/");
   if (isApi && !SAFE_METHODS.has(request.method) && !isCsrfAllowed(request)) {
-    return jsonError("ERR-RBAC-001", {
+    const rejected = jsonError("ERR-RBAC-001", {
       requestId,
       details: { reason: "csrf_origin_mismatch" },
     });
+    rejected.headers.set("content-security-policy", csp);
+    rejected.headers.set("x-request-id", requestId);
+    return rejected;
   }
 
   // session refresh (SDS §5.1) — token หมุนแล้วเดินต่อทั้งสองทิศทาง:
@@ -199,6 +247,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   }
 
   response.headers.set("x-request-id", requestId);
+  response.headers.set("content-security-policy", csp);
   return response;
 }
 

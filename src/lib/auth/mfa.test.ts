@@ -11,8 +11,10 @@ import {
   backupCodeHash,
   base32Decode,
   decodeJwtPayload,
-  decodePendingMfaValue,
-  encodePendingMfaValue,
+  decodePendingStashKey,
+  decryptPendingStashPayload,
+  encryptPendingStashPayload,
+  parsePendingStashCookie,
   generateBackupCodes,
   hasRecentMfa,
   normalizeBackupCodeInput,
@@ -136,20 +138,50 @@ describe("assertMfaDisableAllowed", () => {
   });
 });
 
-describe("cookie ชั่วคราว (pending)", () => {
+describe("cookie ชั่วคราว (pending — stash uuid · gate r1 F2/F5)", () => {
   it("ชื่อ+อายุตามสัญญา", () => {
     expect(MFA_PENDING_COOKIE).toBe("ltc_mfa_pending");
     expect(MFA_PENDING_COOKIE_MAX_AGE).toBe(300);
   });
 
-  it("encode/decode ตรงกัน + fail-closed เมื่อค่าเพี้ยน", () => {
-    const value = encodePendingMfaValue({ accessToken: "tok-a.b.c", refreshToken: "rt-1" });
-    expect(value).not.toBeNull();
-    expect(decodePendingMfaValue(value ?? "")).toEqual({ accessToken: "tok-a.b.c", refreshToken: "rt-1" });
-    expect(decodePendingMfaValue("not-json")).toBeNull();
-    expect(decodePendingMfaValue('{"a":"x"}')).toBeNull(); // ขาด r
-    expect(decodePendingMfaValue('{"a":"","r":"y"}')).toBeNull();
-    expect(encodePendingMfaValue({ accessToken: "", refreshToken: "y" })).toBeNull();
+  it("parsePendingStashCookie รับ uuid v4 เท่านั้น — ค่าอื่น null หมด (fail-closed)", () => {
+    expect(parsePendingStashCookie("0f0e0d0c-1b2a-4c3d-8e9f-aabbccddeeff")).toBe(
+      "0f0e0d0c-1b2a-4c3d-8e9f-aabbccddeeff",
+    );
+    // token/JSON ของระบบเดิมต้องถูกปฏิเสธเด็ดขาด (ไม่มีทางเล็ดลอดกลับไปแพ็ก token)
+    expect(parsePendingStashCookie('{"a":"eyJ...","r":"rt"}')).toBeNull();
+    expect(parsePendingStashCookie("")).toBeNull();
+    expect(parsePendingStashCookie("not-a-uuid")).toBeNull();
+    // uuid รุ่นอื่น (v1 — หลักตำแหน่ง 13 ไม่ใช่ 4) ไม่รับ
+    expect(parsePendingStashCookie("0f0e0d0c-1b2a-1c3d-8e9f-aabbccddeeff")).toBeNull();
+  });
+
+  it("encrypt/decrypt stash payload ตรงกัน · ค่าเพี้ยน/คีย์ผิด = null (GCM ตรวจแก้ไข)", () => {
+    const key = Buffer.alloc(32, 7);
+    const payload = encryptPendingStashPayload({ accessToken: "tok-a.b.c", refreshToken: "rt-1" }, key);
+    expect(payload).toMatch(/^v1\./);
+    expect(decryptPendingStashPayload(payload ?? "", key)).toEqual({
+      accessToken: "tok-a.b.c",
+      refreshToken: "rt-1",
+    });
+    // ผิดรูป
+    expect(decryptPendingStashPayload("not-json", key)).toBeNull();
+    expect(decryptPendingStashPayload("v2.a.b.c", key)).toBeNull();
+    expect(decryptPendingStashPayload("v1.only-three", key)).toBeNull();
+    // แก้ ciphertext หนึ่งตัวอักษร = tag ไม่ผ่าน (tamper-evidence ของ GCM)
+    const parts = (payload ?? "").split(".");
+    const tampered = `${parts[0]}.${parts[1]}.${parts[2]}.${(parts[3] ?? "").slice(0, -2)}xx`;
+    expect(decryptPendingStashPayload(tampered, key)).toBeNull();
+    // คีย์ผิด
+    expect(decryptPendingStashPayload(payload ?? "", Buffer.alloc(32, 9))).toBeNull();
+    // token ไม่ครบรูป = ไม่เข้ารหัส
+    expect(encryptPendingStashPayload({ accessToken: "", refreshToken: "y" }, key)).toBeNull();
+  });
+
+  it("decodePendingStashKey รับ base64 32 ไบต์เท่านั้น", () => {
+    expect(decodePendingStashKey(Buffer.alloc(32, 1).toString("base64"))).not.toBeNull();
+    expect(decodePendingStashKey(Buffer.alloc(16, 1).toString("base64"))).toBeNull();
+    expect(decodePendingStashKey("not base64!")).toBeNull();
   });
 
   it("decodeJwtPayload อ่าน payload แบบ base64url", () => {
