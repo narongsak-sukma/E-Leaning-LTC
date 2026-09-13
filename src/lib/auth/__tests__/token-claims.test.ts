@@ -1,5 +1,5 @@
 /**
- * unit tests — token-claims (gate r1 B1/M4 · Wave G P1)
+ * unit tests — token-claims (gate r1 B1/M4 + r2 MINOR-2 · Wave G P1)
  *
  * ประกอบ JWT ปลอมชิ้นส่วน payload จริง (header.signature ไม่เกี่ยว — helper
  * decode payload อย่างเดียว ไม่ตรวจลายเซ็น) ตรวจ:
@@ -7,12 +7,20 @@
  * - amr อ่าน method ทุก entry · รูปแบบอื่น (ไม่มี amr / entry ไม่ใช่ object /
  *   method ไม่ใช่ string) = null/ชุดว่าง
  * - token ขยะ/ว่าง = null ไม่ throw
+ * - accessTokenFromAuthCookie: อ่าน access token จาก cookie header ตรง ๆ
+ *   (base เดี่ยว + chunk .N ตาม cookieEncoding ของ @supabase/ssr) โดยไม่ผ่าน
+ *   SDK getSession — ผิดรูป = null ไม่ throw
  * ค่าอ้างอิงจาก probe จริงของ GoTrue v2.164 (2026-09-14): recovery = otp ·
  * password grant = password · refresh คง method เดิม
  */
 import { describe, expect, it } from "vitest";
 
-import { amrMethodsFromAccessToken, subFromAccessToken } from "../token-claims";
+import {
+  accessTokenFromAuthCookie,
+  amrMethodsFromAccessToken,
+  authCookieBaseName,
+  subFromAccessToken,
+} from "../token-claims";
 
 const UUID = "cb7ccb09-1111-4222-8333-444455556666";
 
@@ -63,5 +71,47 @@ describe("amrMethodsFromAccessToken", () => {
     expect(amrMethodsFromAccessToken(jwt({ amr: [{ nomethod: 1 }, 42, "x"] }))).toEqual([]);
     expect(amrMethodsFromAccessToken("")).toBeNull();
     expect(amrMethodsFromAccessToken("garbage")).toBeNull();
+  });
+});
+
+describe("accessTokenFromAuthCookie (r2 MINOR-2 — ไม่ผ่าน SDK)", () => {
+  const KONG = "http://kong:8000";
+  const TOKEN = jwt({ sub: UUID });
+
+  /** ค่า cookie ตาม cookieEncoding base64 ของ @supabase/ssr (แบบ tests/integration) */
+  function cookieValue(session: Record<string, unknown>): string {
+    return `base64-${Buffer.from(JSON.stringify(session)).toString("base64url")}`;
+  }
+
+  it("base เดี่ยว — decode ได้ access_token (ท่าจริงของ @supabase/ssr)", () => {
+    const header = `other=x; sb-kong-auth-token=${cookieValue({ access_token: TOKEN })}; y=1`;
+    expect(accessTokenFromAuthCookie(header, KONG)).toBe(TOKEN);
+  });
+
+  it("chunk .0/.1/.2 — ต่อเนื้อ base64 ก่อน decode (เรียงตามเลข ไม่ใช่ชื่อ)", () => {
+    const encoded = Buffer.from(JSON.stringify({ access_token: TOKEN })).toString("base64url");
+    const cut = [encoded.slice(0, 10), encoded.slice(10, 25), encoded.slice(25)];
+    const header = [
+      `sb-kong-auth-token.2=${`base64-${cut[2]}`}`,
+      `sb-kong-auth-token.0=${`base64-${cut[0]}`}`,
+      `sb-kong-auth-token.1=${`base64-${cut[1]}`}`,
+    ].join("; ");
+    expect(accessTokenFromAuthCookie(header, KONG)).toBe(TOKEN);
+  });
+
+  it("ไม่มี cookie / ไม่มีชื่อ base / JSON ไม่มี access_token / ขยะ → null ไม่ throw", () => {
+    expect(accessTokenFromAuthCookie(null, KONG)).toBeNull();
+    expect(accessTokenFromAuthCookie("", KONG)).toBeNull();
+    expect(accessTokenFromAuthCookie("sb-other-auth-token=base64-AAAA", KONG)).toBeNull();
+    expect(
+      accessTokenFromAuthCookie(`sb-kong-auth-token=${cookieValue({ no_token: true })}`, KONG),
+    ).toBeNull();
+    expect(accessTokenFromAuthCookie("sb-kong-auth-token=base64-%zz", KONG)).toBeNull();
+    expect(accessTokenFromAuthCookie("sb-kong-auth-token=", KONG)).toBeNull();
+  });
+
+  it("authCookieBaseName — สูตร sb-<host ต้นทาง>-auth-token ตรง ssr.ts", () => {
+    expect(authCookieBaseName("http://kong:8000")).toBe("sb-kong-auth-token");
+    expect(authCookieBaseName("https://abcd1234.supabase.co")).toBe("sb-abcd1234-auth-token");
   });
 });

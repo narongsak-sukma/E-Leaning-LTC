@@ -10,7 +10,8 @@
  *   {password} ด้วย session ผู้ใช้ → audit AUTH_PASSWORD_CHANGE (service-role RPC,
  *   context strict ['method','session_id']) → 200 — เซสชันปัจจุบันคงไว้ (ห้าม sign out)
  * - rate: AUTH group (secondary = claim sub จาก cookie — นับ ip + user แยกกัน
- *   D12-11 · นับก่อนแตะ GoTrue ใด ๆ ตาม MINOR-2)
+ *   D12-11 · นับก่อนแตะ GoTrue/SDK ใด ๆ ตาม MINOR-2: อ่าน cookie เอง ไม่ผ่าน
+ *   getSession ที่อาจ refresh ผ่าน network)
  */
 import { NextResponse } from "next/server";
 
@@ -19,7 +20,8 @@ import { AppError } from "@/lib/errors";
 import { buildPasswordChangeDeps, changePassword, PASSWORD_CHANGE_MESSAGES, PASSWORD_POLICY_MESSAGE } from "@/lib/auth/password-change";
 import { requireUser } from "@/lib/auth/session";
 import { clientIpFrom, enforceRateLimit } from "@/lib/rate-limit";
-import { subFromAccessToken } from "@/lib/auth/token-claims";
+import { accessTokenFromAuthCookie, subFromAccessToken } from "@/lib/auth/token-claims";
+import { getConfig } from "@/lib/config";
 import { readJwtSessionClaim } from "@/lib/schemas/v1/exam";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { PasswordChangeBody, PasswordChangeView } from "./schema";
@@ -60,19 +62,21 @@ async function parsePasswordBody(request: Request) {
 export async function POST(request: Request): Promise<NextResponse> {
   const options = responseOptions(request);
   try {
-    const supabase = await createSupabaseSsrClient();
     // นับ quota AUTH ก่อนพิสูจน์รหัสผ่านเสมอ (กรอกผิดก็นับ — D72) และ**ก่อนแตะ
-    // GoTrue ด้วย** (gate r1 MINOR-2): requireUser คือ getUser+aal+profiles หลาย
-    // round-trip — ต้องนับก่อน ไม่งั้น request ขยะไหลเข้า GoTrue โดยไม่ถูกนับ ·
-    // คีย์รอง = claim sub จาก access token ใน cookie (getSession+decode ในเครื่อง
-    // ไม่มี network — ปลอม sub ได้แค่แยก bucket ของตัวเอง ขณะ bucket IP หลักนับ
-    // ทุกครั้งเสมอ) · ไม่มี sub = mirror IP (แบบแผน lead fix ของ reset action)
-    const { data: sessionPreview } = await supabase.auth.getSession();
-    const previewSub = subFromAccessToken(sessionPreview.session?.access_token ?? "");
+    // GoTrue/SDK ด้วย** (gate r1 MINOR-2 + r2: getSession ของ auth-js เช็ค
+    // expires_at และอาจยิง refresh ผ่าน network เมื่อใกล้หมดอายุ — ไม่ใช่การอ่าน
+    // cookie เปล่า ๆ) → อ่านคีย์รองเองจาก cookie header ตรง ๆ (decode ในเครื่อง
+    // ล้วน ไม่มี network · ปลอม sub ได้แค่แยก bucket ของตัวเอง ขณะ bucket IP
+    // หลักนับทุกครั้งเสมอ) · ไม่มี/อ่านไม่ได้ = mirror IP (แบบแผน lead fix ของ
+    // reset action)
+    const { supabaseUrl } = getConfig();
+    const previewToken = accessTokenFromAuthCookie(request.headers.get("cookie"), supabaseUrl);
+    const previewSub = subFromAccessToken(previewToken ?? "");
     enforceRateLimit(request, {
       group: "AUTH",
       secondaryKey: previewSub ?? clientIpFrom(request),
     });
+    const supabase = await createSupabaseSsrClient();
     const user = await requireUser();
     const body = await parsePasswordBody(request);
     // claim session_id ของ session ปัจจุบัน (audit) — fail-closed เมื่อไม่มี session จริง

@@ -175,7 +175,10 @@ export interface PasswordResetConfirmDeps {
   ) => Promise<"ok" | "expired_link" | "weak_password" | "system">;
   /** POST /auth/v1/logout?scope=global — เพิกถอนทุกเซสชันของ user ทันที */
   readonly logoutGlobal: (accessToken: string) => Promise<"ok" | "system">;
-  /** เขียน audit AUTH_PASSWORD_RESET_DONE (context {ip_hash}) — fail-closed */
+  /**
+   * เขียน audit AUTH_PASSWORD_RESET_DONE — fail-closed · จุดประกอบจริงของ context
+   * อยู่ที่ route: {user_id ยกเป็น actor โดย RPC แล้ว strip, ip_hash} (gate r2)
+   */
   readonly audit: (
     ipHash: string,
     requestId: string | null,

@@ -18,9 +18,11 @@
  *   weak_password = 400 ERR-VAL-001 ข้อความ policy · 429/5xx/network ที่ PUT/logout
  *   = 503 ERR-SYS-002 (คง cookie ไว้ให้กดใหม่ — แบบเดียวกับ logout route) · audit
  *   ล้มหลัง mutation สำเร็จ = 503 โดยการล้าง cookie ถูก flush จริง (M3)
- * - audit ผ่าน service-role RPC append_audit_event context {ip_hash} เท่านั้น
- *   (0008:471) · actor = claim sub ของ access token (M4 — ไม่ใช่ user object ใน
- *   cookie ที่ปลอมได้) · PII (รหัสผ่าน/JWT/อีเมล) ห้ามลง log/response
+ * - audit ผ่าน service-role RPC append_audit_event · actor = claim sub ของ
+ *   access token (M4 — ไม่ใช่ user object ใน cookie ที่ปลอมได้) ส่งเป็น
+ *   context.user_id ให้ RPC ยกเป็น actor แล้ว strip (0032) · context ที่เก็บจริง
+ *   เหลือ {ip_hash} ตาม allowlist 0008:471 (gate r2 — เดิมไม่ส่ง user_id ทำให้
+ *   actor เป็น null) · PII (รหัสผ่าน/JWT/อีเมล) ห้ามลง log/response
  */
 import { NextResponse } from "next/server";
 
@@ -99,9 +101,14 @@ async function logoutGlobalViaGoTrue(
   }
 }
 
-/** audit AUTH_PASSWORD_RESET_DONE — context {ip_hash} เท่านั้น (0008:471) */
+/**
+ * audit AUTH_PASSWORD_RESET_DONE — gate r2: ส่ง `user_id` (claim sub ของ token
+ * ที่ GoTrue ผ่านใน request เดียวกัน) ให้ RPC ยกเป็น actor แล้ว strip ออกก่อน
+ * strict allowlist (0032 — กลไกเดียวกับ AUTH_PASSWORD_CHANGE) · context ที่
+ * เก็บจริงเหลือ {ip_hash} ตาม allowlist 0008:471
+ */
 async function auditDoneFailClosed(
-  userId: string | null,
+  userId: string,
   ipHash: string,
   requestId: string | null,
 ): Promise<{ ok: true } | { ok: false }> {
@@ -113,7 +120,7 @@ async function auditDoneFailClosed(
       p_entity_id: userId,
       p_before: null,
       p_after: null,
-      p_context: { ip_hash: ipHash },
+      p_context: { user_id: userId, ip_hash: ipHash },
       p_actor_roles: null,
       p_ip_hash: null,
       p_user_agent: null,

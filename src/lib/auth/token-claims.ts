@@ -10,6 +10,8 @@
  *   จริงใน request เดียวกัน เท่านั้น
  * - ห้าม log ค่า token/claim ทั้งฟัลด้วยเด็ดขาด (SDS §6.2)
  * - pure module (ไม่ import server-only) — unit test เรียกตรงได้
+ * - gate r2 MINOR-2: `accessTokenFromAuthCookie` อ่าน token จาก cookie ตรง ๆ
+ *   (รองจาก SDK getSession ที่อาจยิง refresh ผ่าน network ก่อนนับ quota)
  */
 
 /** uuid v4 เท่านั้น (ตรงแบบแผน sessionIdFromAccessToken ของ logout-all.ts) */
@@ -61,4 +63,88 @@ export function amrMethodsFromAccessToken(accessToken: string): readonly string[
     }
   }
   return methods;
+}
+
+// ─── อ่าน access token จาก cookie ตรง ๆ (gate r2 MINOR-2) ────────────────────
+
+/**
+ * สูตรชื่อ cookie ของ ssr.ts:169 (supabase-js) — `sb-<host ต้นทาง>-auth-token`
+ * (dev = http://kong:8000 → `sb-kong-auth-token`)
+ */
+export function authCookieBaseName(supabaseUrl: string): string {
+  return `sb-${new URL(supabaseUrl).hostname.split(".")[0]!}-auth-token`;
+}
+
+/** แยก cookie header เป็น map (ชื่อ → ค่า) — ทนช่องว่างรอบ ๆ และค่าที่มี '='  */
+function cookieMapOf(cookieHeader: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) {
+      continue;
+    }
+    const name = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (name !== "") {
+      map.set(name, value);
+    }
+  }
+  return map;
+}
+
+/**
+ * access token จาก auth cookie โดยไม่ผ่าน SDK — getSession() ของ @supabase/ssr
+ * เช็ค `expires_at` และยิง refresh ผ่าน network เมื่อใกล้หมดอายุ (auth-js
+ * GoTrueClient) จึงใช้เป็น "การอ่านคีย์รองก่อนนับ quota" ไม่ได้ · อ่านเองแทน:
+ * ค่า cookie ของ @supabase/ssr (cookieEncoding base64) = `base64-` + base64url
+ * ของ JSON session · session ยาวโดนแบ่งเป็น chunk `<base>.0`, `<base>.1`, ...
+ * (แต่ละ chunk มี prefix `base64-` ของตัวเอง — ต่อเนื้อความก่อน decode)
+ * - ผิดรูป/ไม่มี cookie/decode ไม่ได้ = null (ไม่ throw) — ผู้เรียก fallback เอง
+ */
+export function accessTokenFromAuthCookie(
+  cookieHeader: string | null,
+  supabaseUrl: string,
+): string | null {
+  if (cookieHeader === null || cookieHeader === "") {
+    return null;
+  }
+  const base = authCookieBaseName(supabaseUrl);
+  const map = cookieMapOf(cookieHeader);
+  let encoded: string | null = null;
+  if (map.has(base)) {
+    encoded = map.get(base) ?? null;
+  } else {
+    // chunked — เก็บทุก `<base>.N` เรียงตามเลขแล้วต่อกัน
+    const chunkRe = new RegExp(`^${base}\\.(\\d+)$`);
+    const chunks = [...map.entries()]
+      .filter(([name]) => chunkRe.test(name))
+      .sort((a, b) => {
+        const na = Number((a[0].match(chunkRe) ?? [])[1]);
+        const nb = Number((b[0].match(chunkRe) ?? [])[1]);
+        return na - nb;
+      })
+      .map(([, value]) => value);
+    if (chunks.length > 0) {
+      encoded = chunks
+        .map((chunk) => (chunk.startsWith("base64-") ? chunk.slice("base64-".length) : chunk))
+        .join("");
+    }
+  }
+  if (encoded === null) {
+    return null;
+  }
+  const body = encoded.startsWith("base64-") ? encoded.slice("base64-".length) : encoded;
+  if (body === "") {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const token = (parsed as Record<string, unknown>)["access_token"];
+    return typeof token === "string" && token !== "" ? token : null;
+  } catch {
+    return null;
+  }
 }

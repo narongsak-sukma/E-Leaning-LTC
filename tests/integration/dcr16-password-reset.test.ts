@@ -161,12 +161,13 @@ async function clickVerifyLink(
 interface AuditRow {
   readonly action: string;
   readonly request_id: string | null;
+  readonly actor_user_id: string | null;
   readonly context: Record<string, unknown>;
 }
 
 function auditRowsByRequestId(requestId: string): Promise<AuditRow[]> {
   return psqlRows<AuditRow>(
-    `select action, request_id, context from audit_logs
+    `select action, request_id, actor_user_id, context from audit_logs
      where action like 'AUTH_PASSWORD_RESET%'
        and request_id = '${requestId}'
      order by occurred_at`,
@@ -423,12 +424,15 @@ describe.skipIf(DB_URL === undefined)("DCR-16 — password reset (AUTH-004)", ()
     const body = (await confirmRes.json()) as { data?: { message?: string } };
     expect(body.data?.message).toBe(PASSWORD_RESET_DONE_MESSAGE);
 
-    // audit DONE — แถวจริงโยง request-id ของ response (context = ip_hash เดียว 0008:471)
+    // audit DONE — แถวจริงโยง request-id ของ response (context = ip_hash เดียว 0008:471
+    // — user_id ถูก RPC ยกเป็น actor แล้ว strip ออกก่อนเก็บ) · actor = sub จริงของ
+    // token recovery (gate r2 — เดิม context ไม่มี user_id ทำให้ actor เป็น null)
     const requestId = confirmRes.headers.get("x-request-id");
     expect(requestId).not.toBeNull();
     const rows = await auditRowsByRequestId(requestId!);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.action).toBe("AUTH_PASSWORD_RESET_DONE");
+    expect(rows[0]?.actor_user_id).toBe(second.id);
     expect(Object.keys(rows[0]?.context ?? {})).toEqual(["ip_hash"]);
 
     // เปลี่ยนรหัสจริง — grant ด้วยรหัสใหม่ผ่าน (ผ่าน Kong)
