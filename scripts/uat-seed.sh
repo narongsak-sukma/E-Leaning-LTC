@@ -77,15 +77,40 @@ if [[ -n "${DOCKER_HOST:-}" ]] \
   exit 1
 fi
 # ชื่อ context ไม่ใช่เกณฑ์ (Docker Desktop ใช้ชื่อ 'desktop-linux' บน socket ในเครื่อง) —
-# เกณฑ์คือ endpoint ที่ resolve จริงต้องเป็นของเครื่องนี้: unix/npipe socket หรือ tcp ที่
-# localhost เท่านั้น (DOCKER_CONTEXT ที่ชี้ context ของเครื่องอื่นจะตกกระสอบที่นี่)
-CTX_NAME="${DOCKER_CONTEXT:-$(docker context show 2>/dev/null || printf 'default')}"
-CTX_ENDPOINT=$(docker context inspect "$CTX_NAME" --format '{{.Endpoints.docker.Host}}' 2>/dev/null || printf '')
-if [[ -n "$CTX_ENDPOINT" ]] \
-   && [[ "$CTX_ENDPOINT" != unix://* && "$CTX_ENDPOINT" != npipe://* ]] \
-   && [[ "$CTX_ENDPOINT" != *://localhost:* && "$CTX_ENDPOINT" != *://127.0.0.1:* ]]; then
-  log "ERROR: docker context '$CTX_NAME' ชี้ endpoint ที่ไม่ใช่เครื่องนี้ ($CTX_ENDPOINT) — สลับ context กลับ local ก่อนรัน seed dev"
-  exit 1
+# เกณฑ์คือปลายทางที่ docker CLI ใช้จริงตามลำดับความสำคัญของมันเอง: ตั้ง DOCKER_HOST =
+# ปลายทางคือ DOCKER_HOST เสมอ (ชนะ context ทุกตัว — ตรวจ allowlist ไปแล้วด้านบน จึงไม่
+# ต้อง resolve context ซ้ำ) · ไม่ตั้ง DOCKER_HOST = ปลายทางมาจาก context (DOCKER_CONTEXT
+# เลือกทับ active context) ซึ่งต้อง resolve ได้เป็นชื่อ/endpoint ที่ไม่ว่างก่อนตรวจ allowlist
+# — resolve ไม่ได้หรือได้ค่าว่าง = พิสูจน์เป้าหมายไม่ได้ = หยุด (gate p4-r3 M1 ปิดช่องที่
+# r2 เหลือ: เดิม resolve ล้มแล้วผ่านเงียบ ๆ ถ้า compose ps ตอบ running)
+if [[ -z "${DOCKER_HOST:-}" ]]; then
+  if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+    CTX_NAME="$DOCKER_CONTEXT"
+  else
+    CTX_NAME=$(docker context show 2>/dev/null) || {
+      log "ERROR: อ่านชื่อ docker context ที่ active อยู่ไม่สำเร็จ (docker context show ล้มเหลว) — พิสูจน์เป้าหมายไม่ได้ ไม่ผ่าน guard (fail-closed)"
+      exit 1
+    }
+    if [[ -z "$CTX_NAME" ]]; then
+      log "ERROR: docker context show ตอบชื่อ context ว่าง — พิสูจน์เป้าหมายไม่ได้ ไม่ผ่าน guard (fail-closed)"
+      exit 1
+    fi
+  fi
+  CTX_ENDPOINT=$(docker context inspect "$CTX_NAME" --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || {
+    log "ERROR: resolve endpoint ของ docker context '$CTX_NAME' ไม่สำเร็จ (docker context inspect ล้มเหลว) — ไม่ผ่าน guard (fail-closed)"
+    exit 1
+  }
+  if [[ -z "$CTX_ENDPOINT" ]]; then
+    log "ERROR: docker context '$CTX_NAME' resolve ได้ endpoint ว่าง — ไม่ผ่าน guard (fail-closed)"
+    exit 1
+  fi
+  case "$CTX_ENDPOINT" in
+    unix://*|npipe://*|*://localhost:*|*://127.0.0.1:*) : ;;
+    *)
+      log "ERROR: docker context '$CTX_NAME' ชี้ endpoint ที่ไม่ใช่เครื่องนี้ ($CTX_ENDPOINT) — สลับ context กลับ local ก่อนรัน seed dev"
+      exit 1
+      ;;
+  esac
 fi
 if ! docker compose ps db 2>/dev/null | grep -q "running\|healthy"; then
   log "ERROR: service db ไม่ได้รัน — เริ่มด้วย: docker compose up -d"
