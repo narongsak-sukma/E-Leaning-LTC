@@ -51,7 +51,7 @@ const USER_ID = "b0000000-0000-4000-8000-000000000001";
 const T1 = "2026-08-01T00:00:00+00:00";
 const T2 = "2026-09-01T00:00:00+00:00";
 
-/** แถวผู้ใช้จาก admin_list_users (snake_case ตรง 0035 §7) */
+/** แถวผู้ใช้จาก admin_list_users (snake_case ตรง 0035 §7 + is_banned/banned_until ของ RPC v2 0041) */
 function userRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: USER_ID,
@@ -61,6 +61,8 @@ function userRow(overrides: Record<string, unknown> = {}): Record<string, unknow
     created_at: T1,
     roles: ["citizen"],
     has_verified_license: false,
+    is_banned: false,
+    banned_until: null,
     ...overrides,
   };
 }

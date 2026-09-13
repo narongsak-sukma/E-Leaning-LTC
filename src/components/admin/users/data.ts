@@ -39,11 +39,18 @@ export type AdminUserRow = {
   displayName: string;
   /** บทบาททั้งหมดที่ถือ (ค่าแปลกปลอมกรองทิ้งตอนแสดง — ตัดสินจริงอยู่ที่ BFF/DB เสมอ) */
   roles: readonly string[];
-  /** วันที่ถูกลบ (soft-delete) — null = ยังใช้งาน · สถานะ ban ของ GoTrue ไม่อยู่ในแถวของ RPC (Wave F) */
+  /** วันที่ถูกลบ (soft-delete) — null = ยังใช้งาน */
   deletedAt: string | null;
   createdAt: string;
-  /** มีใบอนุญาตที่ verified หรือไม่ (จาก lawyer_licenses ผ่าน RPC) */
+  /** มีใบอนุญาตที่ verified หรือไม่ (จาก GoTrue ผ่าน RPC — 0041) */
   hasVerifiedLicense: boolean;
+  /** 0041 (Wave F · D-f-5): แบน GoTrue ยังไม่หมดอายุ (is_banned ของ RPC) */
+  isBanned: boolean;
+  /**
+   * 0041: ค่า banned_until จริงจาก auth.users — null ได้ · **ค่าในอดีต = แบนหมด
+   * อายุแล้ว** (isBanned=false) — UI ตีความ "ยังถูกระงับ" จาก isBanned เท่านั้น
+   */
+  bannedUntil: string | null;
 };
 
 /** ผลหน้าของ keyset pagination — รูปร่างเดียวกับ AdminCoursesPage */
@@ -80,6 +87,8 @@ export function parseAdminUserRow(raw: unknown): AdminUserRow | null {
   const displayName = requiredString(raw, "displayName");
   const createdAt = requiredString(raw, "createdAt");
   const deletedAt = nullableString(raw, "deletedAt");
+  const bannedUntil = nullableString(raw, "bannedUntil");
+  const isBanned = raw["isBanned"];
   const rolesRaw = raw["roles"];
   const roles =
     rolesRaw === undefined
@@ -94,6 +103,8 @@ export function parseAdminUserRow(raw: unknown): AdminUserRow | null {
     displayName === null ||
     createdAt === null ||
     deletedAt === undefined ||
+    bannedUntil === undefined ||
+    typeof isBanned !== "boolean" ||
     roles === undefined ||
     typeof hasVerifiedLicense !== "boolean"
   ) {
@@ -107,6 +118,8 @@ export function parseAdminUserRow(raw: unknown): AdminUserRow | null {
     deletedAt,
     createdAt,
     hasVerifiedLicense,
+    isBanned,
+    bannedUntil,
   };
 }
 

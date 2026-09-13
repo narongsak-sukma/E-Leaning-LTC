@@ -28,6 +28,7 @@ import {
   USER_STATUS_FILTER_OPTIONS,
 } from "./data";
 
+// Wave F D-f-5 (0041): แถวขาออกเพิ่ม isBanned/bannedUntil — parser fail-closed ต่อสองฟิลด์นี้ด้วย
 const ROW = {
   id: "00000000-0000-4000-8000-000000000001",
   email: "staff@lawcouncil.go.th",
@@ -36,6 +37,8 @@ const ROW = {
   deletedAt: null,
   createdAt: "2026-08-01T03:00:00Z",
   hasVerifiedLicense: false,
+  isBanned: false,
+  bannedUntil: null,
 };
 
 function jsonResponse(status: number, body: unknown): Response {

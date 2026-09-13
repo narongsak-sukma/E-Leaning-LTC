@@ -148,7 +148,22 @@ export default async function AdminUsersPage({
       header: "สถานะ",
       render: (user) => {
         const view = userStatusViewOf(userStatusKeyOf(user.deletedAt));
-        return <StatusBadge tone={view.tone} label={view.label} />;
+        return (
+          <div className="flex flex-col items-start gap-1">
+            <StatusBadge tone={view.tone} label={view.label} />
+            {user.isBanned ? (
+              <span
+                title={
+                  user.bannedUntil !== null
+                    ? `ถูกระงับจนถึง ${formatThaiDate(user.bannedUntil)}`
+                    : "ถูกระงับ"
+                }
+              >
+                <StatusBadge tone="danger" label="ถูกระงับ" />
+              </span>
+            ) : null}
+          </div>
+        );
       },
     },
     {

@@ -17,9 +17,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import {
+  AdminUserResource,
   auditUsersPiiAccessFailClosed,
   createStaffUser,
+  IsoTimestamp,
   listUsersViaRpc,
+  toAdminUserResource,
+  type AdminUserDbRow,
 } from "@/lib/admin/users";
 import { decodeCursor, encodeCursor } from "@/lib/api/pagination";
 import {
@@ -36,9 +40,6 @@ import { enforceRateLimit } from "@/lib/rate-limit";
 /** ความยาวคำค้นสูงสุด — ตรงขอบเขตที่ RPC admin_list_users ตรวจ (ERR-VAL-001|query_length) */
 const QUERY_MAX_LENGTH = 100;
 
-/** เวลา ISO 8601 (ยอมทั้ง Z และ +00:00 — เดียวกับ schema กลางของ repo) */
-const IsoTimestamp = z.iso.datetime({ offset: true });
-
 /** สถานะบัญชีที่กรองได้ — ตรง p_status ของ RPC (active/deleted · ไม่ระบุ = ทุกสถานะ) */
 const StatusFilter = z.enum(["active", "deleted"]);
 
@@ -54,31 +55,7 @@ const STAFF_ROLE_CHOICES = [
   "staff:registrar",
 ] as const;
 
-/** resource ขาออกของแถวผู้ใช้ (camelCase · strict) — คอลัมน์ตรง jsonb ของ RPC (0035 §7) */
-const AdminUserResource = z
-  .object({
-    id: z.uuid(),
-    displayName: z.string().min(1),
-    email: z.email(),
-    deletedAt: IsoTimestamp.nullable(),
-    createdAt: IsoTimestamp,
-    roles: z.array(z.string().min(1)),
-    hasVerifiedLicense: z.boolean(),
-  })
-  .strict();
-
-type AdminUserResourceParsed = z.infer<typeof AdminUserResource>;
-
-/** แถวดิบจาก RPC (row_to_json — snake_case) — ตรงตามตัวอักษรของ 0035 §7 */
-interface AdminUserDbRow {
-  readonly id: string;
-  readonly display_name: string;
-  readonly email: string;
-  readonly deleted_at: string | null;
-  readonly created_at: string;
-  readonly roles: readonly string[];
-  readonly has_verified_license: boolean;
-}
+/** resource ขาออกของแถวผู้ใช้ (camelCase · strict) — คอลัมน์ตรง jsonb ของ RPC (0035 §7 + 0041) — นิยามใน src/lib/admin/users.ts (Wave F · D-f-5) */
 
 /** resource ขาออกของ POST สร้างบัญชี (strict) — ห้าม log email ทุกจุด (D24) */
 const StaffUserResource = z
@@ -138,19 +115,6 @@ function parseListQuery(searchParams: URLSearchParams): {
 function optionsOf(request: Request): JsonResponseOptions {
   const requestId = request.headers.get("x-request-id");
   return requestId === null ? {} : { requestId };
-}
-
-/** แถวดิบ (snake_case) → resource (camelCase) — map ตรง ไม่ fabricate ค่า */
-function toAdminUserResource(row: AdminUserDbRow): AdminUserResourceParsed {
-  return {
-    id: row.id,
-    displayName: row.display_name,
-    email: row.email,
-    deletedAt: row.deleted_at,
-    createdAt: row.created_at,
-    roles: [...row.roles],
-    hasVerifiedLicense: row.has_verified_license,
-  };
 }
 
 /** GET — ค้นหา/กรองผู้ใช้ (200 + keyset page · audit PII_ACCESS fail-closed) */
