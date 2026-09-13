@@ -98,7 +98,10 @@ function cookieMapOf(cookieHeader: string): Map<string, string> {
  * GoTrueClient) จึงใช้เป็น "การอ่านคีย์รองก่อนนับ quota" ไม่ได้ · อ่านเองแทน:
  * ค่า cookie ของ @supabase/ssr (cookieEncoding base64) = `base64-` + base64url
  * ของ JSON session · session ยาวโดนแบ่งเป็น chunk `<base>.0`, `<base>.1`, ...
- * (แต่ละ chunk มี prefix `base64-` ของตัวเอง — ต่อเนื้อความก่อน decode)
+ * — SDK ใส่ prefix `base64-` **ครั้งเดียวก่อนแบ่ง chunk** (cookies.ts:
+ * `encoded = BASE64_PREFIX + …` แล้ว createChunks) ดังนั้น prefix อยู่ที่หัว
+ * ของ chunk `.0` เท่านั้น · การอ่านตาม SDK (chunker combineChunks): อ่าน `.0`
+ * เรียงขึ้นไปจนพบเลขที่หาย **หยุด** ที่ช่องว่างแรก
  * - ผิดรูป/ไม่มี cookie/decode ไม่ได้ = null (ไม่ throw) — ผู้เรียก fallback เอง
  */
 export function accessTokenFromAuthCookie(
@@ -114,20 +117,19 @@ export function accessTokenFromAuthCookie(
   if (map.has(base)) {
     encoded = map.get(base) ?? null;
   } else {
-    // chunked — เก็บทุก `<base>.N` เรียงตามเลขแล้วต่อกัน
-    const chunkRe = new RegExp(`^${base}\\.(\\d+)$`);
-    const chunks = [...map.entries()]
-      .filter(([name]) => chunkRe.test(name))
-      .sort((a, b) => {
-        const na = Number((a[0].match(chunkRe) ?? [])[1]);
-        const nb = Number((b[0].match(chunkRe) ?? [])[1]);
-        return na - nb;
-      })
-      .map(([, value]) => value);
+    // chunked — อ่าน `.0`, `.1`, ... ตามลำดับจนพบเลขที่หาย (แบบ combineChunks
+    // ของ SDK — หยุดที่ช่องว่างแรก ไม่รวมเลขกระโดด) แล้วต่อค่าดิบทั้งหมดก่อน
+    // strip prefix ครั้งเดียว (prefix อยู่ที่หัว chunk .0 เท่านั้น)
+    const chunks: string[] = [];
+    for (let i = 0; ; i += 1) {
+      const chunk = map.get(`${base}.${i}`);
+      if (chunk === undefined) {
+        break;
+      }
+      chunks.push(chunk);
+    }
     if (chunks.length > 0) {
-      encoded = chunks
-        .map((chunk) => (chunk.startsWith("base64-") ? chunk.slice("base64-".length) : chunk))
-        .join("");
+      encoded = chunks.join("");
     }
   }
   if (encoded === null) {

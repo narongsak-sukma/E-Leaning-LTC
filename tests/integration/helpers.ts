@@ -131,6 +131,12 @@ export interface TestUser {
   readonly id: string;
   readonly email: string;
   readonly accessToken: string;
+  /**
+   * refresh token จริงของ session ที่ login ได้มา (gate g-p1-r3) — จำเป็นกับเคส
+   * regression ของ middleware ที่ต้องการให้ GoTrue ตอบ rotation สำเร็จจริง
+   * (ค่าปลอมทำให้ refresh พลาด = ไม่เกิด Set-Cookie จับอะไรไม่ได้) · ห้าม log
+   */
+  readonly refreshToken: string;
 }
 
 /** signup → confirm ผ่าน SQL (MAILER_AUTOCONFIRM=false) → login ด้วยรหัสผ่านจริง */
@@ -166,11 +172,20 @@ export async function createTestUser(localPart: string, role?: string): Promise<
     {},
     { email, password: TEST_PASSWORD },
   );
-  const loginBody = (login.json ?? {}) as { access_token?: string };
-  if (login.status >= 400 || typeof loginBody.access_token !== "string") {
+  const loginBody = (login.json ?? {}) as { access_token?: string; refresh_token?: string };
+  if (
+    login.status >= 400 ||
+    typeof loginBody.access_token !== "string" ||
+    typeof loginBody.refresh_token !== "string"
+  ) {
     throw new Error(`login failed (${login.status}): ${login.text.slice(0, 300)}`);
   }
-  return { id: userId, email, accessToken: loginBody.access_token };
+  return {
+    id: userId,
+    email,
+    accessToken: loginBody.access_token,
+    refreshToken: loginBody.refresh_token,
+  };
 }
 
 /** เพิ่มบทบาทให้ผู้ใช้ทดสอบ (role_assignments — INSERT จริงผ่าน service path เท่านั้นตาม DD §3.1) */

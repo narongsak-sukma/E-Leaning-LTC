@@ -18,6 +18,10 @@
  *       ERR-RATE-001 + Retry-After (เคสนี้รันท้ายสุดด้วยผู้ใช้+IP แยก)
  *   (6) ปุ่ม UI เดินทางเดียวกัน — probe POST /api/v1/auth/logout-all (route ของ W3 —
  *       ตรวจแบบ lenient รายงานผลตามจริง)
+ *   (7) gate g-p1-r3 — cookie ใกล้หมดอายุ (expires_at = now+120 ตก LEAD 180 ของ
+ *       middleware แต่พ้น margin 90 ของ SDK) พร้อม refresh token จริง ถูก 429:
+ *       ต้องไม่มี Set-Cookie ของ auth ติดกลับมา (middleware ข้าม refresh ของ
+ *       POST เส้นนี้ — network แรกของ request คือการนับ quota)
  *
  * การแยกโลกของ suite: email prefix 'waveg-pc-%' · cleanup ใน afterAll (auth.users
  * delete cascade ตามแบบ dcr15) · ล็อก serial /tmp/ltc-it-lock (กติกาทีม) · ห้าม
@@ -73,17 +77,22 @@ function jwtSessionId(token: string): string {
  * session cookie (base64url — ตรง cookieEncoding ของ @supabase/ssr) —
  * session ต้องมี user.factors: [] ตามแบบ dcr14 (branch mfa ของ auth-js อ่านตรง ๆ)
  */
-function sessionCookieValue(accessToken: string, userId: string): string {
+function sessionCookieValue(
+  accessToken: string,
+  userId: string,
+  overrides?: { expiresAt?: number; refreshToken?: string },
+): string {
   const part = accessToken.split(".")[1] ?? "";
   const payload = JSON.parse(Buffer.from(part, "base64").toString("utf8")) as { exp?: number };
   const expiresAt =
-    typeof payload.exp === "number" ? payload.exp : Math.floor(Date.now() / 1000) + 3600;
+    overrides?.expiresAt ??
+    (typeof payload.exp === "number" ? payload.exp : Math.floor(Date.now() / 1000) + 3600);
   const session = {
     access_token: accessToken,
     token_type: "bearer",
     expires_in: 3600,
     expires_at: expiresAt,
-    refresh_token: "waveg-pc-unused-no-refresh",
+    refresh_token: overrides?.refreshToken ?? "waveg-pc-unused-no-refresh",
     user: {
       id: userId,
       aud: "authenticated",
@@ -175,6 +184,7 @@ function errorFields(json: unknown): readonly unknown[] {
 
 let main: TestUser; // เคส 1-4 — เจ้าของรหัสผ่านที่เปลี่ยน (session A)
 let rateUser: TestUser; // เคส 5 — ผู้ใช้แยกสำหรับ quota AUTH
+let mwUser: TestUser; // เคส 7 (gate g-p1-r3) — middleware ต้องไม่แตะ auth ก่อนนับ
 
 /** เซสชันที่สองของ main (password grant ก่อนเปลี่ยนรหัส) — capture ระหว่างทาง */
 let sessionB: {
@@ -201,6 +211,7 @@ beforeAll(async () => {
   }
   main = await createTestUser("waveg-pc-main");
   rateUser = await createTestUser("waveg-pc-rl");
+  mwUser = await createTestUser("waveg-pc-mw");
   // รอล็อกได้สูงสุด 30 นาที + เผื่อ signup retry — hook timeout ต้องยาวกว่านั้น
 }, 35 * 60_000);
 
@@ -350,5 +361,45 @@ describe.skipIf(!DB_URL)("AUTH-005 — เปลี่ยนรหัสผ่�
     expect(blocked.status).toBe(429);
     expect(errorCode(blocked.json)).toBe("ERR-RATE-001");
     expect(blocked.retryAfter).not.toBeNull();
+  });
+
+  it("gate g-p1-r3: cookie ใกล้หมดอายุ (expires_at = now+120 — ตก LEAD 180 ของ middleware แต่พ้น margin 90 ของ SDK) ถูก 429 → ต้องไม่มี Set-Cookie ของ auth เด็ดขาด", async () => {
+    // ออกแบบให้ "คำขอที่ถูก 429" เป็นครั้งแรกที่ refresh token นี้ถูกใช้: เผา quota
+    // 10 ครั้งด้วย cookie ปกติ (token ยังไกลหมดอายุ — middleware ไม่แตะ network)
+    // แล้วคำขอที่ 11 ส่ง cookie expires_at = now+120 พร้อม refresh token จริง —
+    // ถ้า middleware ยังหมุนก่อน limiter (รหัสก่อน fix) GoTrue จะตอบ rotation
+    // สำเร็จ (การใช้ครั้งแรก) และ Set-Cookie จะติด response 429 กลับมา = เคสนี้
+    // ล้ม · หลัง fix middleware ข้าม refresh ของ POST เส้นนี้ → network แรกของ
+    // request คือการนับ quota · ผู้ใช้เดียวกันทั้ง 11 คำขอ = ถัง quota เดียว
+    // (คีย์รองอ่านจาก claim sub ของ access token เดียวกัน)
+    const attempt = (cookie: string): Promise<Response> =>
+      fetch(`${APP_URL}/api/v1/me/password`, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          origin: APP_URL,
+          "content-type": "application/json",
+          cookie,
+          "x-forwarded-for": clientIpFor(mwUser.id),
+        },
+        body: JSON.stringify({ currentPassword: "WrongCurrent#2026", newPassword: NEW_PASSWORD }),
+        signal: AbortSignal.timeout(60_000),
+      });
+    for (let i = 0; i < 10; i += 1) {
+      const res = await attempt(cookieHeader(mwUser.accessToken, mwUser.id));
+      expect(res.status).toBe(401); // ผิด — แต่นับเข้า quota ก่อนพิสูจน์เสมอ
+    }
+    const blocked = await attempt(
+      `${AUTH_COOKIE}=${sessionCookieValue(mwUser.accessToken, mwUser.id, {
+        expiresAt: Math.floor(Date.now() / 1000) + 120,
+        refreshToken: mwUser.refreshToken,
+      })}`,
+    );
+    expect(blocked.status).toBe(429);
+    expect(errorCode(await blocked.clone().json())).toBe("ERR-RATE-001");
+    // หลักฐานผ่าน middleware จริง: response 429 ต้องไม่พก Set-Cookie ของ auth เลย
+    // (ค่าปลอมแทน refresh token จะพิสูจน์อะไรไม่ได้ — refresh พลาดก็ไม่เกิด cookie)
+    const setCookies = blocked.headers.getSetCookie();
+    expect(setCookies.some((line) => line.startsWith(AUTH_COOKIE))).toBe(false);
   });
 });

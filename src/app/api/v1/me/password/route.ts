@@ -11,7 +11,8 @@
  *   context strict ['method','session_id']) → 200 — เซสชันปัจจุบันคงไว้ (ห้าม sign out)
  * - rate: AUTH group (secondary = claim sub จาก cookie — นับ ip + user แยกกัน
  *   D12-11 · นับก่อนแตะ GoTrue/SDK ใด ๆ ตาม MINOR-2: อ่าน cookie เอง ไม่ผ่าน
- *   getSession ที่อาจ refresh ผ่าน network)
+ *   getSession ที่อาจ refresh ผ่าน network · gate g-p1-r3: middleware ก็ข้าม
+ *   refresh ของ POST เส้นนี้ด้วย — network แรกของ request คือการนับ quota)
  */
 import { NextResponse } from "next/server";
 

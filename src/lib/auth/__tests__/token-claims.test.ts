@@ -88,15 +88,21 @@ describe("accessTokenFromAuthCookie (r2 MINOR-2 — ไม่ผ่าน SDK)",
     expect(accessTokenFromAuthCookie(header, KONG)).toBe(TOKEN);
   });
 
-  it("chunk .0/.1/.2 — ต่อเนื้อ base64 ก่อน decode (เรียงตามเลข ไม่ใช่ชื่อ)", () => {
-    const encoded = Buffer.from(JSON.stringify({ access_token: TOKEN })).toString("base64url");
-    const cut = [encoded.slice(0, 10), encoded.slice(10, 25), encoded.slice(25)];
+  it("chunk .0/.1/.2 — prefix base64- ที่หัว .0 เท่านั้น (SDK ใส่ก่อนแบ่ง chunk) · ต่อเนื้อก่อน decode", () => {
+    const encoded = `base64-${Buffer.from(JSON.stringify({ access_token: TOKEN })).toString("base64url")}`;
+    const cut = [encoded.slice(0, 12), encoded.slice(12, 30), encoded.slice(30)];
     const header = [
-      `sb-kong-auth-token.2=${`base64-${cut[2]}`}`,
-      `sb-kong-auth-token.0=${`base64-${cut[0]}`}`,
-      `sb-kong-auth-token.1=${`base64-${cut[1]}`}`,
+      `sb-kong-auth-token.2=${cut[2]}`,
+      `sb-kong-auth-token.0=${cut[0]}`,
+      `sb-kong-auth-token.1=${cut[1]}`,
     ].join("; ");
     expect(accessTokenFromAuthCookie(header, KONG)).toBe(TOKEN);
+  });
+
+  it("มีช่องว่าง (ขาด .1) — หยุดที่ .0 ตาม combineChunks ของ SDK → decode ไม่ผ่าน = null", () => {
+    const encoded = `base64-${Buffer.from(JSON.stringify({ access_token: TOKEN })).toString("base64url")}`;
+    const header = `sb-kong-auth-token.0=${encoded.slice(0, 12)}; sb-kong-auth-token.2=${encoded.slice(30)}`;
+    expect(accessTokenFromAuthCookie(header, KONG)).toBeNull();
   });
 
   it("ไม่มี cookie / ไม่มีชื่อ base / JSON ไม่มี access_token / ขยะ → null ไม่ throw", () => {
