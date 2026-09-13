@@ -9,6 +9,7 @@
 import { errorDefinition, type ErrorCode } from "@/lib/errors";
 import { resolveSafeNextPath } from "@/lib/auth/session";
 import { registerAction } from "../actions";
+import { SIGNUP_CONSENT_POLICY_VERSION } from "../signup-consents";
 
 interface RegisterPageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -133,6 +134,34 @@ export default async function RegisterPage({ searchParams }: RegisterPageProps) 
               (จำเป็น — PDPA)
             </label>
           </div>
+          <div className="flex items-start gap-3 rounded-[10px] border-[1.5px] border-mist-300 bg-mist-50 px-4 py-3">
+            <input
+              id="reg-consent-marketing"
+              name="marketingConsent"
+              type="checkbox"
+              value="on"
+              className="mt-1 size-4 shrink-0"
+            />
+            <label htmlFor="reg-consent-marketing" className="text-sm text-ink-700">
+              รับข่าวสาร โปรโมชัน และกิจกรรมจากสภาทนายความฯ (ไม่บังคับ)
+            </label>
+          </div>
+          <div className="flex items-start gap-3 rounded-[10px] border-[1.5px] border-mist-300 bg-mist-50 px-4 py-3">
+            <input
+              id="reg-consent-email"
+              name="emailNotifyConsent"
+              type="checkbox"
+              value="on"
+              className="mt-1 size-4 shrink-0"
+            />
+            <label htmlFor="reg-consent-email" className="text-sm text-ink-700">
+              รับการแจ้งเตือนผ่านอีเมล (ไม่บังคับ)
+            </label>
+          </div>
+          <p id="reg-consent-note" className="text-xs text-ink-500">
+            ให้ความยินยอมได้ และถอนได้ทุกเมื่อที่หน้าการตั้งค่า (เวอร์ชันนโยบาย:{" "}
+            {SIGNUP_CONSENT_POLICY_VERSION})
+          </p>
           <button
             type="submit"
             className="w-full rounded-[10px] bg-brand-600 px-[18px] py-2.5 font-heading font-semibold text-white shadow-card hover:bg-brand-700"

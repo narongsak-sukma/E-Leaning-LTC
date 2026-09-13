@@ -9,11 +9,20 @@
  *   ไม่สำเร็จ → กลับมาที่หน้าเดิมพร้อม error code จากทะเบียน (API-SPEC §2) เท่านั้น
  * - ห้าม log PII — ไม่ log email/รหัสผ่าน ใด ๆ ทั้งสิ้น (SDS §6.2)
  */
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import type { ErrorCode } from "@/lib/errors";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { resolveSafeNextPath, DEFAULT_POST_LOGIN_PATH } from "@/lib/auth/session";
+import {
+  MFA_PENDING_COOKIE,
+  MFA_PENDING_COOKIE_MAX_AGE,
+  createStandaloneAuthClient,
+  encodePendingMfaValue,
+  firstVerifiedTotpFactor,
+} from "@/lib/auth/mfa";
+import { buildSignupConsents, SIGNUP_CONSENT_POLICY_VERSION } from "./signup-consents";
 
 /** ข้อความแจ้ง (ไม่ใช่ error code) สำหรับสถานะที่เอกสารกำหนดให้แจ้งผู้ใช้ */
 type LoginNotice = "registered" | "email_not_confirmed";
@@ -124,6 +133,12 @@ function registerUrl(next: string, outcome: ActionOutcome): string {
 /**
  * เข้าสู่ระบบ (signInWithPassword) — สำเร็จ redirect ไป next (ปลอดภัยแล้วจาก
  * resolveSafeNextPath) · ไม่สำเร็จ redirect กลับ /login พร้อม error code จากทะเบียน
+ *
+ * Wave F · D-f-1 login สองขั้น: ถ้าบัญชีมี factor TOTP ที่ verified (บทบาทบังคับ MFA
+ * และผู้ใช้ที่เปิดเอง) จะ **ไม่มี session cookie ถูกเขียน** ณ ขั้น password — token
+ * ถูกเก็บใน cookie ชั่วคราว `ltc_mfa_pending` (httpOnly · sameSite=lax · path=/login ·
+ * อายุ 5 นาที · secure เมื่อ production) แล้วพาไป /login/verify เพื่อยืนยันรหัส 6 หลัก
+ * (หรือโค้ดสำรอง) ก่อนจึงออก session จริง aal2
  */
 export async function loginAction(formData: FormData): Promise<void> {
   const next = resolveSafeNextPath(formData.get("next"));
@@ -134,13 +149,57 @@ export async function loginAction(formData: FormData): Promise<void> {
   if (!parsed.success) {
     redirect(loginUrl(next, { error: "ERR-VAL-001" }));
   }
-  const supabase = await createSupabaseSsrClient();
-  const { error } = await supabase.auth.signInWithPassword({
+  // Wave F · D-f-1: ขั้น password ผ่าน client เดี่ยว (ไม่ผูก cookie) — บัญชีที่มี
+  // factor TOTP verified ยัง "ไม่เข้าระบบจริง" ณ จุดนี้ (ไม่มี session cookie เขียน)
+  const auth = createStandaloneAuthClient();
+  const { data, error } = await auth.auth.signInWithPassword({
     email: parsed.data.email,
     password: parsed.data.password,
   });
-  if (error) {
+  if (error !== null) {
     redirect(loginUrl(next, classifyLoginError(error)));
+  }
+  const session = data.session;
+  if (session === null) {
+    redirect(loginUrl(next, { error: "ERR-SYS-001" }));
+  }
+  // ตรวจ factor — fail-closed: ค้นล้มเหลว = กลับ /login (ERR-SYS-001) ไม่ปล่อยผ่าน
+  const { data: factorsData, error: factorsError } = await auth.auth.mfa.listFactors();
+  if (factorsError !== null) {
+    redirect(loginUrl(next, { error: "ERR-SYS-001" }));
+  }
+  const pendingFactor = factorsData === null ? null : firstVerifiedTotpFactor(factorsData.all);
+  if (pendingFactor !== null) {
+    const value = encodePendingMfaValue({
+      accessToken: session.access_token,
+      refreshToken: session.refresh_token,
+    });
+    if (value === null) {
+      redirect(loginUrl(next, { error: "ERR-SYS-001" }));
+    }
+    const store = await cookies();
+    store.set(MFA_PENDING_COOKIE, value, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/login",
+      maxAge: MFA_PENDING_COOKIE_MAX_AGE,
+      secure: process.env.NODE_ENV === "production",
+    });
+    redirect(
+      next === DEFAULT_POST_LOGIN_PATH
+        ? "/login/verify"
+        : `/login/verify?next=${encodeURIComponent(next)}`,
+    );
+  }
+  // ไม่มี factor TOTP ที่ verified — เส้นทางเดิม: เขียน session ลง cookie ผ่าน
+  // SSR client (setSession ตรวจ token กับ Auth server ก่อนบันทึกลง cookie)
+  const supabase = await createSupabaseSsrClient();
+  const { error: setSessionError } = await supabase.auth.setSession({
+    access_token: session.access_token,
+    refresh_token: session.refresh_token,
+  });
+  if (setSessionError !== null) {
+    redirect(loginUrl(next, { error: "ERR-SYS-001" }));
   }
   redirect(next);
 }
@@ -167,6 +226,13 @@ export async function registerAction(formData: FormData): Promise<void> {
   const { error } = await supabase.auth.signUp({
     email: parsed.data.email,
     password: parsed.data.password,
+    options: {
+      data: {
+        // PDPA opt-in เสริม (D-f-3) — เฉพาะช่องที่ติ๊ก; ไม่ติ๊ก = [] = ไม่เกิดแถว consents
+        // (trigger 0043 แปลงเป็นแถว consents เมื่อยืนยันอีเมลสำเร็จ)
+        consents_granted: buildSignupConsents(formData, SIGNUP_CONSENT_POLICY_VERSION),
+      },
+    },
   });
   if (error) {
     const outcome = classifyRegisterError(error);

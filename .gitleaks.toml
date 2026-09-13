@@ -86,3 +86,14 @@ regexes = [
   '''3jsTHD6cIxwRFtwetOAvCHSIQ0Z1xBxfki6n38cwPvk''',
   '''4m7tXPHtzmhd8_oafj7Xt0PDZFXn0I1WkNXrxJzwYtQ''',
 ]
+
+# เวกเตอร์สาธารณะของมาตรฐาน (ไม่ใช่ค่าลับ) — allowlist "ที่ค่า" ไม่ใช่ทั้งไฟล์/กฎ:
+# ค่าอื่นที่หน้าตาคล้ายในที่อื่นยังโดนจับตามปกติ
+# - GEZDGNBVGY3TQOJQ… = base32("12345678901234567890") เวกเตอร์ทดสอบ TOTP ของ RFC 6238
+#   Appendix B ทุกเครื่องเหมือนกัน — ใช้ใน src/lib/auth/mfa.test.ts (Wave F D-f-1)
+[[allowlists]]
+description = "เวกเตอร์ทดสอบสาธารณะของมาตรฐาน (RFC 6238 §B) — ค่าสาธารณะ ไม่ใช่ค่าลับ"
+regexTarget = "line"
+regexes = [
+  '''GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ''',
+]

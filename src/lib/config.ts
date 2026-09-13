@@ -373,6 +373,14 @@ export const FEATURE_FLAG_KEYS = ["cert_auto_issue"] as const;
 export type FeatureFlagKey = (typeof FEATURE_FLAG_KEYS)[number];
 
 /**
+ * เวอร์ชันนโยบาย consent สมัคร (policy_version ของ marketing/email_notify —
+ * Wave F D-f-3 · [#91]) — แหล่งเดียวของระบบ · รูปแบบต้องผ่าน regex ฝั่ง DB
+ * (migration 0043): `^[A-Za-z0-9][A-Za-z0-9._-]{0,19}$` · เปลี่ยนเมื่อเงื่อนไข
+ * consent เปลี่ยน (แถว grant เก่าคงเวอร์ชันเดิมตาม append-only ของ consents)
+ */
+export const SIGNUP_CONSENT_POLICY_VERSION = "1";
+
+/**
  * อ่านสถานะ feature flag จากตาราง `feature_flags` (migration 0026 — source of
  * truth ฝั่ง DB · BFF อ่านอย่างเดียว ไม่มี mutation ตามขอบเขต E-6)
  *
