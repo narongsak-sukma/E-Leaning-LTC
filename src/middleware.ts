@@ -139,6 +139,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // "การเขียน" (rotation) เผยแพร่เสมอ
   const isLogoutPath =
     request.method === "POST" && request.nextUrl.pathname === "/api/v1/auth/logout";
+  // gate g-p1-r3 MAJOR + r4 MINOR-2: POST /api/v1/me/password สัญญา "นับ quota
+  // AUTH ก่อน network แรกของ request" — middleware ต้องไม่หมุน token
+  // (getSession/refreshSession = network) ก่อน route นับ · rotation ของ browser
+  // เกิดที่ request ก่อนหน้าแล้ว (เช่น GET /my/security ที่เปิดฟอร์ม) · ถ้า
+  // access token หมดอายุจริงตอนนี้ getUser ของ SDK จะ refresh เอง **หลังนับ
+  // แล้ว** (สำเร็จ = เดินต่อ · พลาด = 401) — quota ถูกนับก่อนเสมอไม่ว่าอย่างไร
+  const isPreCountPasswordChangePath =
+    request.method === "POST" && request.nextUrl.pathname === "/api/v1/me/password";
   // gate-cleanup r1 M1: ขาในของ server component (RSC loader เรียก BFF ของตัวเอง —
   // catalog/learning/admin ใส่ header x-ltc-bff-internal: 1 ฝั่ง server เท่านั้น)
   // ต้องไม่หมุน token: Set-Cookie ของขาในไม่มีทางถึง browser (RSC ตั้ง cookie เอง
@@ -148,7 +156,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // เองได้ แต่ผลมีแค่ "request นั้นไม่ถูกหมุน" — ไม่ข้าม CSRF/authorization ใด ๆ
   // (ไม่ใช่ช่องรั่ว) และ request ถัดไปที่ไม่ปลอมก็หมุนตาม LEAD ปกติ
   const isInternalBffLeg = request.headers.get("x-ltc-bff-internal") === "1";
-  if (!isLogoutPath && !isInternalBffLeg) {
+  if (!isLogoutPath && !isPreCountPasswordChangePath && !isInternalBffLeg) {
     try {
       const { supabaseUrl, supabaseAnonKey } = getConfig();
       const pending = new Map<string, { value: string; options?: CookieOptions }>();
