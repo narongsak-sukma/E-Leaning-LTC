@@ -10,6 +10,10 @@ import Link from "next/link";
 
 import { NotificationsInbox } from "@/components/learner/notifications/notifications-inbox";
 
+// gate r2 G2: บังคับ dynamic rendering — หน้าที่ prerender เป็น static จะไม่มี
+// CSP nonce ให้ inline script ของ client island (middleware ออก nonce ต่อ request)
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "การแจ้งเตือน — ระบบฝึกอบรมออนไลน์",
   description:

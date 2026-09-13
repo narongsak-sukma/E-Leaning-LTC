@@ -576,6 +576,39 @@ describe.skipIf(!DB_URL)(
       expect(revokes).toBe("1");
     }, 45_000);
 
+    // ─── เคส c2: P0002 pin — ถอนบทบาทที่เป้าหมายไม่ถือ ─────────────────────────
+    // เจตนา pin พฤติกรรมจริงตาม D-f-6 (ไม่เปลี่ยน errcode การผลิตกลาง wave — ทางเลือก
+    // เปลี่ยนเป็น 22023 เปิดไว้ ใน API-SPEC หมายเหตุ): role_not_found ของ 0039
+    // (update role_assignments … not found → raise errcode P0002) ผ่าน Kong gateway =
+    // 500 ทึบ (ร่าง error ถูกตัด — ไม่มี envelope ERR-NF-001|role_not_found ให้ผู้เรียก)
+    // และ statement abort ต้องไม่แตะ role_assignments ของเป้าหมายแม้แต่แถวเดียว
+    it("เคส c2 admin_revoke_role บทบาทที่เป้าหมายไม่ถือ (instructor) → opaque 500 (P0002 role_not_found — ไม่มี envelope ERR-) และ role_assignments ไม่เปลี่ยน (pin ตาม D-f-6)", async () => {
+      // สแนปชอต role_assignments ทั้งชุดของเป้าหมาย (รวมแถวที่ถูกถอนจากเคส c) ก่อนเรียก
+      const before = await psqlScalar(`
+        select coalesce(jsonb_agg(to_jsonb(ra) order by ra.role), '[]'::jsonb)::text
+          from public.role_assignments ra where ra.user_id = '${revokeUser.id}';
+      `);
+      expect(before).toBeTruthy();
+      const failed = await userRpc("admin_revoke_role", adminAal2, {
+        p_user_id: revokeUser.id,
+        p_role: "instructor", // บทบาทที่เป้าหมายไม่เคยถือ (fixture มี citizen+staff:viewer)
+        p_reason: `ทดสอบ pin พฤติกรรม role_not_found ของ DCR-12 เคส c2 (D-f-6)`,
+        p_request_id: crypto.randomUUID(),
+      });
+      // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|role_not_found หายที่ gateway
+      expect(failed.status, failed.text.slice(0, 300)).toBe(500);
+      expect(failed.json, "P0002 500 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
+      expect(failed.text).not.toContain("ERR-");
+      expect(failed.text).not.toContain("role_not_found");
+      // P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวบทบาทคงเดิมทุกค่า
+      expect(
+        await psqlScalar(`
+          select coalesce(jsonb_agg(to_jsonb(ra) order by ra.role), '[]'::jsonb)::text
+            from public.role_assignments ra where ra.user_id = '${revokeUser.id}';
+        `),
+      ).toBe(before);
+    }, 45_000);
+
     // ─── เคส d: SoD re-check ใน TX ของ confirm (B6) ────────────────────────────
 
     it("เคส d ได้บทบาท instructor หลังยื่นคำขอ (B6): confirm → sod_role_changed กลิ้งทั้ง TX (บัญชีอยู่ครบ · คำขอ pending) · ถอนบทบาทกลับ → token เดิมยืนยันผ่าน", async () => {

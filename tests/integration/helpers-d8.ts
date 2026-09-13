@@ -215,7 +215,10 @@ export async function cleanupFastExamRows(): Promise<void> {
  * - รอบสอบสอบเร็ว id ตายตัวของ suite (attempts/answers ของรอบนั้น)
  * - ผู้ใช้ทดสอบทุกคนที่ suite เคยสร้าง (email pattern d8-examcert-*) — attempts บนข้อสอบ seed,
  *   ใบประกาศนียบัตร + แถวการตรวจสอบสาธารณะ, lesson_progress, enrollments, roles, profiles, auth.users
- * - event_outbox ที่อ้าง attempt ของ suite (payload->>source_id)
+ * - event_outbox ที่อ้าง attempt ของ suite (payload->>source_id) และ event ใบประกาศ
+ *   ที่อ้าง "เจ้าของใบ" (payload->>user_id — topic certificate.issued/revoked ออกใน TX
+ *   เดียวกับ admin_issue_certificate ของ 0034 — source_id ของ event เหล่านี้เป็น
+ *   certificate_id ไม่ใช่ attempt id จึงตกหล่นจาก scope เดิม · Wave F D-f nit)
  * NB: audit_logs เป็น append-only ตามดีไซน์ (trigger ห้ามลบทุก role) — ตั้งใจคงไว้
  */
 export async function cleanupD8World(): Promise<void> {
@@ -224,9 +227,11 @@ export async function cleanupD8World(): Promise<void> {
   const d8Users = `(select id from auth.users where email like 'd8-examcert-%')`;
   const attemptScope = `(select id from public.assessment_attempts
       where assessment_id in (${fastList}) or user_id in ${d8Users})`;
+  const d8UserIds = `(select id::text from auth.users where email like 'd8-examcert-%')`;
   await psql(`
     delete from public.event_outbox
-     where payload ->> 'source_id' in (select x.id::text from ${attemptScope} x);
+     where payload ->> 'source_id' in (select x.id::text from ${attemptScope} x)
+        or payload ->> 'user_id' in ${d8UserIds};
     delete from public.attempt_answers where attempt_id in ${attemptScope};
     delete from public.assessment_attempts
      where assessment_id in (${fastList}) or user_id in ${d8Users};

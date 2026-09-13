@@ -13,6 +13,9 @@ const REQUIRED_STUBS: Record<string, string> = {
   SUPABASE_URL: "https://stub.supabase.co",
   SUPABASE_ANON_KEY: "stub-anon-key",
   SUPABASE_SERVICE_ROLE_KEY: "stub-service-role-key",
+  // gate r1 F2/F5: คีย์ stash ของ login สองขั้นบังคับเมื่อ APP_ENV=prod (ไม่มี
+  // fallback) — เคส "env ครบ" ต้องใส่ค่านี้ด้วยจึงชื่อว่าครบจริง
+  LTC_MFA_PENDING_KEY: "stub-mfa-pending-key",
 };
 
 const TOUCHED_KEYS = [

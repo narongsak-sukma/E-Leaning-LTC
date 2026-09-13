@@ -9,6 +9,10 @@ import type { Metadata } from "next";
 
 import { NotificationSettingsForm } from "@/components/learner/notifications/notification-settings-form";
 
+// gate r2 G2: บังคับ dynamic rendering — หน้าที่ prerender เป็น static จะไม่มี
+// CSP nonce ให้ inline script ของ client island (middleware ออก nonce ต่อ request)
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "ตั้งค่าการแจ้งเตือน — ระบบฝึกอบรมออนไลน์",
   description:

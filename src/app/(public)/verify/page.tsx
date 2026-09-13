@@ -10,6 +10,10 @@ import Link from "next/link";
 
 import { VerifyPanel } from "@/components/certificate/verify-panel";
 
+// gate r2 G2: บังคับ dynamic rendering — หน้าที่ prerender เป็น static จะไม่มี
+// CSP nonce ให้ inline script ของ client island (middleware ออก nonce ต่อ request)
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "ตรวจสอบประกาศนียบัตร — สภาทนายความแห่งประเทศไทย",
   description:

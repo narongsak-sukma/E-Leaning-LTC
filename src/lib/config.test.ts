@@ -25,6 +25,9 @@ function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
   return { ...BASE_ENV, ...extra };
 }
 
+/** base64 ครบ 32 ไบต์ (AES-256) — ค่าท้องถิ่นของเทสเท่านั้น ไม่ใช่คีย์จริง */
+const MFA_PENDING_KEY_FIXTURE = Buffer.alloc(32, 7).toString("base64");
+
 describe("loadConfig — ค่าบังคับ (SDS §7.2)", () => {
   it("โหลดผ่านเมื่อ env บังคับครบ", () => {
     const cfg = loadConfig(baseEnv());
@@ -204,7 +207,12 @@ describe("CURSOR_HMAC_SECRET — signed cursor (API-SPECIFICATION §1.2)", () =>
 
   it("PB-9: APP_ENV=prod ตั้งค่าแล้ว → โหลดผ่าน (staging/prod ใช้กติกาเดียวกัน)", () => {
     const cfg = loadConfig(
-      baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod", IP_HASH_SALT: "ip-hash-salt-prod" }),
+      baseEnv({
+        APP_ENV: "prod",
+        CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod",
+        IP_HASH_SALT: "ip-hash-salt-prod",
+        LTC_MFA_PENDING_KEY: MFA_PENDING_KEY_FIXTURE,
+      }),
     );
     expect(cfg.appEnv).toBe("prod");
     expect(cfg.cursorHmacSecret).toBe("cursor-hmac-secret-prod");
@@ -241,7 +249,12 @@ describe("IP_HASH_SALT — salt ของ ip_hash/user_agent_hash ตรวจ�
 
   it("PB-13: APP_ENV=prod ตั้งค่าแล้ว → โหลดผ่าน (staging/prod ใช้กติกาเดียวกัน)", () => {
     const cfg = loadConfig(
-      baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod", IP_HASH_SALT: "ip-hash-salt-prod" }),
+      baseEnv({
+        APP_ENV: "prod",
+        CURSOR_HMAC_SECRET: "cursor-hmac-secret-prod",
+        IP_HASH_SALT: "ip-hash-salt-prod",
+        LTC_MFA_PENDING_KEY: MFA_PENDING_KEY_FIXTURE,
+      }),
     );
     expect(cfg.appEnv).toBe("prod");
     expect(cfg.ipHashSalt).toBe("ip-hash-salt-prod");
@@ -249,6 +262,27 @@ describe("IP_HASH_SALT — salt ของ ip_hash/user_agent_hash ตรวจ�
 
   it("PB-13: APP_ENV=local (default dev) ไม่ตั้ง → ยัง fallback null ได้ตามเดิม", () => {
     expect(loadConfig(baseEnv()).ipHashSalt).toBeNull();
+  });
+});
+
+describe("LTC_MFA_PENDING_KEY — คีย์ AES-256-GCM ของ stash login สองขั้น (gate r1 F2/F5)", () => {
+  it("ไม่ตั้ง → mfaPendingKey = null (helper ปฏิเสธ fail-closed — ไม่มีทาง fallback)", () => {
+    expect(loadConfig(baseEnv()).mfaPendingKey).toBeNull();
+  });
+
+  it("ตั้งค่า → เก็บค่าตาม env (trim แล้ว)", () => {
+    const cfg = loadConfig(baseEnv({ LTC_MFA_PENDING_KEY: `  ${MFA_PENDING_KEY_FIXTURE}  ` }));
+    expect(cfg.mfaPendingKey).toBe(MFA_PENDING_KEY_FIXTURE);
+  });
+
+  it("APP_ENV=prod ไม่ตั้ง → ConfigError พร้อมชื่อ key ใน issue (prod ห้ามขาด)", () => {
+    try {
+      loadConfig(baseEnv({ APP_ENV: "prod", CURSOR_HMAC_SECRET: "c", IP_HASH_SALT: "s" }));
+      expect.unreachable("ต้อง throw ConfigError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError);
+      expect((err as ConfigError).issues.join("\n")).toContain("LTC_MFA_PENDING_KEY");
+    }
   });
 });
 

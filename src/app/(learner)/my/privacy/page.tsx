@@ -12,6 +12,10 @@ import type { Metadata } from "next";
 import { ConsentSwitches } from "@/components/learner/privacy/consent-switches";
 import { ExportDeleteActions } from "@/components/learner/privacy/export-delete-actions";
 
+// gate r2 G2: บังคับ dynamic rendering — หน้าที่ prerender เป็น static จะไม่มี
+// CSP nonce ให้ inline script ของ client island (middleware ออก nonce ต่อ request)
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "ความเป็นส่วนตัวและข้อมูลส่วนบุคคล — ระบบฝึกอบรมออนไลน์",
   description:

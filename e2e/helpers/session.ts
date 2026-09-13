@@ -7,6 +7,8 @@
  * - ห้ามใช้ service-role สร้าง/แก้ learner-visible state — ขา service-role มีแค่ cleanup
  */
 import type { Page } from "@playwright/test";
+
+import { totpNow } from "../d9-helpers";
 import { APP_ORIGIN, TEST_PASSWORD } from "./env";
 
 export interface ApiResult {
@@ -14,14 +16,41 @@ export interface ApiResult {
   readonly text: string;
 }
 
-/** เข้าสู่ระบบผ่านฟอร์ม /login จริง แล้วรอ redirect ออกจาก /login */
-export async function loginViaForm(page: Page, email: string): Promise<void> {
+/**
+ * เข้าสู่ระบบผ่านฟอร์ม /login จริง แล้วรอ redirect ออกจาก /login
+ *
+ * Wave F (D-f-1): บัญชีที่มี factor TOTP verified เดิน login สองขั้น — รหัสผ่านผ่าน
+ * แล้วระบบ 303 ไป /login/verify (pending cookie 300 วิ) ก่อนออก session จริง —
+ * ส่ง `{ totpSecret }` (จาก enrollMfaTotp) เพื่อให้ helper กรอกรหัส 6 หลักและกด
+ * ยืนยันขั้นที่สองต่อ · ไม่ส่งแล้วบัญชีต้อง MFA = throw ทันที (fail-loud ดีกว่ารอ timeout)
+ */
+export async function loginViaForm(
+  page: Page,
+  email: string,
+  options?: { readonly totpSecret?: string | undefined },
+): Promise<void> {
   await page.goto(`${APP_ORIGIN}/login`);
   await page.fill("#email", email);
   await page.fill("#password", TEST_PASSWORD);
+  await page.getByRole("button", { name: "เข้าสู่ระบบ" }).click();
+  // ออกจาก /login เลย (ขั้นเดียว) หรือจอดหน้ายืนยันขั้นสอง — ทั้งสองถือว่าขั้นหนึ่งผ่าน
+  await page.waitForURL(
+    (url) => !url.pathname.startsWith("/login") || url.pathname === "/login/verify",
+    { timeout: 20_000 },
+  );
+  if (new URL(page.url()).pathname !== "/login/verify") {
+    return;
+  }
+  const secret = options?.totpSecret;
+  if (secret === undefined) {
+    throw new Error(
+      `loginViaForm: ${email} ถูกขอรหัส MFA ขั้นที่สอง — ส่ง { totpSecret } ของบัญชีนี้ให้ helper`,
+    );
+  }
+  await page.fill("#code", totpNow(secret));
   await Promise.all([
     page.waitForURL((url) => !url.pathname.startsWith("/login"), { timeout: 20_000 }),
-    page.getByRole("button", { name: "เข้าสู่ระบบ" }).click(),
+    page.getByRole("button", { name: "ยืนยันตัวตน" }).click(),
   ]);
 }
 

@@ -317,7 +317,7 @@ test.describe("E2E-15 คำขอผูกเลขที่ใบอนุญ�
     const learnerName = await displayNameOf(learnerA?.id ?? "");
 
     // registrar — ฟอร์มล็อกอินจริงก่อน (ให้แอปเขียน cookie) แล้ว inject session aal2 (แบบ e2e-10)
-    await loginViaForm(page, registrar?.email ?? "");
+    await loginViaForm(page, registrar?.email ?? "", { totpSecret: registrarAal2?.totpSecret });
     if (registrarAal2 === undefined) throw new Error("beforeAll ต้อง enroll registrar สำเร็จก่อน");
     await injectSession(page, registrarAal2);
     await page.goto("/admin/license-applications");
@@ -469,7 +469,7 @@ test.describe("E2E-15 คำขอผูกเลขที่ใบอนุญ�
     expect(appB).toHaveLength(1);
 
     // registrar — login ทับคุกกี้เดิม (กลับเป็น aal1) จึงต้อง inject session aal2 กลับก่อนใช้หน้า staff
-    await loginViaForm(page, registrar?.email ?? "");
+    await loginViaForm(page, registrar?.email ?? "", { totpSecret: registrarAal2?.totpSecret });
     if (registrarAal2 === undefined) throw new Error("beforeAll ต้อง enroll registrar สำเร็จก่อน");
     await injectSession(page, registrarAal2);
     await page.goto("/admin/license-applications");

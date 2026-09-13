@@ -154,6 +154,8 @@ create table public.media_assets (
   duration_sec int null check (duration_sec > 0 and duration_sec <= 3600),
   checksum_sha256 text null,
   status public.media_status not null default 'uploading',
+  -- Wave F nit: NOT NULL ตามจริง · uploaded_by = ผู้อัปโหลดจริง (actor) — ไม่เสมอเจ้าของข้อมูล
+  -- (เช่น PDF ใบประกาศ = ผู้ออกใบ/runner ตาม admin_attach_certificate_pdf 0019)
   uploaded_by uuid not null references public.profiles (id),
   deleted_at timestamptz null,
   created_at timestamptz not null default now()

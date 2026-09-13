@@ -221,6 +221,11 @@ services:
       NODE_ENV: development
       CHOKIDAR_USEPOLLING: "true"
       WATCHPACK_POLLING: "true"
+      # D-f-7: เพิ่ม heap ให้ next dev (container) — ลด memory-threshold restart ช่วง full e2e
+      # (Next dev ตรวจ used_heap > 0.8×heap_limit หลังทุก request แล้ว restart router-server
+      #  ทันที — full suite 34 เทสสะสม module graph ~2.5GB+ · 3072 ยังโดน 1 ครั้งช่วง e2e-14
+      #  เห็นใน e2e-full-r3 — เพิ่มเป็น 4096 + playwright retries:1 กันขอบ)
+      NODE_OPTIONS: --max-old-space-size=4096
     ports:
       - "3000:3000"
     volumes:

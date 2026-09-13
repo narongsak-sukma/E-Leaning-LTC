@@ -192,7 +192,8 @@ test.describe("E2E-10 ทะเบียนออกใบประกาศน�
     expect(issuedPdf.size).toBeGreaterThan(100);
 
     // ── gate r3: เพิกถอนผ่าน UI จริง — ปุ่มต่อแถวของทะเบียนใบที่ออกแล้ว (PB-20) ──
-    await loginViaForm(page, registrar?.email ?? "");
+    // registrar ผูก factor แล้วตั้งแต่ต้นเทส → login สองขั้น (Wave F) — ส่ง secret ให้ helper
+    await loginViaForm(page, registrar?.email ?? "", { totpSecret: aal2.totpSecret });
     // reuse session aal2 ตัวเดิม: token ยังอยู่ในอายุ (ทั้งเทสจบภายในไม่กี่นาที) และ
     // loginViaForm เพิ่งสร้าง session aal1 ทับคุกกี้ — inject คืน aal2 ก่อนใช้หน้า staff
     await injectSession(page, aal2);

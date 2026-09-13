@@ -129,6 +129,62 @@ export interface AdminListUsersResult {
   readonly nextCursor: { readonly createdAt: string; readonly id: string } | null;
 }
 
+/** เวลา ISO 8601 (ยอมทั้ง Z และ +00:00 — เดียวกับ schema กลางของ repo) */
+export const IsoTimestamp = z.iso.datetime({ offset: true });
+
+/**
+ * resource ขาออกของแถวผู้ใช้ GET /admin/users (camelCase · strict) — คอลัมน์ตรง jsonb
+ * ของ RPC admin_list_users (0035 §7) · 0041 (Wave F · D-f-5) เพิ่ม additive:
+ *   isBanned    = สถานะแบน GoTrue ยังไม่หมดอายุ (is_banned ของ RPC)
+ *   bannedUntil = ค่า banned_until จริงจาก auth.users — **อาจเป็นวันในอดีต** (แบนหมด
+ *                 อายุแล้ว GoTrue คงค่าไว้) — ห้ามตีความเป็น "ยังถูกแบน" ที่ UI
+ */
+export const AdminUserResource = z
+  .object({
+    id: z.uuid(),
+    displayName: z.string().min(1),
+    email: z.email(),
+    deletedAt: IsoTimestamp.nullable(),
+    createdAt: IsoTimestamp,
+    roles: z.array(z.string().min(1)),
+    hasVerifiedLicense: z.boolean(),
+    isBanned: z.boolean(),
+    bannedUntil: IsoTimestamp.nullable(),
+  })
+  .strict();
+
+export type AdminUserResourceParsed = z.output<typeof AdminUserResource>;
+
+/** แถวดิบจาก RPC (row_to_json — snake_case) — ตรงตามตัวอักษรของ 0035 §7 + 0041 */
+export interface AdminUserDbRow {
+  readonly id: string;
+  readonly display_name: string;
+  readonly email: string;
+  readonly deleted_at: string | null;
+  readonly created_at: string;
+  readonly roles: readonly string[];
+  readonly has_verified_license: boolean;
+  /** 0041: แบนยังไม่หมดอายุ (banned_until > now()) */
+  readonly is_banned: boolean;
+  /** 0041: ค่าจริงจาก auth.users — null ได้ · ค่าในอดีต = แบนหมดอายุแล้ว */
+  readonly banned_until: string | null;
+}
+
+/** แถวดิบ (snake_case) → resource (camelCase) — map ตรง ไม่ fabricate ค่า */
+export function toAdminUserResource(row: AdminUserDbRow): AdminUserResourceParsed {
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    email: row.email,
+    deletedAt: row.deleted_at,
+    createdAt: row.created_at,
+    roles: [...row.roles],
+    hasVerifiedLicense: row.has_verified_license,
+    isBanned: row.is_banned,
+    bannedUntil: row.banned_until,
+  };
+}
+
 /**
  * เรียก RPC admin_list_users (0035 §7) ด้วย user-JWT client — RLS/guard ของ RPC
  * (admin_users_staff_guard: login + aal2 + sv/sr/sa) เป็นชั้นที่สองเสมอ

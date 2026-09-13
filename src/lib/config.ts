@@ -83,6 +83,10 @@ const envSchema = z.object({
   CURSOR_HMAC_SECRET: optionalString,
   // — Salt ของ hash ตรวจสอบประกาศนียบัตร (PB-13 — ip_hash + user_agent_hash ใช้ค่าเดียวกัน) —
   IP_HASH_SALT: optionalString,
+  // — คีย์ AES-256-GCM ของ stash login สองขั้น (gate r1 F2/F5 · migration 0045) —
+  // base64 ของ 32 ไบต์ · ไม่มี fallback ทั้ง dev/prod (ไม่ตั้ง = ฟีเจอร์ login MFA
+  // ตอบ ERR-SYS-001 fail-closed ไม่ใช่ตกไปใช้ค่าอื่น)
+  LTC_MFA_PENDING_KEY: optionalString,
   // — การเรียน —
   VIDEO_HEARTBEAT_SEC: intFromEnv(15, 1, 600),
   VIDEO_COMPLETE_PCT: intFromEnv(80, 1, 100), // ธง Q6 — รอยืนยันกับสภาทนายความ
@@ -139,6 +143,15 @@ const envSchemaWithRules = envSchema.superRefine((env, ctx) => {
       message: "APP_ENV=prod ต้องตั้ง IP_HASH_SALT เฉพาะทาง (docs/09-dev/SECRETS-PROVISIONING.md)",
     });
   }
+  // gate r1 F2/F5: คีย์เข้ารหัส token ของ login สองขั้นไม่มี fallback — prod ต้องตั้ง
+  // เสมอ (dev ไม่ตั้งได้แต่ฟีเจอร์จะ fail-closed ที่ใช้งานจริง)
+  if (env.APP_ENV === "prod" && env.LTC_MFA_PENDING_KEY === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["LTC_MFA_PENDING_KEY"],
+      message: "APP_ENV=prod ต้องตั้ง LTC_MFA_PENDING_KEY เฉพาะทาง (docs/09-dev/SECRETS-PROVISIONING.md)",
+    });
+  }
 });
 
 type EnvRaw = z.infer<typeof envSchemaWithRules>;
@@ -186,6 +199,12 @@ export interface AppConfig {
    * ตอน boot) · sha256 เป็น one-way จึงไม่เปิดเผยค่า salt ออกนอกกระบวนการ
    */
   ipHashSalt: string | null;
+  /**
+   * คีย์เข้ารหัส (AES-256-GCM) ของ token stash ใน login สองขั้น (gate r1 F2/F5 ·
+   * migration 0045) — optional env `LTC_MFA_PENDING_KEY` (base64 32 ไบต์); ไม่ตั้ง =
+   * null → helper ฝั่ง mfa ปฏิเสธ fail-closed (ERR-SYS-001) ไม่ใช่ fallback ไปค่าอื่น
+   */
+  mfaPendingKey: string | null;
   mediaProvider: "supabase_storage" | "r2" | "stream";
   mediaSignedUrlTtlSec: number;
   r2: {
@@ -237,6 +256,7 @@ function toConfig(env: EnvRaw): AppConfig {
     supabasePublicUrl: env.SUPABASE_PUBLIC_URL ?? null,
     cursorHmacSecret: env.CURSOR_HMAC_SECRET ?? null,
     ipHashSalt: env.IP_HASH_SALT ?? null,
+    mfaPendingKey: env.LTC_MFA_PENDING_KEY ?? null,
     mediaProvider: env.MEDIA_PROVIDER,
     mediaSignedUrlTtlSec: env.MEDIA_SIGNED_URL_TTL_SEC,
     r2:
@@ -371,6 +391,14 @@ export function getConfig(): AppConfig {
 export const FEATURE_FLAG_KEYS = ["cert_auto_issue"] as const;
 
 export type FeatureFlagKey = (typeof FEATURE_FLAG_KEYS)[number];
+
+/**
+ * เวอร์ชันนโยบาย consent สมัคร (policy_version ของ marketing/email_notify —
+ * Wave F D-f-3 · [#91]) — แหล่งเดียวของระบบ · รูปแบบต้องผ่าน regex ฝั่ง DB
+ * (migration 0043): `^[A-Za-z0-9][A-Za-z0-9._-]{0,19}$` · เปลี่ยนเมื่อเงื่อนไข
+ * consent เปลี่ยน (แถว grant เก่าคงเวอร์ชันเดิมตาม append-only ของ consents)
+ */
+export const SIGNUP_CONSENT_POLICY_VERSION = "1";
 
 /**
  * อ่านสถานะ feature flag จากตาราง `feature_flags` (migration 0026 — source of

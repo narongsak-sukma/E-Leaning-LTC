@@ -61,7 +61,12 @@ const common = {
   expect: { timeout: 15_000 },
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // retries:1 — Next dev (router-server) ตรวจ used_heap > 0.8×heap_limit หลังทุก request
+  // แล้ว restart ตัวเองทันที (start-server.js) คำขอที่กำลังเดินทางตายเป็น ERR_CONNECTION_RESET
+  // แบบสุ่มตำแหน่งช่วง full suite (หลักฐาน: e2e-full-r2/r3 — container ไม่ restart ไม่ OOM
+  // RestartCount=0) · retry บนเซิร์ฟเวอร์ที่เพิ่งเกิดใหม่ผ่าน และ playwright รายงานเป็น
+  // "flaked" ไม่ใช่ passed เงียบ ๆ — deterministic failure ยังตายเหมือนเดิม
+  retries: 1,
   reporter: [["list"]] as ReporterDescription[],
   use: {
     baseURL: process.env.E2E_BASE_URL ?? "http://localhost:3000",

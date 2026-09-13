@@ -8,6 +8,7 @@
  */
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { saveLessonProgress } from "@/lib/fixtures/learning";
@@ -23,6 +24,7 @@ export function DocumentViewer({
   documentTitle: string;
   paragraphs: readonly string[];
 }) {
+  const router = useRouter();
   const [status, setStatus] = useState<AttestStatus>("idle");
   const hasContent = paragraphs.length > 0;
 
@@ -31,6 +33,10 @@ export function DocumentViewer({
     try {
       await saveLessonProgress(lessonId, { documentRead: true });
       setStatus("done");
+      // สถานะจบบทถูกตัดสินที่ RPC แล้ว (document = completed ทันที 0011) — สั่ง
+      // refresh ให้ RSC (outline ✓ + แถบความคืบหน้า) เห็นผลในหน้าเดียวกัน ไม่ต้อง
+      // รอผู้เรียนรีเฟรชเอง (แบบแผนเดียวกับ router.refresh() หลัง mutation ของหน้า admin)
+      router.refresh();
     } catch {
       setStatus("error");
     }

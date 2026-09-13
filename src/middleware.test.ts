@@ -23,7 +23,7 @@ vi.mock("./lib/config", () => ({
 }));
 
 import { createServerClient } from "@supabase/ssr";
-import { middleware, isCsrfAllowed, config } from "./middleware";
+import { middleware, isCsrfAllowed, config, buildContentSecurityPolicy, generateCspNonce } from "./middleware";
 
 const createServerClientMock = vi.mocked(createServerClient);
 
@@ -232,6 +232,58 @@ describe("isCsrfAllowed + config", () => {
 // ภายในด้วย cookie ที่ forward — ถ้าไม่หมุนก่อน BFF จะหมุนเองแล้ว Set-Cookie ของ
 // internal response หายกลางทาง (RSC ตั้ง cookie เองไม่ได้) browser จึงถือ refresh
 // token เก่าจนโดนตรวจ reuse → session ขาด
+
+describe("CSP แบบ nonce (gate r1 F8)", () => {
+  it("buildContentSecurityPolicy: prod ไม่มี unsafe-inline/unsafe-eval ที่ script-src + มี nonce+strict-dynamic", () => {
+    const csp = buildContentSecurityPolicy("abc123", false);
+    const scriptSrc = csp.split(";").find((d) => d.trim().startsWith("script-src")) ?? "";
+    expect(scriptSrc).toContain("'nonce-abc123'");
+    expect(scriptSrc).toContain("'strict-dynamic'");
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(scriptSrc).not.toContain("'unsafe-eval'");
+    // ชุด directive เดิมครบ (default/frame-ancestors/object-src ฯลฯ)
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("object-src 'none'");
+  });
+
+  it("dev: script-src บวก 'unsafe-eval' (React Refresh) + media/img เปิด localhost:8000", () => {
+    const csp = buildContentSecurityPolicy("n", true);
+    const scriptSrc = csp.split(";").find((d) => d.trim().startsWith("script-src")) ?? "";
+    expect(scriptSrc).toContain("'unsafe-eval'");
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(csp).toContain("http://localhost:8000");
+    // prod ต้องไม่มีค่า dev นี้
+    expect(buildContentSecurityPolicy("n", false)).not.toContain("localhost:8000");
+  });
+
+  it("generateCspNonce: ยาวพอ (≥16) และไม่ซ้ำกัน", () => {
+    const a = generateCspNonce();
+    const b = generateCspNonce();
+    expect(a.length).toBeGreaterThanOrEqual(16);
+    expect(a).not.toBe(b);
+  });
+
+  it("ทุก response มี CSP header แบบ nonce และ nonce เปลี่ยนทุก request", async () => {
+    const first = await middleware(makeRequest("GET", "/courses"));
+    const second = await middleware(makeRequest("GET", "/courses"));
+    const csp1 = first.headers.get("content-security-policy") ?? "";
+    const csp2 = second.headers.get("content-security-policy") ?? "";
+    expect(csp1).toContain("'nonce-");
+    // script-src ต้องไม่มี unsafe-inline (style-src ยังมีโดยเจตนา — ตัดเฉพาะ directive นี้)
+    const scriptSrc = csp1.split(";").find((d) => d.trim().startsWith("script-src")) ?? "";
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    // ห้าม hardcode nonce เดิมซ้ำ (cache/reuse = จุดตายของแนวทาง nonce)
+    expect(csp1).not.toBe(csp2);
+  });
+
+  it("response ปฏิเสธ CSRF ก็มี CSP + x-request-id เหมือนกัน (ไม่มีช่องไร้หัวความปลอดภัย)", async () => {
+    const res = await middleware(makeRequest("POST", "/api/v1/x", { origin: "https://evil.example" }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get("content-security-policy")).toContain("'nonce-");
+    expect(res.headers.get("x-request-id")).toBeTruthy();
+  });
+});
 
 describe("session refresh บนหน้าเว็บ (gate r10 M2)", () => {
   it("GET /courses (RSC) token หมดอายุ → middleware หมุนก่อน render — cookie ใหม่กลับ browser + ไปถึง render", async () => {
