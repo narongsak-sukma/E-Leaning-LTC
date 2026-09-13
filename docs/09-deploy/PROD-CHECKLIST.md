@@ -2,7 +2,7 @@
 
 |          |                                                                                                                              |
 | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| เวอร์ชัน | 1.0.0 — ฉบับแรก: รายการตรวจ/ตั้งค่าก่อนเปิดระบบจริงบน cloud (Cloudflare + Vercel + Supabase Cloud) — **ทุกบรรทัดตรวจกับ compose/config จริงของ repo แล้ว (อ้าง `ไฟล์:บรรทัด`)** · พับธงเก่าที่ค้างมาตั้งแต่ wave ก่อน: PGRST aggregates (§2.3) · RESEND/EMAIL_PROVIDER (§3) · MAILER_AUTOCONFIRM (§2.2) · SUPABASE_PUBLIC_URL (§2.4) · backup/restore (§6) |
+| เวอร์ชัน | 1.0.1 — แก้ตาม codex gate p4-r1 (M4: MEDIA_PROVIDER as-built = supabase_storage เท่านั้น · M5: เพิ่ม Auth SMTP ของ Supabase แยกจาก Resend + CRON_SECRET/cron ของ Vercel + PUBLIC_BASE_URL บังคับ · minor: แก้จุดยึด secure cookie (cookies.ts:32) · CERT_PUBLIC_BASE_URL fail-closed (pdf.ts:104-106) · TTL 900 วิ/สูงสุด 1 วัน (config.ts:55) · HSTS next.config.ts:24 · bucket 3 ใบรวม pdpa-exports) — ฉบับแรก 1.0.0: รายการตรวจ/ตั้งค่าก่อนเปิดระบบจริงบน cloud (Cloudflare + Vercel + Supabase Cloud) — **ทุกบรรทัดตรวจกับ compose/config จริงของ repo แล้ว (อ้าง `ไฟล์:บรรทัด`)** · พับธงเก่าที่ค้างมาตั้งแต่ wave ก่อน: PGRST aggregates (§2.3) · RESEND/EMAIL_PROVIDER (§3) · MAILER_AUTOCONFIRM (§2.2) · SUPABASE_PUBLIC_URL (§2.4) · backup/restore (§6) |
 | วันที่    | 2026-09-13                                                                                                                    |
 | อ้างอิง  | SDS §7 (env vars) · `.env.example` · `docker-compose.yml` · `src/lib/config.ts` · VA-PENTEST 1.3.0 (§3.5 COOP/COEP/CORP · §5 external pentest · V14.2.x ค่าลับ placeholder) · SYSTEM-TEST 1.0.1 (§5.2 สิ่งที่ส่งต่อ prod) · SECURITY-REMEDIATION §4 (npm audit accept-with-expiry) · `.omc/plans/wave-f-plan.md` (D-f-8 · D-f-13) |
 | ขอบเขต  | สภาพแวดล้อม production/staging ของ สภาทนายความฯ — ไม่ใช่ dev stack (dev = 100% local Docker ตาม Brief) · ใช้เป็น checkbox เดินตรวจทีละข้อก่อน go-live · ผู้ลงนามปิดท้าย §11 |
@@ -25,12 +25,13 @@
 
 - [ ] **สร้างโปรเจกต์ใหม่ ห้ามใช้ค่า placeholder ของ local dev ทุกชนิด** — JWT secret / anon key / service key ของ `.env.example` และ `docker/kong/kong.yml` เป็นค่า canonical สาธารณะของ Supabase local (ref `0000…` — VA-PENTEST V14.2.x จดคำเตือนไว้แล้ว) · prod ต้องเป็นค่าที่ platform ออกให้เท่านั้น
 - [ ] **Run migrations ครบทั้ง 46 ไฟล์** (`supabase/migrations/0001…0046`) ตามลำดับ — โครงสร้าง/RLS/RPC/trigger ทั้งหมดของระบบอยู่ที่นี่ (SDS §6 · MAINT-003) · ตรวจจบด้วย `_dev.migrations` ledger ครบ 46 แถว + `select count(*) from pg_tables where schemaname='public'` ตรงตาม DATA-DICTIONARY
-- [ ] **สร้าง buckets สองใบ**: `media` (วิดีโอ/PDF ใบประกาศ — private) และ `license-evidence` (ไฟล์แนบใบอนุญาต — private) ตามชื่อที่โค้ดใช้จริง (`docker/volumes/storage` ของ dev + API-SPEC §3.2)
+- [ ] **สร้าง buckets ให้ครบสามใบ** (gate p4-r1 minor): `media` (วิดีโอ — private) · `license-evidence` (ไฟล์แนบใบอนุญาต — private) · `pdpa-exports` (ไฟล์ส่งออกข้อมูลส่วนตัวตามคำขอ PDPA — private · สร้างโดย migration `0036_pdpa_admin.sql:677` §11) — ชื่อทั้งสามตรงกับที่โค้ด/migration ใช้จริง · ขาดใบหลัง = ทุก job ส่งออก PDPA ล้มตอนอัปโหลด (export_upload_failed — คอมเมนต์ migration บรรทัด 678-680)
 - [ ] `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` ตั้งบน Vercel เป็นค่าของโปรเจกต์จริง · `SUPABASE_DB_POOLER_URL` ใช้ pooler ของ cloud (`.env.example:43` รูปแบบ)
 
 ### 2.2 Auth (GoTrue บน cloud)
 
 - [ ] **"Confirm email" เปิดอยู่** = `GOTRUE_MAILER_AUTOCONFIRM=false` สมมูล — dev ตั้ง false ไว้แล้ว (docker-compose.yml:64) · **บน Supabase Cloud หลายแผนค่า default คือยืนยันอัตโนมัติ** ต้องเข้า Auth → Settings ปิด manual confirm ไม่งั้นสมัครได้โดยไม่ยืนยันอีเมล (ขัด AUTH-001)
+- [ ] **SMTP ของ Auth (GoTrue) ตั้งแยกจากอีเมลของแอป** (gate p4-r1 M5): อีเมลยืนยันสมัคร/ยืนยันเปลี่ยนอีเมล ส่งโดย **GoTrue ของ Supabase โดยตรง** ผ่าน SMTP ของหน้า Auth → SMTP Settings ของโปรเจกต์ — **ไม่ผ่าน `RESEND_API_KEY` ของแอปเลย** (แอปเรียก resend เฉพาะอีเมลธุรกิจ: ผลสอบ · ใบประกาศ · เตือนรอบต่ออายุ — §3) · dev สอดคล้องกัน: GoTrue ใช้ SMTP Mailpit ของตัวเอง (docker-compose.yml:70-73) · บน cloud ต้องตั้ง Auth SMTP (หรือทดสอบและยอมรับ sender default ของแผน) แล้ว**พิสูจน์ด้วยการสมัครจริง 1 ฉบับ** ว่าอีเมลยืนยันถึงกล่องจริงจากโดเมนที่ตั้ง
 - [ ] **รหัสผ่านขั้นต่ำ 12** — Auth settings ของ cloud ตั้ง ≥ 12 ให้ตรง `GOTRUE_PASSWORD_MIN_LENGTH=12` (docker-compose.yml:65 · VA-PENTEST V2.1.1)
 - [ ] **Site URL / Redirect URLs** เป็นโดเมนจริงของระบบเท่านั้น (สมมูล `GOTRUE_URI_ALLOW_LIST` ที่ dev ชี้ `http://localhost:3000/**` — docker-compose.yml:55)
 - [ ] **อีเมล rate limit กลับเป็นค่าอนุรักษ์** — dev ตั้ง `GOTRUE_RATE_LIMIT_EMAIL_SENT=1000` เพราะ integration suite สร้างผู้ใช้จริงหลายสิบรายต่อรอบ (คอมเมนต์ docker-compose.yml:66-69) · prod ปล่อยตาม default ของ platform/แผน (เช่น ~30 ฉบับ/ชม.) แล้วเทียบกับปริมาณผู้สมัครที่คาด ถ้าต่ำไปให้อัปเกรดแผน ไม่ใช่ปล่อยสูง
@@ -57,16 +58,19 @@
 
 ## 4. Vercel (แอป Next.js)
 
-- [ ] `APP_ENV=prod` — ค่านี้เป็นตัวเปิดสวิตช์ตรวจทั้งชุด (fail-fast 3 ค่า §1 · secure cookie เฉพาะ prod — `src/lib/supabase/cookies.ts:33-37`) · ห้ามลืม ไม่งั้นระบบเดินด้วยค่า dev-grade
+- [ ] `PUBLIC_BASE_URL=https://<โดเมนจริง>` — **บังคับทุก environment** (`requiredString` — config.ts:33): แอปปฏิเสธการบูตถ้าไม่ตั้ง · เป็น origin ของลิงก์ในอีเมล/QR ที่ระบบสร้าง (gate p4-r1 M5)
+- [ ] `APP_ENV=prod` — ค่านี้เป็นตัวเปิดสวิตช์ตรวจ fail-fast 3 ค่า §1 · ห้ามลืม ไม่งั้นระบบเดินด้วยค่า dev-grade · (คำอธิบายเดิมที่อ้าง secure cookie ผิดจุดยึด: secure cookie ตัดสินที่ `process.env.NODE_ENV === "production"` — cookies.ts:32 — ไม่ใช่ APP_ENV · บน Vercel production `NODE_ENV=production` เสมอจึงได้ผลเหมือนกันโดยไม่ต้องทำอะไรเพิ่ม — gate p4-r1 minor)
 - [ ] `CURSOR_HMAC_SECRET` / `IP_HASH_SALT` / `LTC_MFA_PENDING_KEY` — สามค่าบังคับของ prod (config.ts:130/139/148 · วิธีเจาะจง `docs/09-dev/SECRETS-PROVISIONING.md`)
-- [ ] `CERT_PUBLIC_BASE_URL=https://<โดเมนจริง>` — ตัวสร้าง QR บนใบประกาศนียบัตร (`.env.example:21-22`) · ลืมตั้ง = QR ชี้ localhost
-- [ ] `MEDIA_PROVIDER` — prod เลือก `r2` (Cloudflare R2 + ครบ `R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET` — config.ts:100-106) หรือคง `supabase_storage` (ใช้ bucket `media` ของ §2.1) · `stream` ได้เช่นกัน (config.ts:107-113) — **ตัดสินครั้งเดียวตอนตั้ง แล้วทดสอบเล่นวิดีโอจริง** (signed URL 7 วัน — VA-PENTEST V12.5.1)
+- [ ] `CERT_PUBLIC_BASE_URL=https://<โดเมนจริง>` — ตัวสร้าง QR บนใบประกาศนียบัตร (`.env.example:21-22`) · **ลืมตั้ง = การออกใบประกาศ PDF ล้มทันทีแบบ fail-closed** (`ERR-SYS-002` ที่ pdf.ts:104-106 — โค้ดเลือก "ไม่สร้างเลย" ไม่ใช่สร้าง QR ชี้ localhost — คำอธิบายเดิมของฉบับ 1.0.0 ผิด · gate p4-r1 minor)
+- [ ] `MEDIA_PROVIDER=supabase_storage` — **as-built v1 รองรับ supabase_storage เท่านั้น** (gate p4-r1 M4): `resolveLessonMediaUrl` (learning.server.ts:210-222) คืน `null` เมื่อ provider ≠ `supabase_storage` → บทเรียนวิดีโอแสดง placeholder ไทยแทนเครื่องเล่น · ค่า `r2`/`stream` เป็นค่าใน config ที่**ยังไม่มีเส้นทาง CDN/อัปโหลดจริง** (หนี้ทะเบียน SYSTEM-TEST §5.2 — config.ts:100-113) — ห้ามเลือกใน prod v1 · ใช้ bucket `media` ของ §2.1 แล้ว**ทดสอบเล่นวิดีโอจริง**
+- [ ] `MEDIA_SIGNED_URL_TTL_SEC` — default **900 วินาที (15 นาที) ต่ออายุได้สูงสุด 86,400 (1 วัน)** (config.ts:55) — คำอธิบาย "signed URL 7 วัน" ของฉบับ 1.0.0 ผิด · TTL สั้นโดยตั้งใจ (วิดีโอเล่นผ่าน session ของผู้เรียน ไม่ใช่ลิงก์กันไปแปะ) — gate p4-r1 minor
+- [ ] **`CRON_SECRET` + ตาราง cron ของ Vercel** (gate p4-r1 M5): internal jobs สองตัวเดินด้วย cron — `GET /api/internal/jobs/email-dispatch` (จัดส่งอีเมลค้างคิว) และ `GET /api/internal/jobs/pdpa-export` (ทำคำขอส่งออกข้อมูล PDPA) · ทั้งคู่**ตอบ 404 เงียบเมื่อไม่ตั้ง `CRON_SECRET`** (email-dispatch/route.ts:87-90 · pdpa-export/route.ts:85-88 — ค่าว่างใน `.env.example:88`) = อีเมลไม่ถูกส่งและงาน PDPA ไม่เดิน โดยไม่มี error ใด ๆ · ตั้งค่าบน Vercel แล้วสร้าง schedule (dashboard หรือ `vercel.json` — **repo ยังไม่มีไฟล์นี้ ต้องสร้างตอน deploy**) เรียกพร้อม header `Authorization: Bearer <CRON_SECRET>` ตามรอบที่ สภาทนายความฯ กำหนด (แนะนำ email ทุก 1-5 นาที · pdpa-export ทุก 5-15 นาที) แล้ว**พิสูจน์จริง**ว่าอีเมลเดินและ job ตอบ 200
 - [ ] Node.js 20 (engine ของ repo) · region ใกล้ผู้ใช้ไทย (เช่น Singapore/Hong Kong — latency ส่งต่อ PERF)
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` ตั้งเฉพาะ environment ของ server (Vercel ไม่มี NEXT_PUBLIC_ นำหน้า = ไม่รั่วไป client) — กฎเดียวกับ SDS §5.1
 
 ## 5. Cloudflare / ขอบเขตเครือข่าย
 
-- [ ] **TLS + HSTS ยืนยันบนโดเมนจริง** — โค้ดส่ง HSTS ทุก env อยู่แล้ว (next.config.ts:46) แต่ต้องยืนยันว่า certificate/โดเมนเสร็จ (V9.1.1 ส่งต่อจาก VA-PENTEST)
+- [ ] **TLS + HSTS ยืนยันบนโดเมนจริง** — โค้ดส่ง HSTS ทุก env อยู่แล้ว (next.config.ts:24 · max-age 180 วัน) แต่ต้องยืนยันว่า certificate/โดเมนเสร็จ (V9.1.1 ส่งต่อจาก VA-PENTEST)
 - [ ] **WAF/rate limit ระดับขอบเขต** — dev ใช้ in-memory (SEC-005 "ผ่านบางส่วน" ของ SYSTEM-TEST) · prod ต้องมีกฎที่ Cloudflare คุมกลุ่มเดียวกับ API-SPEC §5 (AUTH 10/นาที · MFA 10/นาที · OTP 3/ชม. ฯลฯ — ตาราง 10 กลุ่ม canonical ที่ `src/lib/rate-limit.ts:44-53`) — อย่างน้อยคุม `/api/v1/auth/*` และ `/api/v1/me/mfa/*`
 - [ ] **คำวินิจฉัย COOP/COEP/CORP ตาม topology จริง** (ของใหม่จาก ZAP baseline — VA-PENTEST §3.5): `Cross-Origin-Opener-Policy: same-origin` ใส่ได้เลย · `Cross-Origin-Embedder-Policy: require-corp` **ขัดกับการโหลดสื่อ cross-origin ผ่าน signed URL ของ Supabase Storage** — ถ้าแอปกับ storage ต่างโดเมน การใส่ COEP require-corp จะทำให้วิดีโอ/PDF โหลดไม่ขึ้น · ทางเลือก: (ก) ไม่ใส่ COEP (ยอมรับความเสี่ยง Spectre-class ต่ำ — สอดคล้องการประเมินของ ZAP ที่จัด Low) หรือ (ข) ใส่พร้อม `Cross-Origin-Resource-Policy` header ที่ storage endpoint + credentialless mode แล้ว**ทดสอบเล่นวิดีโอ+เปิด PDF จริงทุกเบราว์เซอร์เป้าหมาย** · จดการตัดสินไว้ที่ไฟล์นี้เมื่อตัดสินแล้ว: ________
 - [ ] Bot/flood protection ของ Cloudflare เปิดเป็นโหมดอนุรักษ์ (ทดสอบว่าไม่บล็อก Playwright/ผู้ใช้จริง)
@@ -74,7 +78,7 @@
 ## 6. สำรอง/กู้คืน (ธงเก่าตาม D-f-13)
 
 - [ ] **PITR หรือ scheduled backups ของ Supabase เปิด** (แผนที่รองรับ) — ครอบทั้งฐานข้อมูล
-- [ ] **สำรองสื่อของ bucket สองใบ** — Storage เป็น object store แยกจาก DB: export ประจำ (หรือเปิด versioning) ไม่งั้นเสียไฟล์วิดีโอ/ใบประกาศ PDF แม้ DB กู้คืนได้
+- [ ] **สำรองสื่อของ bucket ทั้งสามใบ** (`media` · `license-evidence` · `pdpa-exports` — §2.1) — Storage เป็น object store แยกจาก DB: export ประจำ (หรือเปิด versioning) ไม่งั้นเสียไฟล์วิดีโอ/หลักฐานใบอนุญาต/ไฟล์ส่งออก PDPA แม้ DB กู้คืนได้
 - [ ] **ซ้อม restore จริง 1 ครั้งก่อน go-live** (ไม่ใช่แค่ "มี backup") — สร้างโปรเจกต์ซ้อม → restore → ยืนยัน: ล็อกอินได้ · หลักสูตร/บทเรียนครบ · เปิดใบประกาศ PDF ได้ · เล่นวิดีโอได้ · ตรวจ `/verify/<code>` กับใบที่ออกก่อน backup ผ่าน
 - [ ] สำรอง secrets ของ platform แยกตามกระบวนการของ สภาทนายความฯ (Vercel/Supabase/Resend/Cloudflare แต่ละเจ้ามีวิธี recover ของตน) — ไม่เก็บใน repo
 

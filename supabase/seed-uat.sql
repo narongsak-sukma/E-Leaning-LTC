@@ -40,12 +40,13 @@
 
 begin;
 
--- == 0) กรอบรหัสผ่าน (สอดคล้อง GOTRUE_PASSWORD_MIN_LENGTH=12 · bcrypt ตัดที่ 72 ไบต์) ==
+-- == 0) กรอบรหัสผ่าน (สอดคล้อง GOTRUE_PASSWORD_MIN_LENGTH=12 ตัวอักษร · bcrypt ตัดที่ 72 ไบต์) ==
 create temp table _uat_pw (hash text not null);
 insert into _uat_pw values (extensions.crypt(:'uat_pass', extensions.gen_salt('bf', 10)));
 alter table _uat_pw add constraint _uat_pw_len_ok check (
-  length(:'uat_pass') >= 12 and length(:'uat_pass') <= 72
-); -- แถวที่แทรกไว้ถูกตรวจย้อน — รหัสสั้น/ยาวเกิน = ERROR = ทั้ง TX กลิ้ง (ON_ERROR_STOP)
+  length(:'uat_pass') >= 12 and octet_length(:'uat_pass') <= 72
+); -- แถวที่แทรกไว้ถูกตรวจย้อน — สั้นกว่า 12 ตัวอักษร หรือยาวเกิน 72 "ไบต์" (Unicode กิน
+   -- หลายไบต์/อักขระ — gate p4-r1 minor) = ERROR = ทั้ง TX กลิ้ง (ON_ERROR_STOP)
 
 -- == 1) บัญชี demo 8 บัญชี (auth.users จริง + รหัสผ่าน bcrypt) ==
 --   id คงที่ คำนำหน้า 1707a000 (แยกจาก dev seed ทุกคำนำหน้า)
@@ -102,6 +103,8 @@ on conflict (id) do nothing;
 
 -- รันซ้ำ: รีเซ็ตรหัสผ่าน + บังคับรูปแถว GoTrue อีกครั้ง (กันแถวจาก seed เวอร์ชันเก่า
 -- ที่ aud='authenticated'/token เป็น NULL ค้างอยู่)
+-- เงื่อนไข = id แปบัญชีจริงเท่านั้น (gate p4-r1 M2: ห้าม like 'prefix-%' ซึ่งแตะ
+-- แถวอื่นที่บังเอิญใช้คำนำหน้าเดียวกันได้ — คำสั่งนี้รีเซ็ตรหัสผ่าน/ปลด ban เป็น mutation)
 update auth.users
    set encrypted_password = (select hash from _uat_pw),
        email_confirmed_at = now(),
@@ -113,7 +116,12 @@ update auth.users
        is_sso_user = false, is_anonymous = false,
        created_at = coalesce(created_at, now()), -- แถวจาก seed รุ่นเก่าอาจเป็น NULL — GoTrue อ่านไม่ได้
        updated_at = now()
- where id::text like '1707a000-%';
+ where id in (
+   '1707a000-0a70-4a70-8a70-000000000001', '1707a000-0a70-4a70-8a70-000000000002',
+   '1707a000-0a70-4a70-8a70-000000000003', '1707a000-0a70-4a70-8a70-000000000004',
+   '1707a000-0a70-4a70-8a70-000000000005', '1707a000-0a70-4a70-8a70-000000000006',
+   '1707a000-0a70-4a70-8a70-000000000007', '1707a000-0a70-4a70-8a70-000000000008'
+ );
 
 -- == 2) ปรับ profiles ที่ trigger สร้างให้ (ชื่อไทยเต็ม · th) ==
 update public.profiles
@@ -366,7 +374,12 @@ select p.email,
        u.encrypted_password is not null as password_set
   from public.profiles p
   join auth.users u on u.id = p.id
- where p.id::text like '1707a000-%'
+ where p.id in (
+   '1707a000-0a70-4a70-8a70-000000000001', '1707a000-0a70-4a70-8a70-000000000002',
+   '1707a000-0a70-4a70-8a70-000000000003', '1707a000-0a70-4a70-8a70-000000000004',
+   '1707a000-0a70-4a70-8a70-000000000005', '1707a000-0a70-4a70-8a70-000000000006',
+   '1707a000-0a70-4a70-8a70-000000000007', '1707a000-0a70-4a70-8a70-000000000008'
+ )
  order by p.id;
 
 \echo '== UAT seed: หลักสูตร/ข้อสอบ =='
@@ -383,7 +396,12 @@ select c.code, c.title_th, c.status, c.is_public,
 
 \echo '== UAT seed: ตรวจสอบเพิ่ม =='
 select
-  (select count(*) from auth.users where id::text like '1707a000-%') as demo_users,
+  (select count(*) from auth.users where id in (
+     '1707a000-0a70-4a70-8a70-000000000001', '1707a000-0a70-4a70-8a70-000000000002',
+     '1707a000-0a70-4a70-8a70-000000000003', '1707a000-0a70-4a70-8a70-000000000004',
+     '1707a000-0a70-4a70-8a70-000000000005', '1707a000-0a70-4a70-8a70-000000000006',
+     '1707a000-0a70-4a70-8a70-000000000007', '1707a000-0a70-4a70-8a70-000000000008'
+  )) as demo_users,
   (select count(*) from public.lawyer_licenses where user_id = '1707a000-0a70-4a70-8a70-000000000002'
      and status = 'verified') as lawyer_license_verified,
   (select count(*) from public.questions where bank_id = '1707b000-0b70-4b70-8b70-000000000053'
