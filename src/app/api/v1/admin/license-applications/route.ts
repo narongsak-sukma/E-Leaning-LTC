@@ -22,12 +22,14 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { buildPage, decodeCursor } from "@/lib/api/pagination";
 import { jsonErrorResponse, jsonPageOk, parseOutgoingView, type JsonResponseOptions } from "@/lib/api/response";
+import { ipHashOf } from "@/lib/auth/password-reset";
 import { AdminLicenseApplicationRow } from "@/lib/schemas/license";
 import { AppError } from "@/lib/errors";
 import { createLogger } from "@/lib/logger";
 import { getConfig } from "@/lib/config";
 import { requirePermission } from "@/lib/rbac";
-import { enforceRateLimit } from "@/lib/rate-limit";
+import { clientIpFrom, enforceRateLimit } from "@/lib/rate-limit";
+import { userAgentHashOf } from "@/lib/security/hash";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
@@ -142,6 +144,10 @@ async function evidenceUrlOf(
 async function auditApplicationsPiiAccess(input: {
   readonly actorId: string;
   readonly requestId: string | null;
+  /** D76: ip_hash จาก request จริง — ipHashOf(clientIpFrom(request)) ของ handler */
+  readonly ipHash: string;
+  /** D76: user_agent_hash จาก request จริง — null = ไม่มี header user-agent */
+  readonly userAgentHash: string | null;
 }): Promise<void> {
   const service = createSupabaseServiceRoleClient();
   let lastError: unknown = null;
@@ -163,8 +169,10 @@ async function auditApplicationsPiiAccess(input: {
         user_id: input.actorId,
       },
       p_actor_roles: null,
-      p_ip_hash: null,
-      p_user_agent: null,
+      // D76: hash จาก request จริงของ handler — ไม่มี header user-agent = null
+      // (ตาม userAgentHashOf — ไม่ hash ค่าว่าง)
+      p_ip_hash: input.ipHash,
+      p_user_agent: input.userAgentHash,
       p_request_id: input.requestId,
     });
     if (error === null) {
@@ -244,10 +252,13 @@ export async function GET(request: Request): Promise<NextResponse> {
         ),
       ),
     );
-    // 6) audit PII_ACCESS fail-closed — ล้ม = 503 ไม่มี disclosure (ดูหัวไฟล์)
+    // 6) audit PII_ACCESS fail-closed — ล้ม = 503 ไม่มี disclosure (ดูหัวไฟล์) · D76:
+    //    hash จาก request จริง (ip_hash + user_agent_hash) — ไม่ส่ง null เหมือนเดิมอีก
     await auditApplicationsPiiAccess({
       actorId: userId,
       requestId: options.requestId ?? null,
+      ipHash: ipHashOf(clientIpFrom(request)),
+      userAgentHash: userAgentHashOf(request),
     });
     return jsonPageOk({ data: resources, page: page.page }, options);
   } catch (error: unknown) {

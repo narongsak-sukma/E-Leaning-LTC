@@ -39,7 +39,9 @@ vi.mock("@/lib/supabase/server", () => ({
 
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
+import { ipHashOf } from "@/lib/auth/password-reset";
 import { resetRateLimitStore } from "@/lib/rate-limit";
+import { userAgentHashOf } from "@/lib/security/hash";
 import { decodeCursor, encodeCursor } from "@/lib/api/pagination";
 import { GET, POST } from "./route";
 
@@ -188,9 +190,9 @@ function mockClient(options: {
   return { rpcCalls };
 }
 
-function adminUrl(query = ""): Request {
+function adminUrl(query = "", extraHeaders: Record<string, string> = {}): Request {
   return new Request("http://localhost:3000/api/v1/admin/users" + query, {
-    headers: { "x-forwarded-for": "10.5.0.1", "x-request-id": "req-e11-1" },
+    headers: { "x-forwarded-for": "10.5.0.1", "x-request-id": "req-e11-1", ...extraHeaders },
   });
 }
 
@@ -321,6 +323,41 @@ describe("GET /admin/users — สิทธิ์ + keyset + PII audit", () => {
     expect(last?.status).toBe(429);
     const body = (await last?.json()) as { error: { details: { group: string } } };
     expect(body.error.details.group).toBe("STAFF_WRITE");
+  });
+
+  it("D76: audit PII_ACCESS รับ p_ip_hash/p_user_agent จาก request จริง (10.5.0.1 + UA ของ header) — ไม่ใช่ null · UA ต่างกัน = hash ต่างกัน", async () => {
+    setup({ listResult: { data: { data: [userRow()], nextCursor: null } }, roles: [SR] });
+    const ua = "Mozilla/5.0 (d76-users-route)";
+    const res = await GET(adminUrl("", { "user-agent": ua }));
+    expect(res.status).toBe(200);
+    const auditCalls = service.rpcCalls.filter((c) => c.fn === "append_audit_event");
+    expect(auditCalls).toHaveLength(1);
+    const args = auditCalls[0]?.args ?? {};
+    expect(args["p_ip_hash"]).toBe(ipHashOf("10.5.0.1"));
+    expect(args["p_ip_hash"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(args["p_user_agent"]).toBe(
+      userAgentHashOf(new Request("http://localhost/", { headers: { "user-agent": ua } })),
+    );
+    expect(args["p_user_agent"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(args["p_request_id"]).toBe("req-e11-1");
+    // D76 สองทิศ: UA ต่างกัน → hash ต่างกัน (ค่ามาจาก header จริง ไม่ใช่ค่าคงที่)
+    setup({ listResult: { data: { data: [userRow()], nextCursor: null } }, roles: [SR] });
+    const res2 = await GET(adminUrl("", { "user-agent": ua + "-variant-2" }));
+    expect(res2.status).toBe(200);
+    const auditCalls2 = service.rpcCalls.filter((c) => c.fn === "append_audit_event");
+    const args2 = auditCalls2[0]?.args ?? {};
+    expect(args2["p_user_agent"]).not.toBe(args["p_user_agent"]);
+  });
+
+  it("D76: request ไม่มี header user-agent → p_user_agent เป็น null (ตาม helper — ไม่ hash ค่าว่าง)", async () => {
+    setup({ listResult: { data: { data: [userRow()], nextCursor: null } }, roles: [SR] });
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(200);
+    const auditCalls = service.rpcCalls.filter((c) => c.fn === "append_audit_event");
+    expect(auditCalls).toHaveLength(1);
+    const args = auditCalls[0]?.args ?? {};
+    expect(args["p_user_agent"]).toBeNull();
+    expect(args["p_ip_hash"]).toBe(ipHashOf("10.5.0.1"));
   });
 });
 

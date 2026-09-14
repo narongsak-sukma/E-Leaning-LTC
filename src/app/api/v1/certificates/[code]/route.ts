@@ -29,6 +29,7 @@ import { AppError } from "@/lib/errors";
 import { jsonErrorResponse, type JsonResponseOptions } from "@/lib/api/response";
 import { CertificatePublicView, type CertificatePublicViewParsed } from "@/lib/schemas/v1/certificate";
 import { clientIpFrom, enforceRateLimit } from "@/lib/rate-limit";
+import { userAgentHashOf } from "@/lib/security/hash";
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
 /** ความยาว code สูงสุดที่ยอมรับ (cert_no = 12 ตัวอักษร, verify_code = nanoid 43) */
@@ -52,19 +53,6 @@ function ipHashOf(ip: string): string {
   const { ipHashSalt, supabaseAnonKey } = getConfig();
   const salt = ipHashSalt ?? supabaseAnonKey;
   return createHash("sha256").update(ip + salt).digest("hex");
-}
-
-/** user_agent_hash = sha256(ua + salt) — r9-O1: header เป็นค่าอิสระของ anon
- *  (ใส่อีเมล/เบอร์โทรได้) จึงห้ามเก็บข้อความดิบลงตาราง append-only · ใช้ salt
- *  ชุดเดียวกับ ipHashOf (PB-13 ครอบทั้งสองค่า) */
-function userAgentHashOf(request: Request): string | null {
-  const raw = request.headers.get("user-agent");
-  if (raw === null) return null;
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) return null;
-  const { ipHashSalt, supabaseAnonKey } = getConfig();
-  const salt = ipHashSalt ?? supabaseAnonKey;
-  return createHash("sha256").update(trimmed + salt).digest("hex");
 }
 
 /** {code} ดิบ → ค่าที่ใช้ค้น (trim + จำกัดความยาว — ตัดเศษเกินทิ้ง ไม่ error) */

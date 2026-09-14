@@ -343,6 +343,14 @@ export interface PiiAccessAuditInput {
   readonly purpose: string;
   readonly actorId: string;
   readonly requestId: string | null;
+  /**
+   * ip_hash = sha256(ip + salt) จาก request จริง (D76) — ipHashOf(@/lib/auth/
+   * password-reset) กับ clientIpFrom(@/lib/rate-limit) ของ handler เป็นผู้คำนวณ —
+   * ห้ามเก็บ IP ดิบลงตาราง append-only · ค่าที่ RPC รับ type text (ไม่มี format check)
+   */
+  readonly ipHash: string;
+  /** user_agent_hash = sha256(ua.trim() + salt) จาก request จริง · null = ไม่มี header */
+  readonly userAgentHash: string | null;
 }
 
 /**
@@ -372,8 +380,10 @@ export async function auditUsersPiiAccessFailClosed(input: PiiAccessAuditInput):
       p_after: null,
       p_context: context,
       p_actor_roles: null, // เมินโดย DB — derive ฝั่ง server (0008:411 D15-N1)
-      p_ip_hash: null,
-      p_user_agent: null,
+      // D76: hash จาก request จริงของ handler (ipHashOf + userAgentHashOf) —
+      // ไม่มี header user-agent = null ตาม helper (ไม่ hash ค่าว่าง)
+      p_ip_hash: input.ipHash,
+      p_user_agent: input.userAgentHash,
       p_request_id: input.requestId,
     });
     if (error === null) {

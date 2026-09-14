@@ -35,8 +35,8 @@ vi.mock("@/lib/supabase/ssr", () => {
 
 import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 import { resetRateLimitStore } from "@/lib/rate-limit";
-import { QuestionResource } from "@/lib/schemas/v1/admin-exam";
-import { PATCH } from "./route";
+import { EditQuestionResource, QuestionResource } from "@/lib/schemas/v1/admin-exam";
+import { GET, PATCH } from "./route";
 
 const USER_ID = "a0000000-0000-4000-8000-000000000001";
 const BANK_ID = "b0000000-0000-4000-8000-000000000001";
@@ -387,5 +387,141 @@ describe("PATCH — RPC infra path", () => {
     expect(src.includes('.from("question_options")')).toBe(false);
     expect(src.includes('supabase\n      .from("questions")\n      .update')).toBe(false);
     expect(src.includes('rpc("admin_update_question"')).toBe(true);
+  });
+});
+
+describe("GET (edit) — ข้อเดี่ยวสำหรับฟอร์มแก้ (D74)", () => {
+  function editRow(): Record<string, unknown> {
+    return questionRow({
+      question_options: [
+        { id: OPTION_ID, option_text: "ตัวเลือกก", sort_order: 0, is_correct: true },
+        { id: "e0000000-0000-4000-8000-000000000002", option_text: "ตัวเลือกข", sort_order: 1, is_correct: false },
+      ],
+    });
+  }
+  function editContext(): { params: Promise<{ id: string; qid: string }> } {
+    return { params: Promise.resolve({ id: BANK_ID, qid: QUESTION_ID }) };
+  }
+  function editUrl(): Request {
+    return new Request(URL_PATH, {
+      headers: { "x-forwarded-for": "10.5.0.1", "x-request-id": "req-gp2-edit-1" },
+    });
+  }
+
+  it("staff:exam → 200 EditQuestionResource (options มี isCorrect) · Cache-Control private, no-store", async () => {
+    mockClient({ questions: [{ data: editRow() }] });
+    const res = await GET(editUrl(), editContext());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    const body = (await res.json()) as { data: { options: Array<{ isCorrect: boolean }>; version: number } };
+    expect(body.data.options).toEqual([
+      { id: OPTION_ID, optionText: "ตัวเลือกก", sortOrder: 0, isCorrect: true },
+      { id: "e0000000-0000-4000-8000-000000000002", optionText: "ตัวเลือกข", sortOrder: 1, isCorrect: false },
+    ]);
+  });
+
+  it("staff:content → 403 ก่อนถึง DB (ไม่มี question_bank:update)", async () => {
+    const { calls } = mockClient({ questions: [] }, ["staff:content"]);
+    const res = await GET(editUrl(), editContext());
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-RBAC-001");
+    expect(calls.some((call) => call.table === "questions")).toBe(false);
+  });
+
+  it("staff:viewer → 403 (มี view แต่ไม่มี question_bank:update — D74 ให้เฉลยเฉพาะผู้แต่ง)", async () => {
+    const { calls } = mockClient({ questions: [] }, ["staff:viewer"]);
+    const res = await GET(editUrl(), editContext());
+    expect(res.status).toBe(403);
+    expect(calls.some((call) => call.table === "questions")).toBe(false);
+  });
+
+  it("qid ไม่อยู่ใน bank (data null) → 404 ERR-NF-001 question_not_found", async () => {
+    mockClient({ questions: [] }, ["staff:exam"]);
+    const res = await GET(editUrl(), editContext());
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-NF-001");
+    expect(body.error.details?.reason).toBe("question_not_found");
+  });
+
+  it("qid ผิดรูป uuid → 400 ERR-VAL-001 ก่อนแตะ DB", async () => {
+    const { calls } = mockClient({ questions: [] }, ["staff:exam"]);
+    const badCtx: { params: Promise<{ id: string; qid: string }> } = {
+      params: Promise.resolve({ id: BANK_ID, qid: "not-a-uuid" }),
+    };
+    const res = await GET(editUrl(), badCtx);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { details?: { fields?: string[] } } };
+    expect(body.error.details?.fields).toEqual(["questionId"]);
+    expect(calls.some((call) => call.table === "questions")).toBe(false);
+  });
+
+  it("row drift (tags null) → 503 edit_question_row_drift · error path ก็ no-store", async () => {
+    mockClient({ questions: [{ data: questionRow({ tags: null }) }] });
+    const res = await GET(editUrl(), editContext());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    const body = (await res.json()) as { error: { details?: { reason?: string } } };
+    expect(body.error.details?.reason).toBe("edit_question_row_drift");
+  });
+
+  it("Cache-Control private, no-store ครบทุกทางออก error — 400/403/404/503", async () => {
+    // 400 (uuid ผิด)
+    mockClient({ questions: [] }, ["staff:exam"]);
+    const badCtx: { params: Promise<{ id: string; qid: string }> } = {
+      params: Promise.resolve({ id: "oops", qid: QUESTION_ID }),
+    };
+    const r400 = await GET(editUrl(), badCtx);
+    expect(r400.status).toBe(400);
+    expect(r400.headers.get("cache-control")).toBe("private, no-store");
+    // 403 (staff:content)
+    mockClient({ questions: [] }, ["staff:content"]);
+    const r403 = await GET(editUrl(), editContext());
+    expect(r403.status).toBe(403);
+    expect(r403.headers.get("cache-control")).toBe("private, no-store");
+    // 404 (ไม่พบ)
+    mockClient({ questions: [] }, ["staff:exam"]);
+    const r404 = await GET(editUrl(), editContext());
+    expect(r404.status).toBe(404);
+    expect(r404.headers.get("cache-control")).toBe("private, no-store");
+    // 503 (drift)
+    mockClient({ questions: [{ data: questionRow({ tags: null }) }] });
+    const r503 = await GET(editUrl(), editContext());
+    expect(r503.status).toBe(503);
+    expect(r503.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("select ของ edit GET รวม is_correct ใน embed · กรองทั้ง id+bank_id", async () => {
+    const { calls } = mockClient({ questions: [{ data: editRow() }] });
+    await GET(editUrl(), editContext());
+    const call = calls.find((item) => item.table === "questions");
+    expect(call?.select?.includes("question_options(id,option_text,sort_order,is_correct)")).toBe(true);
+    expect(call?.filters).toEqual([
+      { column: "id", value: QUESTION_ID },
+      { column: "bank_id", value: BANK_ID },
+    ]);
+  });
+
+  it("DTO แยก — response ผ่าน EditQuestionResource (options มี isCorrect)", async () => {
+    mockClient({ questions: [{ data: editRow() }] });
+    const res = await GET(editUrl(), editContext());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: unknown };
+    expect(() => EditQuestionResource.parse(body.data)).not.toThrow();
+    expect(JSON.stringify(body.data).includes("isCorrect")).toBe(true);
+  });
+});
+
+describe("D74 — select แยกชุดระหว่าง edit GET กับเส้นอื่น (grep-assert)", () => {
+  it("EDIT_QUESTION_SELECT รวม is_correct · QUESTION_SELECT (list/PATCH) ไม่มี", () => {
+    const editSrc = readFileSync("src/app/api/v1/admin/question-banks/[id]/questions/[qid]/route.ts", "utf8");
+    const listSrc = readFileSync("src/app/api/v1/admin/question-banks/[id]/questions/route.ts", "utf8");
+    const editM = /EDIT_QUESTION_SELECT =\s*"([^"]+)"\s*\+\s*"([^"]+)";/.exec(editSrc);
+    const listM = /QUESTION_SELECT =\s*"([^"]+)"\s*\+\s*"([^"]+)";/ .exec(listSrc);
+    expect(editM).not.toBeNull();
+    expect(listM).not.toBeNull();
+    expect((String(editM?.[1] ?? "") + String(editM?.[2] ?? "")).includes("is_correct")).toBe(true);
+    expect((String(listM?.[1] ?? "") + String(listM?.[2] ?? "")).includes("is_correct")).toBe(false);
   });
 });
