@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { awaitStuckWaiter } from "./barrier-harness.js";
+import { awaitStuckWaiter, auditSafeRunTail } from "./barrier-harness.js";
 import {
   currentRunId,
   deriveOpKey,
@@ -49,7 +49,7 @@ describe("8k qb PATCH — RPC commit หลัง abort + row คง running จ
   it(
     "abort กลาง lock-wait → lock ปล่อย → INSERT commit หลัง abort · invocation ไม่ตัดสินใจแทนหลักฐาน",
     async () => {
-      const runTail = `${currentRunId().slice(0, 6)}-${randomUUID().slice(0, 6)}`;
+      const runTail = auditSafeRunTail(currentRunId().slice(0, 6));
       const url = qbPatchUrl(fixture.bankId, fixture.questionId);
       opKey = deriveOpKey("app-direct", "PATCH", url);
       const invocationId = randomUUID();

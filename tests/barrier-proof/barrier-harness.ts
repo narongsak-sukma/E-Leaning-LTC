@@ -88,6 +88,20 @@ export function teardownContextActiveFor(file: string): boolean {
   return teardownCtxAls.getStore()?.file === file;
 }
 
+/** tail ของ run สำหรับฝังใน p_reason (บริบท audit ฟรีเท็กซ์) — ปลอด digit-run ของ
+ *  D19-B2 audit_free_text_ok: ตัวสแกนตัด `[\s\-–—_.]` ทิ้งก่อนแล้วห้ามมีเลขติดกัน
+ *  6-9 ตัว (license_no heuristic) · hex สุ่ม 10-12 ตัวที่ติดกันหลัง strip มีโอกาส
+ *  ~1 ใน 3 ที่ออก digit-run ≥6 → 22023 PII ทั้ง run (หลักฐาน 2026-09-15 probe12:
+ *  tail `1234-56789012` = 400 22023 "context มีรูปแบบ PII" · tail ตัวอักษร = 200)
+ *  → ตัดเลขออกทุกส่วน สุ่มจากตัวอักษร a-f ของ uuid เท่านั้น ให้ tail ไม่มีทางชน */
+export function auditSafeRunTail(prefix: string): string {
+  let letters = "";
+  while (letters.length < 8) {
+    letters += randomUUID().replace(/[^a-f]/g, "");
+  }
+  return `${prefix.replace(/[^a-zA-Z]/g, "")}-${letters.slice(0, 8)}`;
+}
+
 let barrierDdlReady = false;
 
 export async function ensureBarrierInfra(): Promise<void> {

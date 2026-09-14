@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { awaitStuckWaiter } from "./barrier-harness.js";
+import { awaitStuckWaiter, auditSafeRunTail } from "./barrier-harness.js";
 import {
   currentRunId,
   deriveOpKey,
@@ -76,7 +76,7 @@ describe("8l หยุด PostgREST หลัง handshake — 5xx จริง 
   it(
     "rest ตายหลัง mutation ถึง server → 5xx ขณะ row คง running → terminal → settle completed-evidenced",
     async () => {
-      const runTail = `${currentRunId().slice(0, 6)}-${randomUUID().slice(0, 6)}`;
+      const runTail = auditSafeRunTail(currentRunId().slice(0, 6));
       const url = qbPatchUrl(fixture.bankId, fixture.questionId);
       const opKey = deriveOpKey("app-direct", "PATCH", url);
       const invocationId = randomUUID();

@@ -97,3 +97,18 @@ regexTarget = "line"
 regexes = [
   '''GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ''',
 ]
+
+# ป้าย (label) ของ attemptBegin/ledger ใน barrier-proof — สตริงธรรมดาที่มนุษย์อ่าน
+# แต่หน้าตาเป็น "คีย์" ต่อ generic-api-key (dash + ตัวอักษรผสมเลข) · scope เฉพาะ
+# ไดเรกทอรีทดสอบ + เฉพาะรูปแบบป้าย h8o-*-attempt-* (pass 4c: 4 hits ที่
+# w8o-ng-attempt-N / h8o-ng2-attempt-N-plus-1(-after-poison)) — ค่าลับจริงหน้าตา
+# แบบนี้ในที่อื่นยังโดนจับตามปกติ
+[[allowlists]]
+description = "ป้าย attemptBegin/ledger ของ barrier-proof (h8o-*-attempt-*) — สตริงทดสอบ ไม่ใช่ค่าลับ"
+paths = [
+  '''(^|/)tests/barrier-proof/''',
+]
+regexTarget = "line"
+regexes = [
+  '''h8o-[a-z0-9-]*attempt-[a-zA-Z0-9-]+''',
+]

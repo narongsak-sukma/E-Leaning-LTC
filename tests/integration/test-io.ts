@@ -868,6 +868,7 @@ export async function writeSettleDecision(
 // ─── 8b) settle engine ชั้นบน — evidence-based settle (barrier suite 8k-8o) ────
 
 export type SettleRefusal =
+  | "settle-refused-retry-capable" // op retry-capable (manifest singleDispatch=false) + claim ไร้ response — scan สะอาดก็ห้าม settle (8o)
   | "settle-refused-blocked-backend" // backend ที่ handshake จับได้ยังมีชีวิต — settle เดี๋ยวนี้ไม่ได้
   | "settle-refused-no-terminal-link"; // อ้างจบแต่ไม่มีหลักฐาน terminal (response/scan) — ห้าม settle
 
@@ -930,6 +931,26 @@ export async function settleHttpWithEvidence(
   }
   const invocationId = inv.invocationId;
   const label = opts.label ?? "settleHttpWithEvidence";
+  // (0) op retry-capable (manifest singleDispatch=false) + claim ไร้ response —
+  //     settle ตาม scan ล้วยมีโอกาสหลอก: transport อาจ dispatch ซ้ำหลัง scan สะอาด
+  //     (users.ts loop 250/600ms) — ห้าม settle ไม่ว่า scan/attribution จะสวยแค่ไหน
+  //     · scan ยังรันเพื่อบันทึกความจริง (scanClean = ผล scan ณ ตอนนั้น) · claim
+  //     'evidenced' (response จริงมาถึง transport) ไม่อยู่ข้อนี้ — response = terminal (r24-r30 8o)
+  const manifestEntry = manifestByOpKey(opKey);
+  if (manifestEntry !== undefined && !manifestEntry.singleDispatch && opts.claimed === "evidenced-no-response") {
+    const busyNow = await pidsBusy(opts.blockerPids ?? []);
+    await writeSettleDecision(invocationId, opKey, "settle-refused-retry-capable", busyNow.length === 0, {
+      busyPids: busyNow,
+      retryCapable: true,
+      label,
+      claimed: opts.claimed,
+    });
+    return {
+      settled: false,
+      decision: "settle-refused-retry-capable",
+      refusal: "settle-refused-retry-capable",
+    };
+  }
   // (1) scan ก่อน claim เสมอ
   const busy = await pidsBusy(opts.blockerPids ?? []);
   if (busy.length > 0) {
