@@ -263,6 +263,8 @@ export const AssessmentRuleSummary = z.object({
   cooldownMinutes: z.number().int(),
   shuffleQuestions: z.boolean(),
   shuffleOptions: z.boolean(),
+  requireCourseComplete: z.boolean(),
+  selection: z.record(z.string(), z.unknown()),
   proctoringMode: z.enum(ADMIN_PROCTORING_MODES),
   examReviewMode: z.enum(EXAM_REVIEW_MODES),
   effectiveFrom: IsoTimestamp,
@@ -324,7 +326,7 @@ export type QuestionBankCreateResultParsed = z.infer<typeof QuestionBankCreateRe
 
 /* ─── แถว DB (snake_case ตามคอลัมน์จริง) + mapper ─── */
 
-/** แถว assessment_rules ที่ฝังมากับ assessments — เฉพาะคอลัมน์ที่ authenticated ได้ grant (pass_pct เพิ่ม 0019; exam_review_mode เพิ่ม 0049; selection ยังซ่อน) */
+/** แถว assessment_rules ที่ฝังมากับ assessments — เฉพาะคอลัมน์ที่ authenticated ได้ grant (pass_pct เพิ่ม 0019; exam_review_mode เพิ่ม 0049; require_course_complete+selection เพิ่ม GP3-r2 เพื่อ prefill โมดัลกติกาโดยไม่เขียนทับขอบเขตคลัง) */
 export interface AssessmentRuleRow {
   readonly version: number;
   readonly pass_pct: number;
@@ -334,12 +336,14 @@ export interface AssessmentRuleRow {
   readonly attempt_cooldown_minutes: number;
   readonly shuffle_questions: boolean;
   readonly shuffle_options: boolean;
+  readonly require_course_complete: boolean;
+  readonly selection: Record<string, unknown>;
   readonly proctoring_mode: string;
   readonly exam_review_mode: string;
   readonly effective_from: string;
 }
 
-/** แถว assessments + embed (PostgREST) — course = เจ้าของหลักสูตร (created_by), rules = effective ล่าสุด */
+/** แถว assessments + embed (PostgREST) — course = เจ้าของหลักสูตร (created_by), rules = version สูงสุด */
 export interface AdminAssessmentRow {
   readonly id: string;
   readonly code: string;
@@ -371,6 +375,8 @@ export const AssessmentRuleRowSchema = z
     attempt_cooldown_minutes: z.number().int(),
     shuffle_questions: z.boolean(),
     shuffle_options: z.boolean(),
+    require_course_complete: z.boolean(),
+    selection: z.record(z.string(), z.unknown()),
     proctoring_mode: z.enum(ADMIN_PROCTORING_MODES),
     exam_review_mode: z.enum(EXAM_REVIEW_MODES),
     effective_from: IsoTimestamp,
@@ -401,7 +407,7 @@ export function parseAdminAssessmentRow(row: unknown): AdminAssessmentRow {
   return parsed.data;
 }
 
-/** map แถว assessments → resource — เลือกกติกา effective ล่าสุด (effective_from มากสุด — handler เรียงให้) */
+/** map แถว assessments → resource — เลือกกติกา version สูงสุด (handler เรียง version desc + limit 1 — "ล่าสุด" = ฐานที่ RPC ใช้คิด max+1 ต่อ) */
 export function toAdminAssessmentResource(row: AdminAssessmentRow): AdminAssessmentResourceParsed {
   const latestRule = row.assessment_rules[0];
   const rules: AssessmentRuleSummaryParsed | null =
@@ -416,6 +422,8 @@ export function toAdminAssessmentResource(row: AdminAssessmentRow): AdminAssessm
           cooldownMinutes: latestRule.attempt_cooldown_minutes,
           shuffleQuestions: latestRule.shuffle_questions,
           shuffleOptions: latestRule.shuffle_options,
+          requireCourseComplete: latestRule.require_course_complete,
+          selection: latestRule.selection,
           proctoringMode: latestRule.proctoring_mode as AssessmentRuleSummaryParsed["proctoringMode"],
           examReviewMode: latestRule.exam_review_mode as AssessmentRuleSummaryParsed["examReviewMode"],
           effectiveFrom: latestRule.effective_from,

@@ -187,6 +187,24 @@ export default async function AdminAssessmentsPage({
               id: assessment.id,
               label: `${assessment.code} · ${assessment.title}`,
               currentVersion: assessment.rules?.version ?? null,
+              // กติกาล่าสุดทั้งแถว — โมดัลใช้ prefill ฟอร์มและส่งต่อ selection เดิม
+              currentRules:
+                assessment.rules === null
+                  ? null
+                  : {
+                      version: assessment.rules.version,
+                      timeLimitMinutes: assessment.rules.timeLimitMinutes,
+                      questionCount: assessment.rules.questionCount,
+                      passPct: assessment.rules.passPct,
+                      maxAttempts: assessment.rules.maxAttempts,
+                      cooldownMinutes: assessment.rules.cooldownMinutes,
+                      shuffleQuestions: assessment.rules.shuffleQuestions,
+                      shuffleOptions: assessment.rules.shuffleOptions,
+                      requireCourseComplete: assessment.rules.requireCourseComplete,
+                      selection: assessment.rules.selection,
+                      proctoringMode: assessment.rules.proctoringMode,
+                      examReviewMode: assessment.rules.examReviewMode,
+                    },
             }))}
             allowRules={allowRules}
           />

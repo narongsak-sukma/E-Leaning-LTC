@@ -8,10 +8,15 @@
  * - 403 สองแบบ: instructor (ERR-RBAC-001 ก่อนแตะ DB) · staff:exam แต่ aal1 (ERR-AUTH-004)
  * - flip โหมดเปิดเฉลยสองทิศผ่าน HTTP (never → GET embed สะท้อน → กลับ after_final_attempt)
  * - VAL pass_pct 0 → 400 ERR-VAL-001 (ขา BFF zod ตรวจก่อน RPC — ตามทะเบียน §2 แถว 72;
- *   เอกสาร §3.8 แถว 226 เขียน 422 ซึ่ง implementable ไม่ได้ — flag ที่รายงาน lead แล้ว)
+ *   เอกสาร §3.8 แถว 226 เดิมเขียน 422 ซึ่ง implementable ไม่ได้ → wave นี้แก้เป็น 400
+ *   พร้อมเหตุผลแล้ว)
  * - NF: assessment ถูก soft-delete → 404 ERR-NF-001 จาก RPC
  * - audit: ASSESSMENT_CONFIG_CHANGE (0049 ข้อ 5) ลง audit_logs ของ version ใหม่
  *   ทุกครั้งที่ POST ผ่าน endpoint (ปิด 3 ทาง — POST v1 เดิมรวมอยู่ด้วย)
+ * - embed "กติกาล่าสุด" เลือกด้วย version สูงสุด (ไม่ใช่ effective_from ล่าสุด) —
+ *   ย้อนหลัง/effective_from เท่ากันต้องไม่หมุนแถวที่ GET ตอบ (M4)
+ * - app ไม่พร้อม: skip ตามปกติ ยกเว้น TEST_REQUIRE_APP=1 (battery §2.4) = ล้มทันที
+ *   ห้ามผ่าน battery โดยไม่ได้พิสูจน์บน BFF จริง
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_PASSWORD, createTestUser, psql, psqlScalar, restCall, type TestUser } from "./helpers.js";
@@ -170,6 +175,22 @@ let instructorAal2 = "";
 /** container app เข้าถึงได้หรือไม่ — ไม่ได้ = skip ทุกเคส (สแตกบางสภาพรันแค่ db+kong) */
 let appReachable = false;
 
+/**
+ * app ไม่พร้อม → skip เคสตามปกติ ยกเว้น TEST_REQUIRE_APP=1 (battery §2.4) —
+ * โหมด battery ห้ามเขียวแบบไม่ได้พิสูจน์บน BFF จริง: skip เงียบ = false pass → โยน error
+ */
+function requireAppOrSkip(ctx: { skip(): void }): void {
+  if (appReachable) {
+    return;
+  }
+  if (process.env["TEST_REQUIRE_APP"] === "1") {
+    throw new Error(
+      `app ไม่พร้อมที่ ${APP_URL} แต่ TEST_REQUIRE_APP=1 — battery ห้าม skip เคส BFF`,
+    );
+  }
+  ctx.skip();
+}
+
 describe.skipIf(!DB_URL)(
   "Wave G P3 — POST /admin/assessments/{id}/rules + embed exam_review_mode (D87)",
   () => {
@@ -195,7 +216,7 @@ describe.skipIf(!DB_URL)(
     // ─── กลุ่ม 1 — 201 + version = max+1 + embed สะท้อน ──────────────────────
 
     it("staff:exam → 201 · version = max+1 จริง (seed v1 → ได้ v2) · แถว DB สะท้อน body", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       const res = await bffPost(RULES_PATH, examAal2, staffExam.id, {
         ...MIN_BODY,
         passPct: 80,
@@ -221,7 +242,7 @@ describe.skipIf(!DB_URL)(
     }, 60_000);
 
     it("flip สองทิศ: never → GET embed สะท้อน never → กลับ after_final_attempt → GET สะท้อนกลับ", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       // ทิศ 1 — POST never (ได้ v3)
       const postNever = await bffPost(RULES_PATH, examAal2, staffExam.id, {
         ...MIN_BODY,
@@ -262,7 +283,7 @@ describe.skipIf(!DB_URL)(
     // ─── กลุ่ม 2 — 403: บทบาท + aal ──────────────────────────────────────────
 
     it("instructor → 403 ERR-RBAC-001 ก่อนเรียก RPC · ไม่มี version ใหม่ใน DB", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       const res = await bffPost(RULES_PATH, instructorAal2, instructor.id, MIN_BODY);
       expect(res.status).toBe(403);
       const body = res.json as { error: { code: string } };
@@ -274,7 +295,7 @@ describe.skipIf(!DB_URL)(
     }, 60_000);
 
     it("staff:exam แต่ session aal1 → 403 ERR-AUTH-004 (mfa_required)", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       // token aal1 ของรอบ — grant ใหม่ ณ จุดเรียก (แบบ dcr13 เคส d): GoTrue เพิกถอน
       // session อื่นของผู้ใช้เมื่อยืนยัน MFA (factor verify ใน mintAal2Token ตอน
       // beforeAll) ทำให้ accessToken ดิบจาก createTestUser ตาย → 401 ไม่ใช่ 403
@@ -295,8 +316,8 @@ describe.skipIf(!DB_URL)(
 
     // ─── กลุ่ม 3 — VAL/NF ────────────────────────────────────────────────────
 
-    it("passPct 0 → 400 ERR-VAL-001 (ขา BFF zod ตรวจก่อน RPC — ทะเบียน §2 แถว 72; §3.8 แถว 226 เขียน 422 ซึ่ง implementable ไม่ได้ — flag lead แล้ว)", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+    it("passPct 0 → 400 ERR-VAL-001 (ขา BFF zod ตรวจก่อน RPC — ทะเบียน §2 แถว 72; §3.8 แถว 226 เดิมเขียน 422 → แก้เป็น 400 แล้วใน wave นี้)", async (ctx) => {
+      requireAppOrSkip(ctx);
       const res = await bffPost(RULES_PATH, examAal2, staffExam.id, { passPct: 0 });
       expect(res.status).toBe(400);
       const body = res.json as { error: { code: string } };
@@ -308,7 +329,7 @@ describe.skipIf(!DB_URL)(
     }, 60_000);
 
     it("assessment ถูก soft-delete → 404 ERR-NF-001 จาก RPC · คืนสถานะหลังเคส", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       await psql(`update public.assessments set deleted_at = now() where id = '${ASSESS_ID}'`);
       try {
         const res = await bffPost(RULES_PATH, examAal2, staffExam.id, MIN_BODY);
@@ -324,7 +345,7 @@ describe.skipIf(!DB_URL)(
     // ─── กลุ่ม 4 — audit ผ่าน endpoint ───────────────────────────────────────
 
     it("POST ผ่าน endpoint → audit_logs มี ASSESSMENT_CONFIG_CHANGE ของ version ใหม่ + actor ถูกคน", async (auditCtx) => {
-      if (!appReachable) return auditCtx.skip();
+      requireAppOrSkip(auditCtx);
       const marker = await psqlScalar("select now()");
       const res = await bffPost(RULES_PATH, examAal2, staffExam.id, {
         ...MIN_BODY,
@@ -351,5 +372,59 @@ describe.skipIf(!DB_URL)(
          order by occurred_at desc limit 1
       `);
       expect(actor).toBe(staffExam.id);
+    }, 60_000);
+
+    // ─── กลุ่ม 5 — สัญญา embed "ล่าสุด" = version สูงสุด (M4) ─────────────────
+
+    it("embed เลือก version สูงสุด แม้แถวนั้น effective_from ย้อนหลัง/เท่ากัน (เกณฑ์เดียวกับ max+1 ของ RPC)", async (ctx) => {
+      requireAppOrSkip(ctx);
+      // max ปัจจุบันหลังเคสก่อนหน้า (อย่างน้อย v5 จากเคส audit) — ยืด 2 แถวด้วย psql:
+      // v(max+1) ย้อน effective_from 30 วัน · v(max+2) effective_from เดียวกันเป๊ะ
+      // (now() ใน statement เดียว = ค่าเดียวกันทุกแถว) — เก่าสั่งเรียง effective_from
+      // desc จะตอบแถว POST ล่าสุด (effective_from = ตอนนี้) ไม่ใช่ version สูงสุด
+      const maxVersion = Number(
+        await psqlScalar(
+          `select max(version) from public.assessment_rules where assessment_id = '${ASSESS_ID}'`,
+        ),
+      );
+      expect(maxVersion).toBeGreaterThanOrEqual(1);
+      const backdatedVersion = maxVersion + 1;
+      const tieVersion = maxVersion + 2;
+      await psql(`
+        insert into public.assessment_rules
+          (id, assessment_id, version, time_limit_minutes, question_count, pass_pct,
+           max_attempts, attempt_cooldown_minutes, shuffle_questions, shuffle_options,
+           selection, require_course_complete, proctoring_mode, effective_from) values
+          ('aaaaaaaa-0000-4000-8000-0000000000d6', '${ASSESS_ID}', ${backdatedVersion},
+           60, 30, 70, 3, 1440, true, true, '{}'::jsonb, true, 'basic',
+           now() - interval '30 days'),
+          ('aaaaaaaa-0000-4000-8000-0000000000d7', '${ASSESS_ID}', ${tieVersion},
+           60, 30, 70, 3, 1440, true, true, '{}'::jsonb, true, 'basic',
+           now() - interval '30 days')
+        on conflict (id) do nothing;
+      `);
+      try {
+        const get = await bffGet(LIST_PATH, examAal2, staffExam.id);
+        expect(get.status, get.text.slice(0, 300)).toBe(200);
+        const list = get.json as {
+          data: Array<{ id: string; rules: { version: number } | null }>;
+        };
+        const row = list.data.find((item) => item.id === ASSESS_ID);
+        expect(row?.rules?.version).toBe(tieVersion); // version สูงสุดชนะ — ไม่แพ้เพราะย้อนหลัง
+        // DB ยืนยันแถวสองแถวนั้นมีจริง + effective_from เท่ากันเป๊ะ (ไม่ใช่ไม่ได้แทรก)
+        const tieCount = await psqlScalar(`
+          select count(*) from public.assessment_rules
+           where assessment_id = '${ASSESS_ID}'
+             and version in (${backdatedVersion}, ${tieVersion})
+             and effective_from = (select effective_from from public.assessment_rules
+                                     where assessment_id = '${ASSESS_ID}' and version = ${backdatedVersion})
+        `);
+        expect(Number(tieCount)).toBe(2);
+      } finally {
+        await psql(`
+          delete from public.assessment_rules
+           where assessment_id = '${ASSESS_ID}' and version > ${maxVersion};
+        `);
+      }
     }, 60_000);
   });

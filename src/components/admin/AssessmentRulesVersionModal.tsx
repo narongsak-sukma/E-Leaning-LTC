@@ -6,15 +6,26 @@
  *
  * - body ตรง AssessmentRuleInput (schema ขาเข้าของ route จริง) เป๊ะ — camelCase ทุกคีย์ ·
  *   ห้ามส่ง version/effective_to (schema strict ไม่มีคีย์นี้ — version = max+1 server-side)
+ * - เลือกชุดข้อสอบแล้ว prefill ทุกช่องจากกติกา version ล่าสุด (embed GET /admin/assessments)
+ *   และส่งต่อ selection (ขอบเขตคลังข้อสอบ) ตามเดิมเสมอ — ไม่ส่ง = RPC เขียน '{}' ทับ
+ *   ขอบเขตคลังเดิมเงียบ ๆ (ห้าม — แก้ที่อื่นเท่านั้น)
  * - เขียนกติกาได้เฉพาะ staff:exam/super_admin (allowRules — ตัดสินจริงที่ BFF เสมอ)
  * - validation error ของ BFF (ERR-VAL-001 details.fields) แปลงเป็นชื่อฟิลด์ไทย
  *   ผ่าน validationFieldLabels — แสดงในโมดัล ไม่ปิดฟอร์มทิ้ง
+ * - response แบบ envelope { data: { version } } ต้อง unwrap ก่อนอ่าน version —
+ *   อ่านผิดชั้น = successVersion null ตลอด (แสดงสำเร็จไม่ได้) · ปิดโมดัลกลางคัน =
+ *   response เก่าตายทันที (request epoch)
  */
 
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
-import { AdminApiError, postAdminJson, TRANSPORT_FALLBACK_MESSAGE } from "@/lib/exam-admin.client";
+import {
+  AdminApiError,
+  postAdminJson,
+  TRANSPORT_FALLBACK_MESSAGE,
+  unwrapDataEnvelope,
+} from "@/lib/exam-admin.client";
 import {
   PROCTORING_MODE_LABEL_TH,
   validationFieldLabels,
@@ -31,11 +42,31 @@ export const EXAM_REVIEW_MODE_LABEL_TH: Record<ExamAdminExamReviewMode, string> 
   never: "ไม่เปิดเฉลย",
 };
 
-/** ชุดข้อสอบที่หน้า RSC ส่งมาให้เลือก (id + ป้าย + version ล่าสุดที่มี) */
+/**
+ * กติกา version ล่าสุดแบบ camelCase (ตรง AssessmentRuleSummary ของ BFF) —
+ * ใช้ prefill ฟอร์มเมื่อเลือกชุดข้อสอบ
+ */
+export interface AssessmentRulesPrefill {
+  readonly version: number;
+  readonly timeLimitMinutes: number;
+  readonly questionCount: number;
+  readonly passPct: number;
+  readonly maxAttempts: number;
+  readonly cooldownMinutes: number;
+  readonly shuffleQuestions: boolean;
+  readonly shuffleOptions: boolean;
+  readonly requireCourseComplete: boolean;
+  readonly selection: Record<string, unknown>;
+  readonly proctoringMode: ExamAdminProctoringMode;
+  readonly examReviewMode: ExamAdminExamReviewMode;
+}
+
+/** ชุดข้อสอบที่หน้า RSC ส่งมาให้เลือก (id + ป้าย + กติกา version ล่าสุด — null = ยังไม่มี) */
 export interface AssessmentOption {
   readonly id: string;
   readonly label: string;
   readonly currentVersion: number | null;
+  readonly currentRules: AssessmentRulesPrefill | null;
 }
 
 /** ช่องกรอกของฟอร์ม — ตัวเลขเก็บเป็นสตริงจาก input แล้ว validate/แปลงตอน submit */
@@ -51,6 +82,11 @@ export interface AssessmentRulesFormState {
   readonly requireCourseComplete: boolean;
   readonly proctoringMode: ExamAdminProctoringMode;
   readonly examReviewMode: ExamAdminExamReviewMode;
+  /**
+   * ขอบเขตคลังข้อสอบของ version ล่าสุด — ส่งต่อเป๊ะเสมอ (แสดงอ่านอย่างเดียว) ·
+   * null = ชุดข้อสอบยังไม่มีกติกา → ไม่แนบคีย์ selection ใน body (ใช้ default ของ RPC)
+   */
+  readonly selection: Record<string, unknown> | null;
 }
 
 /** ค่าเริ่มต้นตรง default ของ AssessmentRuleInput (schema ขาเข้าของ route จริง) */
@@ -66,6 +102,7 @@ export const ASSESSMENT_RULES_FORM_DEFAULTS: AssessmentRulesFormState = {
   requireCourseComplete: true,
   proctoringMode: "basic",
   examReviewMode: "after_final_attempt",
+  selection: null,
 };
 
 /** body ของ POST .../rules — คีย์ตรง AssessmentRuleInput เป๊ะ (strict — ไม่มี version/effective_to) */
@@ -80,7 +117,54 @@ export type AssessmentRuleVersionBody = {
   readonly requireCourseComplete: boolean;
   readonly proctoringMode: ExamAdminProctoringMode;
   readonly examReviewMode: ExamAdminExamReviewMode;
+  /** แนบเฉพาะเมื่อมีกติกาเดิม — ไม่แนบ = RPC ใช้ default ('{}') ตามสัญญา */
+  readonly selection?: Record<string, unknown>;
 };
+
+/**
+ * ฟอร์มเริ่มจากกติกา version ล่าสุดของชุดข้อสอบที่เลือก — ทุกช่อง prefill ตามจริง
+ * (ผู้ใช้เห็นค่าปัจจุบันก่อนแก้ ไม่ใช่ default ที่บังเอิญ) · rules = null (ชุดใหม่
+ * ยังไม่มีกติกา) → ค่า default ของ schema
+ */
+export function formStateForAssessment(
+  assessmentId: string,
+  rules: AssessmentRulesPrefill | null,
+): AssessmentRulesFormState {
+  if (rules === null) {
+    return { ...ASSESSMENT_RULES_FORM_DEFAULTS, assessmentId };
+  }
+  return {
+    assessmentId,
+    passPct: String(rules.passPct),
+    timeLimitMinutes: String(rules.timeLimitMinutes),
+    questionCount: String(rules.questionCount),
+    maxAttempts: String(rules.maxAttempts),
+    attemptCooldownMinutes: String(rules.cooldownMinutes),
+    shuffleQuestions: rules.shuffleQuestions,
+    shuffleOptions: rules.shuffleOptions,
+    requireCourseComplete: rules.requireCourseComplete,
+    proctoringMode: rules.proctoringMode,
+    examReviewMode: rules.examReviewMode,
+    selection: rules.selection,
+  };
+}
+
+/**
+ * อ่าน version ที่สร้างสำเร็จจาก response ของ POST .../rules — ตรงสัญญา
+ * envelope { data: { version } } (ข้ามชั้น data = เห็น undefined เสมอ) ·
+ * คืน null เมื่อ envelope ผิดรูป/ไม่มี version จำนวนเต็มบวก = drift —
+ * caller ต้อง fail-closed (ไม่อวดสำเร็จ ไม่ refresh ตามเปล่า)
+ */
+export function readCreatedRulesVersion(envelope: unknown): number | null {
+  const resource = unwrapDataEnvelope(envelope);
+  if (resource === null || typeof resource !== "object") {
+    return null;
+  }
+  const version = (resource as { version?: unknown }).version;
+  return typeof version === "number" && Number.isInteger(version) && version >= 1
+    ? version
+    : null;
+}
 
 /** ตรวจความถูกต้องของตัวเลข — คืน number ที่ผ่านช่วง หรือ null (ยังไม่กรอก/ผิด) */
 function intInRange(value: string, min: number, max: number): number | null {
@@ -192,6 +276,9 @@ export function buildAssessmentRuleVersionBody(
     requireCourseComplete: state.requireCourseComplete,
     proctoringMode: state.proctoringMode,
     examReviewMode: state.examReviewMode,
+    // ขอบเขตคลังเดิมส่งต่อเป๊ะ (ไม่แนบ = RPC เขียน '{}' ทับ) · null ได้เฉพาะชุด
+    // ยังไม่มีกติกา — กรณีนั้นไม่แนบคีย์ให้ RPC ใช้ default ตามสัญญา
+    ...(state.selection !== null ? { selection: state.selection } : {}),
   };
   return { ok: true, body };
 }
@@ -245,6 +332,12 @@ export function AssessmentRulesVersionModal({
   const [apiFieldLabels, setApiFieldLabels] = useState<readonly string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [successVersion, setSuccessVersion] = useState<number | null>(null);
+  /**
+   * ยุคของ request ปัจจุบัน — บั๊ก M3: ปิดโมดัล (ยกเลิก/ปิดหลัง/Escape) ระหว่าง POST
+   * ค้างอยู่ แล้วเปิดใหม่ = response เก่าไหลเขียน state ของฟอร์มใหม่ · ทุกการปิด/เปิด
+   * ใหม่ bump ค่านี้ — response ของยุคก่อนเห็นค่าไม่ตรงจึงทิ้งผลลัพธ์ทิ้งทั้งหมด
+   */
+  const requestEpochRef = useRef(0);
 
   if (!allowRules) {
     return null;
@@ -257,7 +350,15 @@ export function AssessmentRulesVersionModal({
     setForm((previous) => ({ ...previous, [key]: value }));
   };
 
+  /** เลือกชุดข้อสอบ = รีเซ็ตฟอร์มทั้งแบบ prefill จากกติกา version ล่าสุดของชุดนั้น */
+  const selectAssessment = (assessmentId: string) => {
+    const option = assessmentOptions.find((item) => item.id === assessmentId);
+    setForm(formStateForAssessment(assessmentId, option?.currentRules ?? null));
+    setFieldErrors({});
+  };
+
   const closeAndReset = () => {
+    requestEpochRef.current += 1; // ฆ่า response ที่ยังค้างของฟอร์มเก่าทันที
     setOpen(false);
     setForm(ASSESSMENT_RULES_FORM_DEFAULTS);
     setFieldErrors({});
@@ -266,7 +367,7 @@ export function AssessmentRulesVersionModal({
     setSuccessVersion(null);
   };
 
-  /** จุดเดียวที่ map error ของ BFF → ข้อความไทย (ERR-VAL-001 แสดงเป็นรายการฟิลด์) */
+  /** จุดเดียวที่ map error ของ BFF → ข้อความไทย — ดู error.code ก่อน status (403 มีสองสาเหตุ) */
   const showApiError = (error: unknown) => {
     if (error instanceof AdminApiError && error.code === "ERR-VAL-001") {
       setFormError("กรุณาตรวจสอบข้อมูลตามรายการต่อไปนี้");
@@ -277,8 +378,19 @@ export function AssessmentRulesVersionModal({
       setFormError("ไม่พบชุดข้อสอบที่เลือก (อาจถูกลบไปแล้ว) — ERR-NF-001");
       return;
     }
-    if (error instanceof AdminApiError && error.status === 403) {
+    if (error instanceof AdminApiError && error.code === "ERR-AUTH-004") {
+      setFormError(
+        "ต้องยืนยันตัวตนด้วย MFA (AAL2) ก่อนแก้ไขกติกาข้อสอบ — กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่พร้อม MFA (ERR-AUTH-004)",
+      );
+      return;
+    }
+    if (error instanceof AdminApiError && error.code === "ERR-RBAC-001") {
       setFormError("คุณไม่มีสิทธิ์ดำเนินการนี้ — ติดต่อผู้ดูแลระบบหากถือว่าผิดพลาด (ERR-RBAC-001)");
+      return;
+    }
+    if (error instanceof AdminApiError && error.status === 403) {
+      // 403 ที่ไม่ใช่ AUTH-004/RBAC-001 ตาม code — อย่าเดาสาเหตุ แสดงตามข้อความ BFF
+      setFormError(error.message);
       return;
     }
     if (error instanceof AdminApiError) {
@@ -297,23 +409,36 @@ export function AssessmentRulesVersionModal({
       return;
     }
     setFieldErrors({});
+    const epoch = requestEpochRef.current;
     setSubmitting(true);
     try {
       const result = await postAdminJson(
         `${ASSESSMENT_RULES_PATH}/${form.assessmentId}/rules`,
         built.body,
       );
-      // version ที่ได้จาก BFF (แถวที่แทรก — version = max+1 server-side)
-      const version =
-        typeof (result.body as { version?: unknown })?.version === "number"
-          ? (result.body as { version: number }).version
-          : null;
+      if (epoch !== requestEpochRef.current) {
+        return; // ปิด/รีเซ็ตไปแล้วระหว่างรอ — ทิ้ง response ของฟอร์มเก่า
+      }
+      // unwrap envelope { data: { version } } ก่อนอ่าน — อ่านตรง body = undefined เสมอ (M1)
+      const version = readCreatedRulesVersion(result.body);
+      if (version === null) {
+        // 201 แต่ envelope ผิดสัญญา = drift — fail-closed: ไม่อวดสำเร็จ ไม่ refresh ตามเปล่า
+        setFormError(
+          "บันทึกแล้วแต่คำตอบของระบบไม่ตรงสัญญา (ไม่พบเลข version) — กรุณาปิดแล้วตรวจสอบ version ล่าสุดในตารางอีกครั้ง",
+        );
+        return;
+      }
       setSuccessVersion(version);
       router.refresh();
     } catch (error) {
+      if (epoch !== requestEpochRef.current) {
+        return;
+      }
       showApiError(error);
     } finally {
-      setSubmitting(false);
+      if (epoch === requestEpochRef.current) {
+        setSubmitting(false);
+      }
     }
   };
 
@@ -377,6 +502,7 @@ export function AssessmentRulesVersionModal({
               assessmentOptions={assessmentOptions}
               disabled={submitting}
               onChange={update}
+              onAssessmentChange={selectAssessment}
             />
           </div>
         )}
@@ -394,6 +520,7 @@ export function AssessmentRulesFormFields({
   assessmentOptions,
   disabled,
   onChange,
+  onAssessmentChange,
 }: {
   readonly form: AssessmentRulesFormState;
   readonly fieldErrors: AssessmentRulesFormErrors;
@@ -403,6 +530,8 @@ export function AssessmentRulesFormFields({
     key: K,
     value: AssessmentRulesFormState[K],
   ) => void;
+  /** เลือกชุดข้อสอบไม่ใช่แค่เปลี่ยนคีย์ — ต้อง prefill ทั้งฟอร์มจากกติกาล่าสุดด้วย */
+  readonly onAssessmentChange: (assessmentId: string) => void;
 }) {
   const fieldErrorOf = (key: string): string | null =>
     key in fieldErrors ? (fieldErrors[key] ?? null) : null;
@@ -414,7 +543,7 @@ export function AssessmentRulesFormFields({
           className={INPUT_CLASS}
           value={form.assessmentId}
           disabled={disabled}
-          onChange={(event) => onChange("assessmentId", event.target.value)}
+          onChange={(event) => onAssessmentChange(event.target.value)}
         >
           <option value="">— เลือกชุดข้อสอบ —</option>
           {assessmentOptions.map((assessment) => (
@@ -429,9 +558,24 @@ export function AssessmentRulesFormFields({
           <span className="mt-1 block text-sm text-ink-500">
             เลือกไว้: version ล่าสุด{" "}
             {assessmentOptions.find((item) => item.id === form.assessmentId)?.currentVersion ?? "—"}
+            {" — "}ฟอร์มด้านล่าง prefill จากกติกานี้แล้ว
           </span>
         ) : null}
       </FieldRow>
+
+      {form.selection !== null ? (
+        <div className="rounded-[10px] border border-mist-200 bg-mist-50 p-3">
+          <p className="font-heading text-sm font-semibold text-ink-900">
+            ขอบเขตคลังข้อสอบ (ส่งต่อจาก version ล่าสุด — แก้ที่เมนูคลังข้อสอบเท่านั้น)
+          </p>
+          <pre className="mt-1 max-h-40 overflow-auto text-xs text-ink-600">
+            {JSON.stringify(form.selection, null, 2)}
+          </pre>
+          <p className="mt-1 text-xs text-ink-500">
+            การบันทึก version ใหม่จะส่งค่าขอบเขตนี้ต่อตามเดิมโดยอัตโนมัติ
+          </p>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <FieldRow label="เวลาทำข้อสอบ (นาที)" error={fieldErrorOf("timeLimitMinutes")}>

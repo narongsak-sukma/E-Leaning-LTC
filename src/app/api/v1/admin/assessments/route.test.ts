@@ -153,6 +153,8 @@ function assessmentRow(overrides: Record<string, unknown> = {}): Record<string, 
         attempt_cooldown_minutes: 1440,
         shuffle_questions: true,
         shuffle_options: true,
+        require_course_complete: true,
+        selection: { bank_ids: ["b00000000-0000-4000-8000-000000000001"] },
         proctoring_mode: "basic",
         exam_review_mode: "after_final_attempt",
         effective_from: CREATED_AT,
@@ -211,7 +213,7 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(row.rules?.timeLimitMinutes).toBe(90);
   });
 
-  it("embed กติกาเรียง effective_from desc + limit 1 ที่ embed (ไม่กระทบ limit หน้าหลัก)", async () => {
+  it("embed กติกาเรียง version desc + limit 1 ที่ embed (ไม่กระทบ limit หน้าหลัก) — กติกา 'ล่าสุด' = version สูงสุดตามสัญญา max+1", async () => {
     const { calls } = mockClient({ assessments: [{ data: [assessmentRow()] }] });
     await GET(adminUrl());
     const call = calls.find((item) => item.table === "assessments");
@@ -220,8 +222,16 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(call?.select?.includes("pass_pct")).toBe(true);
     // exam_review_mode เปิดตั้งแต่ 0049 (Wave G P3) — ต้องอยู่ใน embed ให้ mapper เดียวใช้สองทาง
     expect(call?.select?.includes("exam_review_mode")).toBe(true);
+    // require_course_complete + selection เปิดตั้งแต่ GP3-r2 — โมดัลกติกาต้อง prefill/
+    // ส่งต่อขอบเขตคลังเดิมได้ (ไม่ส่ง = RPC เขียน '{}' ทับ)
+    expect(call?.select?.includes("require_course_complete")).toBe(true);
+    expect(call?.select?.includes("selection")).toBe(true);
     expect(call?.select?.includes("is_correct")).toBe(false);
     expect(call?.orders).toContainEqual({
+      column: "version",
+      options: { referencedTable: "assessment_rules", ascending: false },
+    });
+    expect(call?.orders).not.toContainEqual({
       column: "effective_from",
       options: { referencedTable: "assessment_rules", ascending: false },
     });

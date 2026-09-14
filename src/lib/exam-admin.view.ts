@@ -23,7 +23,7 @@ export type ExamAdminQuestionType = "single_choice" | "multiple_choice" | "true_
 /** ระดับความยาก — enum question_difficulty (0001_extensions.sql) */
 export type ExamAdminQuestionDifficulty = "easy" | "medium" | "hard";
 
-/** สรุปกติกาล่าสุดของชุดข้อสอบ (AssessmentRuleSummary ของ BFF — passPct เปิดให้แสดงแล้ว) */
+/** สรุปกติกาล่าสุดของชุดข้อสอบ (AssessmentRuleSummary ของ BFF — passPct เปิดให้แสดงแล้ว · requireCourseComplete/selection/examReviewMode เพิ่ม GP3-r2 เพื่อ prefill โมดัลกติกา) */
 export interface ExamAdminAssessmentRuleSummary {
   readonly version: number;
   readonly passPct: number;
@@ -33,7 +33,11 @@ export interface ExamAdminAssessmentRuleSummary {
   readonly cooldownMinutes: number;
   readonly shuffleQuestions: boolean;
   readonly shuffleOptions: boolean;
+  readonly requireCourseComplete: boolean;
+  /** ขอบเขตคลังข้อสอบ (jsonb) — ส่งต่อให้ version ใหม่เมื่อแก้กติกา */
+  readonly selection: Record<string, unknown>;
   readonly proctoringMode: ExamAdminProctoringMode;
+  readonly examReviewMode: "after_final_attempt" | "never";
   readonly effectiveFrom: string;
 }
 

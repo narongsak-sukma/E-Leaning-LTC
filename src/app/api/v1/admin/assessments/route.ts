@@ -48,14 +48,16 @@ import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 /**
  * select ของ GET/POST — course = เจ้าของหลักสูตร (assessments ไม่มีคอลัมน์ created_by —
  * 0005 L50-L61) ผูก !left กันแถวหายเมื่อ RLS ฝั่ง courses บัง; assessment_rules embed เรียง
- * effective_from ล่าสุดก่อน + limit 1
+ * version สูงสุดก่อน + limit 1 (กติกา "ล่าสุด" = version สูงสุด — ฐานเดียวกับที่ RPC
+ * admin_add_assessment_rules ใช้คิด version ถัดไป = max+1 · require_course_complete +
+ * selection ติดมาด้วยเพื่อ prefill โมดัลกติกาโดยไม่ทับขอบเขตคลังข้อสอบ)
  */
 const ADMIN_ASSESSMENT_SELECT =
   "id,code,title,description,is_final,status,course_id,created_at," +
   "course:courses!left(id,created_by)," +
   "assessment_rules(version,pass_pct,time_limit_minutes,question_count,max_attempts," +
-  "attempt_cooldown_minutes,shuffle_questions,shuffle_options,proctoring_mode," +
-  "exam_review_mode,effective_from)";
+  "attempt_cooldown_minutes,shuffle_questions,shuffle_options,require_course_complete," +
+  "selection,proctoring_mode,exam_review_mode,effective_from)";
 
 /** สะท้อน x-request-id ที่ middleware สร้าง กลับทุก response (SDS §5.4) */
 function optionsOf(request: Request): JsonResponseOptions {
@@ -139,8 +141,10 @@ export async function GET(request: Request): Promise<NextResponse> {
       .select(ADMIN_ASSESSMENT_SELECT)
       .order("created_at", { ascending: false })
       .order("id", { ascending: false })
-      // embed กติกา: effective ล่าสุดก่อน + 1 แถว (limit เฉพาะ embed — ไม่กระทบหน้าหลัก)
-      .order("effective_from", { referencedTable: "assessment_rules", ascending: false })
+      // embed กติกา: version สูงสุดก่อน + 1 แถว (limit เฉพาะ embed — ไม่กระทบหน้าหลัก)
+      // "ล่าสุด" = version สูงสุด ตามสัญญา version=max+1 ของ RPC — เรียงด้วย effective_from
+      // เพียงอย่างเดียวจะคลาดเคลื่อนเมื่อแถว effective_from เดียวกันหรือ insert ย้อนหลัง
+      .order("version", { referencedTable: "assessment_rules", ascending: false })
       .limit(1, { referencedTable: "assessment_rules" })
       .limit(query.limit + 1);
     if (query.status !== undefined) {

@@ -216,6 +216,8 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
     attempt_cooldown_minutes: 1440,
     shuffle_questions: true,
     shuffle_options: true,
+    require_course_complete: true,
+    selection: { bank_ids: ["b00000000-0000-4000-8000-000000000001"] },
     proctoring_mode: "basic",
     exam_review_mode: "after_final_attempt",
     effective_from: "2026-09-01T00:00:00+00:00",

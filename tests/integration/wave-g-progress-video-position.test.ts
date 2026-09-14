@@ -16,7 +16,8 @@
  * เงื่อนไขรัน: TEST_DATABASE_URL + container app (next dev) + .env ครบ
  * (PUBLIC_BASE_URL ชี้ container app, SUPABASE_URL/ANON_KEY — loader ยิง BFF ผ่าน
  * origin นี้และอ่าน lessons/media ด้วย JWT ผู้เรียนผ่าน Kong) · app เข้าไม่ถึง = skip
- * ทุกเคส (แบบ wave-g-qb-bank-detail) · รันโดย lead ตามลำดับ D-f-7
+ * ทุกเคส (แบบ wave-g-qb-bank-detail) ยกเว้น TEST_REQUIRE_APP=1 (battery §2.4)
+ * = ล้มทันที ห้ามผ่าน battery โดยไม่ได้พิสูจน์บน BFF จริง · รันโดย lead ตามลำดับ D-f-7
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ANON_KEY, createTestUser, psql, psqlScalar, restCall, type TestUser } from "./helpers.js";
@@ -223,6 +224,22 @@ let learner: TestUser;
 /** container app เข้าถึงได้หรือไม่ — ไม่ได้ = skip ทุกเคส (สแตกบางสภาพรันแค่ db+kong) */
 let appReachable = false;
 
+/**
+ * app ไม่พร้อม → skip เคสตามปกติ ยกเว้น TEST_REQUIRE_APP=1 (battery §2.4) —
+ * โหมด battery ห้ามเขียวแบบไม่ได้พิสูจน์บน BFF จริง: skip เงียบ = false pass → โยน error
+ */
+function requireAppOrSkip(ctx: { skip(): void }): void {
+  if (appReachable) {
+    return;
+  }
+  if (process.env["TEST_REQUIRE_APP"] === "1") {
+    throw new Error(
+      `app ไม่พร้อมที่ ${APP_URL} แต่ TEST_REQUIRE_APP=1 — battery ห้าม skip เคส BFF`,
+    );
+  }
+  ctx.skip();
+}
+
 interface LessonWire {
   readonly lessonId: string;
   readonly videoMaxPositionSec: number | null;
@@ -273,7 +290,7 @@ describe.skipIf(!DB_URL)(
     });
 
     it("BFF GET /courses/{id}/progress → videoMaxPositionSec ทะลุครบ 6 แถว แบบดิบ (0=ค่าจริง · null=legacy)", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       const res = await bffGet(`/api/v1/courses/${COURSE}/progress`, learner.accessToken, learner.id);
       expect(res.status, res.text.slice(0, 300)).toBe(200);
       const byLesson = lessonsOf(res.json);
@@ -286,7 +303,7 @@ describe.skipIf(!DB_URL)(
     }, 60_000);
 
     it("reader+outline: getCourseProgress (zod) → buildCourseOutline → videoMaxPositionSec ผูกครบทุกบท", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       const context = { origin: APP_URL, cookieHeader: `${AUTH_COOKIE}=${sessionCookieValue(learner.accessToken, learner.id)}` };
       const [detail, progress] = await Promise.all([
         getCourseDetail(COURSE, context),
@@ -308,7 +325,7 @@ describe.skipIf(!DB_URL)(
     }, 60_000);
 
     it("loader: loadLessonWorkspace seed ตำแหน่งเริ่มเล่นถูก clamp ตามเคส (0→0 · 600→599 · 700→599 · 333→333≠240 · null→240 · completed→0)", async (ctx) => {
-      if (!appReachable) return ctx.skip();
+      requireAppOrSkip(ctx);
       for (const row of CASES) {
         const workspace = await loadLessonWorkspace(COURSE, row.id);
         if (workspace.kind !== "ready") {
