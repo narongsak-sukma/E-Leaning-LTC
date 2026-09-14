@@ -713,6 +713,13 @@ export interface HttpWriteOptions {
   /** touchSet สำหรับ before-snapshot (manifest op เท่านั้น) */
   readonly touchSet?: ReadonlyArray<{ table: string; where: string; orderBy: string }>;
   readonly callerGeneration?: string;
+  /** signal ของ caller — abort กลาง dispatch ได้ (scenario commit-after-abort 8k/8m/8n) */
+  readonly signal?: AbortSignal;
+  /** header เพิ่มของ caller (cookie/origin/x-forwarded-for ของ BFF — D89-3: httpWrite ครอบ bffPatch) */
+  readonly extraHeaders?: Record<string, string>;
+  /** 'scenario' = ผู้เรียกเป็นผู้ settle เองผ่าน settleHttpWithEvidence — transport
+   *  ห้ามปิด invocation เองไม่ว่าจะได้ response หรือ error (row คง 'running') */
+  readonly settleMode?: "auto" | "scenario";
 }
 
 /** http write ผ่านจุดกลาง — ทุก dispatch: binding immutable + ua_nonce + cursor + snapshot */
@@ -761,8 +768,12 @@ export async function httpWrite(
     headers["authorization"] = `Bearer ${opts.token}`;
   }
   if (body !== undefined) headers["content-type"] = "application/json";
+  for (const [k, v] of Object.entries(opts.extraHeaders ?? {})) {
+    headers[k] = v;
+  }
   const init: RequestInit = { method, headers };
   if (body !== undefined) init.body = JSON.stringify(body);
+  if (opts.signal !== undefined) init.signal = opts.signal;
   let status = -1;
   let text = "";
   let json: unknown = null;
@@ -778,13 +789,32 @@ export async function httpWrite(
       }
     }
   } catch (err) {
-    // abort/network — settle ปฏิเสธ (ต้อง singleDispatch+terminalLink ตาม manifest — ที่นี่คือ
-    // ชั้นกลาง: บันทึกแล้ว poison เพราะไม่มีหลักฐาน terminal)
+    // abort/network — scenario mode: ผู้เรียกถือหลักฐาน (handshake pid) และเป็นคน
+    // settle เอง → คง 'running' + โยนต่อ · auto mode: ชั้นกลางไม่มีหลักฐาน terminal
+    // → poison (ต้อง singleDispatch+terminalLink ตาม manifest)
+    if (opts.settleMode === "scenario") {
+      await ledgerWrite(
+        "note",
+        { event: "http-error-held-running", uaNonce, opKey, error: String(err).slice(0, 200) },
+        { opKey, invocationId },
+      );
+      throw err instanceof Error ? err : new Error(String(err));
+    }
     await invocationClose(invocationId, opKey, "poisoned", {
       reason: "settle-refused-no-terminal-link",
       error: String(err).slice(0, 300),
     });
     throw err instanceof Error ? err : new Error(String(err));
+  }
+  if (opts.settleMode === "scenario") {
+    // ได้ response แล้วแต่ scenario ยังไม่ settle — เช่น 5xx ขณะ downstream ยังไม่
+    // terminal (8l: ต้องแน่ใจ backend จบก่อน) — คง 'running' ให้ผู้เรียกตัดสิน
+    await ledgerWrite(
+      "note",
+      { event: "http-response-held-running", uaNonce, opKey, status },
+      { opKey, invocationId },
+    );
+    return { status, json, text, invocationId, opKey, uaNonce, settledAs: "held-running" };
   }
   // completion ตาม provenance (r26-r28):
   // kong-path: 2xx/4xx = confirmed · 500 = ต้อง access-log fence · 502/503/504/52x = unresolved
@@ -858,10 +888,16 @@ export interface SettleHttpEvidenceResult {
   readonly terminalLink?: { pids: number[]; checkedAt: string };
 }
 
-async function pidsAlive(pids: readonly number[]): Promise<number[]> {
+/** pid ที่ "ยังไม่ terminal": ยังมีชีวิตและ state ≠ 'idle' — กำลัง active-query
+ *  (รวมรอ lock) หรือ TX ค้าง (idle in transaction = ถือ lock อยู่) · backend
+ *  pooled ของ PostgREST ที่ commit แล้วจะนั่ง 'idle' = terminal จริง (lock ปล่อย
+ *  แล้ว ไม่มีงานต่อจาก invocation เดิม) — จำแนกด้วยสถานะ ไม่ใช่การมีชีวิตเปล่าๆ
+ *  (พิสูจน์ด้วย 8m รอบแรก: pid ยังอยู่หลัง commit แต่ idle) */
+export async function pidsBusy(pids: readonly number[]): Promise<number[]> {
   if (pids.length === 0) return [];
   const raw = await psql(
-    `select pid::text from pg_stat_activity where pid = any('{${pids.join(",")}}'::int[]);`,
+    `select pid::text from pg_stat_activity
+     where pid = any('{${pids.join(",")}}'::int[]) and state <> 'idle';`,
   );
   return raw
     .trim()
@@ -895,10 +931,10 @@ export async function settleHttpWithEvidence(
   const invocationId = inv.invocationId;
   const label = opts.label ?? "settleHttpWithEvidence";
   // (1) scan ก่อน claim เสมอ
-  const alive = await pidsAlive(opts.blockerPids ?? []);
-  if (alive.length > 0) {
+  const busy = await pidsBusy(opts.blockerPids ?? []);
+  if (busy.length > 0) {
     await writeSettleDecision(invocationId, opKey, "settle-refused-blocked-backend", false, {
-      alivePids: alive,
+      busyPids: busy,
       label,
       claimed: opts.claimed,
     });
