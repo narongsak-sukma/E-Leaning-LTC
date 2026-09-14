@@ -72,6 +72,11 @@ export default defineConfig({
     // ลำดับไฟล์คือส่วนหนึ่งของ proof (8b/8c/8d) — ห้ามขนาน ห้ามสลับ
     fileParallelism: false,
     sequence: { sequencer: AaToBbSequencer },
+    // ทุกไฟล์ในหนึ่ง process (จับจริงจาก 8c รอบแรก: fork-ต่อ-ไฟล์ถูก tear down ทันที
+    // ที่ hook หมดเวลา — timer/budget ของ promise ที่ถูกทิ้งตายพร้อม worker ก่อนถึง
+    // จุดพิสูจน์ · singleFork ทำให้ promise ที่ runner ทิ้ง (F56) ยังวิ่งต่อได้ข้าม
+    // ไฟล์ถัดไปในรอบเดียวกัน — สมมติฐานของ time-anchor ของ 8c)
+    poolOptions: { forks: { singleFork: true } },
     testTimeout: 30_000,
     // ตั้งใจ 5s — scenario abandonment ต้องการ runner ทิ้ง hook จริง (ดู header)
     hookTimeout: 5_000,

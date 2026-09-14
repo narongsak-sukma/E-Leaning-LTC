@@ -276,6 +276,9 @@ export async function guardedBeforeAll(file: string, label: string, fn: () => Pr
   const lifecycleId = await fileBegin(file, label);
   try {
     await fn();
+    // หลักฐานคงทน (markers โดน cleanup TX ลบ): setup "จบจริง" เมื่อไหร่ — 8e เทียบ ts
+    // กับ cleanup-start ของ afterAll ที่รออยู่ (เขียนโดย promise ที่ runner ทิ้งแล้ว)
+    await ledgerWrite("note", { event: "setup-complete", file, lifecycleId });
     await fileSetupSettled(file, lifecycleId);
   } catch (err) {
     await fileSetupFailed(file, lifecycleId, `setup fn ล้ม: ${String(err)}`).catch(() => undefined);
