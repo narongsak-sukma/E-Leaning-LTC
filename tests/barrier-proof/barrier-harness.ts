@@ -185,17 +185,20 @@ export async function markersCreatedSince(file: string, cleanupStart: string): P
 // ─── 1) file lifecycle — begin/settle/teardown ────────────────────────────────
 
 /**
- * จุดบังคับก่อน setup ของไฟล์ (สัญญา 8b): มีไฟล์อื่นใน run เดียวกันที่ยัง
- * setup-running/teardown-running/poisoned = ปฏิเสธ "ก่อน" แตะ setup ใดๆ + เขียน
- * guard-event · ผ่าน = registration (lifecycle ใหม่) · registration เป็น statement
- * เดียว (INSERT..ON CONFLICT UPDATE) — outsider ล็อกแถวอยู่ = บล็อกที่นี่ (f1)
+ * จุดบังคับก่อน setup ของไฟล์ (สัญญา 8b): มีหน้าต่าง live ใดๆ ใน run เดียวกัน —
+ * รวม "ตัวไฟล์เอง" (setup-running/teardown-running/poisoned) = ปฏิเสธ "ก่อน"
+ * แตะ setup ใดๆ + เขียน guard-event · self-poison ก็ห้ามเปิดใหม่เงียบๆ — ต้อง
+ * manualClearFile ก่อน (f4a: hang→poison→re-attempt ถูกปฏิเสธ) · ผ่าน =
+ * registration (lifecycle ใหม่ — หน้าต่างเดิมที่ setup-settled แทนที่ได้: f4c) ·
+ * registration เป็น statement เดียว (INSERT..ON CONFLICT UPDATE) — outsider
+ * ล็อกแถวอยู่ = บล็อกที่นี่ (f1)
  */
 export async function fileBegin(file: string, label: string): Promise<string> {
   await ensureBarrierInfra();
   const run = currentRunId();
   const live = await psql(`
     select file || '|' || phase from test_infra.window_file_state
-    where run_id = ${sqlLit(run)} and file <> ${sqlLit(file)}
+    where run_id = ${sqlLit(run)}
       and phase in ('setup-running','teardown-running','poisoned');`);
   const predecessors = live.trim().split("\n").filter((l) => l.length > 0);
   if (predecessors.length > 0) {
@@ -342,9 +345,12 @@ export async function guardedAfterAll(
   opts: GuardedAfterAllOptions,
 ): Promise<GuardedAfterAllResult> {
   await ensureBarrierInfra();
-  // (1) fast-refuse
+  // (1) fast-refuse — สองกรณี · (ก) ไม่มี setup เลย (lifecycle ว่าง/ไม่มีแถว) =
+  //     teardown-refused-no-setup (8b: bb หลัง guard ปฏิเสธ) · (ข) มีแถวแต่
+  //     lifecycle ไม่ใช่ของเรา = stale-lifecycle-release (f4c — หน้าต่างถูกแทนที่
+  //     แล้ว release เก่าห้ามแตะของใหม่)
   const st0 = await fileState(file);
-  if (opts.lifecycleId === "" || st0 === null || st0.lifecycleId !== opts.lifecycleId) {
+  if (opts.lifecycleId === "" || st0 === null) {
     await ledgerWrite("note", {
       event: "teardown-refused-no-setup",
       file,
@@ -355,6 +361,20 @@ export async function guardedAfterAll(
     throw new FileGuardError(
       "teardown-refused-no-setup",
       `${file}: setup ไม่เคยเริ่มของ lifecycle นี้ (lifecycleId=${opts.lifecycleId || "-"})`,
+    );
+  }
+  if (st0.lifecycleId !== opts.lifecycleId) {
+    await ledgerWrite("note", {
+      event: "stale-lifecycle-release",
+      file,
+      label,
+      myLifecycle: opts.lifecycleId,
+      currentLifecycle: st0.lifecycleId,
+      phase: st0.phase,
+    });
+    throw new FileGuardError(
+      "stale-lifecycle-release",
+      `${file}: lifecycle ${opts.lifecycleId} ไม่ใช่ lifecycle ปัจจุบัน (${st0.lifecycleId})`,
     );
   }
   // (2) barrier fn — race กับ budget (แพ้ = poison; fn เดิมวิ่งต่อ)
@@ -395,8 +415,13 @@ export async function guardedAfterAll(
       throw fnError;
     }
   }
-  // (3) รอ setup เซ็ตเทิลจริง
-  await awaitFileSettled(file, opts.setupBudgetMs ?? 30_000);
+  // (3) รอ setup เซ็ตเทิลจริง — เฉพาะเมื่อ setup ยังวิ่งอยู่ (8e) · phase อื่น
+  //     (settled แล้ว / failed / teardown แล้ว / poisoned) ไม่ต้องรอ — ปล่อยให้
+  //     phase TX ตัดสินที่ (4) (f1 double-release / f4c stale lifecycle ต้อง
+  //     ปฏิเสธทันที ไม่ใช่ค้างรอจน budget)
+  if (st0.phase === "setup-running") {
+    await awaitFileSettled(file, opts.setupBudgetMs ?? 30_000);
+  }
   // (4) phase TX — บล็อกบน row lock · lifecycle เก่า = stale (f4c)
   const run2 = currentRunId();
   const upd = await psql(`
@@ -592,4 +617,58 @@ export async function awaitStuckWaiter(
     }
     await sleep(pollMs);
   }
+}
+
+// ─── violation probe (8e3-ข) ─────────────────────────────────────────────────
+
+export interface ViolationProbe {
+  /** ลบแถวที่แทรกไว้ + เขียน ledger outcome 'executed' — ปิดรอบ probe เสมอ */
+  retract(): Promise<void>;
+}
+
+/**
+ * ทางออกที่ "ตั้งใจ" ให้ทดสอบยิงแถวหลุด guard ทุกชั้น (ข้าม phase/generation —
+ * จำลอง mutation ที่เกิดหลัง cleanup-start โดยไม่ผ่าน attemptBegin/transport) —
+ * พิสูจน์ว่า absence check (markersCreatedSince) เป็นเส้นตายสุดท้ายของ
+ * defense-in-depth: จับแถวที่ guard ทุกชั้นไม่เห็น · จำกัดให้เรียกจากโมดูลใต้
+ * tests/barrier-proof/ เท่านั้น (callerModule ต้องขึ้นต้นด้วย prefix นี้) ·
+ * probe แทรก 1 แถว (note='violation-probe') ค้างไว้ให้ checker จับ แล้วผู้เรียก
+ * ต้อง retract() เพื่อลบ + เขียน audit trail
+ */
+export async function violationProbe(
+  file: string,
+  kind: string,
+  callerModule: string,
+): Promise<ViolationProbe> {
+  if (!/^tests\/barrier-proof\//.test(callerModule)) {
+    throw new Error(
+      `violationProbe: ปฏิเสธ — callerModule ต้องอยู่ใต้ tests/barrier-proof/ เท่านั้น (ได้ ${callerModule})`,
+    );
+  }
+  await ensureBarrierInfra();
+  const run = currentRunId();
+  await psql(
+    `insert into test_infra.barrier_markers (run_id, file, kind, note)
+     values (${sqlLit(run)}, ${sqlLit(file)}, ${sqlLit(kind)}, 'violation-probe');`,
+    { quiet: true },
+  );
+  await ledgerWrite("note", { event: "violation-probe-armed", file, kind, callerModule });
+  return {
+    retract: async () => {
+      await psql(
+        `delete from test_infra.barrier_markers
+         where run_id = ${sqlLit(run)} and file = ${sqlLit(file)}
+           and kind = ${sqlLit(kind)} and note = 'violation-probe';`,
+        { quiet: true },
+      );
+      await ledgerWrite("note", {
+        event: "violation-probe-executed",
+        outcome: "executed",
+        file,
+        kind,
+        inserted: 1,
+        deleted: 1,
+      });
+    },
+  };
 }
