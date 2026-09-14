@@ -106,6 +106,12 @@ services:
       # ใช้ id.count()/score_pct.avg() ผ่าน user-JWT client จึงต้องเปิดไว้ (พิสูจน์ด้วย
       # curl /rest/v1/courses?select=id.count() ก่อน-หลัง: 400 PGRST123 → 200)
       PGRST_DB_AGGREGATES_ENABLED: "true"
+      # Wave H D89-3 [#94]: access-log fence ของ evidence-settle — settle kong-path 500
+      # ได้ต่อเมื่อ window มี line {ua_nonce+method+path-normalized+" 500 "} หนึ่งต่อหนึ่ง
+      # default = silent (probe จริง: 200/404/401/42501/500 P0002 ไม่มี line ทุกสถานะที่ทดลอง)
+      # info = Apache line ทุกสถานะ เขียนเมื่อ request จบ · dev-only (ไม่ buffer — มีผล
+      # throughput) · production (Cloudflare+Supabase) ไม่มีกลไกนี้
+      PGRST_LOG_LEVEL: info
     networks: [ltc-dev]
 
   # ----------------------------------------------------------------- Storage API
@@ -225,7 +231,9 @@ services:
       # (Next dev ตรวจ used_heap > 0.8×heap_limit หลังทุก request แล้ว restart router-server
       #  ทันที — full suite 34 เทสสะสม module graph ~2.5GB+ · 3072 ยังโดน 1 ครั้งช่วง e2e-14
       #  เห็นใน e2e-full-r3 — เพิ่มเป็น 4096 + playwright retries:1 กันขอบ)
-      NODE_OPTIONS: --max-old-space-size=4096
+      # Wave H D90 [#94]: 4096 → 6144 — e2e สะสมหลัง suite โตข้ามเพดาน 0.8×4096 อีก
+      # พิสูจน์ด้วย scripts/heap-sampler.sh → .omc/artifacts/heap-samples.jsonl (dev-only)
+      NODE_OPTIONS: --max-old-space-size=6144
     ports:
       - "3000:3000"
     volumes:
