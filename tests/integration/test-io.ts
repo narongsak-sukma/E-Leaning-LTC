@@ -76,7 +76,7 @@ export function currentRunId(): string {
 export async function ledgerWrite(
   kind: LedgerKind,
   payload: Record<string, unknown>,
-  refs: { opKey?: string; invocationId?: string } = {},
+  refs: { opKey?: string | undefined; invocationId?: string | undefined } = {},
 ): Promise<string> {
   await ensureTestInfra();
   const id = randomUUID();
@@ -825,4 +825,193 @@ export async function writeSettleDecision(
     { decisionId: randomUUID(), invocationId, scanClean, decision, ...extra },
     { opKey, invocationId },
   );
+}
+
+// ─── 9) EVIDENCE_SETTLE_MANIFEST (machine-verified · opKey = transport-derived) ──
+
+export interface TouchSetSpecEntry {
+  readonly table: string;
+  /** ชื่อ param ของ entity key ใน where template เช่น 'id = :uuid' — caller แทนค่าจริงตอน dispatch */
+  readonly whereTemplate: string;
+  readonly orderBy: string;
+}
+
+export interface ManifestEntry {
+  /** opKey ตาม deriveOpKey — runtime settle เช็ค opKey กับ manifest ด้วยค่านี้เท่านั้น */
+  readonly opKey: string;
+  readonly label: string;
+  readonly transportTarget: TransportTarget;
+  readonly singleDispatch: boolean;
+  readonly finalMutation: string;
+  readonly touchSet: readonly TouchSetSpecEntry[];
+  /** ไฟล์ SDK/handler ที่ AST ต้องเห็นการเรียกจริง (two-layer verify: AST + catalog + sdkTargets) */
+  readonly sdkTargets: readonly string[];
+}
+
+/**
+ * manifest 5 entry ตามแผน r26-r30 — entry เพิ่มใหม่ได้ต่อเมื่อผ่าน AST+catalog+sdkTargets
+ * must-equal (scripts/verify-settle-manifest.mjs) — เขียนมือลอยไม่มีสิทธิ์ settle (limitation 22)
+ */
+export const EVIDENCE_SETTLE_MANIFEST: readonly ManifestEntry[] = [
+  {
+    opKey: "app:PATCH:/api/v1/admin/questions/:uuid",
+    label: "qb-patch-admin-update-question",
+    transportTarget: "app-direct",
+    singleDispatch: true,
+    finalMutation: "public.questions (update โดย handler) + audit append",
+    touchSet: [
+      { table: "public.questions", whereTemplate: "id = :uuid", orderBy: "id" },
+    ],
+    sdkTargets: ["src/app/api/v1/admin/questions/[id]/route.ts"],
+  },
+  {
+    opKey: "app:POST:/api/v1/admin/questions/:uuid/status",
+    label: "admin-set-question-status",
+    transportTarget: "app-direct",
+    singleDispatch: true,
+    finalMutation: "rpc admin_set_question_status → questions.status + audit",
+    touchSet: [
+      { table: "public.questions", whereTemplate: "id = :uuid", orderBy: "id" },
+    ],
+    sdkTargets: ["src/app/api/v1/admin/questions/[id]/status/route.ts"],
+  },
+  {
+    opKey: "app:PATCH:/api/v1/admin/users/:uuid",
+    label: "admin-set-user-active",
+    transportTarget: "app-direct",
+    singleDispatch: false, // users.ts:595-615 retry loop ≤3 — dispatch หลายครั้งใน invocation เดียว
+    finalMutation: "rpc admin_set_user_active → profiles.is_active + audit",
+    touchSet: [
+      { table: "public.profiles", whereTemplate: "id = :uuid", orderBy: "id" },
+    ],
+    sdkTargets: [
+      "src/app/api/v1/admin/users/[id]/route.ts",
+      "src/lib/admin/users.ts",
+    ],
+  },
+  {
+    opKey: "rpc:admin_revoke_role:POST",
+    label: "admin-revoke-role",
+    transportTarget: "kong-path",
+    singleDispatch: true,
+    finalMutation: "UPDATE role_assignments (revoked_at) — 0 แถว→P0002 no-op (0035:502-560)",
+    touchSet: [
+      { table: "public.role_assignments", whereTemplate: "user_id = :uuid", orderBy: "granted_at" },
+    ],
+    sdkTargets: ["tests/integration/dcr12-p5r1-hardening.test.ts"],
+  },
+  {
+    opKey: "rpc:complete_data_export_job:POST",
+    label: "complete-data-export-job",
+    transportTarget: "kong-path",
+    singleDispatch: true,
+    finalMutation: "data_export_jobs + audit_logs + event_outbox (0039 — guard P0002 ก่อนทุก write)",
+    touchSet: [
+      { table: "public.data_export_jobs", whereTemplate: "id = :uuid", orderBy: "id" },
+    ],
+    sdkTargets: ["src/lib/pdpa/worker.ts"],
+  },
+];
+
+export function manifestByOpKey(opKey: string): ManifestEntry | undefined {
+  return EVIDENCE_SETTLE_MANIFEST.find((e) => e.opKey === opKey);
+}
+
+/** สร้าง touchSet จริงจาก spec + params (entity keys ของ invocation)
+ * ค่า string แทนแบบ quoted literal (escape ' เป็น '') — ไม่งั้น where เป็น SQL ที่ใช้ไม่ได้ */
+export function buildTouchSet(
+  entry: ManifestEntry,
+  params: Record<string, string>,
+): Array<{ table: string; where: string; orderBy: string }> {
+  return entry.touchSet.map((t) => ({
+    table: t.table,
+    where: t.whereTemplate.replace(/:([a-z_]+)/g, (_m, k: string) => {
+      const v = params[k];
+      if (v === undefined) return `:missing-${k}`;
+      return `'${v.replace(/'/g, "''")}'`;
+    }),
+    orderBy: t.orderBy,
+  }));
+}
+
+// ─── 10) trackedClient (SDK fetch-injection — r22-r28) ───────────────────────
+
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+/** RPC ที่พิสูจน์แล้วว่าอ่านอย่างเดียว (read-only) — นอกนี้ทุก rpc = write (default-deny, limitation 19) */
+export const SDK_READ_ONLY_RPC = new Set<string>([]); // เติมเมื่อมีหลักฐาน probe จริงต่อ entry
+
+export interface TrackedClient {
+  readonly client: SupabaseClient;
+  readonly parentCallKey: string;
+}
+
+export interface TrackedClientOptions {
+  readonly label: string;
+  readonly supabaseUrl?: string;
+  readonly apiKey?: string;
+  /** invocation ของ scenario (ถ้ามี — attempt rows ผูกเข้า) · ไม่มี = attempt-level tracking เท่านั้น */
+  readonly invocationId?: string;
+  readonly opKey?: string;
+  readonly callerGeneration?: string;
+}
+
+/**
+ * SDK factory + fetch injection — ทุก request ของ SDK (รวม retry ภายใน parent invocation
+ * เดียวกัน — แต่ละครั้ง = dispatch ใหม่ = ua_nonce ใหม่ + attempt row ผูก parent_call_key)
+ * ผ่านจุดกลาง: admit → nonce → classify → attempt row → dispatch → บันทึก status
+ * (r29-m1: transport ไม่ปรึกษา attemptBegin — retry ภายใน invocation เดิมไม่ผ่าน guard)
+ */
+export function createTrackedClient(opts: TrackedClientOptions): TrackedClient {
+  const parentCallKey = `sdk-${randomUUID()}`;
+  const url = opts.supabaseUrl ?? REST_URL;
+  const apiKey = opts.apiKey ?? ANON_KEY;
+  const trackedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const admit = transportAdmit(opts.callerGeneration);
+    if (!admit.ok) throw new Error(`trackedClient refused: ${admit.reason}`);
+    const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = rawUrl.replace(/^https?:\/\/[^/]+/, "").split("?")[0] ?? "";
+    const opKey = opts.opKey ?? deriveOpKey("kong-path", method, rawUrl);
+    const uaNonce = mintUaNonce();
+    const isRpc = /^\/rest\/v1\/rpc\//.test(path);
+    const readOnly = !isRpc ? method === "GET" || method === "HEAD" : SDK_READ_ONLY_RPC.has((path.split("/").pop() ?? ""));
+    const classification = readOnly ? "read" : "write"; // unknown = write เสมอ (default-deny)
+    const attemptEventId = await ledgerWrite(
+      "attempt",
+      {
+        transport: "sdk",
+        uaNonce,
+        parentCallKey,
+        method,
+        urlNorm: normalizePathForLog("kong-path", rawUrl),
+        classification,
+        status: null,
+      },
+      { opKey, invocationId: opts.invocationId },
+    );
+    const headers = new Headers(init?.headers);
+    headers.set("user-agent", uaNonce);
+    const nextInit: RequestInit = { ...init, headers };
+    if (init?.method !== undefined) nextInit.method = init.method;
+    const response = await fetch(rawUrl, nextInit);
+    await ledgerWrite(
+      "attempt",
+      {
+        transport: "sdk",
+        parentCallKey,
+        outcome: true,
+        attemptEventId,
+        status: response.status,
+        classification,
+      },
+      { opKey, invocationId: opts.invocationId },
+    );
+    return response;
+  };
+  const client = createClient(url, apiKey, {
+    global: { fetch: trackedFetch },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  return { client, parentCallKey };
 }
