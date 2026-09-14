@@ -1017,6 +1017,30 @@ describe.skipIf(!DB_URL)(
           guardFires,
           "guard 0048 ต้องจับสถานะนี้ (cardinality(v_qids) < v_rules.question_count) → ยก ERR-ASM-003 ก่อนสร้าง attempt",
         ).toBe("true");
+        // (1b) gate r1 M3-A: พิสูจน์ execute path ของ raise จริง ไม่ใช่แค่ boolean —
+        // DO block คัดลอกตัว guard ต้นฉบับของ 0048 (ข้อความเดิมทุกไบต์) รันกับ
+        // qids/rules จริงของสถานะแข่งนี้ · exception handler ของ DO จับ raise
+        // แล้วบันทึก sqlerrm ลง temp table (จบ TX อัตโนมัติ) — psql ไม่ตาย
+        await sessionOne.exec("create temp table guard_raised (msg text) on commit drop;");
+        await sessionOne.exec(`
+          do $g$
+          begin
+            if cardinality(array[${qids.map((id) => `'${id}'`).join(",")}]::uuid[]) <
+               (select question_count from public.assessment_rules where id = '${RULES_WA}') then
+              raise exception 'ไม่พบรอบการสอบ หรือรอบนี้ปิดแล้ว: คลังข้อไม่พอ (ERR-ASM-003)';
+            end if;
+            insert into guard_raised values ('not-raised');
+          exception when others then
+            insert into guard_raised values (sqlerrm);
+          end
+          $g$;
+        `);
+        const raised = await sessionOne.exec("select msg from guard_raised;");
+        expect(
+          raised,
+          "raise ของ guard 0048 ต้อง execute จริงกับสถานะแข่งนี้ (ข้อความต้นฉบับ มี ERR-ASM-003)",
+        ).toContain("ERR-ASM-003");
+        expect(raised).toContain("คลังข้อไม่พอ");
       } finally {
         await sessionOne.exec("rollback;");
         await sessionOne.end();
@@ -1035,7 +1059,7 @@ describe.skipIf(!DB_URL)(
       ).toBe("1");
     }, 120_000);
 
-    it("probe หน้าต่าง B: เลือก ID ก่อน → retire คั่น → snapshot ยังได้ 2 แถว (ยอมรับข้อที่เลือกไว้)", async (ctx) => {
+    it("probe หน้าต่าง B: เลือก ID ก่อน → retire ผ่าน RPC จริง → replay snapshot CTE ของ 0048 ต้องได้ครบตามกติกา (version หลัง retire)", async (ctx) => {
       if (!appReachable) return ctx.skip();
       const sessionOne = new PsqlSession();
       sessionOne.start();
@@ -1064,19 +1088,66 @@ describe.skipIf(!DB_URL)(
         `);
         const qids = uuidArrayFromPg(selection);
         expect(qids).toHaveLength(2);
-        await retireFromOtherSession(Q_WB2);
-        const readBack = await sessionOne.exec(
-          `select status from public.questions where id = '${Q_WB2}';`,
+        // S2 retire ผ่าน RPC จริง (admin_set_question_status) ผ่าน BFF — ได้ทั้ง
+        // status='retired' และ version ยกเป็น 2 + audit (ต่างจาก UPDATE ตรงที่
+        // ไม่ bump version — gate r1 M3-B: expected outcome ของ r4 ผูก version)
+        const retire = await bffPatch(
+          `/api/v1/admin/question-banks/${BANK_WB}/questions/${Q_WB2}/status`,
+          examAal2,
+          staffExam.id,
+          { status: "retired" },
         );
-        expect(readBack, "S1 ต้องเห็น retire commit แล้ว (sync ตรวจสอบได้)").toBe("retired");
-        const snapshot = await sessionOne.exec(`
-          select count(*)::text from public.questions q
-          where q.id = any (array[${qids.map((id) => `'${id}'`).join(",")}]::uuid[]);
+        expect(retire.status, retire.text.slice(0, 300)).toBe(200);
+        const readBack = await sessionOne.exec(
+          `select status::text || '|' || version::text from public.questions where id = '${Q_WB2}';`,
+        );
+        expect(readBack, "S1 ต้องเห็น retire commit แล้วพร้อม version ยก (sync ตรวจสอบได้)").toBe("retired|2");
+        // replay snapshot CTE ของ 0048 ตัวจริง (ord+snap :237-264) ใน TX เปิดของ
+        // S1 — เหมือน statement ถัดไปของ start_attempt หลัง selection: ไม่
+        // re-check status (ยอมรับข้อที่เลือกไว้) · options ≥1 ต่อข้อ · seq
+        // ตั้งแต่ 1 ไล่เรียงไม่ซ้ำ · version ที่ snapshot เห็น = หลัง retire
+        // (Read Committed statement ใหม่อ่าน commit ล่าสุด)
+        const snapReplay = await sessionOne.exec(`
+          with ord as (
+            select q.id as qid, q.question_text, q.points, q.version, q.type,
+                   row_number() over (order by case when (select shuffle_questions from public.assessment_rules where id = '${RULES_WB}')
+                                                  then md5(q.id::text || 'probe-seed')
+                                                  else q.created_at::text || q.id::text end,
+                                             q.created_at, q.id) as seq
+            from public.questions q
+            where q.id = any (array[${qids.map((id) => `'${id}'`).join(",")}]::uuid[])
+          ),
+          snap as (
+            select o.question_id,
+                   jsonb_agg(jsonb_build_object('id', o.id, 'text', o.option_text,
+                                                'is_correct', o.is_correct, 'points', ord.points)
+                             order by case when (select shuffle_options from public.assessment_rules where id = '${RULES_WB}')
+                                           then md5(o.id::text || 'probe-seed')
+                                           else lpad(o.sort_order::text, 8, '0') end) as options
+            from public.question_options o
+            join ord on ord.qid = o.question_id
+            group by o.question_id
+          )
+          select (select count(*)::text from ord)
+              || '|' || (select count(*)::text from snap)
+              || '|' || (select min(jsonb_array_length(options))::text from snap)
+              || '|' || (select count(distinct seq)::text from ord)
+              || '|' || (select min(seq)::text || '..' || max(seq)::text from ord)
+              || '|' || (select version::text from ord where qid = '${Q_WB2}')
+              || '|' || (select question_count::text from public.assessment_rules where id = '${RULES_WB}');
         `);
+        const [ordCount, snapCount, minOptions, distinctSeq, seqRange, wb2Version, rulesCount] =
+          snapReplay.split("|");
+        expect(ordCount, "ord = จำนวนข้อที่เลือกไว้ (ยอมรับข้อที่เลือก — ไม่ re-check status)").toBe("2");
+        expect(snapCount, "snap = มี options ครบทุกข้อที่เลือก").toBe("2");
+        expect(minOptions, "options ต่อข้อ ≥ 1 (D20-M3)").toBe("2");
+        expect(distinctSeq, "seq ไม่ซ้ำ").toBe("2");
+        expect(seqRange, "seq ไล่ 1..n").toBe("1..2");
         expect(
-          snapshot,
-          "snapshot CTE ไม่ re-check status → ยอมรับข้อที่เลือกไว้ (version หลัง retire ไม่ถือว่า invariant แตก)",
+          wb2Version,
+          "version ที่ snapshot เห็น = หลัง retire (Read Committed statement ใหม่เห็น commit ล่าสุด)",
         ).toBe("2");
+        expect(rulesCount, "invariant รวม: จำนวนข้อ = rules.question_count").toBe("2");
       } finally {
         await sessionOne.exec("rollback;");
         await sessionOne.end();

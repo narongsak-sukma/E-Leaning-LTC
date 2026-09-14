@@ -88,6 +88,7 @@ export function StatusConfirm({ bankId, qid, status, canToggle }: StatusConfirmP
       <ConfirmModal
         open={open}
         onClose={closeAndReset}
+        cancelDisabled={successMessage === null && submitting}
         title="เปลี่ยนสถานะข้อสอบ"
         description={statusConfirmDescriptionTh(status)}
         confirmLabel={successMessage !== null ? "ปิด" : "ยืนยันเปลี่ยนสถานะ"}

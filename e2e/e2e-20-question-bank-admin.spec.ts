@@ -12,6 +12,9 @@
  *   GET /admin/question-banks/{id} · GET .../{id}/questions · GET .../{id}/questions/{qid}
  *   (EditQuestionResource มี isCorrect + Cache-Control: private, no-store · D74) ·
  *   PATCH .../{qid}/status ({status: active|retired} · transition matrix · version+1)
+ * - UI flow จริง (gate r1 M4): เปิด EditQuestionModal จากปุ่ม "แก้ไข" ในแถว · แก้โจทย์ ·
+ *   บันทึกผ่าน dialog เห็นเวอร์ชันใหม่ · เปิด StatusConfirm จากปุ่ม toggle แล้วยืนยัน
+ *   การเปลี่ยนสถานะผ่าน dialog — ไม่ใช่แค่ fetch API ตรง
  * - ไม่ seed หลักสูตร UAT ซ้ำ — e2e-04 นับแคตตาล็อกผู้เยี่ยมชม = 4 ต้องคงเดิม; fixture
  *   ของ suite นี้คือ question_banks/questions/question_options เท่านั้น (แนบ course 3
  *   LTC-103 ที่ is_public=false — ไม่โผล่ในแคตตาล็อกผู้เยี่ยมชม) และล้างใน afterAll
@@ -49,9 +52,11 @@ const Q1_TEXT = "E20 ข้อ 1: การแก้ไขข้อสอบผ�
 const Q1_OPTION_CORRECT = "f2f2f2f2-f2f2-4f2f-8f2f-000000000101";
 const Q1_OPTION_WRONG_A = "f2f2f2f2-f2f2-4f2f-8f2f-000000000102";
 
-/** ข้อคงสถานะ draft — ให้ตารางมีแถวอื่นและเทียบแถวต่อแถวได้ */
+/** ข้อคงสถานะ draft — ให้ตารางมีแถวอื่นและเทียบแถวต่อแถวได้ (ใช้เดิน UI flow ของ M4 ตอนท้าย) */
 const Q2_ID = "e20e20e0-0000-4e20-8e20-0000000000d2";
 const Q2_TEXT = "E20 ข้อ 2: ข้อนี้คงสถานะร่างตลอดเทส";
+/** ข้อความโจทย์หลังแก้ผ่าน EditQuestionModal จริง (M4) — ตารางต้องสะท้อนข้อความนี้ */
+const Q2_TEXT_EDITED = "E20 ข้อ 2 (แก้ผ่านหน้าจอแล้ว): ฟอร์มแก้ไขบันทึกได้จริง";
 
 /** ป้ายสถานะไทยของข้อสอบ — sync กับ QUESTION_STATUS_LABEL_TH ของ W2 จริง
  *  (bank-detail.view.ts: draft=ร่าง · active=ใช้งาน · retired=ปลดจากการใช้งาน) */
@@ -143,7 +148,9 @@ async function cleanupQuestionBankFixture(): Promise<void> {
 
 /**
  * seed คลัง + ข้อ 2 ข้อ + ตัวเลือก — status ข้อเป็น draft ทั้งคู่ (ไม่แตะ trigger
- * guard_question_activation) · created_by = ผู้ใช้ staff:exam ของ suite (runtime id)
+ * guard_question_activation) · Q2 มีตัวเลือกด้วยเพราะ M4 เดิน draft→active ผ่าน
+ * dialog จริง — 0047 pre-check ปฏิเสธข้อไร้ตัวเลือก (question_needs_options)
+ * created_by = ผู้ใช้ staff:exam ของ suite (runtime id)
  */
 async function seedQuestionBankFixture(createdBy: string): Promise<void> {
   await psql(`
@@ -168,7 +175,9 @@ async function seedQuestionBankFixture(createdBy: string): Promise<void> {
       ('${Q1_OPTION_CORRECT}', '${Q1_ID}', 'ตัวเลือกถูกของ E20 ข้อ 1', true, 1),
       ('${Q1_OPTION_WRONG_A}', '${Q1_ID}', 'ตัวเลือกผิด ก ของ E20 ข้อ 1', false, 2),
       ('f2f2f2f2-f2f2-4f2f-8f2f-000000000103', '${Q1_ID}', 'ตัวเลือกผิด ข ของ E20 ข้อ 1', false, 3),
-      ('f2f2f2f2-f2f2-4f2f-8f2f-000000000104', '${Q1_ID}', 'ตัวเลือกผิด ค ของ E20 ข้อ 1', false, 4);
+      ('f2f2f2f2-f2f2-4f2f-8f2f-000000000104', '${Q1_ID}', 'ตัวเลือกผิด ค ของ E20 ข้อ 1', false, 4),
+      ('f2f2f2f2-f2f2-4f2f-8f2f-000000000201', '${Q2_ID}', 'ตัวเลือกถูกของ E20 ข้อ 2', true, 1),
+      ('f2f2f2f2-f2f2-4f2f-8f2f-000000000202', '${Q2_ID}', 'ตัวเลือกผิดของ E20 ข้อ 2', false, 2);
   `);
 }
 
@@ -191,8 +200,8 @@ test.describe("e2e-20 — คลังข้อสอบฝั่ง admin (staf
     await deleteD9User(instructor.id);
   });
 
-  test("staff:exam — เปิดคลังจากรายการ → เห็นเฉลยของข้อ (edit GET · D74) → เปลี่ยนสถานะ draft→active→retired → ตารางสะท้อน", async ({ page }) => {
-    test.setTimeout(120_000);
+  test("staff:exam — เปิดคลังจากรายการ → เห็นเฉลยของข้อ (edit GET · D74) → เปลี่ยนสถานะ draft→active→retired → ตารางสะท้อน → เดิน UI จริง (แก้ไข+บันทึก · ยืนยันเปลี่ยนสถานะผ่าน dialog · M4)", async ({ page }) => {
+    test.setTimeout(180_000);
     await loginViaForm(page, staffExam.email, { totpSecret: staffAal2.totpSecret });
     await injectSession(page, staffAal2);
 
@@ -273,6 +282,46 @@ test.describe("e2e-20 — คลังข้อสอบฝั่ง admin (staf
     const q2 = items.find((q) => q.id === Q2_ID);
     expect(q1?.status).toBe("retired");
     expect(q2?.status).toBe("draft");
+
+    // ─── M4 (gate r1): เดิน UI จริง — ไม่ใช่แค่ fetch API ─────────────────────
+    // Q2 (draft) — เปิด EditQuestionModal จากปุ่ม "แก้ไข" ในแถว · แก้โจทย์ · บันทึก ·
+    // เห็นข้อความสำเร็จพร้อมเวอร์ชันใหม่ (PATCH จริง — version 2)
+    const rowQ2 = page.locator("tr", { hasText: Q2_TEXT });
+    await rowQ2.getByRole("button", { name: "แก้ไข" }).click();
+    const editDialog = page.getByRole("dialog");
+    await expect(editDialog.getByRole("heading", { name: "แก้ไขข้อสอบ" })).toBeVisible();
+    const questionField = editDialog.getByLabel("โจทย์");
+    await expect(questionField).toHaveValue(Q2_TEXT);
+    await questionField.fill(Q2_TEXT_EDITED);
+    await editDialog.getByRole("button", { name: "บันทึกการแก้ไข" }).click();
+    await expect(
+      editDialog.getByText(/บันทึกการแก้ไขเรียบร้อยแล้ว — ข้อสอบเวอร์ชัน 2/),
+    ).toBeVisible();
+    // phase saved: ปุ่มทั้งสองข้างกล่องชื่อ "ปิด" — ปิดด้วย Esc (cancel ไม่ถูกล็อกตอน saved)
+    await page.keyboard.press("Escape");
+    await expect(editDialog).toBeHidden();
+    await page.reload();
+    await expect(page.locator("tr", { hasText: Q2_TEXT_EDITED })).toBeVisible();
+
+    // M4 ต่อ — StatusConfirm ผ่าน dialog จริง: Q2 ยัง draft → ปุ่ม "เปิดใช้งาน" →
+    // ข้อความยืนยัน from→to ตาม D77 → ยืนยัน → สำเร็จ → ตารางสะท้อน "ใช้งาน"
+    const rowQ2Edited = page.locator("tr", { hasText: Q2_TEXT_EDITED });
+    await rowQ2Edited.getByRole("button", { name: "เปิดใช้งาน" }).click();
+    const statusDialog = page.getByRole("dialog");
+    // ใช้ heading role — getByText สตริงจะจับ h2 และ description (มีข้อความนี้เป็นส่วนหนึ่ง) พร้อมกัน
+    await expect(statusDialog.getByRole("heading", { name: "เปลี่ยนสถานะข้อสอบ" })).toBeVisible();
+    await expect(
+      statusDialog.getByText(/เปลี่ยนสถานะข้อสอบจาก "ร่าง" เป็น "ใช้งาน"/),
+    ).toBeVisible();
+    await statusDialog.getByRole("button", { name: "ยืนยันเปลี่ยนสถานะ" }).click();
+    await expect(
+      statusDialog.getByText('เปลี่ยนสถานะข้อสอบเป็น "ใช้งาน" เรียบร้อยแล้ว'),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await expect(page.locator("tr", { hasText: Q2_TEXT_EDITED })).toContainText(
+      QUESTION_STATUS_THAI.active,
+    );
   });
 
   test("instructor เข้าหน้า admin คลัง → shell ปฏิเสธ พาไป /login (D78 · แบบ e2e-12 — redirect ที่ layout ไม่ใช่ปุ่ม)", async ({ page }) => {

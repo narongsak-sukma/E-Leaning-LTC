@@ -20,6 +20,11 @@ export type ConfirmModalProps = {
   confirmDisabled?: boolean | undefined;
   /** เหตุผลที่ปุ่มยืนยันกดไม่ได้ — แสดงเป็น tooltip (title) + ข้อความ sr-only */
   confirmDisabledReason?: string | undefined;
+  /**
+   * ล็อกทางปิดทั้งสามทาง (ปุ่มยกเลิก · Esc · ฉากหลัง) — ใช้ระหว่าง request ที่ปิด
+   * กลางคันทำ state ตกหล่น (เช่น กำลังบันทึกแก้ข้อสอบ) · ค่าเริ่มต้น = ปิดได้ปกติ
+   */
+  cancelDisabled?: boolean | undefined;
   cancelLabel?: string | undefined;
   onConfirm?: (() => void) | undefined;
 };
@@ -33,6 +38,7 @@ export function ConfirmModal({
   confirmLabel,
   confirmDisabled = false,
   confirmDisabledReason,
+  cancelDisabled = false,
   cancelLabel = "ยกเลิก",
   onConfirm,
 }: ConfirmModalProps) {
@@ -60,6 +66,9 @@ export function ConfirmModal({
     }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (cancelDisabled) {
+          return;
+        }
         event.stopPropagation();
         onClose();
         return;
@@ -96,7 +105,7 @@ export function ConfirmModal({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [open, onClose, cancelDisabled]);
 
   if (!open) {
     return null;
@@ -107,7 +116,7 @@ export function ConfirmModal({
       <div
         aria-hidden="true"
         className="absolute inset-0 bg-ink-900/55 backdrop-blur-[2px]"
-        onClick={onClose}
+        onClick={cancelDisabled ? undefined : onClose}
       />
       <div
         ref={dialogRef}
@@ -128,7 +137,8 @@ export function ConfirmModal({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[10px] px-[18px] py-2.5 font-heading text-base font-semibold text-brand-700 hover:bg-brand-50"
+            disabled={cancelDisabled}
+            className="rounded-[10px] px-[18px] py-2.5 font-heading text-base font-semibold text-brand-700 hover:bg-brand-50 disabled:cursor-not-allowed disabled:text-ink-400"
           >
             {cancelLabel}
           </button>

@@ -204,6 +204,13 @@ describe("D74 — authorization ล้ม = ล้าง state + ฟ้องภ
     expect(editLoadOutcomeFromError(new Error("boom"))).toEqual({ ok: false, kind: "server" });
   });
 
+  it("transport โยน 404 (qid ไม่มีจริง) → outcome not-found ไม่ใช่ server (gate r1 m2)", () => {
+    expect(editLoadOutcomeFromError(new AdminApiError("ERR-NF-001", 404, "ไม่พบ"))).toEqual({
+      ok: false,
+      kind: "not-found",
+    });
+  });
+
   it("resolve denied → phase denied · resource/form ถูกล้าง · ข้อความไทย", () => {
     const denied = editModalResolveLoad(
       editModalOpenFor("q-1", 1),
@@ -226,7 +233,8 @@ describe("D74 — authorization ล้ม = ล้าง state + ฟ้องภ
     );
     const saving = editModalSaveStart(loaded);
     expect(saving.phase).toBe("saving");
-    const denied = editModalDeny(saving);
+    expect(saving.saveSeq).toBe(1);
+    const denied = editModalDeny(saving, "q-1", 1);
     expect(denied.phase).toBe("denied");
     expect(denied.resource).toBeNull();
     expect(denied.form).toBeNull();
@@ -234,7 +242,7 @@ describe("D74 — authorization ล้ม = ล้าง state + ฟ้องภ
   });
 
   it("editModalDeny ตอน idle → ไม่แตะ state", () => {
-    expect(editModalDeny(EDIT_MODAL_IDLE)).toEqual(EDIT_MODAL_IDLE);
+    expect(editModalDeny(EDIT_MODAL_IDLE, "q-1", 1)).toEqual(EDIT_MODAL_IDLE);
   });
 });
 
@@ -307,8 +315,10 @@ describe("parseEditQuestionResource — fail-closed ทุกฟิลด์", (
     ).toBeNull();
   });
 
-  it("options ว่าง → null", () => {
-    expect(parseEditQuestionResource({ data: resourceWith({ options: [] }) })).toBeNull();
+  it("options ว่าง → parse ผ่าน (ข้อร่างที่ยังไม่มีตัวเลือก — schema edit GET ไม่มี min · gate r1 M2)", () => {
+    const parsed = parseEditQuestionResource({ data: resourceWith({ options: [] }) });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.options).toEqual([]);
   });
 
   it("option ขาด isCorrect → null (EditQuestionResource ต้องมีเฉลยทุกแถว)", () => {
@@ -379,7 +389,7 @@ describe("D79 — buildQuestionPatchBody: option เดิมส่ง id เด
         "points",
         "tags",
         "options",
-  ]); 
+      ]);
     }
   });
 
@@ -454,8 +464,22 @@ describe("D79 — buildQuestionPatchBody: option เดิมส่ง id เด
     expect(multi.ok).toBe(true);
   });
 
-  it("options ว่าง → error ที่ path options", () => {
+  it("options ว่าง → ok ตาม schema PATCH ที่รับ [] (แก้ข้อร่างไร้ตัวเลือกได้ — gate r1 M2)", () => {
     const built = buildQuestionPatchBody(formWith({ options: [] }));
+    expect(built.ok).toBe(true);
+    if (built.ok) {
+      expect(built.body.options).toEqual([]);
+    }
+  });
+
+  it("options เกิน 10 แถว → error ที่ path options", () => {
+    const eleven = Array.from({ length: 11 }, (_, index) => ({
+      id: `o${index}`,
+      optionText: `ตัวเลือก ${index}`,
+      isCorrect: index === 0,
+      sortOrder: String(index),
+    }));
+    const built = buildQuestionPatchBody(formWith({ options: eleven }));
     expect(built.ok).toBe(false);
     if (built.ok === false) {
       expect(built.errors["options"]).toBeDefined();
@@ -478,6 +502,7 @@ describe("D79 — hint ลบตัวเลือก + จัดการแถ
     const withNew = addEditOption(loaded);
     expect(withNew.form?.options.length).toBe(3);
     expect(withNew.form?.options[2]?.id).toBeNull();
+    expect(withNew.form?.options[2]?.sortOrder).toBe("2");
     const full = Array.from({ length: 10 }, (_, index) => ({
       id: `o${index}`,
       optionText: `ตัวเลือก ${index}`,
@@ -492,6 +517,54 @@ describe("D79 — hint ลบตัวเลือก + จัดการแถ
         form: { ...baseForm, options: full },
       });
       expect(capped.form?.options.length).toBe(10);
+    }
+  });
+
+  it("addEditOption — sortOrder ใหม่ = ค่าสูงสุดที่มี +1 ไม่ใช่จำนวนแถว (gate r1 m1 — กันชน unique ของ 0005)", () => {
+    const loaded = editModalResolveLoad(
+      editModalOpenFor("q-1", 1),
+      "q-1",
+      1,
+      { ok: true, resource: RESOURCE_BASE },
+    );
+    const baseForm = loaded.form;
+    expect(baseForm).not.toBeNull();
+    if (baseForm !== null) {
+      // ลำดับเดิม 1,2 (แบบ seed 1-based) — เดิมใช้ options.length (=2) จะชน "2" ที่มีอยู่
+      const oneBased = addEditOption({
+        ...loaded,
+        form: {
+          ...baseForm,
+          options: [
+            { id: "opt-1", optionText: "ก.", isCorrect: true, sortOrder: "1" },
+            { id: "opt-2", optionText: "ข.", isCorrect: false, sortOrder: "2" },
+          ],
+        },
+      });
+      expect(oneBased.form?.options[2]?.sortOrder).toBe("3");
+      // ลำดับกระโดด 0,5 — ค่าถัดไปต้อง 6 ไม่ใช่ 2
+      const gapped = addEditOption({
+        ...loaded,
+        form: {
+          ...baseForm,
+          options: [
+            { id: "opt-1", optionText: "ก.", isCorrect: true, sortOrder: "0" },
+            { id: "opt-2", optionText: "ข.", isCorrect: false, sortOrder: "5" },
+          ],
+        },
+      });
+      expect(gapped.form?.options[2]?.sortOrder).toBe("6");
+      // สูงสุด 999 แล้ว — เพิ่มไม่ได้ (ไม่มีค่าที่ถูกกว่า 999)
+      const maxed = addEditOption({
+        ...loaded,
+        form: {
+          ...baseForm,
+          options: [
+            { id: "opt-1", optionText: "ก.", isCorrect: true, sortOrder: "999" },
+          ],
+        },
+      });
+      expect(maxed.form?.options.length).toBe(1);
     }
   });
 
@@ -527,8 +600,8 @@ describe("D79 — hint ลบตัวเลือก + จัดการแถ
   });
 });
 
-describe("save flow — start/success/error/api validation", () => {
-  it("start เฉพาะจาก ready · success เฉพาะจาก saving", () => {
+describe("save flow — start/success/error/api validation + ตัวตนรอบบันทึก (gate r1 M1)", () => {
+  it("start เฉพาะจาก ready · success เฉพาะจาก saving ของรอบเดียวกัน", () => {
     const loaded = editModalResolveLoad(
       editModalOpenFor("q-1", 1),
       "q-1",
@@ -537,11 +610,47 @@ describe("save flow — start/success/error/api validation", () => {
     );
     const saving = editModalSaveStart(loaded);
     expect(saving.phase).toBe("saving");
-    const saved = editModalSaveSuccess(saving, 4);
+    const saved = editModalSaveSuccess(saving, "q-1", 1, 4);
     expect(saved.phase).toBe("saved");
     expect(saved.savedVersion).toBe(4);
     expect(editModalSaveStart(EDIT_MODAL_IDLE)).toEqual(EDIT_MODAL_IDLE);
-    expect(editModalSaveSuccess(loaded, 4)).toEqual(loaded);
+    expect(editModalSaveSuccess(loaded, "q-1", 1, 4)).toEqual(loaded);
+  });
+
+  it("saveSeq ยกทุกรอบ — บันทึกซ้ำหลัง error: outcome ของรอบแรกต้องถูกทิ้ง", () => {
+    const loaded = editModalResolveLoad(
+      editModalOpenFor("q-1", 1),
+      "q-1",
+      1,
+      { ok: true, resource: RESOURCE_BASE },
+    );
+    const first = editModalSaveStart(loaded); // saveSeq 1
+    const errored = editModalSaveError(first, "q-1", 1, "ล้มชั่วคราว"); // กลับ ready
+    const second = editModalSaveStart(errored); // saveSeq 2
+    expect(second.saveSeq).toBe(2);
+    expect(second.phase).toBe("saving");
+    // late success ของรอบแรก (saveSeq 1) มาถึงตอนรอบสองกำลัง saving → ต้องถูกทิ้ง
+    expect(editModalSaveSuccess(second, "q-1", 1, 5)).toBe(second);
+    // outcome ของรอบสองเอง → ใช้ผลได้ปกติ
+    const savedSecond = editModalSaveSuccess(second, "q-1", 2, 6);
+    expect(savedSecond.phase).toBe("saved");
+    expect(savedSecond.savedVersion).toBe(6);
+  });
+
+  it("late outcome ของ qid อื่น/รอบอื่นถูกทิ้งทุกชนิด (deny/error/api-validation)", () => {
+    const loaded = editModalResolveLoad(
+      editModalOpenFor("q-1", 1),
+      "q-1",
+      1,
+      { ok: true, resource: RESOURCE_BASE },
+    );
+    const saving = editModalSaveStart(loaded); // q-1 · saveSeq 1
+    expect(editModalDeny(saving, "q-2", 1)).toBe(saving);
+    expect(editModalSaveError(saving, "q-1", 2, "x")).toBe(saving);
+    expect(editModalSaveApiValidation(saving, "q-1", 0, ["ฟิลด์"])).toBe(saving);
+    const errored = editModalSaveError(saving, "q-1", 1, "ล้มจริง");
+    expect(errored.phase).toBe("ready");
+    expect(errored.errorMessage).toBe("ล้มจริง");
   });
 
   it("error ของ PATCH อื่น → กลับ ready คงฟอร์ม + ข้อความ", () => {
@@ -552,11 +661,11 @@ describe("save flow — start/success/error/api validation", () => {
       { ok: true, resource: RESOURCE_BASE },
     );
     const saving = editModalSaveStart(loaded);
-    const errored = editModalSaveError(saving, "บันทึกไม่สำเร็จชั่วคราว");
+    const errored = editModalSaveError(saving, "q-1", 1, "บันทึกไม่สำเร็จชั่วคราว");
     expect(errored.phase).toBe("ready");
     expect(errored.errorMessage).toBe("บันทึกไม่สำเร็จชั่วคราว");
     expect(errored.form).not.toBeNull();
-    expect(editModalSaveError(loaded, "x")).toEqual(loaded);
+    expect(editModalSaveError(loaded, "q-1", 1, "x")).toEqual(loaded);
   });
 
   it("ERR-VAL-001 จาก BFF → แสดงรายการฟิลด์ภาษาไทย และคงฟอร์ม", () => {
@@ -567,7 +676,7 @@ describe("save flow — start/success/error/api validation", () => {
       { ok: true, resource: RESOURCE_BASE },
     );
     const saving = editModalSaveStart(loaded);
-    const validated = editModalSaveApiValidation(saving, ["โจทย์ต้องมี 1-8,000 ตัวอักษร"]);
+    const validated = editModalSaveApiValidation(saving, "q-1", 1, ["โจทย์ต้องมี 1-8,000 ตัวอักษร"]);
     expect(validated.phase).toBe("ready");
     expect(validated.apiFieldLabels).toEqual(["โจทย์ต้องมี 1-8,000 ตัวอักษร"]);
     expect(validated.form).not.toBeNull();

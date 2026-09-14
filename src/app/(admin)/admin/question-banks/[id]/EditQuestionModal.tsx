@@ -15,7 +15,7 @@
  * แถวใหม่ไม่มี id (insert) — UI ไม่สื่อว่า options เป็น replacement array
  */
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import { ConfirmModal } from "@/components/admin/ConfirmModal";
@@ -133,6 +133,9 @@ function dataRecordOf(body: unknown): Record<string, unknown> | null {
 /**
  * parseEditQuestionResource — ตรวจรูป envelope { data } ของ edit GET
  * - option ทุกแถวต้องมี isCorrect เป็น boolean (EditQuestionResource — ขาด = contract ผิดรูป)
+ * - options เป็น array เปล่าได้ (ข้อร่างที่ยังไม่มีตัวเลือก — schema edit GET ไม่มี min
+ *   และ PATCH ก็รับ [] · gate r1 M2: ห้ามทำข้อแบบนี้กลายเป็นแก้ไม่ได้) — จำนวน/ความถูก
+ *   ต้องของตัวเลือกตรวจตอนบันทึกที่ buildQuestionPatchBody ตาม schema
  * - ตัดสินไม่ได้ทั้ง resource (null) — ไม่เดาข้อมูล ไม่แสดงฟอร์มจากข้อมูลที่ผิดรูป
  */
 export function parseEditQuestionResource(raw: unknown): EditQuestionResource | null {
@@ -176,8 +179,7 @@ export function parseEditQuestionResource(raw: unknown): EditQuestionResource | 
     version === null ||
     createdAt === null ||
     !Array.isArray(data["tags"]) ||
-    !Array.isArray(data["options"]) ||
-    data["options"].length === 0
+    !Array.isArray(data["options"])
   ) {
     return null;
   }
@@ -259,7 +261,7 @@ export type EditFormErrors = Readonly<Record<string, string>>;
 /** ขอบเขตเดียวกับ zod ขาเข้าของ route (admin-exam.ts QuestionPatchBody) */
 const EDIT_POINTS_MIN = 1;
 const EDIT_POINTS_MAX = 100;
-const EDIT_OPTIONS_MIN = 1;
+/** PATCH schema รับ options 0-10 แถว (ไม่มี min — [] = ไม่แตะตัวเลือกเดิม) */
 const EDIT_OPTIONS_MAX = 10;
 const EDIT_SORT_ORDER_MAX = 999;
 
@@ -267,10 +269,12 @@ const EDIT_SORT_ORDER_MAX = 999;
  * ประกอบ body ของ PATCH .../questions/{qid} — คืน { ok, body } / { ok: false, errors }
  * - **ไม่มี status ใน body เด็ดขาด** (strict schema — เปลี่ยนสถานะผ่าน endpoint แยกของ D75)
  * - options ตาม D79: เดิม (มี id) ส่ง id เดิม = update · ใหม่ (ไม่มี id) = insert — ไม่มีลบ
+ * - options เปล่าได้ตาม schema PATCH (แก้ข้อร่างที่ยังไม่มีตัวเลือก — UI ไม่มีทางลบแถว
+ *   อยู่แล้วตาม D79) — กติกาความถูกต้องของเฉลยบังคับเฉพาะเมื่อมีตัวเลือก ≥ 1 แถว
  */
 export function buildQuestionPatchBody(
   form: EditQuestionFormState,
-): { ok: true; body: EditQuestionPatchBody } | { ok: false; errors: EditFormErrors } {
+): { ok: true; body: EditQuestionPatchBody } | { ok: false, errors: EditFormErrors } {
   const errors: Record<string, string> = {};
   const questionText = form.questionText.trim();
   if (questionText.length < 1 || questionText.length > 8000) {
@@ -302,8 +306,8 @@ export function buildQuestionPatchBody(
       break;
     }
   }
-  if (form.options.length < EDIT_OPTIONS_MIN || form.options.length > EDIT_OPTIONS_MAX) {
-    errors["options"] = `ตัวเลือกต้องมี ${EDIT_OPTIONS_MIN}-${EDIT_OPTIONS_MAX} ตัว`;
+  if (form.options.length > EDIT_OPTIONS_MAX) {
+    errors["options"] = `ตัวเลือกได้สูงสุด ${EDIT_OPTIONS_MAX} ตัว`;
   }
   form.options.forEach((option, optionIndex) => {
     const optionText = option.optionText.trim();
@@ -320,13 +324,15 @@ export function buildQuestionPatchBody(
       errors[`options.${optionIndex}.sortOrder`] = "ลำดับตัวเลือกต้องเป็นตัวเลข 0-999";
     }
   });
-  const correctCount = form.options.filter((option) => option.isCorrect).length;
-  if (form.type === "multiple_choice") {
-    if (correctCount < 1) {
-      errors["options"] = errors["options"] ?? "ข้อสอบตอบหลายข้อต้องมีตัวเลือกที่ถูกอย่างน้อย 1 ตัว";
+  if (form.options.length > 0) {
+    const correctCount = form.options.filter((option) => option.isCorrect).length;
+    if (form.type === "multiple_choice") {
+      if (correctCount < 1) {
+        errors["options"] = errors["options"] ?? "ข้อสอบตอบหลายข้อต้องมีตัวเลือกที่ถูกอย่างน้อย 1 ตัว";
+      }
+    } else if (correctCount !== 1) {
+      errors["options"] = errors["options"] ?? "ข้อสอบเลือกตอบเดียว/ถูกผิด ต้องมีตัวเลือกที่ถูกเพียง 1 ตัว";
     }
-  } else if (correctCount !== 1) {
-    errors["options"] = errors["options"] ?? "ข้อสอบเลือกตอบเดียว/ถูกผิด ต้องมีตัวเลือกที่ถูกเพียง 1 ตัว";
   }
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
@@ -358,6 +364,8 @@ export interface EditModalState {
   readonly qid: string | null;
   /** ลำดับ request — เปิดใหม่ทุกครั้ง +1 (late response ของ request เก่าถูกทิ้ง) */
   readonly requestId: number;
+  /** ลำดับรอบบันทึก — +1 ทุกครั้งที่เริ่ม PATCH (late response ของรอบเก่าถูกทิ้ง) */
+  readonly saveSeq: number;
   readonly phase: EditModalPhase;
   /** resource จาก edit GET — ล้าง (null) เมื่อ ปิด/เปลี่ยน qid/authorization ล้ม (D74) */
   readonly resource: EditQuestionResource | null;
@@ -373,6 +381,7 @@ export interface EditModalState {
 export const EDIT_MODAL_IDLE: EditModalState = {
   qid: null,
   requestId: 0,
+  saveSeq: 0,
   phase: "idle",
   resource: null,
   form: null,
@@ -406,11 +415,21 @@ export function editLoadOutcomeFromResponse(status: number, body: unknown): Edit
     : { ok: true, resource };
 }
 
-/** แมป error ที่ขว้างจาก getAdminJson → outcome (401/403 = denied — authorization ล้ม) */
+/**
+ * แมป error ที่ขว้างจาก getAdminJson → outcome — transport ฝั่ง BFF โยน AdminApiError
+ * ทันทีที่ non-2xx (sendAdminJson ของ api-client) ดังนั้น 401/403 = denied ·
+ * 404 = not-found (gate r1 m2: ห้ามกลายเป็นข้อความ server กลาง ๆ) · อื่น = server
+ */
 export function editLoadOutcomeFromError(error: unknown): EditLoadOutcome {
-  return error instanceof AdminApiError && (error.status === 401 || error.status === 403)
-    ? { ok: false, kind: "denied" }
-    : { ok: false, kind: "server" };
+  if (error instanceof AdminApiError) {
+    if (error.status === 401 || error.status === 403) {
+      return { ok: false, kind: "denied" };
+    }
+    if (error.status === 404) {
+      return { ok: false, kind: "not-found" };
+    }
+  }
+  return { ok: false, kind: "server" };
 }
 
 /** ลำดับขั้น: เปิด (ล้าง+ระบุ request ใหม่) → fetch → resolve · ปิด → idle · auth ล้ม → deny */
@@ -418,6 +437,7 @@ export function editModalOpenFor(qid: string, requestId: number): EditModalState
   return {
     qid,
     requestId,
+    saveSeq: 0,
     phase: "loading",
     resource: null,
     form: null,
@@ -470,7 +490,7 @@ export function editModalResolveLoad(
   };
 }
 
-/** เริ่มบันทึก — จาก phase "ready" เท่านั้น (ล้าง error เดิม) */
+/** เริ่มบันทึก — จาก phase "ready" เท่านั้น (ล้าง error เดิม · saveSeq +1 = รอบใหม่) */
 export function editModalSaveStart(state: EditModalState): EditModalState {
   if (state.phase !== "ready") {
     return state;
@@ -478,6 +498,7 @@ export function editModalSaveStart(state: EditModalState): EditModalState {
   return {
     ...state,
     phase: "saving",
+    saveSeq: state.saveSeq + 1,
     fieldErrors: {},
     apiFieldLabels: [],
     errorMessage: null,
@@ -485,9 +506,22 @@ export function editModalSaveStart(state: EditModalState): EditModalState {
   };
 }
 
+/**
+ * ตัวตนของรอบบันทึก — เทียบกับ state ปัจจุบัน (qid + saveSeq ตรงทั้งคู่เป็นรอบเดียวกัน)
+ * late response ของรอบเก่า (บันทึกซ้ำ/ปิดแล้วเปิดใหม่/เปลี่ยนข้อ) จึงถูกทิ้งเสมอ
+ */
+function saveRoundMatches(state: EditModalState, qid: string, saveSeq: number): boolean {
+  return state.qid === qid && state.saveSeq === saveSeq;
+}
+
 /** บันทึกสำเร็จ — เก็บเวอร์ชันใหม่เพื่อแสดงคู่ข้อความสำเร็จ (last-write-wins จดไว้ใน UI) */
-export function editModalSaveSuccess(state: EditModalState, version: number): EditModalState {
-  if (state.phase !== "saving") {
+export function editModalSaveSuccess(
+  state: EditModalState,
+  qid: string,
+  saveSeq: number,
+  version: number,
+): EditModalState {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, saveSeq)) {
     return state;
   }
   return {
@@ -499,11 +533,14 @@ export function editModalSaveSuccess(state: EditModalState, version: number): Ed
 }
 
 /**
- * authorization ล้มระหว่างเปิด modal (PATCH ตอบ 401/403) — **ล้าง resource+form ทันที**
+ * authorization ล้มระหว่างบันทึก (PATCH ตอบ 401/403) — **ล้าง resource+form ทันที**
  * (D74: auth ล้ม = ล้าง state) แล้วแสดงข้อความ — ปิดแล้วเปิดใหม่จะ fetch/authorize ใหม่
  */
-export function editModalDeny(state: EditModalState): EditModalState {
-  if (state.phase !== "saving" && state.phase !== "ready") {
+export function editModalDeny(state: EditModalState, qid: string, saveSeq: number): EditModalState {
+  if (
+    (state.phase !== "saving" && state.phase !== "ready") ||
+    !saveRoundMatches(state, qid, saveSeq)
+  ) {
     return state;
   }
   return {
@@ -519,8 +556,13 @@ export function editModalDeny(state: EditModalState): EditModalState {
 }
 
 /** error อื่นของ PATCH — คงฟอร์มไว้ให้แก้/ลองใหม่ (phase กลับ ready) */
-export function editModalSaveError(state: EditModalState, message: string): EditModalState {
-  if (state.phase !== "saving") {
+export function editModalSaveError(
+  state: EditModalState,
+  qid: string,
+  saveSeq: number,
+  message: string,
+): EditModalState {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, saveSeq)) {
     return state;
   }
   return {
@@ -533,9 +575,11 @@ export function editModalSaveError(state: EditModalState, message: string): Edit
 /** ERR-VAL-001 จาก BFF — แสดงรายการฟิลด์ภาษาไทย (แบบเดียวกับฟอร์มคลัง) */
 export function editModalSaveApiValidation(
   state: EditModalState,
+  qid: string,
+  saveSeq: number,
   apiFieldLabels: readonly string[],
 ): EditModalState {
-  if (state.phase !== "saving") {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, saveSeq)) {
     return state;
   }
   return {
@@ -632,19 +676,29 @@ export function markEditSingleCorrect(state: EditModalState, optionIndex: number
   };
 }
 
-/** เพิ่มแถวตัวเลือกใหม่ (id = null — D79) — ไม่เกิน 10 แถว */
+/**
+ * เพิ่มแถวตัวเลือกใหม่ (id = null — D79) — ไม่เกิน 10 แถว
+ * sortOrder ของแถวใหม่ = ค่าสูงสุดที่มี +1 (gate r1 m1: ใช้ options.length ชน
+ * unique (question_id, sort_order) ของ 0005 เมื่อลำดับเดิมไม่เรียง 0..n-1)
+ */
 export function addEditOption(state: EditModalState): EditModalState {
   if (state.form === null || state.form.options.length >= 10) {
     return state;
   }
-  const nextSortOrder = state.form.options.length;
+  const maxSortOrder = state.form.options.reduce((max, option) => {
+    const parsed = Number(option.sortOrder);
+    return Number.isInteger(parsed) && parsed > max ? parsed : max;
+  }, -1);
+  if (maxSortOrder >= EDIT_SORT_ORDER_MAX) {
+    return state;
+  }
   return {
     ...state,
     form: {
       ...state.form,
       options: [
         ...state.form.options,
-        { id: null, optionText: "", isCorrect: false, sortOrder: String(nextSortOrder) },
+        { id: null, optionText: "", isCorrect: false, sortOrder: String(maxSortOrder + 1) },
       ],
     },
   };
@@ -682,6 +736,12 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
   const router = useRouter();
   const [state, setState] = useState<EditModalState>(EDIT_MODAL_IDLE);
   const requestSeqRef = useRef(0);
+
+  // gate r1 M1: qid/canEdit เปลี่ยน = ข้อมูลเดิมใช้ต่อไม่ได้ — ล้างกลับ idle
+  // (D74 ต่อเนื่อง: เปลี่ยน qid/สิทธิ์หมด = ไม่มีข้อมูลข้อค้างใน state แม้ return null)
+  useEffect(() => {
+    setState(editModalClose());
+  }, [qid, canEdit]);
 
   if (!canEdit) {
     return null;
@@ -721,8 +781,11 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
       setState(editModalSaveValidationError(state, built.errors));
       return;
     }
-    setState(editModalSaveStart(state));
     const saveQid = state.qid;
+    // ตัวตนของรอบบันทึกนี้ — editModalSaveStart จะยก saveSeq เป็นค่านี้เอง
+    // (late outcome ของรอบก่อนหน้าถูก guard qid+saveSeq ทิ้งเสมอ — gate r1 M1)
+    const saveRound = state.saveSeq + 1;
+    setState(editModalSaveStart(state));
     try {
       const { body } = await patchAdminJson(
         bankQuestionPatchEndpointOf(bankId, saveQid),
@@ -733,27 +796,31 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
         setState((previous) =>
           editModalSaveError(
             previous,
+            saveQid,
+            saveRound,
             "บันทึกสำเร็จแต่อ่านเวอร์ชันกลับไม่สำเร็จ — ปิดแล้วเปิดใหม่เพื่อตรวจข้อมูลล่าสุด",
           ),
         );
         return;
       }
-      setState((previous) => editModalSaveSuccess(previous, version));
+      setState((previous) => editModalSaveSuccess(previous, saveQid, saveRound, version));
       router.refresh();
     } catch (error) {
       if (error instanceof AdminApiError && (error.status === 401 || error.status === 403)) {
-        setState((previous) => editModalDeny(previous));
+        setState((previous) => editModalDeny(previous, saveQid, saveRound));
         return;
       }
       if (error instanceof AdminApiError && error.code === "ERR-VAL-001") {
         setState((previous) =>
-          editModalSaveApiValidation(previous, validationFieldLabels(error.fields)),
+          editModalSaveApiValidation(previous, saveQid, saveRound, validationFieldLabels(error.fields)),
         );
         return;
       }
       setState((previous) =>
         editModalSaveError(
           previous,
+          saveQid,
+          saveRound,
           error instanceof AdminApiError ? error.message : TRANSPORT_FALLBACK_MESSAGE,
         ),
       );
@@ -777,6 +844,7 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
       <ConfirmModal
         open={state.phase !== "idle"}
         onClose={closeAndReset}
+        cancelDisabled={state.phase === "saving"}
         title="แก้ไขข้อสอบ"
         confirmLabel={
           state.phase === "saved"
