@@ -250,9 +250,9 @@ export const QuestionResource = z.object({
 export type QuestionResourceParsed = z.infer<typeof QuestionResource>;
 
 /**
- * สรุปกติกาของ GET /admin/assessments — คอลัมน์ตาม **column grant ของ authenticated**
- * (pass_pct ได้ grant เพิ่มใน 0019 · exam_review_mode ได้ grant เพิ่มใน 0049 ·
- * selection ยังไม่เปิดตาม 0010 L711-L714 — เส้นทาง lane นี้ใช้ user JWT ห้าม service_role)
+ * สรุปกติกาของ GET /admin/assessments — แถวกติกาล่าสุดมาจาก **RPC admin_latest_assessment_rules
+ * (0051)** ครบทุกคอลัมน์ ไม่ใช่ embed ตารางอีกต่อไป (0050 เปิด column grant selection แล้วพบ
+ * ผู้เรียนอ่านทางตรง PostgREST ได้ — gate GP3 r2 R2-M3 → 0051 revoke + RPC คุมบทบาทในตัว)
  */
 export const AssessmentRuleSummary = z.object({
   version: z.number().int().min(1),
@@ -326,7 +326,7 @@ export type QuestionBankCreateResultParsed = z.infer<typeof QuestionBankCreateRe
 
 /* ─── แถว DB (snake_case ตามคอลัมน์จริง) + mapper ─── */
 
-/** แถว assessment_rules ที่ฝังมากับ assessments — เฉพาะคอลัมน์ที่ authenticated ได้ grant (pass_pct เพิ่ม 0019; exam_review_mode เพิ่ม 0049; require_course_complete+selection เพิ่ม GP3-r2 เพื่อ prefill โมดัลกติกาโดยไม่เขียนทับขอบเขตคลัง) */
+/** แถว assessment_rules ที่ BFF merge จาก RPC admin_latest_assessment_rules (0051) เป็นรูป embed เดิม — คอลัมน์ 14 ตัวตาม RPC (เลิก embed ตารางหลัง 0051 revoke selection — R2-M3) */
 export interface AssessmentRuleRow {
   readonly version: number;
   readonly pass_pct: number;

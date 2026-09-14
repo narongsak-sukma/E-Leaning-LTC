@@ -15,11 +15,15 @@
  *   ทุกครั้งที่ POST ผ่าน endpoint (ปิด 3 ทาง — POST v1 เดิมรวมอยู่ด้วย)
  * - embed "กติกาล่าสุด" เลือกด้วย version สูงสุด (ไม่ใช่ effective_from ล่าสุด) —
  *   ย้อนหลัง/effective_from เท่ากันต้องไม่หมุนแถวที่ GET ตอบ (M4)
+ * - R2-M3 (gate GP3 r2): ผู้เรียนที่ลงทะเรียน active เห็นแถวกติกา (ar_read) แต่
+ *   ขอคอลัมน์ selection ทางตรง PostgREST = 42501 — 0051 revoke ของ 0050 · ทางอ่าน
+ *   ของเจ้าหน้าที่ = RPC admin_latest_assessment_rules (0051)
  * - app ไม่พร้อม: skip ตามปกติ ยกเว้น TEST_REQUIRE_APP=1 (battery §2.4) = ล้มทันที
- *   ห้ามผ่าน battery โดยไม่ได้พิสูจน์บน BFF จริง
+ *   ห้ามผ่าน battery โดยไม่ได้พิสูจน์บน BFF จริง · R2-m1: ไม่มี TEST_DATABASE_URL
+ *   ในโหมด battery = ล้มที่ระดับโมดูล (describe.skipIf ข้าม requireAppOrSkip ทั้งไฟล์)
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TEST_PASSWORD, createTestUser, psql, psqlScalar, restCall, type TestUser } from "./helpers.js";
+import { ANON_KEY, TEST_PASSWORD, createTestUser, psql, psqlScalar, restCall, type TestUser } from "./helpers.js";
 import { STAFF_EXAM_DEMO_ID } from "./helpers-d8.js";
 import { mintAal2Token } from "./helpers-aal2.js";
 
@@ -53,6 +57,7 @@ async function cleanupWorld(): Promise<void> {
   await psql(`
     delete from public.assessment_rules where assessment_id = '${ASSESS_ID}';
     delete from public.assessments where id = '${ASSESS_ID}';
+    delete from public.enrollments where course_id = '${COURSE_ID}';
     delete from public.courses where id = '${COURSE_ID}';
     delete from public.role_assignments where user_id in (select id from auth.users where email like 'wgp3-rules-%');
     delete from public.profiles where id in (select id from auth.users where email like 'wgp3-rules-%');
@@ -169,6 +174,7 @@ async function bffPost(path: string, token: string, userId: string, body?: unkno
 
 let staffExam: TestUser;
 let instructor: TestUser;
+let learner: TestUser;
 let examAal2 = "";
 let instructorAal2 = "";
 
@@ -191,13 +197,24 @@ function requireAppOrSkip(ctx: { skip(): void }): void {
   ctx.skip();
 }
 
-describe.skipIf(!DB_URL)(
+// R2-m1 (gate GP3 r2): describe.skipIf(!DB_URL) ทำให้ "ไม่มี TEST_DATABASE_URL" ข้าม
+// ทั้งไฟล์โดยไม่แตะ requireAppOrSkip เลย — battery (TEST_REQUIRE_APP=1) จะเขียวโดย
+// ไม่พิสูจน์อะไร → โหมด battery ต้องตายทันทีที่โหลดไฟล์เมื่อไม่มี DB
+if (process.env["TEST_REQUIRE_APP"] === "1" && !DB_URL) {
+  throw new Error(
+    "TEST_REQUIRE_APP=1 แต่ไม่มี TEST_DATABASE_URL — battery ห้ามรันแบบไม่มี DB",
+  );
+}
+const describeDb = DB_URL ? describe : describe.skip;
+
+describeDb(
   "Wave G P3 — POST /admin/assessments/{id}/rules + embed exam_review_mode (D87)",
   () => {
     beforeAll(async () => {
       await cleanupWorld();
       staffExam = await createTestUser("wgp3-rules-exam", "staff:exam");
       instructor = await createTestUser("wgp3-rules-inst", "instructor");
+      learner = await createTestUser("wgp3-rules-learn", "lawyer");
       await seedWorld();
       examAal2 = await mintAal2Token(staffExam);
       instructorAal2 = await mintAal2Token(instructor);
@@ -424,6 +441,55 @@ describe.skipIf(!DB_URL)(
         await psql(`
           delete from public.assessment_rules
            where assessment_id = '${ASSESS_ID}' and version > ${maxVersion};
+        `);
+      }
+    }, 60_000);
+
+    // ─── กลุ่ม 6 — R2-M3: ปิดทางผู้เรียนอ่าน selection ทางตรง PostgREST (0051) ──
+
+    it("ผู้เรียนที่ลงทะเรียน active เห็นแถวกติกา (ar_read) แต่ selection ถูก 42501 — ทางอ่านเดียวคือ RPC เจ้าหน้าที่", async (ctx) => {
+      requireAppOrSkip(ctx);
+      // ผู้เรียนลงทะเรียน active ตามทางจริง (RPC enroll — เหมือน progress IT) เพื่อเปิด
+      // เส้นทาง ar_read (0010 L694-L702): "ผู้เรียน enrolled-active ของหลักสูตรที่ assessment
+      // published" เห็นแถว assessment_rules — นี่คือช่องที่ 0050 เปิดทิ้งให้ (R2-M3)
+      const enroll = await restCall(
+        "POST",
+        "/rest/v1/rpc/enroll",
+        { apiKey: ANON_KEY, token: learner.accessToken },
+        { p_course_id: COURSE_ID },
+      );
+      expect(enroll.status, enroll.text.slice(0, 200)).toBe(200);
+      try {
+        // positive control: คอลัมน์ที่ยังได้ grant SELECT (0010/0019) อ่านได้ผ่าน JWT ผู้เรียน
+        // — พิสูจน์ว่า "แถว" นี้มองเห็นได้จริงตาม ar_read ไม่ใช่โดน row policy บังทั้งหมด
+        const allowed = await restCall(
+          "GET",
+          `/rest/v1/assessment_rules?select=assessment_id,version&assessment_id=eq.${ASSESS_ID}`,
+          { token: learner.accessToken },
+        );
+        expect(allowed.status, allowed.text.slice(0, 300)).toBe(200);
+        const rows = (allowed.json as Array<{ assessment_id: string }>) ?? [];
+        expect(rows.length).toBeGreaterThan(0);
+        expect(rows[0]?.assessment_id).toBe(ASSESS_ID);
+        // ตัวจริง: ขอเพิ่มคอลัมน์ selection ด้วย JWT ผู้เรียนคนเดิม → PostgREST ปฏิเสธที่
+        // column privilege (0051 revoke ของ 0050) — ผู้เรียนกับเจ้าหน้าที่เป็น role เดียว
+        // กัน (authenticated) จึงแยกกันได้ที่คอลัมน์นี้เท่านั้น
+        const probe = await restCall(
+          "GET",
+          `/rest/v1/assessment_rules?select=assessment_id,selection&assessment_id=eq.${ASSESS_ID}`,
+          { token: learner.accessToken },
+        );
+        expect(probe.status, probe.text.slice(0, 300)).toBe(403);
+        expect(probe.text).toContain("42501");
+        // สถานะ grant จริงใน DB: role authenticated ไม่มี SELECT บน selection อีก (D-f-13)
+        const canSelect = await psqlScalar(`
+          select has_column_privilege('authenticated', 'public.assessment_rules', 'selection', 'SELECT');
+        `);
+        expect(canSelect.trim()).toBe("f");
+      } finally {
+        await psql(`
+          delete from public.enrollments
+           where course_id = '${COURSE_ID}' and user_id = '${learner.id}';
         `);
       }
     }, 60_000);

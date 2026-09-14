@@ -67,6 +67,8 @@ function legacyFormula(watchPct: number): number {
 
 /** ข้อมูล seed รายเคส — maxPosition = ค่าคอลัมน์ใน DB · expectedSeeded = clamp ที่ loader ต้องให้ */
 interface VideoCase {
+  /** ชื่อสั้นประจำเคส — ใช้ในชื่อ/ข้อความของ it.each (R2-m2) */
+  readonly label: string;
   readonly id: string;
   readonly mediaId: string;
   readonly path: string;
@@ -80,12 +82,12 @@ interface VideoCase {
 }
 
 const CASES: readonly VideoCase[] = [
-  { id: L_V0, mediaId: M_V0, path: "courses/wgp3/pos0.mp4", maxPosition: 0, status: "in_progress", watchPct: 5, expectedRaw: 0, expectedSeeded: 0 },
-  { id: L_V600, mediaId: M_V600, path: "courses/wgp3/pos600.mp4", maxPosition: DURATION, status: "in_progress", watchPct: 95, expectedRaw: DURATION, expectedSeeded: DURATION - 1 },
-  { id: L_V700, mediaId: M_V700, path: "courses/wgp3/pos700.mp4", maxPosition: 700, status: "in_progress", watchPct: 95, expectedRaw: 700, expectedSeeded: DURATION - 1 },
-  { id: L_V333, mediaId: M_V333, path: "courses/wgp3/pos333.mp4", maxPosition: 333, status: "in_progress", watchPct: 40, expectedRaw: 333, expectedSeeded: 333 },
-  { id: L_VNULL, mediaId: M_VNULL, path: "courses/wgp3/posnull.mp4", maxPosition: null, status: "in_progress", watchPct: 40, expectedRaw: null, expectedSeeded: legacyFormula(40) },
-  { id: L_VDONE, mediaId: M_VDONE, path: "courses/wgp3/posdone.mp4", maxPosition: 500, status: "completed", watchPct: 100, expectedRaw: 500, expectedSeeded: 0 },
+  { label: "v0", id: L_V0, mediaId: M_V0, path: "courses/wgp3/pos0.mp4", maxPosition: 0, status: "in_progress", watchPct: 5, expectedRaw: 0, expectedSeeded: 0 },
+  { label: "v600", id: L_V600, mediaId: M_V600, path: "courses/wgp3/pos600.mp4", maxPosition: DURATION, status: "in_progress", watchPct: 95, expectedRaw: DURATION, expectedSeeded: DURATION - 1 },
+  { label: "v700", id: L_V700, mediaId: M_V700, path: "courses/wgp3/pos700.mp4", maxPosition: 700, status: "in_progress", watchPct: 95, expectedRaw: 700, expectedSeeded: DURATION - 1 },
+  { label: "v333", id: L_V333, mediaId: M_V333, path: "courses/wgp3/pos333.mp4", maxPosition: 333, status: "in_progress", watchPct: 40, expectedRaw: 333, expectedSeeded: 333 },
+  { label: "vnull", id: L_VNULL, mediaId: M_VNULL, path: "courses/wgp3/posnull.mp4", maxPosition: null, status: "in_progress", watchPct: 40, expectedRaw: null, expectedSeeded: legacyFormula(40) },
+  { label: "vdone", id: L_VDONE, mediaId: M_VDONE, path: "courses/wgp3/posdone.mp4", maxPosition: 500, status: "completed", watchPct: 100, expectedRaw: 500, expectedSeeded: 0 },
 ];
 
 // ─── cookie session ของ @supabase/ssr (base64url ตาม cookieEncoding) ────────────
@@ -256,7 +258,17 @@ function lessonsOf(body: unknown): Map<string, LessonWire> {
   return map;
 }
 
-describe.skipIf(!DB_URL)(
+// R2-m1 (gate GP3 r2): describe.skipIf(!DB_URL) ทำให้ "ไม่มี TEST_DATABASE_URL" ข้าม
+// ทั้งไฟล์โดยไม่แตะ requireAppOrSkip เลย — battery (TEST_REQUIRE_APP=1) จะเขียวโดย
+// ไม่พิสูจน์อะไร → โหมด battery ต้องตายทันทีที่โหลดไฟล์เมื่อไม่มี DB
+if (process.env["TEST_REQUIRE_APP"] === "1" && !DB_URL) {
+  throw new Error(
+    "TEST_REQUIRE_APP=1 แต่ไม่มี TEST_DATABASE_URL — battery ห้ามรันแบบไม่มี DB",
+  );
+}
+const describeDb = DB_URL ? describe : describe.skip;
+
+describeDb(
   "Wave G P3 — โซ่ video_max_position_sec ทะลุจริง GET→parser→map→loader (D85)",
   () => {
     beforeAll(async () => {
@@ -324,31 +336,37 @@ describe.skipIf(!DB_URL)(
       }
     }, 60_000);
 
-    it("loader: loadLessonWorkspace seed ตำแหน่งเริ่มเล่นถูก clamp ตามเคส (0→0 · 600→599 · 700→599 · 333→333≠240 · null→240 · completed→0)", async (ctx) => {
-      requireAppOrSkip(ctx);
-      for (const row of CASES) {
+    // R2-m2 (gate GP3 r2): เดิม for-loop เคสเดียว — assertion แรกที่ fail โยนทิ้งเคสถัดไป
+    // หลักฐาน mutation เลยเห็นแค่แถวแรก แยกเป็นรายเคส (it.for — ได้ TestContext เป็น
+    // อาร์กิวเมนต์ที่สองตาม typing ของ vitest ต่างจาก it.each) ให้แต่ละแถวมีชื่อ/ผลของตัวเอง
+    it.for(CASES)(
+      "loader: seed ตำแหน่งเริ่มเล่น clamp บท $label (v=$maxPosition · $status · watchPct $watchPct → $expectedSeeded)",
+      { timeout: 120_000 },
+      async (row, ctx) => {
+        requireAppOrSkip(ctx);
         const workspace = await loadLessonWorkspace(COURSE, row.id);
         if (workspace.kind !== "ready") {
-          throw new Error(`บท ${row.id.slice(-2)}: workspace ควรพร้อม (ได้ ${workspace.kind})`);
+          throw new Error(`บท ${row.label}: workspace ควรพร้อม (ได้ ${workspace.kind})`);
         }
         const lesson = workspace.data.lesson;
         if (lesson.kind !== "video") {
-          throw new Error(`บท ${row.id.slice(-2)}: lesson ควรเป็นวิดีโอ`);
+          throw new Error(`บท ${row.label}: lesson ควรเป็นวิดีโอ`);
         }
         expect(
           lesson.initialPositionSeconds,
-          `บท ${row.id.slice(-2)} (v=${row.maxPosition === null ? "null" : row.maxPosition}, ${row.status}, watchPct ${row.watchPct})`,
+          `บท ${row.label} (v=${row.maxPosition === null ? "null" : row.maxPosition}, ${row.status}, watchPct ${row.watchPct})`,
         ).toBe(row.expectedSeeded);
-      }
-      // ตัวแยกแยะเชิงพิสูจน์: v=333 ต้องไม่ลูกเข้า fallback สูตร % เดิม (240)
-      // และแถว legacy (null) เท่านั้นที่ได้ค่าตามสูตร — คืนสูตร = เทสนี้แดงทันที
-      const v333 = CASES[3];
-      const vNull = CASES[4];
+      },
+    );
+
+    it("ตัวแยกแยะเชิงพิสูจน์: v=333 ≠ fallback สูตร % เดิม · แถว legacy (null) = สูตร — คืนสูตรเก่า = แดงทันที", () => {
+      const v333 = CASES.find((row) => row.label === "v333");
+      const vNull = CASES.find((row) => row.label === "vnull");
       if (v333 === undefined || vNull === undefined) {
-        throw new Error("fixture CASES ครบ 6 เคส");
+        throw new Error("fixture CASES ครบ 6 เคส (v333+vnull)");
       }
       expect(v333.expectedSeeded).not.toBe(legacyFormula(v333.watchPct));
       expect(vNull.expectedSeeded).toBe(legacyFormula(vNull.watchPct));
-    }, 120_000);
+    });
   },
 );

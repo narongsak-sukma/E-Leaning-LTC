@@ -15,6 +15,11 @@
  * - response แบบ envelope { data: { version } } ต้อง unwrap ก่อนอ่าน version —
  *   อ่านผิดชั้น = successVersion null ตลอด (แสดงสำเร็จไม่ได้) · ปิดโมดัลกลางคัน =
  *   response เก่าตายทันที (request epoch)
+ * - สถานะการส่งเป็น state machine เดียว (ModalCoreState — gate GP3 r2 R2-M1/R2-M2):
+ *   201 แต่อ่าน version ไม่ได้ / network ตาย / 5xx หลัง commit = **ผลยังไม่แน่นอน**
+ *   → ล็อกปุ่มบันทึกกันสร้าง version ซ้ำ (RPC max+1 ทุกครั้ง ไม่มี dedup) +
+ *   router.refresh ให้ตารางอ่านกลับ version ล่าสุดจริง · ปิดโมดัลกลางคัน = รีเซ็ต
+ *   ทุกสถานะรวม submitting (เดิมค้าง true ตลอดหลังเปิดใหม่)
  */
 
 import { useRef, useState, type ReactNode } from "react";
@@ -164,6 +169,111 @@ export function readCreatedRulesVersion(envelope: unknown): number | null {
   return typeof version === "number" && Number.isInteger(version) && version >= 1
     ? version
     : null;
+}
+
+/* ─── state machine การส่งของโมดัล (gate GP3 r2 R2-M1/R2-M2) ─── */
+
+/**
+ * แกนสถานะเดียวของโมดัล — แยกจากข้อมูลฟอร์ม (form/fieldErrors/formError) เพื่อให้
+ * สถานะ "ผลการบันทึกยังไม่แน่นอน" (uncertainSave) มีที่ยืนและตรวจ pure ได้:
+ * - R2-M1: 201 แต่ envelope ผิดสัญญา/network ตาย/5xx หลัง commit = version
+ *   "อาจถูกสร้างแล้ว" — ห้ามปล่อยกดบันทึกซ้ำ (RPC max+1 ทุกครั้ง = version ใหม่ทุกครั้ง)
+ * - R2-M2: ปิดโมดัลกลาง POST → เปิดใหม่ ต้องได้สถานะสดทุกช่อง (เดิม submitting
+ *   ค้าง true เพราะ finally ถูก epoch guard ทิ้ง)
+ */
+export interface ModalCoreState {
+  readonly open: boolean;
+  readonly submitting: boolean;
+  readonly uncertainSave: boolean;
+  readonly successVersion: number | null;
+}
+
+/** สถานะปิด = จุดเริ่มและจุดจบของทุกการเปิด (ไม่มีอะไรค้างข้ามการปิด) */
+export const MODAL_CORE_CLOSED: ModalCoreState = {
+  open: false,
+  submitting: false,
+  uncertainSave: false,
+  successVersion: null,
+};
+
+export type ModalCoreEvent =
+  | { readonly kind: "open" }
+  | { readonly kind: "close" }
+  | { readonly kind: "submit_start" }
+  | { readonly kind: "outcome_success"; readonly version: number }
+  | { readonly kind: "outcome_uncertain" }
+  | { readonly kind: "outcome_error" };
+
+/**
+ * สถานะถัดไปของโมดัล — pure · event ที่ไม่ผ่าน guard = คืน state เดิม (idempotent):
+ * - open/close → สถานะสดเสมอ (close รีเซ็ต submitting ด้วย — R2-M2)
+ * - submit_start ยอมเฉพาะ open และยังไม่ส่ง/ไม่ uncertain/ยังไม่สำเร็จ (R2-M1)
+ * - outcome_* ยอมเฉพาะตอน submitting (response เก่าหลัง close ถูกทิ้งเงียบ ๆ)
+ */
+export function nextModalCoreState(
+  state: ModalCoreState,
+  event: ModalCoreEvent,
+): ModalCoreState {
+  switch (event.kind) {
+    case "open":
+      return { ...MODAL_CORE_CLOSED, open: true };
+    case "close":
+      return MODAL_CORE_CLOSED;
+    case "submit_start":
+      if (!state.open || state.submitting || state.uncertainSave || state.successVersion !== null) {
+        return state;
+      }
+      return { ...state, submitting: true };
+    case "outcome_success":
+      if (!state.submitting) {
+        return state;
+      }
+      return { open: true, submitting: false, uncertainSave: false, successVersion: event.version };
+    case "outcome_uncertain":
+      if (!state.submitting) {
+        return state;
+      }
+      return { open: true, submitting: false, uncertainSave: true, successVersion: null };
+    case "outcome_error":
+      if (!state.submitting) {
+        return state;
+      }
+      return { open: true, submitting: false, uncertainSave: false, successVersion: null };
+  }
+}
+
+/** ผลลัพธ์ gate ของปุ่มยืนยัน — disabled พร้อมเหตุผลไทย (แสดงเป็น confirmDisabledReason) */
+export interface ModalConfirmGate {
+  readonly disabled: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * ปุ่มยืนยันถูกล็อกเมื่อ: กำลังส่ง หรือ ผลยังไม่แน่นอน (R2-M1 — กัน version ซ้ำ) ·
+ * โหมดสำเร็จ (successVersion ≠ null) ปลดล็อกเพราะปุ่มกลายเป็น "กลับไปยังรายการ"
+ */
+export function confirmGateOf(core: ModalCoreState): ModalConfirmGate {
+  if (core.submitting) {
+    return { disabled: true, reason: "กำลังบันทึก กรุณารอสักครู่" };
+  }
+  if (core.uncertainSave) {
+    return {
+      disabled: true,
+      reason:
+        "ผลการบันทึกยังไม่แน่นอน — กรุณาตรวจสอบ version ล่าสุดในตารางก่อน เพื่อป้องกันการสร้าง version ซ้ำ",
+    };
+  }
+  return { disabled: false };
+}
+
+/**
+ * error ที่ "แน่ใจว่าไม่มี version ถูกสร้าง" = BFF ตอบ 4xx กลับมาจริง (validation/
+ * RBAC/ไม่พบ) — แก้ฟอร์มแล้วส่งใหม่ได้ · อื่น (network ตายก่อนมี response · 5xx
+ * เช่น 503 assessment_rule_rpc_row_drift ที่ RPC commit สำเร็จแล้วแต่แถวที่คืนไม่ผ่าน
+ * strict parse) = ผลยังไม่แน่นอน → ต้องเข้าสถานะ uncertainSave (R2-M1)
+ */
+export function isDefinitiveRejection(error: unknown): boolean {
+  return error instanceof AdminApiError && error.status >= 400 && error.status < 500;
 }
 
 /** ตรวจความถูกต้องของตัวเลข — คืน number ที่ผ่านช่วง หรือ null (ยังไม่กรอก/ผิด) */
@@ -325,13 +435,13 @@ export function AssessmentRulesVersionModal({
   allowRules,
 }: AssessmentRulesVersionModalProps) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
+  // แกนเดียวของ open/submitting/uncertainSave/successVersion — ทุก transition ผ่าน
+  // nextModalCoreState (R2-M1/R2-M2 ดู docstring ของ ModalCoreState)
+  const [core, setCore] = useState<ModalCoreState>(MODAL_CORE_CLOSED);
   const [form, setForm] = useState<AssessmentRulesFormState>(ASSESSMENT_RULES_FORM_DEFAULTS);
   const [fieldErrors, setFieldErrors] = useState<AssessmentRulesFormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [apiFieldLabels, setApiFieldLabels] = useState<readonly string[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [successVersion, setSuccessVersion] = useState<number | null>(null);
   /**
    * ยุคของ request ปัจจุบัน — บั๊ก M3: ปิดโมดัล (ยกเลิก/ปิดหลัง/Escape) ระหว่าง POST
    * ค้างอยู่ แล้วเปิดใหม่ = response เก่าไหลเขียน state ของฟอร์มใหม่ · ทุกการปิด/เปิด
@@ -359,12 +469,13 @@ export function AssessmentRulesVersionModal({
 
   const closeAndReset = () => {
     requestEpochRef.current += 1; // ฆ่า response ที่ยังค้างของฟอร์มเก่าทันที
-    setOpen(false);
+    // close = สถานะสดทุกช่องรวม submitting (R2-M2 — เดิม finally ถูก epoch guard
+    // ทิ้งจน submitting ค้าง true หลังปิดกลาง POST แล้วเปิดใหม่)
+    setCore((previous) => nextModalCoreState(previous, { kind: "close" }));
     setForm(ASSESSMENT_RULES_FORM_DEFAULTS);
     setFieldErrors({});
     setFormError(null);
     setApiFieldLabels([]);
-    setSuccessVersion(null);
   };
 
   /** จุดเดียวที่ map error ของ BFF → ข้อความไทย — ดู error.code ก่อน status (403 มีสองสาเหตุ) */
@@ -409,8 +520,12 @@ export function AssessmentRulesVersionModal({
       return;
     }
     setFieldErrors({});
+    // gate เดียวกับปุ่ม — กัน double-click/ส่งซ้ำระหว่างผลยังไม่แน่นอน (R2-M1)
+    if (confirmGateOf(core).disabled) {
+      return;
+    }
     const epoch = requestEpochRef.current;
-    setSubmitting(true);
+    setCore((previous) => nextModalCoreState(previous, { kind: "submit_start" }));
     try {
       const result = await postAdminJson(
         `${ASSESSMENT_RULES_PATH}/${form.assessmentId}/rules`,
@@ -422,37 +537,55 @@ export function AssessmentRulesVersionModal({
       // unwrap envelope { data: { version } } ก่อนอ่าน — อ่านตรง body = undefined เสมอ (M1)
       const version = readCreatedRulesVersion(result.body);
       if (version === null) {
-        // 201 แต่ envelope ผิดสัญญา = drift — fail-closed: ไม่อวดสำเร็จ ไม่ refresh ตามเปล่า
+        // R2-M1: 201 แต่ envelope ผิดสัญญา = version อาจถูกสร้างแล้วแต่อ่านไม่ได้ —
+        // ล็อกปุ่มกันสร้างซ้ำ + refresh ให้ตารางอ่านกลับ version ล่าสุดจริงจากเซิร์ฟเวอร์
+        setCore((previous) => nextModalCoreState(previous, { kind: "outcome_uncertain" }));
         setFormError(
-          "บันทึกแล้วแต่คำตอบของระบบไม่ตรงสัญญา (ไม่พบเลข version) — กรุณาปิดแล้วตรวจสอบ version ล่าสุดในตารางอีกครั้ง",
+          "บันทึกแล้วแต่คำตอบของระบบไม่ตรงสัญญา (ไม่พบเลข version) — กรุณาตรวจสอบ version ล่าสุดในตารางก่อน หากยังไม่ถูกสร้างจึงบันทึกใหม่อีกครั้ง",
         );
+        router.refresh();
         return;
       }
-      setSuccessVersion(version);
+      setCore((previous) => nextModalCoreState(previous, { kind: "outcome_success", version }));
       router.refresh();
     } catch (error) {
       if (epoch !== requestEpochRef.current) {
         return;
       }
-      showApiError(error);
-    } finally {
-      if (epoch === requestEpochRef.current) {
-        setSubmitting(false);
+      if (isDefinitiveRejection(error)) {
+        // BFF ตอบ 4xx กลับมาจริง = ไม่มี version ถูกสร้าง — แสดงสาเหตุ แก้แล้วส่งใหม่ได้
+        setCore((previous) => nextModalCoreState(previous, { kind: "outcome_error" }));
+        showApiError(error);
+        return;
       }
+      // network ตายก่อนมี response หรือ 5xx ที่ commit อาจเกิดแล้ว (เช่น row drift
+      // หลัง RPC commit) = ผลยังไม่แน่นอน — ล็อกกัน version ซ้ำ + อ่านกลับ (R2-M1)
+      setCore((previous) => nextModalCoreState(previous, { kind: "outcome_uncertain" }));
+      const fallback = error instanceof AdminApiError
+        ? error.message
+        : TRANSPORT_FALLBACK_MESSAGE;
+      setFormError(
+        `${fallback} — ไม่แน่ใจว่าบันทึกสำเร็จหรือไม่ กรุณาตรวจสอบ version ล่าสุดในตารางก่อน หากยังไม่ถูกสร้างจึงบันทึกใหม่อีกครั้ง`,
+      );
+      router.refresh();
     }
   };
+
+  // gate ของปุ่มยืนยันจากแกนเดียว — submitting/uncertainSave ล็อก + เหตุผลไทย (R2-M1)
+  const confirmGate = confirmGateOf(core);
+  const { successVersion } = core;
 
   return (
     <>
       <button
         type="button"
         className="rounded-[10px] border border-brand-600 bg-white px-[18px] py-2 font-heading text-sm font-semibold text-brand-700 hover:bg-brand-50"
-        onClick={() => setOpen(true)}
+        onClick={() => setCore((previous) => nextModalCoreState(previous, { kind: "open" }))}
       >
         + เพิ่มกติกา version ใหม่
       </button>
       <ConfirmModal
-        open={open}
+        open={core.open}
         onClose={closeAndReset}
         title={successVersion !== null ? "เพิ่มกติกาสำเร็จ" : "เพิ่มกติกา version ใหม่"}
         description={
@@ -463,8 +596,8 @@ export function AssessmentRulesVersionModal({
         confirmLabel={
           successVersion !== null ? "กลับไปยังรายการ" : "บันทึกกติกา version ใหม่"
         }
-        confirmDisabled={successVersion === null && submitting}
-        confirmDisabledReason={submitting ? "กำลังบันทึก กรุณารอสักครู่" : undefined}
+        confirmDisabled={confirmGate.disabled}
+        confirmDisabledReason={confirmGate.reason}
         cancelLabel={successVersion !== null ? "ปิด" : "ยกเลิก"}
         onConfirm={
           successVersion !== null
@@ -500,7 +633,7 @@ export function AssessmentRulesVersionModal({
               form={form}
               fieldErrors={fieldErrors}
               assessmentOptions={assessmentOptions}
-              disabled={submitting}
+              disabled={core.submitting || core.uncertainSave}
               onChange={update}
               onAssessmentChange={selectAssessment}
             />
