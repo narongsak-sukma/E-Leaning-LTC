@@ -854,18 +854,20 @@ export interface ManifestEntry {
  */
 export const EVIDENCE_SETTLE_MANIFEST: readonly ManifestEntry[] = [
   {
-    opKey: "app:PATCH:/api/v1/admin/questions/:uuid",
+    // route จริง: question-banks/[id]/questions/[qid]/route.ts · PATCH :129 → rpc admin_update_question :150
+    opKey: "app:PATCH:/api/v1/admin/question-banks/:uuid/questions/:uuid",
     label: "qb-patch-admin-update-question",
     transportTarget: "app-direct",
     singleDispatch: true,
-    finalMutation: "public.questions (update โดย handler) + audit append",
+    finalMutation: "rpc admin_update_question → public.questions + audit append",
     touchSet: [
       { table: "public.questions", whereTemplate: "id = :uuid", orderBy: "id" },
     ],
-    sdkTargets: ["src/app/api/v1/admin/questions/[id]/route.ts"],
+    sdkTargets: ["src/app/api/v1/admin/question-banks/[id]/questions/[qid]/route.ts"],
   },
   {
-    opKey: "app:POST:/api/v1/admin/questions/:uuid/status",
+    // status route จริง export PATCH (ไม่ใช่ POST) :80 → rpc admin_set_question_status :102
+    opKey: "app:PATCH:/api/v1/admin/question-banks/:uuid/questions/:uuid/status",
     label: "admin-set-question-status",
     transportTarget: "app-direct",
     singleDispatch: true,
@@ -873,7 +875,7 @@ export const EVIDENCE_SETTLE_MANIFEST: readonly ManifestEntry[] = [
     touchSet: [
       { table: "public.questions", whereTemplate: "id = :uuid", orderBy: "id" },
     ],
-    sdkTargets: ["src/app/api/v1/admin/questions/[id]/status/route.ts"],
+    sdkTargets: ["src/app/api/v1/admin/question-banks/[id]/questions/[qid]/status/route.ts"],
   },
   {
     opKey: "app:PATCH:/api/v1/admin/users/:uuid",
@@ -909,7 +911,7 @@ export const EVIDENCE_SETTLE_MANIFEST: readonly ManifestEntry[] = [
     touchSet: [
       { table: "public.data_export_jobs", whereTemplate: "id = :uuid", orderBy: "id" },
     ],
-    sdkTargets: ["src/lib/pdpa/worker.ts"],
+    sdkTargets: ["src/lib/pdpa/export.ts"], // export.ts:258 client.rpc("complete_data_export_job")
   },
 ];
 
