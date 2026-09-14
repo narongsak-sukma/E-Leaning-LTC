@@ -85,6 +85,9 @@ export const CourseLessonProgressView = z.object({
   lessonType: z.enum(["video", "document", "quiz"]),
   status: z.enum(["not_started", "in_progress", "completed"]),
   watchPct: z.number().int().min(0).max(100),
+  // D85/LRN-009 — ตำแหน่งสูงสุดที่เคยบันทึก (วินาที): null = แถว legacy ก่อนมีคอลัมน์
+  // (0 เป็นค่าจริง ห้ามใช้ null แทน) · ขา heartbeat ของ LessonProgressView (:74) มีอยู่แล้ว
+  videoMaxPositionSec: z.number().int().min(0).nullable(),
   quizScorePct: z.number().int().min(0).max(100).nullable(),
   completedAt: z.iso.datetime({ offset: true }).nullable(),
 });

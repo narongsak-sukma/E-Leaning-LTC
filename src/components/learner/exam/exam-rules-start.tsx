@@ -59,6 +59,15 @@ function mapStartError(error: unknown): StartErrorView {
           message:
             "คุณใช้จำนวนครั้งการสอบครบตามกติกาแล้ว ตรวจสอบผลการสอบได้ที่หน้าประวัติการสอบ",
         };
+      case "ERR-ASM-007":
+        // ASM-012 คู่พลัง open-on-pass ⇔ block-retake-on-pass (0049 — B3.5 ก่อน cooldown):
+        // ผ่านแล้ว = สอบซ้ำไม่ได้ถาวร — ข้อความไทยเต็มตามที่กติกากำหนด (tone blocked เหมือน ASM-001)
+        return {
+          tone: "blocked",
+          title: "ผ่านการสอบนี้แล้ว จึงสอบซ้ำไม่ได้",
+          // หางข้อความตรงสัญญาเป๊ะ (0049 B3.5 + API-SPEC 1.4.0): "ดูผลสอบได้ที่หน้าผลสอบ"
+          message: "ดูผลสอบได้ที่หน้าผลสอบ",
+        };
       case "ERR-ASM-003":
         return {
           tone: "blocked",

@@ -120,6 +120,7 @@ const PROGRESS_BODY = {
           lessonType: "video",
           status: "completed",
           watchPct: 100,
+          videoMaxPositionSec: 599,
           quizScorePct: null,
           completedAt: ISO,
         },
@@ -128,6 +129,7 @@ const PROGRESS_BODY = {
           lessonType: "document",
           status: "in_progress",
           watchPct: 0,
+          videoMaxPositionSec: null,
           quizScorePct: null,
           completedAt: null,
         },
@@ -146,6 +148,7 @@ const PROGRESS_BODY = {
           lessonType: "quiz",
           status: "not_started",
           watchPct: 0,
+          videoMaxPositionSec: null,
           quizScorePct: null,
           completedAt: null,
         },
@@ -370,6 +373,8 @@ describe("getCourseProgress", () => {
     expect(progress.lessonTotal).toBe(3);
     expect(progress.modules).toHaveLength(2);
     expect(progress.modules[0]?.lessons[0]?.status).toBe("completed");
+    // D85 — ส่งต่อ videoMaxPositionSec จาก BFF ผ่าน zod contract มาถึง view model
+    expect(progress.modules[0]?.lessons[0]?.videoMaxPositionSec).toBe(599);
     expect(progress.modules[1]?.lessons[0]?.lessonType).toBe("quiz");
   });
 
@@ -645,6 +650,8 @@ describe("pure helpers", () => {
     const lesson = outline.modules[0]?.lessons[0];
     expect(lesson?.status).toBe("not_started");
     expect(lesson?.watchPct).toBe(0);
+    // D85 — ไม่มีสถานะ = ไม่มีตำแหน่งสูงสุด → null (ไม่ใช่ 0)
+    expect(lesson?.videoMaxPositionSec).toBe(null);
   });
 
   it("buildCourseOutline: ผูกสถานะจาก progress และนับจำนวนเรียนจบ + เปอร์เซ็นต์", () => {
@@ -655,6 +662,8 @@ describe("pure helpers", () => {
     const first = outline.modules[0]?.lessons[0];
     expect(first?.status).toBe("completed");
     expect(first?.watchPct).toBe(100);
+    // D85 — ค่าจาก progress ผ่าน stateByLesson มาถึง outline ครบ
+    expect(first?.videoMaxPositionSec).toBe(599);
   });
 
   it("pickContinueLesson: in_progress ก่อน แล้ว not_started แรก — เรียนจบหมด = null", () => {
@@ -676,8 +685,8 @@ describe("pure helpers", () => {
           lessonCompleted: 2,
           progressPct: 100,
           lessons: [
-            { lessonId: LESSON_V, lessonType: "video", status: "completed", watchPct: 100, quizScorePct: null, completedAt: ISO },
-            { lessonId: LESSON_D, lessonType: "document", status: "completed", watchPct: 100, quizScorePct: null, completedAt: ISO },
+            { lessonId: LESSON_V, lessonType: "video", status: "completed", watchPct: 100, videoMaxPositionSec: 599, quizScorePct: null, completedAt: ISO },
+            { lessonId: LESSON_D, lessonType: "document", status: "completed", watchPct: 100, videoMaxPositionSec: null, quizScorePct: null, completedAt: ISO },
           ],
         },
         {
@@ -688,7 +697,7 @@ describe("pure helpers", () => {
           lessonCompleted: 1,
           progressPct: 100,
           lessons: [
-            { lessonId: LESSON_Q, lessonType: "quiz", status: "completed", watchPct: 100, quizScorePct: 100, completedAt: ISO },
+            { lessonId: LESSON_Q, lessonType: "quiz", status: "completed", watchPct: 100, videoMaxPositionSec: null, quizScorePct: 100, completedAt: ISO },
           ],
         },
       ],
@@ -727,6 +736,8 @@ describe("pure helpers", () => {
     expect(card.completedCount).toBe(1);
     expect(card.progressPercent).toBe(33);
     expect(card.continueLesson?.id).toBe(LESSON_D);
+    // D85 — การ์ด "หลักสูตรของฉัน" ส่งต่อตำแหน่งสูงสุดของบทที่ค้าง (LESSON_D = ไม่มีค่า → null)
+    expect(card.continueLesson?.videoMaxPositionSec).toBe(null);
     expect(card.isLoaded).toBe(true);
   });
 

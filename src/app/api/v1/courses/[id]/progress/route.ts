@@ -10,6 +10,8 @@
  *   ส่ง secondaryKey = user_id (ใช้ผลจริงเมื่อกลุ่มของ path นี้เปลี่ยนเป็น READ)
  * - อ่านอย่างเดียว — ไม่มีการเขียน lesson_progress ที่นี่ (F2/D12-1: เขียนผ่าน
  *   record_lesson_progress SECURITY DEFINER เท่านั้น)
+ * - ส่ง video_max_position_sec ต่อบทเรียนออกเสมอ (D85/LRN-009 — ตำแหน่งสูงสุดที่เคย
+ *   บันทึก, วินาที): แถวไหนไม่มีค่า/ไม่มีแถวความคืบหน้า = null (แถว legacy ก่อนมีคอลัมน์)
  */
 import { NextResponse } from "next/server";
 import { AppError } from "@/lib/errors";
@@ -91,7 +93,7 @@ export async function GET(
     // 3) แถวความคืบหน้าของ enrollment ตัวเอง (lp_owner_read — เห็นเฉพาะของตัวเอง)
     const { data: progressRows, error: progressError } = await supabase
       .from("lesson_progress")
-      .select("lesson_id, status, watch_pct, quiz_score_pct, completed_at")
+      .select("lesson_id, status, watch_pct, video_max_position_sec, quiz_score_pct, completed_at")
       .eq("enrollment_id", String(enrollment["id"]));
     if (progressError) {
       throw new AppError("ERR-SYS-002", { details: { reason: "lesson_progress_read_failed" } });
@@ -115,6 +117,8 @@ export async function GET(
             lessonType: String(l["type"]),
             status: typeof p?.["status"] === "string" ? p["status"] : "not_started",
             watchPct: typeof p?.["watch_pct"] === "number" ? p["watch_pct"] : 0,
+            videoMaxPositionSec:
+              typeof p?.["video_max_position_sec"] === "number" ? p["video_max_position_sec"] : null,
             quizScorePct: typeof p?.["quiz_score_pct"] === "number" ? p["quiz_score_pct"] : null,
             completedAt: typeof p?.["completed_at"] === "string" ? p["completed_at"] : null,
           };

@@ -6,6 +6,8 @@
  *   (media_read จำกัด instructor/staff — ผู้เรียนได้ null → placeholder ไทย ห้ามปลอม URL)
  * - loadCourseViewerGate: 401 = guest · พบแถว = enrolled · expired/cancelled = not_enrolled
  * - loadLessonWorkspace: เนื้อหาจริงจาก lessons.content_md (document) + src (video)
+ * - loadLessonWorkspace (D85/LRN-009): seed ตำแหน่งเริ่มเล่นจาก video_max_position_sec —
+ *   clamp [0, duration-1] · 0 = ค่าจริง · null (แถว legacy) → fallback สูตร watchPct เดิม
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -96,14 +98,19 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-/** stub fetch ตามลำดับ BFF: GET /courses/{id} แล้ว GET /courses/{id}/progress */
-function stubBff() {
+/** stub fetch ตามลำดับ BFF: GET /courses/{id} แล้ว GET /courses/{id}/progress — override ได้รายเคส */
+function stubBff(args?: {
+  /** wire body ของ GET /courses/{id} (default DETAIL_BODY) */
+  readonly detail?: unknown;
+  /** wire body ของ GET /courses/{id}/progress (default PROGRESS_BODY) */
+  readonly progress?: unknown;
+}) {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof URL ? input.href : input);
     if (url.includes("/progress")) {
-      return jsonResponse(200, { data: PROGRESS_BODY });
+      return jsonResponse(200, { data: args?.progress ?? PROGRESS_BODY });
     }
-    return jsonResponse(200, { data: DETAIL_BODY });
+    return jsonResponse(200, { data: args?.detail ?? DETAIL_BODY });
   }));
 }
 
@@ -315,5 +322,107 @@ describe("loadLessonWorkspace", () => {
     }
     expect(lesson.src).toBe("https://media.test/signed");
     expect(createSignedUrl).toHaveBeenCalledWith("courses/ltc-101/intro.mp4", 900);
+  });
+});
+
+// ——— loadLessonWorkspace — seed ตำแหน่งเริ่มเล่นจาก video_max_position_sec (D85/LRN-009) ———
+/** สถานะของ LESSON_V (วิดีโอ) ใน progress — รูปร่างเดียวกับ CourseLessonProgressView */
+interface VideoLessonState {
+  readonly lessonId: string;
+  readonly lessonType: "video";
+  readonly status: "not_started" | "in_progress" | "completed";
+  readonly watchPct: number;
+  readonly videoMaxPositionSec: number | null;
+  readonly quizScorePct: number | null;
+  readonly completedAt: string | null;
+}
+
+/** สร้างสถานะของ LESSON_V — default in_progress/watchPct 40 (ค่าที่สูตร % เดิมให้ 240 พอดี) */
+function videoLesson(
+  videoMaxPositionSec: number | null,
+  overrides?: { readonly status?: "not_started" | "in_progress" | "completed"; readonly watchPct?: number },
+): VideoLessonState {
+  return {
+    lessonId: LESSON_V,
+    lessonType: "video",
+    status: overrides?.status ?? "in_progress",
+    watchPct: overrides?.watchPct ?? 40,
+    videoMaxPositionSec,
+    quizScorePct: null,
+    completedAt: null,
+  };
+}
+
+/** รัน loadLessonWorkspace จริงแล้วคืน initialPositionSeconds ที่ seed ให้ player */
+async function seededPositionOf(lesson: VideoLessonState, durationSec = 600): Promise<number> {
+  const detail =
+    durationSec === 600
+      ? DETAIL_BODY
+      : {
+          ...DETAIL_BODY,
+          modules: DETAIL_BODY.modules.map((moduleRow) =>
+            moduleRow.id === MODULE_A
+              ? {
+                  ...moduleRow,
+                  lessons: moduleRow.lessons.map((row) =>
+                    row.id === LESSON_V ? { ...row, durationSec } : row,
+                  ),
+                }
+              : moduleRow,
+          ),
+        };
+  stubBff({ detail, progress: { ...PROGRESS_BODY, modules: [
+    {
+      moduleId: MODULE_A,
+      title: "โมดูลที่ 1",
+      sortOrder: 1,
+      lessonTotal: 1,
+      lessonCompleted: lesson.status === "completed" ? 1 : 0,
+      progressPct: lesson.status === "completed" ? 100 : 0,
+      lessons: [lesson],
+    },
+  ] } });
+  stubSsrClient({ lessonRow: null, signedUrl: null });
+  const workspace = await loadLessonWorkspace(COURSE, LESSON_V);
+  if (workspace.kind !== "ready") {
+    throw new Error("workspace ควรพร้อม");
+  }
+  const lessonView = workspace.data.lesson;
+  if (lessonView.kind !== "video") {
+    throw new Error("lesson ควรเป็นวิดีโอ");
+  }
+  return lessonView.initialPositionSeconds;
+}
+
+describe("loadLessonWorkspace — seed ตำแหน่งเริ่มเล่นจาก video_max_position_sec (D85 clamp)", () => {
+  it("v = 0 → 0 (ค่าจริง — ไม่ fallback สูตร watchPct)", async () => {
+    expect(await seededPositionOf(videoLesson(0))).toBe(0);
+  });
+
+  it("v = duration (600) → 599 (duration-1 — player seek เมื่อ 0 < v < element.duration ตาม F19)", async () => {
+    expect(await seededPositionOf(videoLesson(600))).toBe(599);
+  });
+
+  it("v > duration (700) → 599 (clamp เพดาน duration-1)", async () => {
+    expect(await seededPositionOf(videoLesson(700))).toBe(599);
+  });
+
+  it("v = 333 (watchPct 40) → 333 — ต้องไม่เท่ากับ 240 ที่สูตร watchPct เดิมจะให้ (พิสูจน์อ่านวินาทีจริง)", async () => {
+    const seeded = await seededPositionOf(videoLesson(333, { watchPct: 40 }));
+    expect(seeded).toBe(333);
+    // สูตรเดิมจาก % จะให้ min(600, round(0.4*600)) = 240 — ถ้า fallback ผิดที่ เทสนี้แดงทันที
+    expect(seeded).not.toBe(Math.min(600, Math.round((40 / 100) * 600)));
+  });
+
+  it("v = null (แถว legacy ก่อนมีคอลัมน์) + watchPct 40 → 240 ตามสูตร watchPct เดิม", async () => {
+    expect(await seededPositionOf(videoLesson(null, { watchPct: 40 }))).toBe(240);
+  });
+
+  it("completed แล้ว → 0 เสมอ (แม้ v = 500 — เริ่มดูใหม่เพื่อทบทวน)", async () => {
+    expect(await seededPositionOf(videoLesson(500, { status: "completed", watchPct: 85 }))).toBe(0);
+  });
+
+  it("durationSec = 0 (ผิดปกติ) → 0 (ไม่มีความยาวให้ seed — กัน duration-1 ติดลบ)", async () => {
+    expect(await seededPositionOf(videoLesson(300), 0)).toBe(0);
   });
 });

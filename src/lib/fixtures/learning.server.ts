@@ -353,10 +353,16 @@ export async function loadLessonWorkspace(
     // ห้ามปลอม URL ผ่าน) เมื่อ Wave ถัดไปเปิดสิทธิ์ media/storage ให้ผู้เรียน URL ไหลผ่านเส้นนี้ทันที
     const source = await loadLessonSourceRow(current.lesson.id);
     const durationSeconds = durationOf(detail, current.lesson.id) ?? 0;
+    // D85/LRN-009 — seed ตำแหน่งเริ่มเล่นจาก video_max_position_sec (ตำแหน่งสูงสุดที่เคย
+    // บันทึก): จบบทแล้ว/ไม่มีความยาว → 0 · มีค่าจริง (รวม 0) → clamp [0, duration-1] —
+    // player seek เมื่อ 0 < v < element.duration (F19) ค่า == duration จึงต้องหดเหลือ
+    // duration-1 · null (แถว legacy ก่อนมีคอลัมน์) → fallback สูตร watchPct เดิม
     const initialPositionSeconds =
       current.lesson.status === "completed" || durationSeconds <= 0
         ? 0
-        : Math.min(durationSeconds, Math.round((current.lesson.watchPct / 100) * durationSeconds));
+        : current.lesson.videoMaxPositionSec !== null
+          ? Math.min(Math.max(current.lesson.videoMaxPositionSec, 0), durationSeconds - 1)
+          : Math.min(durationSeconds, Math.round((current.lesson.watchPct / 100) * durationSeconds));
     lesson = {
       kind: "video",
       lessonId: current.lesson.id,
