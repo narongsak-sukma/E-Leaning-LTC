@@ -26,6 +26,15 @@
  *   จากกติกาจริงบนเซิร์ฟเวอร์ · not_committed → ปลดล็อกให้บันทึกใหม่ · อ่านไม่ได้ = คงล็อก
  *   fail-closed พร้อมปุ่ม "ตรวจสอบอีกครั้ง" · event ใหม่ outcome_resolved คือทางออกเดียว
  *   จาก uncertainSave (ผูกการปลดล็อกกับการตรวจผลที่เสร็จจริง ไม่ใช่การเดา)
+ * - R4-M1 (gate GP3 r4): read-back ที่อ่านไม่ได้ (unreadable) = fail-closed คงล็อก
+ *   คงรายการ registry — ห้าม resolve (เดิม resolve ทั้ง unreadable แล้วแจ้งว่า
+ *   "ครั้งก่อนไม่สำเร็จ" ทั้งที่ยังไม่รู้ความจริง) · decisionForReadBack = pure ที่
+ *   callback ใช้จริง
+ * - R4-M2 (gate GP3 r4): คำขอที่กำลังส่งถูกติดตามนอก lifecycle ของโมดัล (in-flight set
+ *   ใน registry เดียวกัน) ตั้งแต่ก่อน POST — ปิดกลางคันแล้วเปิดใหม่ ปุ่มยังล็อกระหว่าง
+ *   คำขอค้าง · ผลที่มาช้า (deferred) จัดการ registry ทุกกรณีแม้ epoch ไม่ตรง
+ *   (uncertain → ลงทะเบียนเสมอ · committed/definitely-not → resolve) — เขียน state
+ *   ของฟอร์มเท่านั้นที่ติด epoch · read-back ระหว่าง in-flight ถูกห้าม (แข่งกับ POST)
  */
 
 import { useRef, useState, type ReactNode } from "react";
@@ -281,8 +290,9 @@ export function confirmGateOf(core: ModalCoreState): ModalConfirmGate {
 }
 
 /**
- * gate รวมของปุ่ม/submit สามชั้น (R3-M1) — ใช้ที่เดียวกันทั้ง render และ handleSubmit:
- * (1) registry มีรายการ "ผลยังไม่แน่นอน" ของชุดที่เลือก → ล็อก (ล็อกนี้รอดการปิดโมดัล)
+ * gate รวมของปุ่ม/submit สี่ชั้น — ใช้ที่เดียวกันทั้ง render และ handleSubmit:
+ * (0) มี POST กติกาของชุดนี้กำลังส่งอยู่ (R4-M2 — in-flight รอดการปิดโมดัล) → ล็อก
+ * (1) registry มีรายการ "ผลยังไม่แน่นอน" ของชุดที่เลือก (R3-M1) → ล็อก
  * (2) กำลังตรวจ read-back ของชุดนั้นอยู่ → ล็อก + เหตุผลรอ
  * (3) แกนเดิม confirmGateOf (submitting/uncertainSave/success)
  */
@@ -293,6 +303,12 @@ export function submitBlockedGate(
   registry: UnresolvedRulesRegistry,
 ): ModalConfirmGate {
   if (assessmentId !== "") {
+    if (registry.isInFlight(assessmentId)) {
+      return {
+        disabled: true,
+        reason: "การบันทึกกติกาของชุดนี้ยังไม่เสร็จ (คำขอกำลังส่งอยู่) — กรุณารอให้ระบบตอบก่อน",
+      };
+    }
     const unresolved = registry.peek(assessmentId);
     if (unresolved !== undefined) {
       return resolvingId === assessmentId
@@ -339,6 +355,9 @@ export interface UnresolvedRulesEntry {
 export class UnresolvedRulesRegistry {
   private readonly entries = new Map<string, UnresolvedRulesEntry>();
 
+  /** R4-M2: ชุดข้อสอบที่มี POST กติกากำลังส่งอยู่ — มีชีวิตข้ามการปิดโมดัลเหมือน entries */
+  private readonly inFlight = new Set<string>();
+
   register(assessmentId: string, knownVersionAtSend: number | null): void {
     // เขียนทับได้ (idempotent) — จริง ๆ เกิดไม่ได้เพราะมี entry = ปุ่มถูกล็อก ส่งซ้ำไม่ได้
     this.entries.set(assessmentId, {
@@ -357,9 +376,24 @@ export class UnresolvedRulesRegistry {
     this.entries.delete(assessmentId);
   }
 
+  /** R4-M2: จดว่าคำขอ POST ของชุดนี้กำลังส่งอยู่ — เรียกก่อน await ของทุกการส่ง */
+  markInFlight(assessmentId: string): void {
+    this.inFlight.add(assessmentId);
+  }
+
+  /** R4-M2: คำขอเสร็จ (ทุกผล) — ปลดสถานะ in-flight เพื่อให้ gate ตัดสินจาก entries ต่อ */
+  clearInFlight(assessmentId: string): void {
+    this.inFlight.delete(assessmentId);
+  }
+
+  isInFlight(assessmentId: string): boolean {
+    return this.inFlight.has(assessmentId);
+  }
+
   /** สำหรับ test เท่านั้น */
   clear(): void {
     this.entries.clear();
+    this.inFlight.clear();
   }
 }
 
@@ -459,6 +493,47 @@ export function parseRulesReadBack(envelope: unknown): RulesReadBack {
       proctoringMode: r["proctoringMode"] as ExamAdminProctoringMode,
       examReviewMode: r["examReviewMode"] as ExamAdminExamReviewMode,
     },
+  };
+}
+
+/**
+ * การตัดสินจากผลอ่านกลับ (R4-M1) — pure ที่ startResolution ใช้จริง:
+ * unreadable = fail_closed (คงรายการ + คงล็อก + ปุ่ม "ตรวจสอบอีกครั้ง") ห้าม resolve —
+ * "อ่านความจริงจากเซิร์ฟเวอร์ไม่ได้" ไม่ใช่ "ไม่มีกติกาใหม่" · prefill null = no_rules
+ * (อ่านได้จริงและแน่ใจว่าไม่มีกติกา) เท่านั้นที่ปลดล็อกให้บันทึกใหม่ได้
+ */
+export type ReadBackDecision =
+  | { readonly action: "fail_closed" }
+  | { readonly action: "resolve"; readonly prefill: AssessmentRulesPrefill | null };
+
+export function decisionForReadBack(readBack: RulesReadBack): ReadBackDecision {
+  if (readBack.kind === "unreadable") {
+    return { action: "fail_closed" };
+  }
+  return { action: "resolve", prefill: readBack.kind === "rules" ? readBack.prefill : null };
+}
+
+/** ผลของ POST กติกาแบ่งสามทาง (R4-M2) — ใช้ตัดสิน registry ไม่สน epoch ของ UI */
+export type RulesPostOutcome =
+  | { readonly kind: "committed"; readonly version: number }
+  | { readonly kind: "definitely_not_committed" }
+  | { readonly kind: "uncertain" };
+
+/**
+ * การจัดการผล POST ที่อาจมาถึงหลังโมดัลปิด/เปิดใหม่ (epoch ไม่ตรง) — pure:
+ * - registry จัดการทุกกรณีแม้ UI ไปแล้ว: uncertain → keep_locked (ลงทะเบียนรอ
+ *   read-back) · committed/definitely_not_committed → resolve (รู้ความจริงแล้ว
+ *   จากตัว response เอง ไม่ต้องเดา) — ปิดช่อง r4 ที่ "ปิดกลาง POST → เปิดใหม่ →
+ *   ส่งซ้ำได้ เพราะผลที่มาช้าถูก epoch guard ทิ้งก่อนลงทะเบียน"
+ * - ui = apply เฉพาะเมื่อ epoch ตรง — เขียน state ของฟอร์มด้วยผลรอบเก่าห้ามเด็ดขาด
+ */
+export function deferredOutcomeHandling(
+  outcome: RulesPostOutcome,
+  epochMatches: boolean,
+): { readonly registry: "resolve" | "keep_locked"; readonly ui: "apply" | "discard" } {
+  return {
+    registry: outcome.kind === "uncertain" ? "keep_locked" : "resolve",
+    ui: epochMatches ? "apply" : "discard",
   };
 }
 
@@ -665,7 +740,12 @@ export function AssessmentRulesVersionModal({
     setResolveNotice(null);
     // R3-M1: ชุดที่ค้าง "ผลยังไม่แน่นอน" — ล็อกไว้ก่อน แล้วตรวจกับเซิร์ฟเวอร์ทันที
     // (props ของหน้าเป็นได้ทั้งเก่า/ใหม่ — ตัดสินจากเซิร์ฟเวอร์เท่านั้น)
-    if (assessmentId !== "" && unresolvedRulesRegistry.peek(assessmentId) !== undefined) {
+    if (
+      assessmentId !== "" &&
+      unresolvedRulesRegistry.peek(assessmentId) !== undefined &&
+      !unresolvedRulesRegistry.isInFlight(assessmentId)
+    ) {
+      // R4-M2: ข้ามระหว่างคำขอค้าง — read-back ตอนนี้แข่งกับ POST ที่ยังไม่ตอบ
       startResolution(assessmentId);
     }
   };
@@ -734,6 +814,12 @@ export function AssessmentRulesVersionModal({
     if (entry === undefined) {
       return;
     }
+    if (unresolvedRulesRegistry.isInFlight(assessmentId)) {
+      // R4-M2: POST ของชุดนี้ยังค้างอยู่ — read-back ตอนนี้แข่งกับคำขอที่ยังไม่ตอบ
+      // (อ่านก่อน commit แล้วตอบ not_committed = ปลดล็อกให้ส่งซ้ำ) จึงไม่ตรวจจนกว่า
+      // คำขอจะเสร็จ: ผล uncertain ของคำขอนั้นเป็นผู้เรียกเราอีกครั้งเอง
+      return;
+    }
     setResolvingId(assessmentId);
     setResolveNotice(null);
     const epoch = requestEpochRef.current;
@@ -770,23 +856,31 @@ export function AssessmentRulesVersionModal({
         return;
       }
       const readBack = parseRulesReadBack(envelope);
+      // R4-M1: อ่านความจริงไม่ได้ (unreadable) = fail-closed — คงรายการ + คงล็อก +
+      // ปุ่ม "ตรวจสอบอีกครั้ง" ห้าม resolve (เดิม resolve ทั้ง unreadable แล้วแจ้ง
+      // "ครั้งก่อนไม่สำเร็จ" ทั้งที่ยังไม่รู้ว่า commit ไปแล้วหรือยัง)
+      const decision = decisionForReadBack(readBack);
+      if (decision.action === "fail_closed") {
+        failClosed();
+        return;
+      }
       const outcome = resolveUnsavedRulesOutcome(
         entry.knownVersionAtSend,
-        readBack.kind === "rules" ? readBack.version : null,
+        decision.prefill !== null ? decision.prefill.version : null,
       );
-      // ปลดสถานะเฉพาะเมื่อการตรวจ "เสร็จจริง" — ไม่มีทางเดาว่า commit แล้ว/ยัง
+      // ปลดสถานะเฉพาะเมื่อการตรวจ "เสร็จจริง" และอ่านความจริงได้ — ไม่มีทางเดา
       unresolvedRulesRegistry.resolve(assessmentId);
       setResolvingId(null);
       setCore((previous) => nextModalCoreState(previous, { kind: "outcome_resolved" }));
-      if (readBack.kind === "rules") {
+      if (decision.prefill !== null) {
         // prefill จากกติกาจริงบนเซิร์ฟเวอร์ (version ล่าสุดจริง ไม่ใช่ props เก่าของหน้า)
-        setForm(formStateForAssessment(assessmentId, readBack.prefill));
+        setForm(formStateForAssessment(assessmentId, decision.prefill));
         setResolveNotice({
           tone: outcome === "committed_expected" ? "ok" : "warn",
           text:
             outcome === "committed_expected"
-              ? `ยืนยันกับเซิร์ฟเวอร์แล้ว — การบันทึกกติกา version ${readBack.version} สำเร็จแล้ว (ฟอร์ม prefill จาก version นี้)`
-              : `ตรวจพบกติกา version ล่าสุด ${readBack.version} บนเซิร์ฟเวอร์ สูงกว่าที่เห็นตอนบันทึก (อาจเป็นการบันทึกของครั้งนั้นหรือของผู้อื่น) — ฟอร์ม prefill จาก version นี้แล้ว บันทึก version ถัดไปได้`,
+              ? `ยืนยันกับเซิร์ฟเวอร์แล้ว — การบันทึกกติกา version ${decision.prefill.version} สำเร็จแล้ว (ฟอร์ม prefill จาก version นี้)`
+              : `ตรวจพบกติกา version ล่าสุด ${decision.prefill.version} บนเซิร์ฟเวอร์ สูงกว่าที่เห็นตอนบันทึก (อาจเป็นการบันทึกของครั้งนั้นหรือของผู้อื่น) — ฟอร์ม prefill จาก version นี้แล้ว บันทึก version ถัดไปได้`,
           retry: false,
         });
         return;
@@ -815,61 +909,77 @@ export function AssessmentRulesVersionModal({
       return;
     }
     // R3-M1: จำ version ล่าสุดที่ผู้ใช้เห็น "ตอนกดส่ง" — เป็นฐานเทียบตอน read-back
-    // (null = ชุดยังไม่มีกติกาตอนส่ง)
+    // (null = ชุดยังไม่มีกติกาตอนส่ง) · R4-M2: จำ id ณ ตอนส่ง — ฟอร์มถูกรีเซ็ตระหว่าง
+    // รอได้ (ปิดโมดัล) ห้ามใช้ค่าปัจจุบันของ form ตอนจัดการผล
+    const assessmentIdAtSend = form.assessmentId;
     const knownVersionAtSend =
-      assessmentOptions.find((item) => item.id === form.assessmentId)?.currentVersion ?? null;
+      assessmentOptions.find((item) => item.id === assessmentIdAtSend)?.currentVersion ?? null;
     const epoch = requestEpochRef.current;
+    // R4-M2: ติดตามคำขอตั้งแต่ก่อนส่ง — in-flight อยู่นอก lifecycle ของโมดัล (ปิดกลาง
+    // คันแล้วเปิดใหม่ ปุ่มของชุดนี้ยังล็อกจนกว่าคำขอจะเสร็จ) · clearInFlight ทุกทางออก
+    unresolvedRulesRegistry.markInFlight(assessmentIdAtSend);
     setCore((previous) => nextModalCoreState(previous, { kind: "submit_start" }));
+    let outcome: RulesPostOutcome;
+    let caughtError: unknown = null;
     try {
       const result = await postAdminJson(
-        `${ASSESSMENT_RULES_PATH}/${form.assessmentId}/rules`,
+        `${ASSESSMENT_RULES_PATH}/${assessmentIdAtSend}/rules`,
         built.body,
       );
-      if (epoch !== requestEpochRef.current) {
-        return; // ปิด/รีเซ็ตไปแล้วระหว่างรอ — ทิ้ง response ของฟอร์มเก่า
-      }
       // unwrap envelope { data: { version } } ก่อนอ่าน — อ่านตรง body = undefined เสมอ (M1)
       const version = readCreatedRulesVersion(result.body);
-      if (version === null) {
-        // R2-M1: 201 แต่ envelope ผิดสัญญา = version อาจถูกสร้างแล้วแต่อ่านไม่ได้ —
-        // ล็อกปุ่มกันสร้างซ้ำ + refresh ให้ตารางอ่านกลับ version ล่าสุดจริงจากเซิร์ฟเวอร์
-        setCore((previous) => nextModalCoreState(previous, { kind: "outcome_uncertain" }));
-        // R3-M1: จดทะเบียน "ผลยังไม่แน่นอน" ของชุดนี้ (รอดการปิดโมดัล) แล้วตรวจกับ
-        // เซิร์ฟเวอร์ทันที — ปลดล็อกเฉพาะเมื่อการตรวจเสร็จจริง
-        unresolvedRulesRegistry.register(form.assessmentId, knownVersionAtSend);
-        startResolution(form.assessmentId);
-        setFormError(
-          "บันทึกแล้วแต่คำตอบของระบบไม่ตรงสัญญา (ไม่พบเลข version) — กรุณาตรวจสอบ version ล่าสุดในตารางก่อน หากยังไม่ถูกสร้างจึงบันทึกใหม่อีกครั้ง",
-        );
-        router.refresh();
-        return;
-      }
-      setCore((previous) => nextModalCoreState(previous, { kind: "outcome_success", version }));
-      router.refresh();
+      // 201 แต่ envelope ผิดสัญญา = version อาจถูกสร้างแล้วแต่อ่านไม่ได้ → uncertain
+      outcome = version === null ? { kind: "uncertain" } : { kind: "committed", version };
     } catch (error) {
-      if (epoch !== requestEpochRef.current) {
-        return;
-      }
-      if (isDefinitiveRejection(error)) {
-        // BFF ตอบ 4xx กลับมาจริง = ไม่มี version ถูกสร้าง — แสดงสาเหตุ แก้แล้วส่งใหม่ได้
-        setCore((previous) => nextModalCoreState(previous, { kind: "outcome_error" }));
-        showApiError(error);
-        return;
-      }
-      // network ตายก่อนมี response หรือ 5xx ที่ commit อาจเกิดแล้ว (เช่น row drift
-      // หลัง RPC commit) = ผลยังไม่แน่นอน — ล็อกกัน version ซ้ำ + อ่านกลับ (R2-M1)
-      setCore((previous) => nextModalCoreState(previous, { kind: "outcome_uncertain" }));
-      // R3-M1: เช่นเดียวกับสาย envelope-drift ข้างบน — จดทะเบียน + ตรวจกับเซิร์ฟเวอร์ทันที
-      unresolvedRulesRegistry.register(form.assessmentId, knownVersionAtSend);
-      startResolution(form.assessmentId);
-      const fallback = error instanceof AdminApiError
-        ? error.message
-        : TRANSPORT_FALLBACK_MESSAGE;
-      setFormError(
-        `${fallback} — ไม่แน่ใจว่าบันทึกสำเร็จหรือไม่ กรุณาตรวจสอบ version ล่าสุดในตารางก่อน หากยังไม่ถูกสร้างจึงบันทึกใหม่อีกครั้ง`,
-      );
+      caughtError = error;
+      // BFF ตอบ 4xx กลับมาจริง = แน่ใจว่าไม่มี version ถูกสร้าง · อื่น (network ตาย
+      // ก่อนมี response · 5xx ที่ commit อาจเกิดแล้ว เช่น row drift หลัง RPC commit) =
+      // ผลยังไม่แน่นอน
+      outcome = isDefinitiveRejection(error)
+        ? { kind: "definitely_not_committed" }
+        : { kind: "uncertain" };
+    }
+    // R4-M2: จัดการ registry ทุกกรณี "ไม่สน epoch" — ผลที่มาช้าหลังปิด/เปิดโมดัลใหม่
+    // ก็ต้องลงทะเบียน uncertain เสมอ (เดิม epoch guard ทิ้งก่อนลงทะเบียน = ส่งซ้ำได้) ·
+    // committed/definitely_not_committed รู้ความจริงจาก response เอง → resolve ได้เลย
+    const handling = deferredOutcomeHandling(outcome, epoch === requestEpochRef.current);
+    unresolvedRulesRegistry.clearInFlight(assessmentIdAtSend);
+    if (handling.registry === "keep_locked") {
+      unresolvedRulesRegistry.register(assessmentIdAtSend, knownVersionAtSend);
+    } else {
+      unresolvedRulesRegistry.resolve(assessmentIdAtSend);
+    }
+    if (outcome.kind !== "definitely_not_committed") {
+      // ตารางของหน้าอ่านกลับความจริงเสมอ (router.refresh ไม่แตะ state ของโมดัล)
       router.refresh();
     }
+    if (handling.ui === "discard") {
+      return; // ปิด/รีเซ็ตไปแล้วระหว่างรอ — ห้ามเขียน state ของฟอร์มใหม่ด้วยผลรอบเก่า
+    }
+    if (outcome.kind === "committed") {
+      setCore((previous) =>
+        nextModalCoreState(previous, { kind: "outcome_success", version: outcome.version }),
+      );
+      return;
+    }
+    if (outcome.kind === "definitely_not_committed") {
+      // แสดงสาเหตุ แก้ฟอร์มแล้วส่งใหม่ได้
+      setCore((previous) => nextModalCoreState(previous, { kind: "outcome_error" }));
+      if (caughtError !== null) {
+        showApiError(caughtError);
+      }
+      return;
+    }
+    // uncertain — ล็อกกัน version ซ้ำ (R2-M1) แล้วตรวจกับเซิร์ฟเวอร์ทันที (R3-M1)
+    setCore((previous) => nextModalCoreState(previous, { kind: "outcome_uncertain" }));
+    startResolution(assessmentIdAtSend);
+    setFormError(
+      caughtError === null
+        ? "บันทึกแล้วแต่คำตอบของระบบไม่ตรงสัญญา (ไม่พบเลข version) — ระบบกำลังตรวจสอบกับเซิร์ฟเวอร์อีกครั้ง หากยังไม่พบ version ใหม่จึงบันทึกใหม่ได้"
+        : `${
+            caughtError instanceof AdminApiError ? caughtError.message : TRANSPORT_FALLBACK_MESSAGE
+          } — ไม่แน่ใจว่าบันทึกสำเร็จหรือไม่ ระบบกำลังตรวจสอบกับเซิร์ฟเวอร์ หากยังไม่พบ version ใหม่จึงบันทึกใหม่ได้`,
+    );
   };
 
   // gate ของปุ่มยืนยันจากแกนเดียว — submitting/uncertainSave ล็อก + เหตุผลไทย (R2-M1)
@@ -961,7 +1071,12 @@ export function AssessmentRulesVersionModal({
               form={form}
               fieldErrors={fieldErrors}
               assessmentOptions={assessmentOptions}
-              disabled={core.submitting || core.uncertainSave || resolvingId !== null}
+              disabled={
+                core.submitting ||
+                core.uncertainSave ||
+                resolvingId !== null ||
+                unresolvedRulesRegistry.isInFlight(form.assessmentId)
+              }
               onChange={update}
               onAssessmentChange={selectAssessment}
             />

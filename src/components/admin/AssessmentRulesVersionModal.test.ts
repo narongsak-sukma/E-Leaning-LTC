@@ -8,6 +8,11 @@
  * R3-M1 (gate GP3 r3): registry
  * unresolved รอดการปิดโมดัล · outcome_resolved ทางออกเดียวจาก uncertain · read-back
  * parser fail-closed · submitBlockedGate = gate ที่ handleSubmit ใช้จริง
+ * R4-M1 (gate GP3 r4): read-back unreadable = fail-closed คงล็อก (decisionForReadBack
+ * pure ที่ callback ใช้จริง — เดิม resolve ทั้ง unreadable)
+ * R4-M2 (gate GP3 r4): in-flight tracking นอก lifecycle โมดัล + ผล deferred จัดการ
+ * registry ทุกกรณีแม้ epoch ไม่ตรง (deferredOutcomeHandling) — ปิดกลาง POST แล้ว
+ * เปิดใหม่ต้องยังล็อกจนคำขอเสร็จ
  */
 import { describe, expect, it } from "vitest";
 
@@ -18,6 +23,8 @@ import {
   UnresolvedRulesRegistry,
   buildAssessmentRuleVersionBody,
   confirmGateOf,
+  decisionForReadBack,
+  deferredOutcomeHandling,
   formStateForAssessment,
   isDefinitiveRejection,
   nextModalCoreState,
@@ -27,6 +34,7 @@ import {
   submitBlockedGate,
   type AssessmentRulesPrefill,
   type ModalCoreState,
+  type RulesPostOutcome,
 } from "./AssessmentRulesVersionModal";
 
 const PREFILL: AssessmentRulesPrefill = {
@@ -399,5 +407,147 @@ describe("submitBlockedGate — gate รวมที่ handleSubmit ใช้�
     registry.register(ASSESSMENT_ID, 1);
     expect(submitBlockedGate(OPEN_IDLE, "", null, registry).disabled).toBe(false);
     expect(submitBlockedGate(OPEN_SUBMITTING, "", null, registry).disabled).toBe(true);
+  });
+
+  it("R4-M2: POST กำลังส่งอยู่ (in-flight) → ล็อกแม้ core จะ idle สดหลังปิด-เปิดโมดัลใหม่", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight(ASSESSMENT_ID);
+    const gate = submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, null, registry);
+    expect(gate.disabled).toBe(true);
+    expect(gate.reason).toContain("ยังไม่เสร็จ");
+  });
+
+  it("R4-M2: คำขอเสร็จ (clearInFlight) และไม่มีรายการค้าง → ปลดล็อกกลับ", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight(ASSESSMENT_ID);
+    registry.clearInFlight(ASSESSMENT_ID);
+    expect(submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, null, registry).disabled).toBe(false);
+  });
+});
+
+/* ─── R4-M1 (gate GP3 r4): read-back ที่อ่านไม่ได้ = fail-closed ห้ามปลดล็อก ─── */
+
+describe("decisionForReadBack — การตัดสินจากผลอ่านกลับ (pure ที่ callback ใช้จริง)", () => {
+  const RULES = {
+    version: 5,
+    passPct: 70,
+    timeLimitMinutes: 60,
+    questionCount: 30,
+    maxAttempts: 3,
+    cooldownMinutes: 1440,
+    shuffleQuestions: true,
+    shuffleOptions: false,
+    requireCourseComplete: true,
+    selection: { bank_ids: ["b00000000-0000-4000-8000-000000000001"] },
+    proctoringMode: "basic",
+    examReviewMode: "after_final_attempt",
+  } as const;
+
+  it("อ่านได้ครบ (rules) → resolve พร้อม prefill จากเซิร์ฟเวอร์", () => {
+    const decision = decisionForReadBack(parseRulesReadBack({ data: [{ id: "x", rules: RULES }] }));
+    expect(decision).toEqual({ action: "resolve", prefill: expect.objectContaining({ version: 5 }) });
+  });
+
+  it("no_rules (อ่านได้จริง และแน่ใจว่าไม่มีกติกา) → resolve พร้อม prefill null — บันทึกใหม่ได้", () => {
+    expect(decisionForReadBack(parseRulesReadBack({ data: [{ id: "x", rules: null }] }))).toEqual({
+      action: "resolve",
+      prefill: null,
+    });
+  });
+
+  it("R4-M1: unreadable (อ่านความจริงไม่ได้) → fail_closed คงล็อก — ไม่ใช่ 'ไม่มีกติกา'", () => {
+    const unreadableCases = [
+      { data: null }, // ไม่ใช่ array
+      { data: [] }, // ว่าง
+      { data: ["x"] }, // แถวไม่ใช่ object
+      { data: [{ rules: { ...RULES, version: 0 } }] }, // ฟิลด์ผิดชนิด
+      { data: [{ rules: { ...RULES, passPct: "70" } }] },
+    ];
+    for (const envelope of unreadableCases) {
+      expect(decisionForReadBack(parseRulesReadBack(envelope))).toEqual({ action: "fail_closed" });
+    }
+  });
+});
+
+/* ─── R4-M2 (gate GP3 r4): ผล POST ที่มาช้าหลังปิด/เปิดโมดัลใหม่ ─── */
+
+describe("deferredOutcomeHandling — จัดการ registry ทุกกรณี · UI เฉพาะ epoch ตรง", () => {
+  it("R4-M2 เคสหลัก: uncertain + ปิดโมดัลไปแล้ว (epoch ไม่ตรง) → คงล็อก registry แต่ทิ้ง UI", () => {
+    const handling = deferredOutcomeHandling({ kind: "uncertain" }, false);
+    expect(handling.registry).toBe("keep_locked"); // เดิม epoch guard ทิ้งก่อนลงทะเบียน = ส่งซ้ำได้
+    expect(handling.ui).toBe("discard");
+  });
+
+  it("uncertain + epoch ตรง → คงล็อก registry + อัปเดต UI ตามปกติ", () => {
+    expect(deferredOutcomeHandling({ kind: "uncertain" }, true)).toEqual({
+      registry: "keep_locked",
+      ui: "apply",
+    });
+  });
+
+  it("committed + epoch ไม่ตรง → resolve registry (รู้ความจริงจาก response) + ทิ้ง UI", () => {
+    expect(deferredOutcomeHandling({ kind: "committed", version: 7 }, false)).toEqual({
+      registry: "resolve",
+      ui: "discard",
+    });
+  });
+
+  it("definitely_not_committed + epoch ไม่ตรง → resolve + ทิ้ง UI (แน่ใจว่าไม่มี version ใหม่)", () => {
+    expect(deferredOutcomeHandling({ kind: "definitely_not_committed" }, false)).toEqual({
+      registry: "resolve",
+      ui: "discard",
+    });
+  });
+
+  it("committed/definitely_not_committed + epoch ตรง → resolve + apply", () => {
+    const committed: RulesPostOutcome = { kind: "committed", version: 3 };
+    expect(deferredOutcomeHandling(committed, true)).toEqual({ registry: "resolve", ui: "apply" });
+    expect(deferredOutcomeHandling({ kind: "definitely_not_committed" }, true)).toEqual({
+      registry: "resolve",
+      ui: "apply",
+    });
+  });
+
+  it("ผลสามชนิดครบชุด (table-driven กันชนิดใหม่หลุด)", () => {
+    const outcomes: readonly RulesPostOutcome[] = [
+      { kind: "committed", version: 1 },
+      { kind: "definitely_not_committed" },
+      { kind: "uncertain" },
+    ];
+    for (const outcome of outcomes) {
+      for (const epochMatches of [true, false]) {
+        const handling = deferredOutcomeHandling(outcome, epochMatches);
+        expect(handling.registry).toBe(outcome.kind === "uncertain" ? "keep_locked" : "resolve");
+        expect(handling.ui).toBe(epochMatches ? "apply" : "discard");
+      }
+    }
+  });
+});
+
+describe("UnresolvedRulesRegistry — in-flight (R4-M2)", () => {
+  it("markInFlight → isInFlight จนกว่าจะ clearInFlight — มีชีวิตนอก lifecycle โมดัล", () => {
+    const registry = new UnresolvedRulesRegistry();
+    expect(registry.isInFlight("a0000000-0000-4000-8000-000000000001")).toBe(false);
+    registry.markInFlight("a0000000-0000-4000-8000-000000000001");
+    expect(registry.isInFlight("a0000000-0000-4000-8000-000000000001")).toBe(true);
+    registry.clearInFlight("a0000000-0000-4000-8000-000000000001");
+    expect(registry.isInFlight("a0000000-0000-4000-8000-000000000001")).toBe(false);
+  });
+
+  it("in-flight แยกรายการต่อชุด — ชุดอื่นไม่โดนล็อกไปด้วย", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight("a0000000-0000-4000-8000-000000000001");
+    expect(registry.isInFlight("a0000000-0000-4000-8000-000000000099")).toBe(false);
+  });
+
+  it("in-flight อยู่ร่วมกับ entry ได้ (uncertain ลงทะเบียนก่อนคำขอเสร็อย่างอื่น) · clear ล้างทั้งคู่", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight("a0000000-0000-4000-8000-000000000001");
+    registry.register("a0000000-0000-4000-8000-000000000001", 2);
+    expect(registry.isInFlight("a0000000-0000-4000-8000-000000000001")).toBe(true);
+    expect(registry.peek("a0000000-0000-4000-8000-000000000001")?.knownVersionAtSend).toBe(2);
+    registry.clear();
+    expect(registry.isInFlight("a0000000-0000-4000-8000-000000000001")).toBe(false);
+    expect(registry.peek("a0000000-0000-4000-8000-000000000001")).toBeUndefined();
   });
 });
