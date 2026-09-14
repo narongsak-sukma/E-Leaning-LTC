@@ -361,8 +361,8 @@ describe("POST .../rules — map error tokens ของ RPC → httpStatus ต�
     const res = await POST(rulesPost(VALID_BODY), {
       params: Promise.resolve({ id: ASSESSMENT_ID }),
     });
-    // ทะเบียน error (spec §2 แถว 72) กำหนด ERR-VAL-001 = 400 — ต่างจากเอกสาร §3.8 แถว 226
-    // ที่เขียน 422 (ความจริงไม่ implementable เพราะ AppError.httpStatus ผูกทะเบียนเดียว) — flag แล้ว
+    // ทะเบียน error (spec §2 แถว 72) กำหนด ERR-VAL-001 = 400 — §3.8 แถว 226 เดิมเขียน 422
+    // (ไม่ implementable เพราะ AppError.httpStatus ผูกทะเบียนเดียว) → แก้เป็น 400 แล้วใน API-SPEC 1.4.0
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-VAL-001");
