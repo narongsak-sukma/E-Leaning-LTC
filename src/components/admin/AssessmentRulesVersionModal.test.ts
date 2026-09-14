@@ -13,11 +13,14 @@
  * R4-M2 (gate GP3 r4): in-flight tracking นอก lifecycle โมดัล + ผล deferred จัดการ
  * registry ทุกกรณีแม้ epoch ไม่ตรง (deferredOutcomeHandling) — ปิดกลาง POST แล้ว
  * เปิดใหม่ต้องยังล็อกจนคำขอเสร็จ
+ * R5-M1 (gate GP3 r5): registry observable + ผล deferred ปลุกโมดัลที่เปิดอยู่ — uncertain → เริ่ม read-back เอง (deferredRegistryReaction)
+ * · หาง callback จริง applyDeferredRulesOutcome (registry ทุกกรณี + refresh ทุกผล รวม definitive 400)
  */
 import { describe, expect, it } from "vitest";
 
 import { AdminApiError } from "@/lib/exam-admin.client";
 import {
+  applyDeferredRulesOutcome,
   ASSESSMENT_RULES_FORM_DEFAULTS,
   MODAL_CORE_CLOSED,
   UnresolvedRulesRegistry,
@@ -25,6 +28,7 @@ import {
   confirmGateOf,
   decisionForReadBack,
   deferredOutcomeHandling,
+  deferredRegistryReaction,
   formStateForAssessment,
   isDefinitiveRejection,
   nextModalCoreState,
@@ -549,5 +553,234 @@ describe("UnresolvedRulesRegistry — in-flight (R4-M2)", () => {
     registry.clear();
     expect(registry.isInFlight("a0000000-0000-4000-8000-000000000001")).toBe(false);
     expect(registry.peek("a0000000-0000-4000-8000-000000000001")).toBeUndefined();
+  });
+});
+
+/* ─── R5-M1 (gate GP3 r5): ผล deferred ของ POST ต้องถึงโมดัลที่เปิดใหม่ ─── */
+
+describe("UnresolvedRulesRegistry — subscription แจ้งทุกการเปลี่ยน (R5-M1)", () => {
+  it("register/resolve/markInFlight/clearInFlight แต่ละครั้ง → listener ถูกเรียก + version บวกตามจำนวน · ถอนแล้วเงียบ", () => {
+    const registry = new UnresolvedRulesRegistry();
+    let calls = 0;
+    const unsubscribe = registry.subscribe(() => {
+      calls += 1;
+    });
+    const v0 = registry.version();
+    registry.markInFlight("a1");
+    registry.register("a1", 1);
+    registry.clearInFlight("a1");
+    registry.resolve("a1");
+    expect(calls).toBe(4);
+    expect(registry.version()).toBe(v0 + 4);
+    unsubscribe();
+    registry.register("a2", null);
+    expect(calls).toBe(4);
+  });
+
+  it("version คงเดิมเมื่อไม่มีการเปลี่ยน (snapshot เสถียร — ไม่วน render)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    expect(registry.version()).toBe(registry.version());
+    registry.register("a1", null);
+    const after = registry.version();
+    expect(registry.peek("a1")).toBeDefined();
+    expect(registry.version()).toBe(after);
+  });
+});
+
+describe("deferredRegistryReaction — โมดัลที่เปิดอยู่ตอบอะไรต่อ registry (R5-M1)", () => {
+  const base = { open: true, assessmentId: "a1", resolvingId: null, retryNoticeVisible: false };
+
+  it("โมดัลปิดอยู่ → none แม้มีรายการค้าง (เปิด+เลือกชุดจึงตรวจ)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a1", 1);
+    expect(deferredRegistryReaction({ ...base, open: false, registry })).toEqual({ kind: "none" });
+  });
+
+  it("ยังไม่เลือกชุด (id ว่าง) → none", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a1", 1);
+    expect(deferredRegistryReaction({ ...base, assessmentId: "", registry })).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("คำขอ POST ยังค้าง (in-flight) → none — ห้ามอ่านก่อนคำขอตอบ (R4-M2 คงอยู่)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight("a1");
+    registry.register("a1", 1);
+    expect(deferredRegistryReaction({ ...base, registry })).toEqual({ kind: "none" });
+  });
+
+  it("ไม่มีรายการ unresolved ของชุดที่เลือก → none", () => {
+    expect(
+      deferredRegistryReaction({ ...base, registry: new UnresolvedRulesRegistry() }),
+    ).toEqual({ kind: "none" });
+  });
+
+  it("กำลังตรวจชุดนี้อยู่ (resolvingId === id) → none — อย่ายิงซ้ำซ้อน", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a1", 1);
+    expect(deferredRegistryReaction({ ...base, resolvingId: "a1", registry })).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("notice รอผู้ใช้กด retry อยู่ → none — ห้ามวนตรวจอัตโนมัติตอนเซิร์ฟเวิร์งล้ม", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a1", 1);
+    expect(deferredRegistryReaction({ ...base, retryNoticeVisible: true, registry })).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("เปิด + เลือกชุดที่ค้าง unresolved + ว่าง → start_read_back (กรณีหลัก: ผล deferred มาถึงหลังเปิดโมดัลใหม่)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a1", 1);
+    expect(deferredRegistryReaction({ ...base, registry })).toEqual({ kind: "start_read_back" });
+  });
+});
+
+describe("ลำดับจบจริงของผล deferred ผ่าน applyDeferredRulesOutcome (R5-M1 — close/reopen + remount ตามข้อสั่ง r4/r5)", () => {
+  it("uncertain หลังปิดกลาง POST แล้วเปิดใหม่เลือกชุดเดิม: registry คงรายการ + notify ปลุก + reaction เริ่ม read-back → ตรวจจบ resolve → gate ปลดล็อกจริง", () => {
+    const registry = new UnresolvedRulesRegistry();
+    const notified: number[] = [];
+    registry.subscribe(() => notified.push(registry.version()));
+    // ส่ง → ปิดกลางคัน → เปิดใหม่เลือก a1 ขณะคำขอยังค้าง: ห้ามเริ่มตรวจ
+    registry.markInFlight("a1");
+    const duringFlight = deferredRegistryReaction({
+      open: true,
+      assessmentId: "a1",
+      resolvingId: null,
+      retryNoticeVisible: false,
+      registry,
+    });
+    expect(duringFlight).toEqual({ kind: "none" });
+    // คำขอตอบผิดรูป = uncertain และ epoch ไม่ตรง — หางจริงของ callback ที่ handleSubmit ใช้
+    let refreshes = 0;
+    const handling = applyDeferredRulesOutcome({
+      assessmentId: "a1",
+      knownVersionAtSend: 1,
+      outcome: { kind: "uncertain" },
+      epochMatches: false,
+      registry,
+      refresh: () => {
+        refreshes += 1;
+      },
+    });
+    expect(handling).toEqual({ ui: "discard" });
+    expect(refreshes).toBe(1);
+    expect(notified.length).toBeGreaterThan(0); // subscription ปลุก — สิ่งที่ effect ของโมดัลฟังอยู่
+    expect(registry.peek("a1")).toBeDefined();
+    expect(registry.isInFlight("a1")).toBe(false);
+    // โมดัลที่เปิดอยู่ (เปิดใหม่แล้วเลือก a1 — notice ถูกเคลียร์ตอนเลือกชุด) ต้องเริ่มตรวจเอง
+    const afterOutcome = deferredRegistryReaction({
+      open: true,
+      assessmentId: "a1",
+      resolvingId: null,
+      retryNoticeVisible: false,
+      registry,
+    });
+    expect(afterOutcome).toEqual({ kind: "start_read_back" });
+    // read-back สำเร็จ → resolve → reaction กลาย none + gate ปลดล็อกจริง (ไม่ใช่แค่ข้อความ)
+    registry.resolve("a1");
+    expect(
+      deferredRegistryReaction({
+        open: true,
+        assessmentId: "a1",
+        resolvingId: null,
+        retryNoticeVisible: false,
+        registry,
+      }),
+    ).toEqual({ kind: "none" });
+    const idleOpen: ModalCoreState = {
+      open: true,
+      submitting: false,
+      uncertainSave: false,
+      successVersion: null,
+    };
+    expect(submitBlockedGate(idleOpen, "a1", null, registry).disabled).toBe(false);
+  });
+
+  it("definite 400 หลังปิดกลาง POST: clearInFlight + resolve + refresh ด้วย (R5-M1: ทุกผล) → gate คลายล็อก 'ยังไม่เสร็จ' ทันทีที่ re-render", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight("a1");
+    const idleOpen: ModalCoreState = {
+      open: true,
+      submitting: false,
+      uncertainSave: false,
+      successVersion: null,
+    };
+    expect(submitBlockedGate(idleOpen, "a1", null, registry).disabled).toBe(true);
+    let refreshes = 0;
+    const handling = applyDeferredRulesOutcome({
+      assessmentId: "a1",
+      knownVersionAtSend: 1,
+      outcome: { kind: "definitely_not_committed" },
+      epochMatches: false,
+      registry,
+      refresh: () => {
+        refreshes += 1;
+      },
+    });
+    expect(handling).toEqual({ ui: "discard" });
+    expect(refreshes).toBe(1); // เดิม 400 ไม่ refresh — หน้าเลยค้างสถานะรอ
+    expect(registry.isInFlight("a1")).toBe(false);
+    expect(registry.peek("a1")).toBeUndefined();
+    // re-render ที่ได้จาก subscription → gate คำนวณใหม่ = ปลดล็อก
+    expect(submitBlockedGate(idleOpen, "a1", null, registry).disabled).toBe(false);
+  });
+
+  it("uncertain รอบเดียวกัน (epoch ตรง): คืน ui apply + registry ค้าง → reaction เริ่ม read-back (effect แทนการเรียกตรงใน callback)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.markInFlight("a1");
+    const handling = applyDeferredRulesOutcome({
+      assessmentId: "a1",
+      knownVersionAtSend: null,
+      outcome: { kind: "uncertain" },
+      epochMatches: true,
+      registry,
+      refresh: () => undefined,
+    });
+    expect(handling).toEqual({ ui: "apply" });
+    expect(registry.peek("a1")).toBeDefined();
+    expect(
+      deferredRegistryReaction({
+        open: true,
+        assessmentId: "a1",
+        resolvingId: null,
+        retryNoticeVisible: false,
+        registry,
+      }),
+    ).toEqual({ kind: "start_read_back" });
+  });
+
+  it("remount: ผล deferred เกิดตอนไม่มีโมดัล (listener เก่าถูกถอด) — mount ใหม่สมัครใหม่ และรอบแรกของ effect ต้องตรวจรายการที่ค้างจากอดีต", () => {
+    const registry = new UnresolvedRulesRegistry();
+    const unsubscribeOld = registry.subscribe(() => undefined);
+    unsubscribeOld(); // โมดัลเก่า unmount = ถอนผู้ฟัง
+    registry.markInFlight("a1");
+    let mountNotified = 0;
+    registry.subscribe(() => {
+      mountNotified += 1;
+    }); // โมดัลใหม่ mount สมัครใหม่
+    applyDeferredRulesOutcome({
+      assessmentId: "a1",
+      knownVersionAtSend: 1,
+      outcome: { kind: "uncertain" },
+      epochMatches: false,
+      registry,
+      refresh: () => undefined,
+    });
+    expect(mountNotified).toBeGreaterThan(0);
+    // effect รอบแรกของ mount (เปิด + เลือก a1 + ว่าง) → ตรวจรายการค้างจาก mount ก่อน
+    expect(
+      deferredRegistryReaction({
+        open: true,
+        assessmentId: "a1",
+        resolvingId: null,
+        retryNoticeVisible: false,
+        registry,
+      }),
+    ).toEqual({ kind: "start_read_back" });
   });
 });

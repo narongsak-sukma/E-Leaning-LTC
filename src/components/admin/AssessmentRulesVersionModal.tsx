@@ -37,7 +37,7 @@
  *   ของฟอร์มเท่านั้นที่ติด epoch · read-back ระหว่าง in-flight ถูกห้าม (แข่งกับ POST)
  */
 
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -358,6 +358,12 @@ export class UnresolvedRulesRegistry {
   /** R4-M2: ชุดข้อสอบที่มี POST กติกากำลังส่งอยู่ — มีชีวิตข้ามการปิดโมดัลเหมือน entries */
   private readonly inFlight = new Set<string>();
 
+  /** R5-M1: ผู้ฟังการเปลี่ยนแปลง — โมดัลที่เปิดอยู่สมัครรับเพื่อรับรู้ผล deferred ของ POST */
+  private readonly listeners = new Set<() => void>();
+
+  /** R5-M1: เลขก้าวของการเปลี่ยนแปลง — snapshot เสถียรระหว่างการเปลี่ยน (useSyncExternalStore) */
+  private mutationVersion = 0;
+
   register(assessmentId: string, knownVersionAtSend: number | null): void {
     // เขียนทับได้ (idempotent) — จริง ๆ เกิดไม่ได้เพราะมี entry = ปุ่มถูกล็อก ส่งซ้ำไม่ได้
     this.entries.set(assessmentId, {
@@ -365,6 +371,7 @@ export class UnresolvedRulesRegistry {
       knownVersionAtSend,
       registeredAt: Date.now(),
     });
+    this.notify();
   }
 
   peek(assessmentId: string): UnresolvedRulesEntry | undefined {
@@ -374,16 +381,19 @@ export class UnresolvedRulesRegistry {
   /** ปลดสถานะ — เรียกเฉพาะเมื่อการตรวจกับเซิร์ฟเวอร์เสร็จสมบูรณ์ */
   resolve(assessmentId: string): void {
     this.entries.delete(assessmentId);
+    this.notify();
   }
 
   /** R4-M2: จดว่าคำขอ POST ของชุดนี้กำลังส่งอยู่ — เรียกก่อน await ของทุกการส่ง */
   markInFlight(assessmentId: string): void {
     this.inFlight.add(assessmentId);
+    this.notify();
   }
 
   /** R4-M2: คำขอเสร็จ (ทุกผล) — ปลดสถานะ in-flight เพื่อให้ gate ตัดสินจาก entries ต่อ */
   clearInFlight(assessmentId: string): void {
     this.inFlight.delete(assessmentId);
+    this.notify();
   }
 
   isInFlight(assessmentId: string): boolean {
@@ -394,11 +404,37 @@ export class UnresolvedRulesRegistry {
   clear(): void {
     this.entries.clear();
     this.inFlight.clear();
+    this.notify();
+  }
+
+  /** R5-M1: สมัครรับการแจ้งเตือนการเปลี่ยนแปลง — คืนฟังก์ชันถอนการสมัคร (unmount) */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** R5-M1: snapshot ปัจจุบันของการเปลี่ยนแปลง — ใช้กับ useSyncExternalStore */
+  version(): number {
+    return this.mutationVersion;
+  }
+
+  private notify(): void {
+    this.mutationVersion += 1;
+    for (const listener of [...this.listeners]) {
+      listener();
+    }
   }
 }
 
 /** singleton ของหน้า — อยู่ตลอดอายุของ module (รอดการปิดโมดัล/รี-เมานต์ของ component) */
 export const unresolvedRulesRegistry = new UnresolvedRulesRegistry();
+
+/** R5-M1: subscribe/getSnapshot เสถียร (identity คงที่ข้าม render — ไม่ resubscribe ทุกเรนเดอร์) */
+const subscribeRulesRegistry = (onChange: () => void): (() => void) =>
+  unresolvedRulesRegistry.subscribe(onChange);
+const getRulesRegistryVersion = (): number => unresolvedRulesRegistry.version();
 
 /**
  * ตัดสินผลของการบันทึกที่ค้าง "ไม่แน่นอน" จาก version ล่าสุดจริงบนเซิร์ฟเวอร์ — pure:
@@ -535,6 +571,83 @@ export function deferredOutcomeHandling(
     registry: outcome.kind === "uncertain" ? "keep_locked" : "resolve",
     ui: epochMatches ? "apply" : "discard",
   };
+}
+
+/**
+ * R5-M1 (gate GP3 r5): ตัดสินว่าโมดัลที่เปิดอยู่ "ตอบสนองอะไร" ต่อสถานะ registry
+ * ปัจจุบัน — pure ที่ effect กลางของโมดัลใช้จริง (ผู้ฟัง subscription):
+ * - start_read_back: ชุดที่เลือกอยู่มีรายการ "ผลยังไม่แน่นอน" + ไม่มีคำขอค้าง +
+ *   ไม่กำลังตรวจอยู่ + ไม่มี notice รอผู้ใช้กด retry → เริ่ม read-back เอง
+ *   (ปิดช่อง r5: ผล deferred มาถึงหลังเปิดโมดัลใหม่ ผู้ใช้เห็นข้อความให้
+ *   "ตรวจสอบอีกครั้ง" แต่ไม่มีปุ่ม และไม่มีใครเริ่มตรวจ)
+ * - none: ทุกกรณีอื่น — รวม retryNoticeVisible (ห้ามวนตรวจอัตโนมัติไปเรื่อย ๆ ตอน
+ *   เซิร์ฟเวิร์งล้ม: รอผู้ใช้กดปุ่มเอง) · effect รันรอบแรกตอน mount ด้วย → remount
+ *   เจอ entry เก่าที่ค้างก็ตัดสินชุดเดียวกันนี้ (reconcile ตอนเริ่มโมดัลใหม่)
+ */
+export interface DeferredRegistryReactionInput {
+  readonly open: boolean;
+  readonly assessmentId: string;
+  readonly resolvingId: string | null;
+  readonly retryNoticeVisible: boolean;
+  readonly registry: UnresolvedRulesRegistry;
+}
+export type DeferredRegistryReaction =
+  | { readonly kind: "start_read_back" }
+  | { readonly kind: "none" };
+
+export function deferredRegistryReaction(
+  input: DeferredRegistryReactionInput,
+): DeferredRegistryReaction {
+  if (!input.open) {
+    return { kind: "none" };
+  }
+  if (input.assessmentId === "") {
+    return { kind: "none" };
+  }
+  if (input.registry.isInFlight(input.assessmentId)) {
+    return { kind: "none" };
+  }
+  if (input.registry.peek(input.assessmentId) === undefined) {
+    return { kind: "none" };
+  }
+  if (input.resolvingId === input.assessmentId) {
+    return { kind: "none" };
+  }
+  if (input.retryNoticeVisible) {
+    return { kind: "none" };
+  }
+  return { kind: "start_read_back" };
+}
+
+/**
+ * R5-M1 (gate GP3 r5): หางจริงของ callback POST (เรียกจาก handleSubmit) — แหล่งเดียว
+ * ของการเปลี่ยน registry + refresh หน้าหลังคำขอจบ **ทุกผล รวม definitive rejection**
+ * (เดิม 400 ไม่ refresh และไม่มี state update ใด หน้าเลยค้างล็อก "ยังไม่เสร็จ" จน
+ * เกิด render จากเหตุอื่น) · notify ของ registry ปลุกโมดัลที่เปิดอยู่ให้ตัดสินใหม่
+ * ผ่าน deferredRegistryReaction — คืน ui: apply|discard ตาม epoch ให้ผู้เรียก
+ * นำไปเขียน state ของฟอร์มต่อ
+ */
+export interface ApplyDeferredRulesOutcomeParams {
+  readonly assessmentId: string;
+  readonly knownVersionAtSend: number | null;
+  readonly outcome: RulesPostOutcome;
+  readonly epochMatches: boolean;
+  readonly registry: UnresolvedRulesRegistry;
+  readonly refresh: () => void;
+}
+
+export function applyDeferredRulesOutcome(
+  params: ApplyDeferredRulesOutcomeParams,
+): { readonly ui: "apply" | "discard" } {
+  const handling = deferredOutcomeHandling(params.outcome, params.epochMatches);
+  params.registry.clearInFlight(params.assessmentId);
+  if (handling.registry === "keep_locked") {
+    params.registry.register(params.assessmentId, params.knownVersionAtSend);
+  } else {
+    params.registry.resolve(params.assessmentId);
+  }
+  params.refresh();
+  return { ui: handling.ui };
 }
 
 /** ตรวจความถูกต้องของตัวเลข — คืน number ที่ผ่านช่วง หรือ null (ยังไม่กรอก/ผิด) */
@@ -720,6 +833,28 @@ export function AssessmentRulesVersionModal({
     readonly text: string;
     readonly retry: boolean;
   } | null>(null);
+  /**
+   * R5-M1: สมัครติดตาม registry — ผล POST ที่มาถึงหลังโมดัลนี้ถูกปิด/เปิดใหม่ (epoch
+   * ไม่ตรง) เปลี่ยน registry กลางอากาศ โมดัลที่เปิดอยู่ต้องรับรู้แล้วตัดสินใหม่:
+   * uncertain ค้าง → เริ่ม read-back เอง (มิฉะนั้นผู้ใช้เห็นข้อความให้ "ตรวจสอบอีกครั้ง"
+   * แต่ไร้ปุ่ม) · definitive rejection → ปลดล็อก gate ที่ค้าง "ยังไม่เสร็จ" ·
+   * startResolution ผ่าน ref (ประกาศหลัง early-return ไม่ได้ — กัน TDZ ของ deps)
+   */
+  const registryVersion = useSyncExternalStore(subscribeRulesRegistry, getRulesRegistryVersion);
+  const startResolutionRef = useRef<((assessmentId: string) => void) | null>(null);
+  const retryNoticeVisible = resolveNotice !== null && resolveNotice.retry;
+  useEffect(() => {
+    const reaction = deferredRegistryReaction({
+      open: core.open,
+      assessmentId: form.assessmentId,
+      resolvingId,
+      retryNoticeVisible,
+      registry: unresolvedRulesRegistry,
+    });
+    if (reaction.kind === "start_read_back") {
+      startResolutionRef.current?.(form.assessmentId);
+    }
+  }, [registryVersion, core.open, form.assessmentId, resolvingId, retryNoticeVisible]);
 
   if (!allowRules) {
     return null;
@@ -738,16 +873,10 @@ export function AssessmentRulesVersionModal({
     setForm(formStateForAssessment(assessmentId, option?.currentRules ?? null));
     setFieldErrors({});
     setResolveNotice(null);
-    // R3-M1: ชุดที่ค้าง "ผลยังไม่แน่นอน" — ล็อกไว้ก่อน แล้วตรวจกับเซิร์ฟเวอร์ทันที
-    // (props ของหน้าเป็นได้ทั้งเก่า/ใหม่ — ตัดสินจากเซิร์ฟเวอร์เท่านั้น)
-    if (
-      assessmentId !== "" &&
-      unresolvedRulesRegistry.peek(assessmentId) !== undefined &&
-      !unresolvedRulesRegistry.isInFlight(assessmentId)
-    ) {
-      // R4-M2: ข้ามระหว่างคำขอค้าง — read-back ตอนนี้แข่งกับ POST ที่ยังไม่ตอบ
-      startResolution(assessmentId);
-    }
+    // R3-M1→R5-M1: ชุดที่ค้าง "ผลยังไม่แน่นอน" — ล็อกไว้ แล้วให้ effect กลาง (ที่ฟัง
+    // registry ผ่าน subscription) เป็นผู้เริ่ม read-back ทางเดียว: ครอบทั้งเลือกชุด
+    // ใหม่ · เลือกซ้ำชุดเดิม · ผล deferred มาถึงหลังเปิดใหม่ — ตัดสินจากเซิร์ฟเวิร์ง
+    // เท่านั้น (การเรียกตรงที่นี่ซ้ำซ้อนกับ effect และเดินสองทางพร้อมกัน)
   };
 
   const closeAndReset = () => {
@@ -892,6 +1021,9 @@ export function AssessmentRulesVersionModal({
       });
     })();
   };
+  // R5-M1: มอบ reference ให้ effect กลาง (effect ประกาศก่อน early-return จึงอ่าน
+  // ตัวแปรนี้ตรง ๆ ไม่ได้ — ป้องกัน TDZ ของ deps array)
+  startResolutionRef.current = startResolution;
 
   const handleSubmit = async () => {
     setFormError(null);
@@ -939,20 +1071,18 @@ export function AssessmentRulesVersionModal({
         ? { kind: "definitely_not_committed" }
         : { kind: "uncertain" };
     }
-    // R4-M2: จัดการ registry ทุกกรณี "ไม่สน epoch" — ผลที่มาช้าหลังปิด/เปิดโมดัลใหม่
-    // ก็ต้องลงทะเบียน uncertain เสมอ (เดิม epoch guard ทิ้งก่อนลงทะเบียน = ส่งซ้ำได้) ·
-    // committed/definitely_not_committed รู้ความจริงจาก response เอง → resolve ได้เลย
-    const handling = deferredOutcomeHandling(outcome, epoch === requestEpochRef.current);
-    unresolvedRulesRegistry.clearInFlight(assessmentIdAtSend);
-    if (handling.registry === "keep_locked") {
-      unresolvedRulesRegistry.register(assessmentIdAtSend, knownVersionAtSend);
-    } else {
-      unresolvedRulesRegistry.resolve(assessmentIdAtSend);
-    }
-    if (outcome.kind !== "definitely_not_committed") {
-      // ตารางของหน้าอ่านกลับความจริงเสมอ (router.refresh ไม่แตะ state ของโมดัล)
-      router.refresh();
-    }
+    // R4-M2/R5-M1: จัดการ registry ทุกกรณี "ไม่สน epoch" + refresh หน้าทุกผล — ผ่าน
+    // แหล่งเดียว applyDeferredRulesOutcome: uncertain ลงทะเบียนเสมอ · committed/
+    // definitely_not_committed resolve จากความจริงใน response · registry เปลี่ยน →
+    // notify ปลุกโมดัลที่เปิดอยู่ (subscription) ให้เริ่มตรวจ/ปลดล็อกเอง
+    const handling = applyDeferredRulesOutcome({
+      assessmentId: assessmentIdAtSend,
+      knownVersionAtSend,
+      outcome,
+      epochMatches: epoch === requestEpochRef.current,
+      registry: unresolvedRulesRegistry,
+      refresh: () => router.refresh(),
+    });
     if (handling.ui === "discard") {
       return; // ปิด/รีเซ็ตไปแล้วระหว่างรอ — ห้ามเขียน state ของฟอร์มใหม่ด้วยผลรอบเก่า
     }
@@ -970,9 +1100,9 @@ export function AssessmentRulesVersionModal({
       }
       return;
     }
-    // uncertain — ล็อกกัน version ซ้ำ (R2-M1) แล้วตรวจกับเซิร์ฟเวอร์ทันที (R3-M1)
+    // uncertain — ล็อกกัน version ซ้ำ (R2-M1) · read-back เริ่มโดย effect กลาง (R5-M1)
+    // ทันทีที่ registry ลงทะเบียน (การเรียกตรงที่นี่ซ้ำซ้อนกับ effect — เดินสองทาง)
     setCore((previous) => nextModalCoreState(previous, { kind: "outcome_uncertain" }));
-    startResolution(assessmentIdAtSend);
     setFormError(
       caughtError === null
         ? "บันทึกแล้วแต่คำตอบของระบบไม่ตรงสัญญา (ไม่พบเลข version) — ระบบกำลังตรวจสอบกับเซิร์ฟเวอร์อีกครั้ง หากยังไม่พบ version ใหม่จึงบันทึกใหม่ได้"
