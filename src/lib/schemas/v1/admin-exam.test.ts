@@ -16,6 +16,10 @@ import {
   parseAdminAssessmentsQuery,
   parseAdminExam,
   AdminAssessmentRowSchema,
+  AssessmentRuleResource,
+  AssessmentRuleRpcRowSchema,
+  parseAssessmentRuleRpcRow,
+  toAssessmentRuleResource,
   QuestionBankRowSchema,
   QuestionRowSchema,
   QuestionBankCreateBody,
@@ -212,7 +216,10 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
     attempt_cooldown_minutes: 1440,
     shuffle_questions: true,
     shuffle_options: true,
+    require_course_complete: true,
+    selection: { bank_ids: ["b00000000-0000-4000-8000-000000000001"] },
     proctoring_mode: "basic",
+    exam_review_mode: "after_final_attempt",
     effective_from: "2026-09-01T00:00:00+00:00",
   };
 
@@ -233,6 +240,8 @@ describe("mappers — response ไม่มี is_correct เด็ดขาด"
     expect(resource.createdBy).toBe("a0000000-0000-4000-8000-000000000009");
     expect(resource.rules?.timeLimitMinutes).toBe(90);
     expect(resource.rules?.passPct).toBe(70);
+    // exam_review_mode ผ่าน mapper เดียวสองทาง (embed GET + แถว RPC) — 0049
+    expect(resource.rules?.examReviewMode).toBe("after_final_attempt");
     expect(JSON.stringify(resource).includes("passPct")).toBe(true);
     expect(() => AdminAssessmentResource.parse(resource)).not.toThrow();
   });
@@ -465,5 +474,93 @@ describe("r10-P2: embed ขาเข้าตรงรูป PostgREST จริ
 
   it("question_options: null → drift (เคย ?? [] กลืนเป็น options ว่างเงียบ ๆ)", () => {
     expect(QuestionRowSchema.safeParse({ ...questionRow, question_options: null }).success).toBe(false);
+  });
+});
+
+describe("AssessmentRuleInput — exam_review_mode (Wave G P3 · 0049)", () => {
+  it("ไม่ส่ง examReviewMode → default 'after_final_attempt' (ตรง default ของคอลัมน์ 0049)", () => {
+    const parsed = AssessmentRuleInput.parse({ passPct: 70 });
+    expect(parsed.examReviewMode).toBe("after_final_attempt");
+  });
+
+  it("ส่ง 'never' → ผ่าน (enum สองค่าของ exam_review_mode)", () => {
+    expect(AssessmentRuleInput.parse({ passPct: 70, examReviewMode: "never" }).examReviewMode).toBe(
+      "never",
+    );
+  });
+
+  it("'open_always' (นอก enum) → ไม่ผ่าน — enum ปิดสองค่าเท่านั้น", () => {
+    expect(AssessmentRuleInput.safeParse({ passPct: 70, examReviewMode: "open_always" }).success).toBe(
+      false,
+    );
+  });
+
+  it("ยัง strict เหมือนเดิม — ส่ง version/effective_to (คีย์ server-side) → ไม่ผ่าน", () => {
+    expect(AssessmentRuleInput.safeParse({ passPct: 70, version: 1 }).success).toBe(false);
+    expect(AssessmentRuleInput.safeParse({ passPct: 70, effective_to: "2026-09-01T00:00:00+00:00" }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe("AssessmentRuleRpcRowSchema + AssessmentRuleResource (Wave G P3 — mapper เดียวสองทาง)", () => {
+  /** แถว jsonb ของ RPC admin_add_assessment_rules (returning * — 0049) */
+  const RPC_ROW = {
+    id: "f0000000-0000-4000-8000-000000000001",
+    assessment_id: "d0000000-0000-4000-8000-000000000001",
+    version: 2,
+    time_limit_minutes: 60,
+    question_count: 30,
+    pass_pct: 70,
+    max_attempts: 2,
+    attempt_cooldown_minutes: 1440,
+    shuffle_questions: true,
+    shuffle_options: true,
+    selection: {},
+    require_course_complete: true,
+    proctoring_mode: "basic",
+    exam_review_mode: "after_final_attempt",
+    effective_from: "2026-09-01T00:00:00+00:00",
+    created_at: "2026-09-01T00:00:00+00:00",
+  };
+
+  it("parseAssessmentRuleRpcRow + toAssessmentRuleResource — round-trip 16 คีย์ → ผ่าน AssessmentRuleResource", () => {
+    const parsed = parseAssessmentRuleRpcRow(RPC_ROW);
+    const resource = toAssessmentRuleResource(parsed);
+    expect(resource.version).toBe(2);
+    expect(resource.examReviewMode).toBe("after_final_attempt");
+    expect(resource.selection).toEqual({});
+    expect(() => AssessmentRuleResource.parse(resource)).not.toThrow();
+  });
+
+  it("exam_review_mode 'never' → ผ่าน + resource สะท้อน 'never'", () => {
+    const resource = toAssessmentRuleResource(parseAssessmentRuleRpcRow({ ...RPC_ROW, exam_review_mode: "never" }));
+    expect(resource.examReviewMode).toBe("never");
+    expect(() => AssessmentRuleResource.parse(resource)).not.toThrow();
+  });
+
+  it("แถว drift (exam_review_mode หาย) → parseAssessmentRuleRpcRow throw ERR-SYS-002 (fail-closed)", () => {
+    const row = { ...RPC_ROW, exam_review_mode: undefined };
+    expect(() => parseAssessmentRuleRpcRow(row)).toThrow();
+    try {
+      parseAssessmentRuleRpcRow(row);
+    } catch (error) {
+      expect((error as AppError).code).toBe("ERR-SYS-002");
+      expect((error as AppError).httpStatus).toBe(503);
+    }
+  });
+
+  it("แถวมีคีย์เกิน (strict) → drift เช่นกัน — ไม่ strip เงียบ ๆ", () => {
+    const row = { ...RPC_ROW, extra_key: true };
+    expect(() => parseAssessmentRuleRpcRow(row)).toThrow();
+  });
+
+  it("AssessmentRuleResource strict — resource มีคีย์เกิน → ไม่ผ่าน (B4 ขาออก)", () => {
+    const resource = toAssessmentRuleResource(parseAssessmentRuleRpcRow(RPC_ROW));
+    expect(AssessmentRuleResource.safeParse({ ...resource, extra: 1 }).success).toBe(false);
+  });
+
+  it("AssessmentRuleRpcRowSchema.safeParse แถวครบ 16 คีย์ → ผ่าน", () => {
+    expect(AssessmentRuleRpcRowSchema.safeParse(RPC_ROW).success).toBe(true);
   });
 });

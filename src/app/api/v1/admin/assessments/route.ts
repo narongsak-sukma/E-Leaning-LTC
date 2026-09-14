@@ -4,9 +4,13 @@
  *
  * GET — requirePermission("assessment:view") (matrix rbac.ts L90-L253 — instructor/staff:viewer/
  * staff:exam/staff:registrar/super_admin มี permission นี้; ขอบเขตกรองที่ RLS asm_read
- * 0010 L643-L651 ให้เอง) · สรุปกติกาล่าสุดจาก embed assessment_rules (เรียง effective_from desc
- * + limit 1 ที่ embed) — select เฉพาะคอลัมน์ที่ **column grant ของ authenticated** ครอบ
- * (pass_pct ได้ grant เพิ่มใน 0019 · selection ยังไม่เปิดตาม 0010 L711-L714)
+ * 0010 L643-L651 ให้เอง) · สรุปกติกาล่าสุดจาก **RPC admin_latest_assessment_rules (0051)**
+ * ไม่ใช่ embed ตารางอีกต่อไป — 0050 เปิด column grant selection ให้ authenticated แล้วพบว่า
+ * ar_read (0010 L694-L702) ให้ "ผู้เรียนที่ลงทะเรียน active" เห็นแถว assessment_rules ด้วย =
+ * ผู้เรียนอ่าน selection ทางตรง PostgREST ได้ (gate GP3 r2 R2-M3) → 0051 revoke คืน + เจ้าหน้าที่
+ * อ่านผ่าน RPC ที่คุมบทบาทในตัว (staff:exam/staff:viewer/super_admin + aal2 · "ล่าสุด" =
+ * version สูงสุดต่อ assessment — เกณฑ์เดียวกับ max+1 ของ RPC 0049)
+ * และ 0052 (gate GP3 r3 R3-M2): audience ของ RPC ขยายเป็น 2 สายแรกของ ar_read จริง — staff เต็ม (viewer/exam/registrar/super_admin) + instructor แบบ row-filter (เจ้าของหลักสูตรเท่านั้น) — instructor POST กลับมาเป็น 201 และ GET ของ instructor/registrar กลับมาเป็น 200 (เดิม 0051 กรอบ instructor จน 503 หลัง INSERT สำเร็จ)
  *
  * POST — requirePermission("assessment:create") (instructor/staff:exam/super_admin):
  * - status = 'draft' เสมอ — server-controlled ห้ามรับจาก body (schema strict ไม่มี status);
@@ -35,6 +39,7 @@ import { requirePermission, type RequirePermissionResult } from "@/lib/rbac";
 import {
   AdminAssessmentResource,
   AssessmentCreateBody,
+  AssessmentRuleRowSchema,
   type AssessmentCreateBodyParsed,
   type AssessmentRuleInputParsed,
   mapAdminExamDbError,
@@ -47,14 +52,89 @@ import { createSupabaseSsrClient } from "@/lib/supabase/ssr";
 
 /**
  * select ของ GET/POST — course = เจ้าของหลักสูตร (assessments ไม่มีคอลัมน์ created_by —
- * 0005 L50-L61) ผูก !left กันแถวหายเมื่อ RLS ฝั่ง courses บัง; assessment_rules embed เรียง
- * effective_from ล่าสุดก่อน + limit 1
+ * 0005 L50-L61) ผูก !left กันแถวหายเมื่อ RLS ฝั่ง courses บัง · **ไม่มี assessment_rules
+ * embed อีกต่อไป** — กติกาล่าสุด (รวม selection) อ่านผ่าน RPC admin_latest_assessment_rules
+ * (0051) ที่คุมบทบาทในตัว แล้ว merge ที่ BFF (ดู latestRulesByAssessment — gate GP3 r2 R2-M3)
  */
 const ADMIN_ASSESSMENT_SELECT =
   "id,code,title,description,is_final,status,course_id,created_at," +
-  "course:courses!left(id,created_by)," +
-  "assessment_rules(version,pass_pct,time_limit_minutes,question_count,max_attempts," +
-  "attempt_cooldown_minutes,shuffle_questions,shuffle_options,proctoring_mode,effective_from)";
+  "course:courses!left(id,created_by)";
+
+/** UUID v4 lowercase/uppercase ตรงรูปแบบ z.uuid() ของ query (R3-m1 — ตรวจ id ที่ RPC คืนก่อนเชื่อ) */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * กติกา version ล่าสุดต่อ assessment จาก RPC 0051/0052 — คืน map assessment_id → แถวรูป
+ * เดียวกับ embed เดิม (คอลัมน์ 14 ตัวตาม AssessmentRuleRow) เพื่อให้ parseAdminAssessmentRow
+ * ตรวจ strict ต่อได้เหมือนเดิม · หน้าว่าง (ids เปล่า) = map เปล่า ไม่ยิง RPC
+ * · RPC ล้ม/คืนไม่ใช่ array = 503 ERR-SYS-002 fail-closed (ไม่กลืนเป็น "ไม่มีกติกา")
+ * · **R3-m1 (gate GP3 r3)**: ตรวจ drift ต่อแถวก่อนเชื่อ — id ต้องเป็น UUID จริง · เป็น id
+ * ที่เราขอเท่านั้น (membership) · ไม่ซ้ำต่อ assessment (uniqueness — ซ้ำคือ criteria
+ * "ล่าสุด" พัง = แถวที่กลืนกันจะ override กันเงียบ ๆ) · แถวที่โปรเจกต์แล้วต้องผ่าน
+ * AssessmentRuleRowSchema strict — ใด ๆ พัง = 503 drift ไม่ปล่อย `rules: null` เงียบ
+ */
+async function latestRulesByAssessment(
+  supabase: Awaited<ReturnType<typeof createSupabaseSsrClient>>,
+  assessmentIds: readonly string[],
+): Promise<Map<string, Record<string, unknown>>> {
+  const map = new Map<string, Record<string, unknown>>();
+  if (assessmentIds.length === 0) {
+    return map;
+  }
+  const requested = new Set(assessmentIds);
+  const drift = (): AppError =>
+    new AppError("ERR-SYS-002", {
+      details: { reason: "admin_assessments_rules_rpc_drift" },
+    });
+  const { data, error } = await supabase.rpc("admin_latest_assessment_rules", {
+    p_assessment_ids: assessmentIds,
+  });
+  if (error !== null) {
+    throw new AppError("ERR-SYS-002", {
+      details: { reason: "admin_assessments_rules_rpc_failed" },
+    });
+  }
+  if (!Array.isArray(data)) {
+    throw drift();
+  }
+  for (const row of data) {
+    if (typeof row !== "object" || row === null) {
+      throw drift();
+    }
+    const record = row as Record<string, unknown>;
+    const id = record["assessment_id"];
+    if (
+      typeof id !== "string" ||
+      !UUID_PATTERN.test(id) ||
+      !requested.has(id) ||
+      map.has(id)
+    ) {
+      throw drift();
+    }
+    // โปรเจกต์เฉพาะคอลัมน์ของ embed เดิม — คีย์อื่น (เช่น assessment_id ของ RPC) ห้าม
+    // ไหลเข้า AssessmentRuleRowSchema ที่ strict
+    const projected: Record<string, unknown> = {
+      version: record["version"],
+      pass_pct: record["pass_pct"],
+      time_limit_minutes: record["time_limit_minutes"],
+      question_count: record["question_count"],
+      max_attempts: record["max_attempts"],
+      attempt_cooldown_minutes: record["attempt_cooldown_minutes"],
+      shuffle_questions: record["shuffle_questions"],
+      shuffle_options: record["shuffle_options"],
+      require_course_complete: record["require_course_complete"],
+      selection: record["selection"],
+      proctoring_mode: record["proctoring_mode"],
+      exam_review_mode: record["exam_review_mode"],
+      effective_from: record["effective_from"],
+    };
+    if (!AssessmentRuleRowSchema.safeParse(projected).success) {
+      throw drift();
+    }
+    map.set(id, projected);
+  }
+  return map;
+}
 
 /** สะท้อน x-request-id ที่ middleware สร้าง กลับทุก response (SDS §5.4) */
 function optionsOf(request: Request): JsonResponseOptions {
@@ -90,7 +170,7 @@ function assessmentInsertPayloadOf(
   return payload;
 }
 
-/** insert ของ assessment_rules — คอลัมน์ตรง 0005 L66-L82 (version/effective_from ให้ DB default ได้) */
+/** insert ของ assessment_rules — คอลัมน์ตรง 0005 L66-L82 + exam_review_mode (0049) (version/effective_from ให้ DB default ได้) */
 function ruleInsertPayloadOf(
   assessmentId: string,
   rules: AssessmentRuleInputParsed,
@@ -107,6 +187,7 @@ function ruleInsertPayloadOf(
     shuffle_options: rules.shuffleOptions,
     require_course_complete: rules.requireCourseComplete,
     proctoring_mode: rules.proctoringMode,
+    exam_review_mode: rules.examReviewMode,
   };
   if (rules.selection !== undefined) {
     payload["selection"] = rules.selection;
@@ -137,15 +218,17 @@ export async function GET(request: Request): Promise<NextResponse> {
       .select(ADMIN_ASSESSMENT_SELECT)
       .order("created_at", { ascending: false })
       .order("id", { ascending: false })
-      // embed กติกา: effective ล่าสุดก่อน + 1 แถว (limit เฉพาะ embed — ไม่กระทบหน้าหลัก)
-      .order("effective_from", { referencedTable: "assessment_rules", ascending: false })
-      .limit(1, { referencedTable: "assessment_rules" })
       .limit(query.limit + 1);
     if (query.status !== undefined) {
       builder = builder.eq("status", query.status);
     }
     if (query.courseId !== undefined) {
       builder = builder.eq("course_id", query.courseId);
+    }
+    // R3-M1 read-back: โมดัลกติกาขอแถวเดียวด้วย id (cache:"no-store") เพื่อตัดสินผล
+    // ที่ค้าง "ไม่แน่นอน" — แถวที่ไม่มี/ไม่เข้าถึง = หน้าว่าง data:[] (เหมือน list ปกติ)
+    if (query.id !== undefined) {
+      builder = builder.eq("id", query.id);
     }
     if (cursorPayload !== null) {
       builder = builder.or(cursorFilterOf(cursorPayload));
@@ -159,7 +242,25 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (!Array.isArray(data)) {
       throw new AppError("ERR-SYS-002", { details: { reason: "admin_assessments_rows_not_array" } });
     }
-    const rows = data.map(parseAdminAssessmentRow);
+    // กติกาล่าสุดจาก RPC 0051 (คุมบทบาทในตัว — ไม่ใช่ embed ตารางอีกต่อไป) แล้ว merge
+    // เป็นรูป embed เดิมก่อน parse — AssessmentRuleRowSchema strict ตรวจทุกคอลัมน์เหมือนเดิม
+    const latestRules = await latestRulesByAssessment(
+      supabase,
+      data.map((row) => {
+        if (typeof row !== "object" || row === null || typeof (row as Record<string, unknown>)["id"] !== "string") {
+          throw new AppError("ERR-SYS-002", { details: { reason: "admin_assessments_rows_not_array" } });
+        }
+        return (row as Record<string, unknown>)["id"] as string;
+      }),
+    );
+    const rows = data.map((row) => {
+      const record = row as unknown as Record<string, unknown>;
+      const embedded = latestRules.get(record["id"] as string);
+      return parseAdminAssessmentRow({
+        ...record,
+        assessment_rules: embedded === undefined ? [] : [embedded],
+      });
+    });
     const page = buildPage({
       rows,
       limit: query.limit,
@@ -226,8 +327,13 @@ export async function POST(
     }
     // zod-ตรวจแถวที่ INSERT คืนขาเข้าก่อนหยิบ id ใช้ (0019-r3 G3) — drift
     // (id หาย/ผิดชนิด) ต้องตายที่นี่ 503 ERR-SYS-002 ก่อนแตะ rules
-    // insert/reload ด้วย id ที่ไม่ผ่าน validation
-    const createdRow = parseAdminAssessmentRow(created);
+    // insert/reload ด้วย id ที่ไม่ผ่าน validation · select ไม่มี embed อีกแล้ว (0051)
+    // จึงแนบ assessment_rules เปล่าให้ strict schema ก่อน parse
+    const createdRecord = created as unknown as Record<string, unknown>;
+    const createdRow = parseAdminAssessmentRow({
+      ...createdRecord,
+      assessment_rules: [],
+    });
     // 6) insert กติกา v1 (เฉพาะเมื่อแนบ rules มา — staff:exam/super_admin เท่านั้น ข้อ 4)
     if (body.rules !== undefined) {
       const { error: ruleError } = await supabase
@@ -237,8 +343,9 @@ export async function POST(
         throw mapAdminExamDbError(ruleError);
       }
     }
-    // 7) ตอบด้วยแถวที่สร้าง (RLS asm_read ให้อ่านกลับเอง) — rules ที่เพิ่ง insert ยังไม่ติด
-    //    ในแถวที่ returning คืน จึง reload เพื่อให้ summary ตรงกับที่เพิ่งเขียน
+    // 7) ตอบด้วยแถวที่สร้าง (RLS asm_read ให้อ่านกลับเอง) — rules ที่เพิ่ง insert ไม่ติด
+    //    ในแถวที่ reload คืน (select ไม่มี embed อีกแล้ว) จึงดึงกติกาล่าสุดจาก RPC 0051
+    //    แล้ว merge เป็นรูป embed เดิมก่อน parse
     const assessmentId = createdRow.id;
     const { data: reloaded, error: reloadError } = await supabase
       .from("assessments")
@@ -250,11 +357,19 @@ export async function POST(
         details: { reason: "assessment_reload_failed" },
       });
     }
+    const reloadedRules = await latestRulesByAssessment(supabase, [assessmentId]);
+    const reloadedRecord = reloaded as unknown as Record<string, unknown>;
+    const reloadedEmbedded = reloadedRules.get(assessmentId);
     // zod-ตรวจแถว DB ขาเข้า (F5) ก่อน map + ตรวจ view ขาออก (B4) — drift → 503 ERR-SYS-002
     return jsonCreated(
       parseOutgoingView(
         AdminAssessmentResource,
-        toAdminAssessmentResource(parseAdminAssessmentRow(reloaded)),
+        toAdminAssessmentResource(
+          parseAdminAssessmentRow({
+            ...reloadedRecord,
+            assessment_rules: reloadedEmbedded === undefined ? [] : [reloadedEmbedded],
+          }),
+        ),
         "admin_assessment_contract_drift",
       ),
       options,

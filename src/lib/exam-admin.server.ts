@@ -156,6 +156,13 @@ function proctoringModeOf(value: unknown): ExamAdminAssessmentRuleSummary["proct
   return value === "none" || value === "basic" ? value : null;
 }
 
+/** examReviewMode นอก enum จริง = drift → null (0049 — มีสองค่าเท่านั้น) */
+function examReviewModeOf(
+  value: unknown,
+): ExamAdminAssessmentRuleSummary["examReviewMode"] | null {
+  return value === "after_final_attempt" || value === "never" ? value : null;
+}
+
 /** ตรวจแถวกติกา (AssessmentRuleSummary ของ BFF — passPct เปิดแสดงได้ตาม column grant 0019) */
 function parseRuleSummary(raw: unknown): ExamAdminAssessmentRuleSummary | null {
   if (!isRecord(raw)) {
@@ -169,7 +176,11 @@ function parseRuleSummary(raw: unknown): ExamAdminAssessmentRuleSummary | null {
   const cooldownMinutes = requiredIntOf(raw, "cooldownMinutes", 0, 5256000);
   const shuffleQuestions = requiredBooleanOf(raw, "shuffleQuestions");
   const shuffleOptions = requiredBooleanOf(raw, "shuffleOptions");
+  const requireCourseComplete = requiredBooleanOf(raw, "requireCourseComplete");
+  const selectionRaw = raw["selection"];
+  const selection = isRecord(selectionRaw) ? selectionRaw : null;
   const proctoringMode = proctoringModeOf(raw["proctoringMode"]);
+  const examReviewMode = examReviewModeOf(raw["examReviewMode"]);
   const effectiveFromRaw = requiredStringOf(raw, "effectiveFrom");
   const effectiveFrom = effectiveFromRaw === null ? null : isoStringOf(effectiveFromRaw);
   if (
@@ -181,7 +192,10 @@ function parseRuleSummary(raw: unknown): ExamAdminAssessmentRuleSummary | null {
     cooldownMinutes === null ||
     shuffleQuestions === null ||
     shuffleOptions === null ||
+    requireCourseComplete === null ||
+    selection === null ||
     proctoringMode === null ||
+    examReviewMode === null ||
     effectiveFrom === null
   ) {
     return null;
@@ -195,7 +209,10 @@ function parseRuleSummary(raw: unknown): ExamAdminAssessmentRuleSummary | null {
     cooldownMinutes,
     shuffleQuestions,
     shuffleOptions,
+    requireCourseComplete,
+    selection,
     proctoringMode,
+    examReviewMode,
     effectiveFrom,
   };
 }

@@ -1,0 +1,20 @@
+-- 0050 — column grant: selection ของ assessment_rules ให้ authenticated (GP3-r2 M2)
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- เหตุผล (gate GP3 r1 M2): D87 เปิดแก้กติกาผ่าน BFF — โมดัลกติกาต้อง prefill จาก
+-- กติกา version ล่าสุดและ "ส่งต่อ" selection (ขอบเขตคลังข้อสอบ jsonb) ไปยัง version
+-- ใหม่เสมอ ไม่งั้น RPC admin_add_assessment_rules เขียน '{}' ทับขอบเขตคลังเดิมเงียบ ๆ
+-- กลไกอ่านของ BFF คือ embed GET /api/v1/admin/assessments ซึ่งวิ่งด้วย JWT ของเจ้าหน้าที่
+-- (บทบาท authenticated) ผ่าน PostgREST — PostgREST select ได้เฉพาะคอลัมน์ที่ role นั้น
+-- มี grant: selection เป็นคอลัมน์เดียวที่ยังไม่แจก (สืบเนื่องตั้งแต่ 0005) → embed ใหม่
+-- ที่ขอ selection ตาย 42501 (permission denied) — เป็นสาเหตุที่ r1 ยังมองไม่เห็นเพราะ
+-- r1 ยังไม่เคยขอคอลัมน์นี้
+--
+-- ขอบเขตความเสี่ยงที่รับ: เนื้อหา selection = รหัสคลัง/เกณฑ์การคัดเลือกข้อสอบ (ไม่มี PII
+-- ไม่มีเนื้อโจทย์) · การเห็น "แถว" ยังถูกคุมโดยนโยบาย ar_read เดิม (เจ้าหน้าที่/ผู้สอน
+-- เจ้าของหลักสูตร) — column grant ไม่เพิ่มแถวที่เห็น เพิ่มเฉพาะคอลัมน์ในแถวที่ ar_read
+-- ให้เห็นอยู่แล้ว · ผู้เรียนที่อ่านกติกาผ่าน BFF ได้คอลัมน์อื่นอยู่แล้ว (pass_pct ตาม 0019)
+-- class ความไวเท่ากัน และ RPC admin_add_assessment_rules (security definer app_owner)
+-- ตอบ selection กลับให้เจ้าหน้าที่ในทุก POST อยู่แล้ว — จึงไม่ใช่การเปิดเผยใหม่ของฝั่งเขียน
+--
+-- รูปแบบตามแบบ 0019 (d): column grant สะสมได้ ไม่ต้อง revoke ชุดเดิม
+grant select (selection) on public.assessment_rules to authenticated;

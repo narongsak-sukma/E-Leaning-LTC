@@ -4,8 +4,8 @@
  * read-only เสมอ ไม่สร้าง attempt (B-10) — อ่าน assessments + assessment_rules effective
  * ล่าสุด (effective_from <= now เรียงหามากสุด — F21) ผ่าน user-JWT + RLS:
  * asm_read (ผู้เรียนเห็นเฉพาะ published ของหลักสูตรที่ลงทะเบียน active — 0010 L643) ·
- * ar_read (0010 L692) + column grant รวม pass_pct แล้ว (0019 — selection ยังซ่อน
- * ตาม 0010 L709-713)
+ * ar_read (0010 L692) + column grant รวม pass_pct แล้ว (0019) · selection ซ่อนต่อผู้เรียน
+ * ตามเจตนา 0005 — 0051 ถอน grant ชั่วคราวของ 0050 คืน (เจ้าหน้าที่อ่านผ่าน RPC 0051)
  *
  * 200 · ไม่เห็น assessment (ไม่ published/ไม่ลงทะเบียน/ไม่มีจริง) → ASM-003 404 ·
  * เห็นแต่ไม่มีกติกา effective → NF-001 404 · id ไม่ใช่ uuid → VAL-001 400 ·
@@ -75,7 +75,8 @@ export async function GET(
     }
 
     // 5) กติกาเวอร์ชัน effective ล่าสุด (effective_from <= now → มากสุด) — คอลัมน์ที่ได้
-    //    GRANT SELECT ให้ authenticated (pass_pct เพิ่มใน 0019 · selection ยังซ่อน)
+    //    GRANT SELECT ให้ authenticated (pass_pct เพิ่มใน 0019 · selection ซ่อนตาม 0005 —
+    //    0050 เคยเปิดแล้วถอนคืนเพราะผู้เรียนอ่านทางตรงได้ R2-M3)
     const { data: rules, error: rError } = await supabase
       .from("assessment_rules")
       .select(

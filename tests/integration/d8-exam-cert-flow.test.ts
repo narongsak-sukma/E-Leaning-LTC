@@ -5,7 +5,9 @@
  * ครอบคลุม:
  *   1) exam RPC ผ่าน claims path จริง (user JWT ไม่ใช่ service role):
  *      start_attempt / save_answer / submit_attempt + learner_attempt_paper_view
- *      (โจทย์กลางสอบ ตัดเฉลย) + learner_attempt_view (เฉลยเปิดหลัง final attempt)
+ *      (โจทย์กลางสอบ ตัดเฉลย) + learner_attempt_view ตาม semantics 0049:
+ *      ผ่าน = เฉลยเปิดทันที + สอบซ้ำถูกบล็อก (ERR-ASM-007) · ตกครบ max =
+ *      เปิดหลัง final attempt · ตกและยังมีครั้ง = ปิด (พิสูจน์ด้วยผู้ใช้คนละคน)
  *      + session binding 2 ชั้น (D20-B5) + idempotent submit + ตัวเลขไม่โกหก (PB-15)
  *   2) certificate path ของ D-4 (service-role RPC): คิว eligible → issue → verify สาธารณะ
  *      → reissue (lineage) → revoke + audit ทุก event ใน TX เดียวกับ mutation
@@ -130,7 +132,11 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
   let enrollmentId: string;
   let seedAttemptId: string;
   let fastAAttempt1: string;
-  let fastAAttempt2: string;
+  /** ผู้ใช้ที่ตกล้วน (0049: เส้นทาง เฉลยยังปิด→เปิดหลังหมดสิทธิ์/ASM-001 ย้ายมาที่คนนี้) */
+  let failEx: TestUser;
+  let failExSession: string;
+  let failExAttempt1: string;
+  let failExAttempt2: string;
   let cert1: { id: string; cert_no: string; verify_code: string };
   let cert2: { id: string; cert_no: string; verify_code: string };
   let fastBAttemptId: string;
@@ -285,7 +291,7 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
     expect(rows[0]?.total).toBe(5);
   });
 
-  it("start_attempt ปฏิเสธ: cooldown ยังไม่ครบ (ERR-ASM-003 — 1440 นาทีของ seed)", async () => {
+  it("start_attempt ปฏิเสธ: ผ่านแล้วสอบซ้ำไม่ได้ (0049 B3.5 → ERR-ASM-007 ก่อนถึง cooldown — ผู้เรียนคนนี้ passed ไปแล้ว)", async () => {
     const result = await restCall(
       "POST",
       "/rest/v1/rpc/start_attempt",
@@ -294,9 +300,84 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
     );
     expect(result.status).toBeGreaterThanOrEqual(400);
     const message = errMessage(result.json);
+    expect(message).toContain("ERR-ASM-007");
+    expect(message).toContain("ผ่านการสอบนี้แล้ว");
+  }, 60_000);
+
+  it("start_attempt ปฏิเสธ: ตกแล้ว cooldown ยังไม่ครบ (ERR-ASM-003 — ผู้ใช้ต่างคนที่ fail ข้อสอบ seed 1440 นาที)", async () => {
+    // 0049 เปลี่ยนเส้นทางของผู้ "ผ่าน" (B3.5 → ERR-ASM-007 ก่อน cooldown เสมอ)
+    // เส้นทาง cooldown จึงพิสูจน์ด้วยผู้ใช้ที่ "ตก" — ครั้งล่าสุดที่ส่งแล้ว (failed)
+    // ยังถูก attempt_cooldown_minutes=1440 ของกติกา seed คุมอยู่
+    const failCool = await createTestUser("d8-examcert-failcool", "lawyer");
+    const failCoolEnroll = await restCall(
+      "POST",
+      "/rest/v1/rpc/enroll",
+      { apiKey: ANON_KEY, token: failCool.accessToken },
+      { p_course_id: COURSE3_ID },
+    );
+    expect(failCoolEnroll.status, failCoolEnroll.text.slice(0, 200)).toBe(200);
+    const failCoolEnrollmentId = await psqlScalar(
+      `select id::text from public.enrollments
+        where user_id = '${failCool.id}' and course_id = '${COURSE3_ID}' limit 1;`,
+    );
+    expect(failCoolEnrollmentId).toMatch(/^[0-9a-f-]{36}$/);
+    const progress = await restCall(
+      "POST",
+      "/rest/v1/rpc/record_lesson_progress",
+      { apiKey: ANON_KEY, token: failCool.accessToken },
+      { p_enrollment_id: failCoolEnrollmentId, p_lesson_id: COURSE3_LESSON_ID },
+    );
+    expect(progress.status, progress.text.slice(0, 200)).toBeLessThan(300);
+    const start = await restCall(
+      "POST",
+      "/rest/v1/rpc/start_attempt",
+      { apiKey: ANON_KEY, token: failCool.accessToken },
+      { p_assessment_id: SEED_EXAM_ID },
+    );
+    expect(start.status, start.text.slice(0, 300)).toBe(200);
+    const attemptId = (start.json as StartAttemptResult).attempt_id;
+    const failCoolSession = jwtPayload(failCool.accessToken).session_id ?? "";
+    const paper = await restCall(
+      "GET",
+      `/rest/v1/learner_attempt_paper_view?attempt_id=eq.${attemptId}&select=question_id&order=seq.asc`,
+      { apiKey: ANON_KEY, token: failCool.accessToken },
+    );
+    expect(paper.status, paper.text.slice(0, 200)).toBe(200);
+    for (const row of paper.json as { question_id: string }[]) {
+      const wrong = await knownWrongAnswer(row.question_id);
+      const saved = await restCall(
+        "POST",
+        "/rest/v1/rpc/save_answer",
+        { apiKey: ANON_KEY, token: failCool.accessToken },
+        {
+          p_attempt_id: attemptId,
+          p_question_id: row.question_id,
+          p_selected_option_ids: [wrong],
+          p_session_id: failCoolSession,
+        },
+      );
+      expect(saved.status, saved.text.slice(0, 200)).toBeLessThan(300);
+    }
+    const submit = await restCall(
+      "POST",
+      "/rest/v1/rpc/submit_attempt",
+      { apiKey: ANON_KEY, token: failCool.accessToken },
+      { p_attempt_id: attemptId, p_session_id: failCoolSession },
+    );
+    expect(submit.status, submit.text.slice(0, 300)).toBe(200);
+    expect((submit.json as SubmitResult).status).toBe("failed");
+    // ตก → ไม่เคยผ่าน → B3.5 ไม่ทำงาน → ชน cooldown จริง (ไม่ใช่ ASM-007)
+    const retry = await restCall(
+      "POST",
+      "/rest/v1/rpc/start_attempt",
+      { apiKey: ANON_KEY, token: failCool.accessToken },
+      { p_assessment_id: SEED_EXAM_ID },
+    );
+    expect(retry.status).toBeGreaterThanOrEqual(400);
+    const message = errMessage(retry.json);
     expect(message).toContain("ERR-ASM-003");
     expect(message).toContain("ระยะห่างระหว่างครั้ง");
-  });
+  }, 120_000);
 
   // ─── 2) สอบเร็ว FAST-A: paper view + session binding (D20-B5) + idempotent ──
 
@@ -440,7 +521,7 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
     expect(body.total_points).toBe(4);
   });
 
-  it("เฉลยยังปิด: learner_attempt_view หลังส่งครั้งที่ 1 (1 < max_attempts 2) → is_correct/question_snapshot ยัง null", async () => {
+  it("เฉลยเปิดทันทีเมื่อผ่าน (0049 D84 open-on-pass): หลังส่งครั้งที่ 1 ผ่าน → ครบแม้ยังเหลือครั้ง (1 < max 2)", async () => {
     const result = await restCall(
       "GET",
       `/rest/v1/learner_attempt_view?attempt_id=eq.${fastAAttempt1}&select=attempt_id,question_id,is_correct,points_earned,question_snapshot,explanation`,
@@ -450,34 +531,66 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
     const rows = result.json as ReviewRow[];
     expect(rows).toHaveLength(4);
     for (const row of rows) {
-      expect(row.is_correct).toBeNull();
-      expect(row.question_snapshot).toBeNull();
-      expect(row.explanation).toBeNull();
+      expect(row.is_correct).toBe(true); // ตอบถูกทุกข้อ + ผ่าน = เฉลยเปิดทันทีไม่รอครบครั้ง
+      expect(row.points_earned).toBe(1);
+      expect(row.question_snapshot).not.toBeNull();
+      expect(row.explanation).not.toBeNull();
+      expect(row.question_snapshot?.options.every((o) => typeof o.is_correct === "boolean")).toBe(true);
     }
   });
 
-  it("สอบเร็ว A ครั้งที่ 2 (cooldown=0): start ได้ → ตอบผิดทุกข้อ → failed", async () => {
+  it("สอบเร็ว A ขอซ้ำหลังผ่าน: ถูกบล็อกถาวร (0049 B3.5 → ERR-ASM-007 แม้ cooldown=0 และเหลือครั้งอีก 1)", async () => {
     const start = await restCall(
       "POST",
       "/rest/v1/rpc/start_attempt",
       { apiKey: ANON_KEY, token: learner.accessToken },
       { p_assessment_id: D8_IDS.fastA.assessment },
     );
+    expect(start.status).toBeGreaterThanOrEqual(400);
+    const message = errMessage(start.json);
+    expect(message).toContain("ERR-ASM-007");
+    expect(message).toContain("ผ่านการสอบนี้แล้ว");
+    // บล็อกจริง: ไม่มีแถว attempt ใหม่ของ (learner, fastA) — คงเพียงครั้งเดียวที่ส่งแล้ว
+    const rows = await psqlRows<{ n: number }>(`
+      select count(*)::int as n from public.assessment_attempts
+       where user_id = '${learner.id}' and assessment_id = '${D8_IDS.fastA.assessment}';
+    `);
+    expect(rows[0]?.n).toBe(1);
+  }, 60_000);
+
+  it("ผู้ตก (คนละคน): สอบเร็ว A ตกครั้งที่ 1 → เฉลยยังปิด (1 < max_attempts 2)", async () => {
+    // 0049: ผู้ผ่านโดนบล็อก + เฉลยเปิดทันที — เส้นทาง "ยังปิดก่อนครบครั้ง" และ
+    // "เปิดหลังหมดสิทธิ์" จึงพิสูจน์ด้วยผู้ใช้ที่ตกล้วน (ไม่มีครั้งใดผ่าน)
+    failEx = await createTestUser("d8-examcert-failex", "lawyer");
+    failExSession = jwtPayload(failEx.accessToken).session_id ?? "";
+    // require_course_complete=false แค่ข้ามเงื่อนไขเรียนครบ — ยังต้องลงทะเบียน (ERR-LRN-001)
+    const failExEnroll = await restCall(
+      "POST",
+      "/rest/v1/rpc/enroll",
+      { apiKey: ANON_KEY, token: failEx.accessToken },
+      { p_course_id: COURSE3_ID },
+    );
+    expect(failExEnroll.status, failExEnroll.text.slice(0, 200)).toBe(200);
+    const start = await restCall(
+      "POST",
+      "/rest/v1/rpc/start_attempt",
+      { apiKey: ANON_KEY, token: failEx.accessToken },
+      { p_assessment_id: D8_IDS.fastA.assessment },
+    );
     expect(start.status, start.text.slice(0, 300)).toBe(200);
-    const body = start.json as StartAttemptResult;
-    fastAAttempt2 = body.attempt_id;
-    expect(body.takeover).toBeUndefined(); // ครั้งใหม่จริง ไม่ใช่ takeover
+    failExAttempt1 = (start.json as StartAttemptResult).attempt_id;
+    expect((start.json as StartAttemptResult).takeover).toBeUndefined();
     for (const questionId of D8_BANK_QUESTIONS.fastA) {
       const wrong = await knownWrongAnswer(questionId);
       const saved = await restCall(
         "POST",
         "/rest/v1/rpc/save_answer",
-        { apiKey: ANON_KEY, token: learner.accessToken },
+        { apiKey: ANON_KEY, token: failEx.accessToken },
         {
-          p_attempt_id: fastAAttempt2,
+          p_attempt_id: failExAttempt1,
           p_question_id: questionId,
           p_selected_option_ids: [wrong],
-          p_session_id: learnerSession,
+          p_session_id: failExSession,
         },
       );
       expect(saved.status, saved.text.slice(0, 300)).toBeLessThan(300);
@@ -485,45 +598,94 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
     const submit = await restCall(
       "POST",
       "/rest/v1/rpc/submit_attempt",
-      { apiKey: ANON_KEY, token: learner.accessToken },
-      { p_attempt_id: fastAAttempt2, p_session_id: learnerSession },
+      { apiKey: ANON_KEY, token: failEx.accessToken },
+      { p_attempt_id: failExAttempt1, p_session_id: failExSession },
     );
-    expect(submit.status).toBe(200);
+    expect(submit.status, submit.text.slice(0, 300)).toBe(200);
     const submitted = submit.json as SubmitResult;
     expect(submitted.status).toBe("failed");
     expect(submitted.passed).toBe(false);
     expect(submitted.score_pct).toBe(0);
-  });
-
-  it("เฉลยเปิดหลัง final attempt: learner_attempt_view ครั้งสุดท้าย → is_correct/explanation/question_snapshot ครบ", async () => {
+    // ตก 1/2 ครั้ง → เฉลยยังปิด
     const result = await restCall(
       "GET",
-      `/rest/v1/learner_attempt_view?attempt_id=eq.${fastAAttempt2}&select=attempt_id,question_id,is_correct,points_earned,question_snapshot,explanation`,
-      { apiKey: ANON_KEY, token: learner.accessToken },
+      `/rest/v1/learner_attempt_view?attempt_id=eq.${failExAttempt1}&select=attempt_id,question_id,is_correct,points_earned,question_snapshot,explanation`,
+      { apiKey: ANON_KEY, token: failEx.accessToken },
     );
     expect(result.status, result.text.slice(0, 300)).toBe(200);
     const rows = result.json as ReviewRow[];
     expect(rows).toHaveLength(4);
     for (const row of rows) {
-      expect(row.is_correct).toBe(false); // ตอบผิด — แต่เปิดเฉลยแล้ว
+      expect(row.is_correct).toBeNull();
+      expect(row.question_snapshot).toBeNull();
+      expect(row.explanation).toBeNull();
+    }
+  }, 120_000);
+
+  it("ผู้ตก: ครั้งที่ 2 (cooldown=0) ตกอีก → ครบ max_attempts → เฉลยเปิดหลัง final attempt (is_correct=false แต้ม 0)", async () => {
+    const start = await restCall(
+      "POST",
+      "/rest/v1/rpc/start_attempt",
+      { apiKey: ANON_KEY, token: failEx.accessToken },
+      { p_assessment_id: D8_IDS.fastA.assessment },
+    );
+    expect(start.status, start.text.slice(0, 300)).toBe(200);
+    failExAttempt2 = (start.json as StartAttemptResult).attempt_id;
+    expect((start.json as StartAttemptResult).takeover).toBeUndefined();
+    for (const questionId of D8_BANK_QUESTIONS.fastA) {
+      const wrong = await knownWrongAnswer(questionId);
+      const saved = await restCall(
+        "POST",
+        "/rest/v1/rpc/save_answer",
+        { apiKey: ANON_KEY, token: failEx.accessToken },
+        {
+          p_attempt_id: failExAttempt2,
+          p_question_id: questionId,
+          p_selected_option_ids: [wrong],
+          p_session_id: failExSession,
+        },
+      );
+      expect(saved.status, saved.text.slice(0, 300)).toBeLessThan(300);
+    }
+    const submit = await restCall(
+      "POST",
+      "/rest/v1/rpc/submit_attempt",
+      { apiKey: ANON_KEY, token: failEx.accessToken },
+      { p_attempt_id: failExAttempt2, p_session_id: failExSession },
+    );
+    expect(submit.status, submit.text.slice(0, 300)).toBe(200);
+    const submitted = submit.json as SubmitResult;
+    expect(submitted.status).toBe("failed");
+    expect(submitted.score_pct).toBe(0);
+    // ครั้งที่ 2 = final (2 ≥ max 2) → เฉลยเปิดแม้ไม่เคยผ่าน
+    const result = await restCall(
+      "GET",
+      `/rest/v1/learner_attempt_view?attempt_id=eq.${failExAttempt2}&select=attempt_id,question_id,is_correct,points_earned,question_snapshot,explanation`,
+      { apiKey: ANON_KEY, token: failEx.accessToken },
+    );
+    expect(result.status, result.text.slice(0, 300)).toBe(200);
+    const rows = result.json as ReviewRow[];
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.is_correct).toBe(false); // ตอบผิด — แต่เปิดเฉลยแล้ว (ครบโอกาส)
       expect(row.points_earned).toBe(0);
       expect(row.question_snapshot).not.toBeNull();
       expect(row.explanation).not.toBeNull();
       // snapshot มีเฉลยในตัวเลือก (ปลายทางอ่าน is_correct ได้หลัง final attempt)
       expect(row.question_snapshot?.options.every((o) => typeof o.is_correct === "boolean")).toBe(true);
     }
-  });
+  }, 120_000);
 
-  it("start_attempt ปฏิเสธ: ครบ max_attempts (ERR-ASM-001 — สอบเร็ว A ส่งครบ 2 ครั้งแล้ว)", async () => {
+  it("ผู้ตก: ครั้งที่ 3 → ERR-ASM-001 (ครบ max_attempts 2 — ไม่ใช่ ASM-007 เพราะไม่เคยผ่าน)", async () => {
     const result = await restCall(
       "POST",
       "/rest/v1/rpc/start_attempt",
-      { apiKey: ANON_KEY, token: learner.accessToken },
+      { apiKey: ANON_KEY, token: failEx.accessToken },
       { p_assessment_id: D8_IDS.fastA.assessment },
     );
     expect(result.status).toBeGreaterThanOrEqual(400);
     expect(errMessage(result.json)).toContain("ERR-ASM-001");
-  });
+  }, 60_000);
 
   // ─── 3) สอบเร็ว FAST-B (max_attempts=1): ERR-ASM-002 + เฉลยหลังครั้งเดียว ────
 

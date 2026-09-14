@@ -4,6 +4,12 @@
  * mock client ตามแบบ src/app/api/v1/admin/courses/route.test.ts (vi.mock supabase/ssr;
  * auth.getUser + mfa aal2 + profiles.is_active + rpc my_roles) — result ต่อตารางผ่านคิว
  * (ทุก from(table) ใหม่ดึง result ถัดไปของตารางนั้น — จำลอง insert → insert rules → reload)
+ * · rpc ที่ไม่ใช่ my_roles ดึงจากคิวต่อชื่อฟังก์ชัน (default = แถวว่าง) — กติกาล่าสุด
+ * ของ GET/POST มาจาก **RPC admin_latest_assessment_rules (0051)** แล้ว merge ที่ BFF
+ * ไม่ใช่ embed ตารางอีกต่อไป (gate GP3 r2 R2-M3)
+ * R3 (gate GP3 r3): R3-m1 ตรวจ drift ต่อแถว RPC (membership/uniqueness/UUID/schema ของ
+ * projection) → 503 admin_assessments_rules_rpc_drift · R3-M1 query id=<uuid> additive
+ * (read-back ของโมดัลกติกา) — กรอง .eq("id", …) แถวเดียว + ไม่ใช่ UUID = 400 ERR-VAL-001
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -35,12 +41,19 @@ import { GET, POST } from "./route";
 
 const USER_ID = "a0000000-0000-4000-8000-000000000001";
 const COURSE_ID = "c0000000-0000-4000-8000-000000000001";
+const ASSESSMENT_ID = "d0000000-0000-4000-8000-000000000001";
 const CREATED_AT = "2026-09-01T00:00:00+00:00";
 
 /** result ต่อการ await builder 1 ครั้ง (data/error ตามรูป PostgrestError) */
 interface StubResult {
   data?: unknown;
   error?: { code?: string; message?: string } | null;
+}
+
+/** rpc call ที่ถูกจด — payload = พารามิเตอร์ที่ route ส่งเข้า RPC */
+interface RecordedRpc {
+  fn: string;
+  args: Record<string, unknown>;
 }
 
 interface RecordedCall {
@@ -53,12 +66,18 @@ interface RecordedCall {
   limits: unknown[];
 }
 
-/** client stub — from(table) คืน builder ใหม่ที่ดึง result ถัดไปของคิวตารางนั้น + จดทุก call */
+/**
+ * client stub — from(table) คืน builder ใหม่ที่ดึง result ถัดไปของคิวตารางนั้น + จดทุก call ·
+ * rpc(my_roles) ตอบ roles · rpc อื่น (เช่น admin_latest_assessment_rules) ดึงจากคิวต่อ
+ * ชื่อฟังก์ชัน — คิวไม่ระบุ = ตอบแถวว่าง (ไม่มีกติกา) ไม่ใช่ null (null = drift ตาม route)
+ */
 function mockClient(
   queues: Record<string, StubResult[]>,
   roles: readonly string[] = ["staff:exam"],
-): { calls: RecordedCall[] } {
+  rpcQueues: Record<string, StubResult[]> = {},
+): { calls: RecordedCall[]; rpcCalls: RecordedRpc[] } {
   const calls: RecordedCall[] = [];
+  const rpcCalls: RecordedRpc[] = [];
   const profilesBuilder = {
     select: () => profilesBuilder,
     eq: () => profilesBuilder,
@@ -74,8 +93,15 @@ function mockClient(
         })),
       },
     },
-    rpc: vi.fn(async (fn: string) =>
-      fn === "my_roles" ? { data: [...roles], error: null } : { data: null, error: null }),
+    rpc: vi.fn(async (fn: string, args: Record<string, unknown> = {}) => {
+      if (fn === "my_roles") {
+        return { data: [...roles], error: null };
+      }
+      rpcCalls.push({ fn, args });
+      const queue = rpcQueues[fn] ?? [];
+      const next = queue.length > 0 ? (queue.shift() as StubResult) : { data: [], error: null };
+      return { data: next.data ?? null, error: next.error ?? null };
+    }),
     from: (table: string) => {
       if (table === "profiles") {
         return profilesBuilder;
@@ -128,13 +154,13 @@ function mockClient(
     },
   };
   vi.mocked(createSupabaseSsrClient).mockResolvedValue(client as never);
-  return { calls };
+  return { calls, rpcCalls };
 }
 
-/** แถว assessments + embed (course owner + กติกาล่าสุด) ตาม select ของ route */
+/** แถว assessments + embed course ตาม select ของ route (0051 — ไม่มี assessment_rules embed) */
 function assessmentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    id: "d0000000-0000-4000-8000-000000000001",
+    id: ASSESSMENT_ID,
     code: "FIN-01",
     title: "สอบจบหลักสูตร",
     description: null,
@@ -143,20 +169,27 @@ function assessmentRow(overrides: Record<string, unknown> = {}): Record<string, 
     course_id: COURSE_ID,
     created_at: CREATED_AT,
     course: { id: COURSE_ID, created_by: USER_ID },
-    assessment_rules: [
-      {
-        version: 1,
-        pass_pct: 70,
-        time_limit_minutes: 90,
-        question_count: 30,
-        max_attempts: 3,
-        attempt_cooldown_minutes: 1440,
-        shuffle_questions: true,
-        shuffle_options: true,
-        proctoring_mode: "basic",
-        effective_from: CREATED_AT,
-      },
-    ],
+    ...overrides,
+  };
+}
+
+/** แถว RPC admin_latest_assessment_rules (0051) — 14 คอลัมน์ + assessment_id นำหน้า */
+function rulesRpcRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    assessment_id: ASSESSMENT_ID,
+    version: 1,
+    pass_pct: 70,
+    time_limit_minutes: 90,
+    question_count: 30,
+    max_attempts: 3,
+    attempt_cooldown_minutes: 1440,
+    shuffle_questions: true,
+    shuffle_options: true,
+    require_course_complete: true,
+    selection: { bank_ids: ["b00000000-0000-4000-8000-000000000001"] },
+    proctoring_mode: "basic",
+    exam_review_mode: "after_final_attempt",
+    effective_from: CREATED_AT,
     ...overrides,
   };
 }
@@ -177,12 +210,6 @@ function postRequest(body: unknown): Request {
 
 const VALID_RULES = { passPct: 70, timeLimitMinutes: 90, maxAttempts: 2 };
 
-/** กติกา embed ที่ drift (pass_pct null) — จำลองคอลัมน์เพี้ยนจาก DB สำหรับ B4 */
-function driftedRules(): Array<Record<string, unknown>> {
-  const base = assessmentRow()["assessment_rules"] as Array<Record<string, unknown>>;
-  return [{ ...base[0]!, pass_pct: null }];
-}
-
 const VALID_BODY = {
   courseId: COURSE_ID,
   code: "FIN-01",
@@ -196,8 +223,12 @@ beforeEach(() => {
 });
 
 describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () => {
-  it("staff:exam → 200 { data, page } · createdBy จาก course owner + สรุปกติกาล่าสุด", async () => {
-    mockClient({ assessments: [{ data: [assessmentRow()] }] });
+  it("staff:exam → 200 { data, page } · createdBy จาก course owner + สรุปกติกาล่าสุดจาก RPC 0051", async () => {
+    const { rpcCalls } = mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow()] }] },
+    );
     const res = await GET(adminUrl());
     expect(res.status).toBe(200);
     expect(res.headers.get("x-request-id")).toBe("req-d3-1");
@@ -208,50 +239,119 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     const row = body.data[0] as { createdBy: string | null; rules: { timeLimitMinutes: number } | null };
     expect(row.createdBy).toBe(USER_ID);
     expect(row.rules?.timeLimitMinutes).toBe(90);
+    // RPC ถูกเรียกครั้งเดียวพร้อม id ทั้งหน้า (ไม่ใช่ per-row N+1)
+    const rpc = rpcCalls.find((item) => item.fn === "admin_latest_assessment_rules");
+    expect(rpc?.args["p_assessment_ids"]).toEqual([ASSESSMENT_ID]);
   });
 
-  it("embed กติกาเรียง effective_from desc + limit 1 ที่ embed (ไม่กระทบ limit หน้าหลัก)", async () => {
-    const { calls } = mockClient({ assessments: [{ data: [assessmentRow()] }] });
-    await GET(adminUrl());
+  it("R2-M3: select ไร้ assessment_rules embed · กติการวม selection มาทาง RPC ที่คุมบทบาท (ไม่ใช่ column grant)", async () => {
+    const other = "d0000000-0000-4000-8000-000000000002";
+    const { calls, rpcCalls } = mockClient(
+      { assessments: [{ data: [assessmentRow(), assessmentRow({ id: other })] }] },
+      ["staff:exam"],
+      {
+        admin_latest_assessment_rules: [
+          { data: [rulesRpcRow(), rulesRpcRow({ assessment_id: other })] },
+        ],
+      },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(200);
     const call = calls.find((item) => item.table === "assessments");
-    expect(call?.select).toContain("assessment_rules");
-    // pass_pct เปิดตั้งแต่ 0019 (column grant สะสม) — ต้องอยู่ใน embed · is_correct ยังห้าม
-    expect(call?.select?.includes("pass_pct")).toBe(true);
-    expect(call?.select?.includes("is_correct")).toBe(false);
-    expect(call?.orders).toContainEqual({
-      column: "effective_from",
+    // embed ที่เหลือ = course owner เท่านั้น — ต้องไม่มี assessment_rules ใน select อีก
+    expect(call?.select).toContain("course:courses!left");
+    expect(call?.select?.includes("assessment_rules")).toBe(false);
+    // เกณฑ์ "ล่าสุด" ย้ายเข้า RPC (distinct on version desc) — ไม่มี order/limit ของ embed อีก
+    expect(call?.orders).not.toContainEqual({
+      column: "version",
       options: { referencedTable: "assessment_rules", ascending: false },
     });
-    expect(call?.limits).toContain(1);
+    expect(call?.limits).not.toContain(1);
     expect(call?.limits).toContain(21); // limit default 20 + 1 เพื่อคำนวณ hasMore
+    const rpc = rpcCalls.find((item) => item.fn === "admin_latest_assessment_rules");
+    expect(rpc?.args["p_assessment_ids"]).toEqual([ASSESSMENT_ID, other]);
+    // คอลัมน์ RPC ถูก project เป็นรูป embed เดิม — selection (ขอบเขตคลัง) ตกถึง payload ขาออก
+    const body = (await res.json()) as { data: Array<{ rules: { selection: Record<string, unknown> } | null }> };
+    expect(body.data[0]?.rules?.selection).toEqual({ bank_ids: ["b00000000-0000-4000-8000-000000000001"] });
+    expect(body.data[1]?.rules?.selection).toEqual({ bank_ids: ["b00000000-0000-4000-8000-000000000001"] });
   });
 
   it("staff:content ไม่มี assessment:view → 403 ERR-RBAC-001 ก่อนถึง DB", async () => {
-    const { calls } = mockClient({ assessments: [{ data: [] }] }, ["staff:content"]);
+    const { calls, rpcCalls } = mockClient({ assessments: [{ data: [] }] }, ["staff:content"]);
     const res = await GET(adminUrl());
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-RBAC-001");
     expect(errorDefinition("ERR-RBAC-001").httpStatus).toBe(403);
     expect(calls.some((call) => call.table === "assessments")).toBe(false);
+    expect(rpcCalls).toHaveLength(0);
   });
 
-  it("staff:viewer มี assessment:view → 200 (ขอบเขตให้ RLS กรอง)", async () => {
-    mockClient({ assessments: [{ data: [] }] }, ["staff:viewer"]);
+  it("staff:viewer มี assessment:view → 200 (ขอบเขตให้ RLS กรอง) · หน้าว่างไม่ยิง RPC เลย", async () => {
+    const { rpcCalls } = mockClient({ assessments: [{ data: [] }] }, ["staff:viewer"]);
     const res = await GET(adminUrl("?status=draft"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { data: unknown[] };
     expect(body.data).toEqual([]);
+    expect(rpcCalls).toHaveLength(0); // ids เปล่า = skip RPC ตาม helper
   });
 
-  it("B4: แถว drift (กติกา embed pass_pct null) → 503 ERR-SYS-002 fail-closed ไม่รั่ง 200 เพี้ยน", async () => {
-    const drifted = assessmentRow({ assessment_rules: driftedRules() });
-    mockClient({ assessments: [{ data: [drifted] }] });
+  it("B4: แถว RPC กติกา drift (pass_pct null) → 503 ERR-SYS-002 fail-closed ไม่รั่ง 200 เพี้ยน", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow({ pass_pct: null })] }] },
+    );
     const res = await GET(adminUrl());
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift"); // R3-m1: caught at RPC helper layer (projection strict) before merge
+  });
+
+  it("R2-M3: RPC 0051 ล้ม → 503 admin_assessments_rules_rpc_failed (ไม่กลืนเป็น 'ไม่มีกติกา')", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      {
+        admin_latest_assessment_rules: [
+          { error: { code: "42501", message: "x (ERR-RBAC-001|rules_read_forbidden)" } },
+        ],
+      },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_failed");
+  });
+
+  it("R2-M3: RPC คืนค่าไม่ใช่ array → 503 admin_assessments_rules_rpc_drift fail-closed", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: null }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R2-M3: แถว RPC ไม่มี assessment_id → 503 admin_assessments_rules_rpc_drift (merge ไม่ได้ = ตาย)", async () => {
+    const row = rulesRpcRow();
+    delete row["assessment_id"];
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [row] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
   });
 
   it("r8-N1: สำเร็จแต่ data null → 503 admin_assessments_rows_not_array ไม่ใช่ 200 หน้าว่าง", async () => {
@@ -262,43 +362,155 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("admin_assessments_rows_not_array");
   });
+
+  it("R3-m1: RPC คืน id นอกชุดที่ขอ (membership) → 503 admin_assessments_rules_rpc_drift", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      {
+        admin_latest_assessment_rules: [
+          { data: [rulesRpcRow({ assessment_id: "d0000000-0000-4000-8000-000000000099" })] },
+        ],
+      },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R3-m1: RPC คืน id เดิมซ้ำสองแถว (uniqueness พัง) → 503 admin_assessments_rules_rpc_drift", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow(), rulesRpcRow()] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R3-m1: RPC คืน assessment_id ไม่ใช่ UUID → 503 admin_assessments_rules_rpc_drift", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow({ assessment_id: "not-a-uuid" })] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R3-m1: RPC คืนแถวขาดคอลัมน์กติกา (version หาย) → 503 ที่ชั้น helper ก่อน merge", async () => {
+    const row = rulesRpcRow();
+    delete row["version"];
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [row] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("F5: แถว assessments เอง drift (title null · RPC ตอบแถวว่าง) → 503 admin_assessment_row_drift", async () => {
+    mockClient({ assessments: [{ data: [assessmentRow({ title: null })] }] }, ["staff:exam"]);
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessment_row_drift");
+  });
+
+  it("R3-M1: query id=<uuid> → กรอง .eq(\"id\", …) แถวเดียว 200 (read-back ของโมดัลกติกา)", async () => {
+    const { calls } = mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow()] }] },
+    );
+    const res = await GET(adminUrl(`?id=${ASSESSMENT_ID}`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: Array<{ id: string; rules: { version: number } | null }> };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]?.id).toBe(ASSESSMENT_ID);
+    expect(body.data[0]?.rules?.version).toBe(1);
+    const call = calls.find((item) => item.table === "assessments");
+    expect(call?.filters).toContainEqual({ column: "id", value: ASSESSMENT_ID });
+  });
+
+  it("R3-M1: query id ไม่ใช่ UUID → 400 ERR-VAL-001 (strict query schema) ก่อนถึง DB", async () => {
+    const { calls } = mockClient({ assessments: [{ data: [] }] }, ["staff:exam"]);
+    const res = await GET(adminUrl("?id=not-a-uuid"));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(calls.some((call) => call.table === "assessments")).toBe(false);
+  });
 });
 
 describe("POST /admin/assessments — สร้าง draft + กติกา", () => {
-  it("staff:exam สร้างพร้อมกติกา → 201 · insert status='draft' เสมอ + pass_pct ลง rules", async () => {
-    const { calls } = mockClient({
-      assessments: [{ data: assessmentRow() }, { data: assessmentRow() }],
-      assessment_rules: [{ data: null }],
-    });
+  it("staff:exam สร้างพร้อมกติกา → 201 · insert status='draft' เสมอ + pass_pct ลง rules + สรุปจาก RPC 0051", async () => {
+    const { calls, rpcCalls } = mockClient(
+      {
+        assessments: [{ data: assessmentRow() }, { data: assessmentRow() }],
+        assessment_rules: [{ data: null }],
+      },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow({ version: 1 })] }] },
+    );
     const res = await POST(postRequest(VALID_BODY));
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { data: { status: string; createdBy: string | null } };
+    const body = (await res.json()) as {
+      data: { status: string; createdBy: string | null; rules: { version: number; passPct: number } | null };
+    };
     expect(body.data.status).toBe("draft");
     expect(body.data.createdBy).toBe(USER_ID);
+    // สรุปกติกาของ response มาจาก RPC merge หลัง reload — ไม่ใช่แถวที่ insert คืน
+    expect(body.data.rules?.version).toBe(1);
+    expect(body.data.rules?.passPct).toBe(70);
     const insert = calls.find((call) => call.table === "assessments" && call.method === "insert");
     expect((insert?.payload as Record<string, unknown>)?.["status"]).toBe("draft");
     const ruleInsert = calls.find((call) => call.table === "assessment_rules");
     expect((ruleInsert?.payload as Record<string, unknown>)?.["pass_pct"]).toBe(70);
     expect((ruleInsert?.payload as Record<string, unknown>)?.["time_limit_minutes"]).toBe(90);
+    // exam_review_mode ลงทุกแถว rules ที่แทรก (0049 — default จาก schema เมื่อ body ไม่ส่ง)
+    expect((ruleInsert?.payload as Record<string, unknown>)?.["exam_review_mode"]).toBe(
+      "after_final_attempt",
+    );
+    // RPC ถูกเรียกครั้งเดียว (merge หลัง reload) ด้วย id ของแถวใหม่
+    const rpc = rpcCalls.find((item) => item.fn === "admin_latest_assessment_rules");
+    expect(rpc?.args["p_assessment_ids"]).toEqual([ASSESSMENT_ID]);
   });
 
-  it("instructor สร้าง draft ของหลักสูตรตัวเอง (ไม่แนบ rules) → 201 และไม่แตะ assessment_rules", async () => {
-    const { calls } = mockClient(
+  it("instructor สร้าง draft ของหลักสูตรตัวเอง (ไม่แนบ rules) → 201 rules=null และไม่แตะ assessment_rules", async () => {
+    const { calls, rpcCalls } = mockClient(
       { assessments: [{ data: assessmentRow() }, { data: assessmentRow() }] },
       ["instructor"],
     );
     const res = await POST(postRequest({ courseId: COURSE_ID, code: "QUIZ-01", title: "แบบทดสอบ" }));
     expect(res.status).toBe(201);
+    const body = (await res.json()) as { data: { rules: unknown } };
+    expect(body.data.rules).toBeNull(); // ยังไม่มีกติกา — RPC ตอบแถวว่าง
     expect(calls.some((call) => call.table === "assessment_rules")).toBe(false);
+    expect(rpcCalls).toHaveLength(1); // reload merge ยังเรียก RPC หนึ่งครั้ง
   });
 
   it("instructor แนบ rules → 403 ERR-RBAC-001 ก่อนเขียน DB (ar_write เฉพาะ staff:exam/sa)", async () => {
-    const { calls } = mockClient({ assessments: [], assessment_rules: [] }, ["instructor"]);
+    const { calls, rpcCalls } = mockClient({ assessments: [], assessment_rules: [] }, ["instructor"]);
     const res = await POST(postRequest(VALID_BODY));
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe("ERR-RBAC-001");
     expect(calls.some((call) => call.table === "assessments")).toBe(false);
+    expect(rpcCalls).toHaveLength(0);
   });
 
   it("instructor สร้างบนหลักสูตรคนอื่น → RLS 42501 → 403 ERR-RBAC-001", async () => {
@@ -335,21 +547,24 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     expect(calls.some((call) => call.table === "assessments")).toBe(false);
   });
 
-  it("B4: สร้างสำเร็จแต่ reload drift (กติกาเพี้ยน) → 503 ERR-SYS-002 ไม่ตอบ 201 ที่ payload เพี้ยน", async () => {
-    const drifted = assessmentRow({ assessment_rules: driftedRules() });
-    mockClient({
-      assessments: [{ data: assessmentRow() }, { data: drifted }],
-      assessment_rules: [{ data: null }],
-    });
+  it("B4: reload ผ่านแต่กติกา RPC drift (pass_pct null) → 503 ERR-SYS-002 ไม่ตอบ 201 ที่ payload เพี้ยน", async () => {
+    mockClient(
+      {
+        assessments: [{ data: assessmentRow() }, { data: assessmentRow() }],
+        assessment_rules: [{ data: null }],
+      },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow({ pass_pct: null })] }] },
+    );
     const res = await POST(postRequest(VALID_BODY));
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift"); // R3-m1: caught at RPC helper layer (projection strict) before merge
   });
 
   it("r3-G3: INSERT คืนแถวที่ id หาย (created drift) → 503 ERR-SYS-002 ก่อนแตะ rules/reload ด้วย id ที่ไม่ผ่าน validation", async () => {
-    const { calls } = mockClient({
+    const { calls, rpcCalls } = mockClient({
       assessments: [{ data: assessmentRow({ id: null }) }],
       assessment_rules: [{ data: null }],
     });
@@ -361,6 +576,7 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     // ห้ามนำ id ที่ไม่ผ่าน validation ไปใช้ต่อ: ไม่มี rules insert · ไม่มี reload (select ครั้งที่สอง)
     expect(calls.some((call) => call.table === "assessment_rules")).toBe(false);
     expect(calls.filter((call) => call.table === "assessments")).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(0);
   });
 
   it("r3-G4: INSERT คืน course ที่มีคีย์เกิน (nested strict) → 503 ERR-SYS-002 ไม่ strip เงียบแล้วตอบ 201", async () => {

@@ -40,6 +40,13 @@ export const ADMIN_ASSESSMENT_STATUSES = ["draft", "published", "closed", "archi
 
 export const ADMIN_PROCTORING_MODES = ["none", "basic"] as const;
 
+/**
+ * โหมดเปิดเฉลยหลังสอบ — enum exam_review_mode (0049 · Wave G P3 D83):
+ * after_final_attempt = เปิดเฉลยเมื่อจบโอกาสสอบหรือผ่านแล้ว (default ของคอลัมน์) ·
+ * never = ไม่เปิดเฉลยแม้ครบครั้ง/ผ่านแล้ว
+ */
+export const EXAM_REVIEW_MODES = ["after_final_attempt", "never"] as const;
+
 /* ─── query ของ list endpoints (API-SPECIFICATION §1.2 + §3.8) ─── */
 
 /** query ของ GET /admin/assessments — limit/cursor จาก PageQuery + ฟิลเตอร์ status/courseId */
@@ -48,6 +55,8 @@ export const AdminAssessmentsQuery = z
     ...PageQuery.shape,
     status: z.enum(ADMIN_ASSESSMENT_STATUSES).optional(),
     courseId: z.uuid().optional(),
+    // additive (gate GP3 r3 R3-M1): ชี้แถวเดียว — read-back ของโมดัลกติกา (cache:"no-store")
+    id: z.uuid().optional(),
   })
   .strict();
 
@@ -111,6 +120,7 @@ export const AssessmentRuleInput = z
     selection: z.record(z.string(), z.unknown()).optional(),
     requireCourseComplete: z.boolean().default(true),
     proctoringMode: z.enum(ADMIN_PROCTORING_MODES).default("basic"),
+    examReviewMode: z.enum(EXAM_REVIEW_MODES).default("after_final_attempt"),
     effectiveFrom: IsoTimestamp.optional(),
   })
   .strict();
@@ -242,9 +252,9 @@ export const QuestionResource = z.object({
 export type QuestionResourceParsed = z.infer<typeof QuestionResource>;
 
 /**
- * สรุปกติกาของ GET /admin/assessments — คอลัมน์ตาม **column grant ของ authenticated**
- * (pass_pct ได้ grant เพิ่มใน 0019 · selection ยังไม่เปิดตาม 0010 L711-L714 —
- * เส้นทาง lane นี้ใช้ user JWT ห้าม service_role)
+ * สรุปกติกาของ GET /admin/assessments — แถวกติกาล่าสุดมาจาก **RPC admin_latest_assessment_rules
+ * (0051)** ครบทุกคอลัมน์ ไม่ใช่ embed ตารางอีกต่อไป (0050 เปิด column grant selection แล้วพบ
+ * ผู้เรียนอ่านทางตรง PostgREST ได้ — gate GP3 r2 R2-M3 → 0051 revoke + RPC คุมบทบาทในตัว)
  */
 export const AssessmentRuleSummary = z.object({
   version: z.number().int().min(1),
@@ -255,7 +265,10 @@ export const AssessmentRuleSummary = z.object({
   cooldownMinutes: z.number().int(),
   shuffleQuestions: z.boolean(),
   shuffleOptions: z.boolean(),
+  requireCourseComplete: z.boolean(),
+  selection: z.record(z.string(), z.unknown()),
   proctoringMode: z.enum(ADMIN_PROCTORING_MODES),
+  examReviewMode: z.enum(EXAM_REVIEW_MODES),
   effectiveFrom: IsoTimestamp,
 }).strict();
 
@@ -315,7 +328,7 @@ export type QuestionBankCreateResultParsed = z.infer<typeof QuestionBankCreateRe
 
 /* ─── แถว DB (snake_case ตามคอลัมน์จริง) + mapper ─── */
 
-/** แถว assessment_rules ที่ฝังมากับ assessments — เฉพาะคอลัมน์ที่ authenticated ได้ grant (pass_pct เพิ่ม 0019; selection ยังซ่อน) */
+/** แถว assessment_rules ที่ BFF merge จาก RPC admin_latest_assessment_rules (0051) เป็นรูป embed เดิม — คอลัมน์ 14 ตัวตาม RPC (เลิก embed ตารางหลัง 0051 revoke selection — R2-M3) */
 export interface AssessmentRuleRow {
   readonly version: number;
   readonly pass_pct: number;
@@ -325,11 +338,14 @@ export interface AssessmentRuleRow {
   readonly attempt_cooldown_minutes: number;
   readonly shuffle_questions: boolean;
   readonly shuffle_options: boolean;
+  readonly require_course_complete: boolean;
+  readonly selection: Record<string, unknown>;
   readonly proctoring_mode: string;
+  readonly exam_review_mode: string;
   readonly effective_from: string;
 }
 
-/** แถว assessments + embed (PostgREST) — course = เจ้าของหลักสูตร (created_by), rules = effective ล่าสุด */
+/** แถว assessments + embed (PostgREST) — course = เจ้าของหลักสูตร (created_by), rules = version สูงสุด */
 export interface AdminAssessmentRow {
   readonly id: string;
   readonly code: string;
@@ -361,7 +377,10 @@ export const AssessmentRuleRowSchema = z
     attempt_cooldown_minutes: z.number().int(),
     shuffle_questions: z.boolean(),
     shuffle_options: z.boolean(),
+    require_course_complete: z.boolean(),
+    selection: z.record(z.string(), z.unknown()),
     proctoring_mode: z.enum(ADMIN_PROCTORING_MODES),
+    exam_review_mode: z.enum(EXAM_REVIEW_MODES),
     effective_from: IsoTimestamp,
   })
   .strict();
@@ -390,7 +409,7 @@ export function parseAdminAssessmentRow(row: unknown): AdminAssessmentRow {
   return parsed.data;
 }
 
-/** map แถว assessments → resource — เลือกกติกา effective ล่าสุด (effective_from มากสุด — handler เรียงให้) */
+/** map แถว assessments → resource — เลือกกติกา version สูงสุด (handler เรียง version desc + limit 1 — "ล่าสุด" = ฐานที่ RPC ใช้คิด max+1 ต่อ) */
 export function toAdminAssessmentResource(row: AdminAssessmentRow): AdminAssessmentResourceParsed {
   const latestRule = row.assessment_rules[0];
   const rules: AssessmentRuleSummaryParsed | null =
@@ -405,7 +424,10 @@ export function toAdminAssessmentResource(row: AdminAssessmentRow): AdminAssessm
           cooldownMinutes: latestRule.attempt_cooldown_minutes,
           shuffleQuestions: latestRule.shuffle_questions,
           shuffleOptions: latestRule.shuffle_options,
+          requireCourseComplete: latestRule.require_course_complete,
+          selection: latestRule.selection,
           proctoringMode: latestRule.proctoring_mode as AssessmentRuleSummaryParsed["proctoringMode"],
+          examReviewMode: latestRule.exam_review_mode as AssessmentRuleSummaryParsed["examReviewMode"],
           effectiveFrom: latestRule.effective_from,
         };
   return {
@@ -772,4 +794,89 @@ export function mapAdminExamDbError(error: AdminExamDbErrorLike): AppError {
     return new AppError("ERR-VAL-001", { details: { reason: "db_constraint_failed" } });
   }
   return new AppError("ERR-SYS-002", { details: { reason: "admin_exam_db_error" } });
+}
+
+/* ─── Wave G P3 — เพิ่มกติกา version ใหม่ (D87 · API-SPECIFICATION §3.8 POST /admin/assessments/{id}/rules) ─── */
+
+/**
+ * แถว jsonb ที่ RPC admin_add_assessment_rules (0049) คืน — returning * ของ
+ * assessment_rules (0005 L66-L82 + exam_review_mode 0049 · selection NOT NULL ตามคอลัมน์)
+ * ตรวจขาเข้าก่อน map (drift → ERR-SYS-002 503 ตามแบบ r4-H2a)
+ */
+export const AssessmentRuleRpcRowSchema = z
+  .object({
+    id: z.uuid(),
+    assessment_id: z.uuid(),
+    version: z.number().int().min(1),
+    time_limit_minutes: z.number().int(),
+    question_count: z.number().int(),
+    pass_pct: z.number().int().min(1).max(100),
+    max_attempts: z.number().int(),
+    attempt_cooldown_minutes: z.number().int(),
+    shuffle_questions: z.boolean(),
+    shuffle_options: z.boolean(),
+    selection: z.record(z.string(), z.unknown()),
+    require_course_complete: z.boolean(),
+    proctoring_mode: z.enum(ADMIN_PROCTORING_MODES),
+    exam_review_mode: z.enum(EXAM_REVIEW_MODES),
+    effective_from: IsoTimestamp,
+    created_at: IsoTimestamp,
+  })
+  .strict();
+
+export type AssessmentRuleRpcRow = z.infer<typeof AssessmentRuleRpcRowSchema>;
+
+/** แถว RPC ดิบ → ผ่านการตรวจแล้ว — drift → ERR-SYS-002 (503 ไม่ leak รายละเอียด) */
+export function parseAssessmentRuleRpcRow(row: unknown): AssessmentRuleRpcRow {
+  const parsed = AssessmentRuleRpcRowSchema.safeParse(row);
+  if (!parsed.success) {
+    throw new AppError("ERR-SYS-002", { details: { reason: "assessment_rule_rpc_row_drift" } });
+  }
+  return parsed.data;
+}
+
+/** resource ของ POST /admin/assessments/{id}/rules — แถวกติกาที่แทรก (camelCase ตาม convention §1.1) */
+export const AssessmentRuleResource = z
+  .object({
+    id: z.uuid(),
+    assessmentId: z.uuid(),
+    version: z.number().int().min(1),
+    timeLimitMinutes: z.number().int(),
+    questionCount: z.number().int(),
+    passPct: z.number().int().min(1).max(100),
+    maxAttempts: z.number().int(),
+    attemptCooldownMinutes: z.number().int(),
+    shuffleQuestions: z.boolean(),
+    shuffleOptions: z.boolean(),
+    selection: z.record(z.string(), z.unknown()),
+    requireCourseComplete: z.boolean(),
+    proctoringMode: z.enum(ADMIN_PROCTORING_MODES),
+    examReviewMode: z.enum(EXAM_REVIEW_MODES),
+    effectiveFrom: IsoTimestamp,
+    createdAt: IsoTimestamp,
+  })
+  .strict();
+
+export type AssessmentRuleResourceParsed = z.infer<typeof AssessmentRuleResource>;
+
+/** map แถว RPC → resource — map ตรง ไม่ fabricate ค่า (mapper เดียวใช้ทั้งขา parse และ view ขาออก) */
+export function toAssessmentRuleResource(row: AssessmentRuleRpcRow): AssessmentRuleResourceParsed {
+  return {
+    id: row.id,
+    assessmentId: row.assessment_id,
+    version: row.version,
+    timeLimitMinutes: row.time_limit_minutes,
+    questionCount: row.question_count,
+    passPct: row.pass_pct,
+    maxAttempts: row.max_attempts,
+    attemptCooldownMinutes: row.attempt_cooldown_minutes,
+    shuffleQuestions: row.shuffle_questions,
+    shuffleOptions: row.shuffle_options,
+    selection: row.selection,
+    requireCourseComplete: row.require_course_complete,
+    proctoringMode: row.proctoring_mode,
+    examReviewMode: row.exam_review_mode,
+    effectiveFrom: row.effective_from,
+    createdAt: row.created_at,
+  };
 }

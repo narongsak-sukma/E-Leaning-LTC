@@ -126,12 +126,13 @@ const LESSONS = [
   { id: LESSON2_ID, module_id: MODULE1_ID, type: "document", sort_order: 2 },
   { id: LESSON3_ID, module_id: MODULE2_ID, type: "quiz", sort_order: 1 },
 ];
-/** L1 จบแล้ว, L3 กำลังเรียน — L2 ยังไม่เริ่ม (ไม่มีแถวความคืบหน้า) */
+/** L1 จบแล้ว (ตำแหน่งสูงสุด 600), L3 กำลังเรียน (45) — L2 ยังไม่เริ่ม (ไม่มีแถวความคืบหน้า) */
 const PROGRESS = [
   {
     lesson_id: LESSON1_ID,
     status: "completed",
     watch_pct: 100,
+    video_max_position_sec: 600,
     quiz_score_pct: null,
     completed_at: "2026-09-05T00:00:00+00:00",
   },
@@ -139,6 +140,7 @@ const PROGRESS = [
     lesson_id: LESSON3_ID,
     status: "in_progress",
     watch_pct: 0,
+    video_max_position_sec: 45,
     quiz_score_pct: null,
     completed_at: null,
   },
@@ -183,19 +185,47 @@ describe("GET /courses/{id}/progress — ประกอบ summary", () => {
       lessonType: "video",
       status: "completed",
       watchPct: 100,
+      videoMaxPositionSec: 600,
       quizScorePct: null,
       completedAt: "2026-09-05T00:00:00+00:00",
     });
-    // บทที่ไม่มีแถวความคืบหน้า = not_started ด้วยค่า default
+    // บทที่ไม่มีแถวความคืบหน้า = not_started ด้วยค่า default (videoMaxPositionSec = null)
     expect(lessons1[1]).toEqual({
       lessonId: LESSON2_ID,
       lessonType: "document",
       status: "not_started",
       watchPct: 0,
+      videoMaxPositionSec: null,
       quizScorePct: null,
       completedAt: null,
     });
     expect(modules[1]?.["progressPct"]).toBe(0);
+  });
+
+  it("video_max_position_sec (D85): 0 = ค่าจริง · null/ไม่ใช่ตัวเลข → null (แถว legacy)", async () => {
+    const { response } = await callRoute({
+      single: { enrollments: ENROLLMENT },
+      list: {
+        course_modules: MODULES,
+        lessons: LESSONS,
+        lesson_progress: [
+          { lesson_id: LESSON1_ID, status: "in_progress", watch_pct: 5, video_max_position_sec: 0, quiz_score_pct: null, completed_at: null },
+          { lesson_id: LESSON2_ID, status: "in_progress", watch_pct: 0, video_max_position_sec: "60", quiz_score_pct: null, completed_at: null },
+          { lesson_id: LESSON3_ID, status: "in_progress", watch_pct: 0, video_max_position_sec: null, quiz_score_pct: null, completed_at: null },
+        ],
+      },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { data: Record<string, unknown> };
+    const modules = body.data["modules"] as Array<Record<string, unknown>>;
+    const lessons1 = modules[0]?.["lessons"] as Array<Record<string, unknown>>;
+    // v = 0 → คงค่า 0 (ค่าจริง — ห้ามกลายเป็น null)
+    expect(lessons1[0]?.["videoMaxPositionSec"]).toBe(0);
+    // ค่าที่ไม่ใช่ตัวเลข ("60") → null — ไม่พัง contract ขาออก
+    expect(lessons1[1]?.["videoMaxPositionSec"]).toBe(null);
+    // null (แถว legacy) → null ตามสัญญา
+    const lessons3 = modules[1]?.["lessons"] as Array<Record<string, unknown>> | undefined;
+    expect(lessons3?.[0]?.["videoMaxPositionSec"]).toBe(null);
   });
 
   it("หลักสูตรไม่มีโมดูล → lessonTotal 0 + progressPct 0 (ไม่ query lessons ซ้ำ)", async () => {

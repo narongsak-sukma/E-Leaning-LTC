@@ -34,7 +34,10 @@ function makeRuleSummary(overrides: Partial<ExamAdminAssessmentRuleSummary> = {}
     cooldownMinutes: 1440,
     shuffleQuestions: true,
     shuffleOptions: true,
+    requireCourseComplete: true,
+    selection: {},
     proctoringMode: "basic",
+    examReviewMode: "after_final_attempt",
     effectiveFrom: "2026-09-01T00:00:00Z",
     ...overrides,
   };

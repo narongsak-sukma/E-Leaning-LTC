@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import { AdminDataState } from "@/components/admin/AdminDataState";
 import { AssessmentFormModal } from "@/components/admin/AssessmentFormModal";
+import { AssessmentRulesVersionModal } from "@/components/admin/AssessmentRulesVersionModal";
 import { DataTable, type DataTableColumn } from "@/components/admin/DataTable";
 import { StatusBadge } from "@/components/admin/StatusBadge";
 import { getAdminCourses, getAdminStaffSession } from "@/lib/fixtures/admin";
@@ -179,6 +180,35 @@ export default async function AdminAssessmentsPage({
           canCreate={canCreate}
           allowRules={allowRules}
         />
+        {/* เพิ่มกติกา version ใหม่ (Wave G P3 D87) — เขียนกติกาได้เฉพาะ staff:exam/super_admin */}
+        {allowRules ? (
+          <AssessmentRulesVersionModal
+            assessmentOptions={rows.map((assessment) => ({
+              id: assessment.id,
+              label: `${assessment.code} · ${assessment.title}`,
+              currentVersion: assessment.rules?.version ?? null,
+              // กติกาล่าสุดทั้งแถว — โมดัลใช้ prefill ฟอร์มและส่งต่อ selection เดิม
+              currentRules:
+                assessment.rules === null
+                  ? null
+                  : {
+                      version: assessment.rules.version,
+                      timeLimitMinutes: assessment.rules.timeLimitMinutes,
+                      questionCount: assessment.rules.questionCount,
+                      passPct: assessment.rules.passPct,
+                      maxAttempts: assessment.rules.maxAttempts,
+                      cooldownMinutes: assessment.rules.cooldownMinutes,
+                      shuffleQuestions: assessment.rules.shuffleQuestions,
+                      shuffleOptions: assessment.rules.shuffleOptions,
+                      requireCourseComplete: assessment.rules.requireCourseComplete,
+                      selection: assessment.rules.selection,
+                      proctoringMode: assessment.rules.proctoringMode,
+                      examReviewMode: assessment.rules.examReviewMode,
+                    },
+            }))}
+            allowRules={allowRules}
+          />
+        ) : null}
       </div>
 
       <div className="mt-4">

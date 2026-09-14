@@ -191,10 +191,30 @@ describe("View schemas — ขาออก validate ก่อนส่ง (§1-4
         lessonType: "video",
         status: "completed",
         watchPct: 100,
+        videoMaxPositionSec: 599,
         quizScorePct: null,
         completedAt: TS,
       }).success,
     ).toBe(true);
+  });
+
+  it("CourseLessonProgressView: videoMaxPositionSec (D85) — 0/null ผ่าน · ขาด field/ติดลบ/ทศนิยม → ไม่ผ่าน", () => {
+    const base = {
+      lessonId: UUID,
+      lessonType: "video",
+      status: "in_progress",
+      watchPct: 40,
+      quizScorePct: null,
+      completedAt: null,
+    };
+    // 0 เป็นค่าจริง (ตำแหน่งสูงสุดที่เคยบันทึก = 0) · null = แถว legacy ก่อนมีคอลัมน์ — ทั้งคู่ผ่าน
+    expect(CourseLessonProgressView.safeParse({ ...base, videoMaxPositionSec: 0 }).success).toBe(true);
+    expect(CourseLessonProgressView.safeParse({ ...base, videoMaxPositionSec: null }).success).toBe(true);
+    // ขาด field → ไม่ผ่าน (ทุกแถวต้องส่ง field นี้ออกเสมอ)
+    expect(CourseLessonProgressView.safeParse(base).success).toBe(false);
+    // ติดลบ/ทศนิยม → ไม่ผ่าน (int ≥ 0 เท่านั้น)
+    expect(CourseLessonProgressView.safeParse({ ...base, videoMaxPositionSec: -1 }).success).toBe(false);
+    expect(CourseLessonProgressView.safeParse({ ...base, videoMaxPositionSec: 1.5 }).success).toBe(false);
   });
 
   it("CourseModuleProgressView + CourseProgressView: ต้นไม้ความคืบหน้าเต็ม", () => {
@@ -203,6 +223,7 @@ describe("View schemas — ขาออก validate ก่อนส่ง (§1-4
       lessonType: "quiz",
       status: "completed",
       watchPct: 0,
+      videoMaxPositionSec: null,
       quizScorePct: 80,
       completedAt: TS,
     };

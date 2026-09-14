@@ -34,6 +34,7 @@ const DOC_CODES: readonly ErrorCode[] = [
   "ERR-ASM-004",
   "ERR-ASM-005",
   "ERR-ASM-006",
+  "ERR-ASM-007",
   "ERR-CERT-001",
   "ERR-CERT-002",
   "ERR-CRD-001",
@@ -60,6 +61,13 @@ describe("ERROR_REGISTRY — ตรงกับ API-SPECIFICATION §2", () => {
       expect(errorDefinition(code).retired).toBe(true);
       expect(errorDefinition(code).httpStatus).toBeNull();
     }
+  });
+
+  it("ERR-ASM-007 — 422 ข้อความไทยตาม API-SPECIFICATION §2 (start_attempt B3.5 · 0049)", () => {
+    expect(errorDefinition("ERR-ASM-007").httpStatus).toBe(422);
+    expect(new AppError("ERR-ASM-007").message).toBe(
+      "ผ่านการสอบนี้แล้ว จึงสอบซ้ำไม่ได้ — ดูผลสอบได้ที่หน้าผลสอบ",
+    );
   });
 });
 

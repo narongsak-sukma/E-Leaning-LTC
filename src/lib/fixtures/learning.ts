@@ -35,6 +35,8 @@ export interface LessonSummary {
 /** บทเรียนในโครงสร้างหลักสูตรที่ผูกสถานะความคืบหน้าแล้ว (GET /courses/{id} + progress) */
 export interface OutlineLesson extends LessonSummary {
   watchPct: number;
+  /** ตำแหน่งสูงสุดที่เคยบันทึก (วินาที · D85) — null = แถว legacy ก่อนมีคอลัมน์ */
+  videoMaxPositionSec: number | null;
 }
 
 export interface CourseModule {
@@ -51,6 +53,8 @@ export interface ContinueLessonInfo {
   status: LessonStatus;
   label: string;
   watchPct: number;
+  /** ตำแหน่งสูงสุดที่เคยบันทึก (วินาที · D85) — null = แถว legacy ก่อนมีคอลัมน์ */
+  videoMaxPositionSec: number | null;
 }
 
 export interface EnrolledCourseCard {
@@ -437,10 +441,17 @@ export function buildCourseOutline(
   detail: CourseDetailSummary,
   progress: CourseProgress,
 ): CourseOutline {
-  const stateByLesson = new Map<string, { status: LessonStatus; watchPct: number }>();
+  const stateByLesson = new Map<
+    string,
+    { status: LessonStatus; watchPct: number; videoMaxPositionSec: number | null }
+  >();
   for (const moduleRow of progress.modules) {
     for (const lesson of moduleRow.lessons) {
-      stateByLesson.set(lesson.lessonId, { status: lesson.status, watchPct: lesson.watchPct });
+      stateByLesson.set(lesson.lessonId, {
+        status: lesson.status,
+        watchPct: lesson.watchPct,
+        videoMaxPositionSec: lesson.videoMaxPositionSec,
+      });
     }
   }
   const modules: CourseModule[] = detail.modules.map((module) => ({
@@ -454,6 +465,7 @@ export function buildCourseOutline(
         type: lesson.type,
         status: state?.status ?? "not_started",
         watchPct: state?.watchPct ?? 0,
+        videoMaxPositionSec: state?.videoMaxPositionSec ?? null,
       };
     }),
   }));
@@ -569,6 +581,7 @@ export function buildEnrolledCourseCard(
             status: picked.lesson.status,
             label: picked.label,
             watchPct: picked.lesson.watchPct,
+            videoMaxPositionSec: picked.lesson.videoMaxPositionSec,
           },
     isLoaded: detail !== null && progress !== null,
   };

@@ -18,6 +18,7 @@ import { useState } from "react";
 import { startAttempt, ExamApiError } from "@/lib/exam/exam-api";
 import { storeExamPaper } from "@/lib/exam/exam-paper-cache";
 import { serverOffsetMsOf } from "@/lib/exam/exam-timer";
+import { errorDefinition } from "@/lib/errors";
 
 /** สถานะของขั้นตอนเริ่มสอบ - idle / กำลังเริ่ม / ผิดพลาดที่จัดกลุ่มแล้ว */
 type StartPhase =
@@ -58,6 +59,15 @@ function mapStartError(error: unknown): StartErrorView {
           title: "ใช้สิทธิ์สอบครบตามกติกาแล้ว",
           message:
             "คุณใช้จำนวนครั้งการสอบครบตามกติกาแล้ว ตรวจสอบผลการสอบได้ที่หน้าประวัติการสอบ",
+        };
+      case "ERR-ASM-007":
+        // ASM-012 คู่พลัง open-on-pass ⇔ block-retake-on-pass (0049 — B3.5 ก่อน cooldown):
+        // ผ่านแล้ว = สอบซ้ำไม่ได้ถาวร — ข้อความเต็มมาจาก registry แหล่งเดียว
+        // (errorDefinition) ไม่ hardcode ซ้ำใน UI ให้เพี้ยนคนละทิศ (tone blocked เหมือน ASM-001)
+        return {
+          tone: "blocked",
+          title: "ผ่านการสอบนี้แล้ว จึงสอบซ้ำไม่ได้",
+          message: errorDefinition("ERR-ASM-007").message,
         };
       case "ERR-ASM-003":
         return {

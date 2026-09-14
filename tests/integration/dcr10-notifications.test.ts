@@ -1172,12 +1172,17 @@ describe.skipIf(!DB_URL)(
       const attempt1 = await passExamViaRest(listUser);
       const tick1 = await runTick();
       expect(tick1.processed, JSON.stringify(tick1)).toBeGreaterThanOrEqual(1);
+      // 0049 B3.5: ผ่านแล้วสอบซ้ำไม่ได้ — void ครั้งที่ผ่าน (หลัง tick เพื่อให้ notification
+      // เกิดจาก event ตามปกติ) เพื่อเริ่มครั้งถัดไปได้ (B3.5 นับเฉพาะ status <> 'voided')
+      await psql(`update public.assessment_attempts set status = 'voided' where id = '${attempt1}';`);
       const attempt2 = await passExamViaRest(listUser);
       const tick2 = await runTick();
       expect(tick2.processed, JSON.stringify(tick2)).toBeGreaterThanOrEqual(1);
+      await psql(`update public.assessment_attempts set status = 'voided' where id = '${attempt2}';`);
       const attempt3 = await passExamViaRest(listUser);
       const tick3 = await runTick();
       expect(tick3.processed, JSON.stringify(tick3)).toBeGreaterThanOrEqual(1);
+      // ครั้งที่ 3 คงไว้ (ไม่ void) — จบที่สถานะ passed ตามจริงของผู้ใช้ทดสอบ
       const list1 = await userRpc("my_notifications", listUser.accessToken, {});
       expect(list1.status, list1.text.slice(0, 300)).toBe(200);
       const page1All = list1.json as NotifListResult;
