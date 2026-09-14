@@ -23,6 +23,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as sleep } from "node:timers/promises";
 import { REPO_ROOT, psql, psqlScalar } from "../integration/helpers.js";
 import {
@@ -60,7 +61,32 @@ create table if not exists test_infra.barrier_markers (
   created_at timestamptz not null default now()
 );
 create index if not exists barrier_markers_file_idx on test_infra.barrier_markers (run_id, file, kind);
+create table if not exists test_infra.cleanup_descendants (
+  id uuid primary key default gen_random_uuid(),
+  run_id text not null,
+  file text not null,
+  label text not null,
+  status text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists cleanup_descendants_idx on test_infra.cleanup_descendants (run_id, file, status);
 `;
+
+// ─── teardown context (ALS ผูกไฟล์ — 8h h3/h5) ────────────────────────────────
+
+interface TeardownCtx {
+  readonly file: string;
+  readonly teardownId: string;
+}
+
+const teardownCtxAls = new AsyncLocalStorage<TeardownCtx>();
+
+/** context ของ teardown "ของไฟล์นี้จริง" — guardedAfterAll รัน fn ใต้ context นี้
+ *  (mutation ใน context นี้ = งานของ teardown · นอก context = ปฏิเสธ) */
+export function teardownContextActiveFor(file: string): boolean {
+  return teardownCtxAls.getStore()?.file === file;
+}
 
 let barrierDdlReady = false;
 
@@ -180,6 +206,38 @@ export async function markersCreatedSince(file: string, cleanupStart: string): P
       and kind <> 'cleanup-ran'
       and created_at >= ${sqlLit(cleanupStart)}::timestamptz;`);
   return Number(raw.trim());
+}
+
+/**
+ * primitive เขียนของโลก marker — จุดบังคับ "mutation หลุดหลังหน้าต่าง" (8h h1):
+ * อนุญาตเฉพาะ setup (running/settled) และ teardown-running "ใน context ของ
+ * ไฟล์นี้จริง" (ALS จาก guardedAfterAll · h3) — นอกจากนั้น (teardown-settled /
+ * poisoned / cleared-manual / setup-failed / ไม่มีแถว / teardown-running ไร้
+ * context) = โยนก่อนแตะ marker + ledger event 'mutation-rejected' — write ที่
+ * หลุดหลัง release ไม่มีทางลงเงียบๆ (ต่างจาก insertMarkers/violationProbe ที่เป็น
+ * ระดับ infrastructure/scenario setup)
+ */
+export async function guardedMarkerInsert(file: string, kind: string, note = ""): Promise<void> {
+  await ensureBarrierInfra();
+  const st = await fileState(file);
+  const inTeardownCtx = teardownContextActiveFor(file);
+  const phase = st?.phase ?? "no-file";
+  const allowed =
+    st !== null &&
+    (st.phase === "setup-running" ||
+      st.phase === "setup-settled" ||
+      (st.phase === "teardown-running" && inTeardownCtx));
+  if (!allowed) {
+    await ledgerWrite("note", {
+      event: "mutation-rejected",
+      reason: `phase-${phase}`,
+      file,
+      kind,
+      inTeardownCtx,
+    });
+    throw new Error(`mutation-rejected(phase-${phase}): ${file} ไม่รับ marker ใหม่ (${kind})`);
+  }
+  await insertMarkers(file, kind, 1, note);
 }
 
 // ─── 1) file lifecycle — begin/settle/teardown ────────────────────────────────
@@ -315,6 +373,87 @@ export async function runFileCleanupTx(file: string): Promise<string> {
   return ts.trim();
 }
 
+// ─── descendants ของ cleanup (r20-M2 · 8h h5) ─────────────────────────────────
+
+export interface CleanupChildHandle {
+  readonly id: string;
+  readonly done: Promise<"completed" | "failed">;
+}
+
+async function descendantsRunning(file: string): Promise<number> {
+  const run = currentRunId();
+  const raw = await psqlScalar(`
+    select count(*) from test_infra.cleanup_descendants
+    where run_id = ${sqlLit(run)} and file = ${sqlLit(file)} and status = 'running';`);
+  return Number(raw.trim());
+}
+
+/** รอ descendants 'running' หมด — deadline ล้น = poison + โยน (teardown ไม่ปิด
+ *  ไฟล์อัตโนมัติ — งานลูกที่ตื่นทีหลังต้องเจอ phase ปฏิเสธ no-fallback) */
+export async function awaitDescendants(file: string, deadlineMs: number, pollMs = 150): Promise<void> {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    if ((await descendantsRunning(file)) === 0) return;
+    if (Date.now() > deadline) {
+      await filePoison(file, `descendants-overstayed-budget (${deadlineMs}ms)`);
+      throw new FileSettleError(
+        `descendants ของ ${file} ไม่จบภายใน ${deadlineMs}ms — poison (ไฟล์ไม่ปิดอัตโนมัติ)`,
+      );
+    }
+    await sleep(pollMs);
+  }
+}
+
+/**
+ * ปล่อยงานลูกจาก cleanup fn — ต้องเรียกใน teardown context ของไฟล์เท่านั้น
+ * (ALS จาก guardedAfterAll) · แทรก descendant row 'running' ก่อนคืน handle
+ * (awaitDescendants เห็นก่อน body จบเสมอ) แล้วรัน body แบบ async — fn คืนก่อนได้
+ * แต่ teardown-settled ต้องรอลูกจบจริง · callerModule จำกัด tests/barrier-proof/
+ * เท่านั้น (r30 #19) · งานลูกที่ตื่นหลัง token ตาย (phase ปิด/พิษ) ต้องเจอ
+ * guardedMarkerInsert ปฏิเสธ — ห้ามตกกลับไปใช้สิทธิ์ caller ปกติ (no-fallback)
+ */
+export async function spawnCleanupChild(
+  file: string,
+  label: string,
+  body: () => Promise<void>,
+  callerModule: string,
+): Promise<CleanupChildHandle> {
+  if (!/^tests\/barrier-proof\//.test(callerModule)) {
+    throw new Error(
+      `spawnCleanupChild: ปฏิเสธ — callerModule ต้องอยู่ใต้ tests/barrier-proof/ เท่านั้น (ได้ ${callerModule})`,
+    );
+  }
+  if (teardownContextActiveFor(file) !== true) {
+    throw new Error(`spawnCleanupChild: ปฏิเสธ — ต้องเรียกใน teardown context ของ ${file} เท่านั้น`);
+  }
+  const run = currentRunId();
+  const id = randomUUID();
+  await psql(
+    `insert into test_infra.cleanup_descendants (id, run_id, file, label, status)
+     values ('${id}', ${sqlLit(run)}, ${sqlLit(file)}, ${sqlLit(label)}, 'running');`,
+    { quiet: true },
+  );
+  const done = (async (): Promise<"completed" | "failed"> => {
+    try {
+      await body();
+      await psql(
+        `update test_infra.cleanup_descendants set status = 'completed', updated_at = now() where id = '${id}';`,
+        { quiet: true },
+      );
+      await ledgerWrite("note", { event: "cleanup-child-completed", file, label, id });
+      return "completed";
+    } catch (err) {
+      await psql(
+        `update test_infra.cleanup_descendants set status = 'failed', updated_at = now() where id = '${id}';`,
+        { quiet: true },
+      );
+      await ledgerWrite("note", { event: "cleanup-child-failed", file, label, id, error: String(err).slice(0, 300) });
+      return "failed";
+    }
+  })();
+  return { id, done };
+}
+
 /**
  * afterAll แบบมีร่องรอย (release):
  * (1) fast-refuse — lifecycle ไม่ตรง/ไม่เคยเริ่ม = ห้าม cleanup (8b: bb หลัง guard
@@ -329,10 +468,14 @@ export async function runFileCleanupTx(file: string): Promise<string> {
  */
 export interface GuardedAfterAllOptions {
   readonly lifecycleId: string;
-  /** barrier fn ก่อน cleanup — ล้ม/budget เกิน = poison (cleanup ไม่รัน) */
+  /** barrier fn ก่อน cleanup — ล้ม/budget เกิน = poison (cleanup ไม่รัน) · รันใต้
+   *  teardown context ของไฟล์ (ALS) — mutation ที่ fn (หรือ descendant) เขียน =
+   *  งานของ teardown นี้ (8h h3/h5) */
   readonly fn?: () => Promise<void>;
   readonly fnBudgetMs?: number;
   readonly setupBudgetMs?: number;
+  /** budget รอ descendants (spawnCleanupChild) จบก่อน teardown-settled — เกิน = poison */
+  readonly descendantBudgetMs?: number;
 }
 
 export interface GuardedAfterAllResult {
@@ -377,11 +520,13 @@ export async function guardedAfterAll(
       `${file}: lifecycle ${opts.lifecycleId} ไม่ใช่ lifecycle ปัจจุบัน (${st0.lifecycleId})`,
     );
   }
-  // (2) barrier fn — race กับ budget (แพ้ = poison; fn เดิมวิ่งต่อ)
+  // (2) barrier fn — race กับ budget (แพ้ = poison; fn เดิมวิ่งต่อ) · รันใต้ teardown
+  //     context ของไฟล์ (ALS) — guardedMarkerInsert/spawnCleanupChild ในนี้ = งาน teardown
   if (opts.fn !== undefined) {
     const budget = opts.fnBudgetMs ?? 60_000;
+    const teardownId = randomUUID();
     let fnError: unknown = null;
-    const losingSide = opts.fn().then(
+    const losingSide = teardownCtxAls.run({ file, teardownId }, opts.fn).then(
       () => "fn-done" as const,
       (err: unknown) => {
         fnError = err;
@@ -445,8 +590,11 @@ export async function guardedAfterAll(
       `${file}: lifecycle ${opts.lifecycleId} ไม่ใช่ lifecycle ปัจจุบัน (${st?.lifecycleId ?? "null"})`,
     );
   }
-  // (5) cleanup TX + ปิดท้าย
+  // (5) cleanup TX → รอ descendants จบจริง → teardown-settled (r20-M2: settle
+  //     'completed' ได้เฉพาะ fn คืน AND ไม่มี descendant 'running' — งานลูกของ
+  //     cleanup ต้องก่อนหน้าเสมอ · deadline ล้น = poison ไม่ปิดไฟล์อัตโนมัติ)
   const cleanupStart = await runFileCleanupTx(file);
+  await awaitDescendants(file, opts.descendantBudgetMs ?? 30_000);
   await fileSetPhase(file, "teardown-settled", "cleanup ครบ", { lifecycleId: opts.lifecycleId });
   return { cleanupStart };
 }
@@ -557,6 +705,7 @@ export async function resetFileWorld(opts: ResetFileWorldOptions): Promise<void>
   const fileList = opts.files.map((f) => sqlLit(f)).join(",");
   await psql(`delete from test_infra.window_file_state where run_id = ${sqlLit(run)} and file in (${fileList});`);
   await psql(`delete from test_infra.barrier_markers where run_id = ${sqlLit(run)} and file in (${fileList});`);
+  await psql(`delete from test_infra.cleanup_descendants where run_id = ${sqlLit(run)} and file in (${fileList});`);
 }
 
 // ─── lock-handshake waiter-mode (r22-r30 — กลุ่ม D ใช้ต่อ) ────────────────────

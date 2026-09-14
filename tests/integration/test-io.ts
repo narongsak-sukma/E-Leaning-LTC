@@ -471,8 +471,9 @@ export interface PsqlSession {
   readonly identity: PsqlSessionIdentity;
   /** รัน SQL ใน session (stdin) เก็บผลลัพธ์ตอน prompt กลับ */
   exec(sql: string, opts?: { timeoutMs?: number }): Promise<string>;
-  /** จบ session (exit code จริงคืนมา) */
-  end(): Promise<number>;
+  /** จบ session (exit code จริงคืนมา) — ค้างเกิน killAfterMs (default 15s) = SIGKILL
+   *  fallback (8i: session ที่ backend ยุ่งอยู่กับ query ยาวต้องจบได้แบบมีขอบเขต) */
+  end(opts?: { killAfterMs?: number }): Promise<number>;
 }
 
 /**
@@ -541,12 +542,18 @@ export async function startPsqlSession(label: string): Promise<PsqlSession> {
   return {
     identity,
     exec,
-    end: async () => {
-      const code = await new Promise<number>((resolve) => {
-        child.on("close", (c) => resolve(c ?? -1));
+    end: async (opts?: { killAfterMs?: number }) => {
+      const killAfterMs = opts?.killAfterMs ?? 15_000;
+      return await new Promise<number>((resolve) => {
+        const killer = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, killAfterMs);
+        child.on("close", (c) => {
+          clearTimeout(killer);
+          resolve(c ?? -1);
+        });
         child.stdin.end();
       });
-      return code;
     },
   };
 }
@@ -826,6 +833,138 @@ export async function writeSettleDecision(
     { decisionId: randomUUID(), invocationId, scanClean, decision, ...extra },
     { opKey, invocationId },
   );
+}
+
+// ─── 8b) settle engine ชั้นบน — evidence-based settle (barrier suite 8k-8o) ────
+
+export type SettleRefusal =
+  | "settle-refused-blocked-backend" // backend ที่ handshake จับได้ยังมีชีวิต — settle เดี๋ยวนี้ไม่ได้
+  | "settle-refused-no-terminal-link"; // อ้างจบแต่ไม่มีหลักฐาน terminal (response/scan) — ห้าม settle
+
+export interface SettleHttpEvidenceOptions {
+  /** pid ของ backend ที่ handshake จับได้ (ตรงกับ invocation) — scan ตัดสินก่อน claim เสมอ */
+  readonly blockerPids?: readonly number[];
+  /** 'evidenced' = response มาถึงแล้ว (เช่น 5xx) · 'evidenced-no-response' = ไม่มี response (abort/kill) */
+  readonly claimed: "evidenced" | "evidenced-no-response";
+  /** status ที่จับได้จาก response จริง (claimed 'evidenced' ต้องมี — ไม่ใช่คำบอกเล่า) */
+  readonly responseStatus?: number;
+  readonly label?: string;
+}
+
+export interface SettleHttpEvidenceResult {
+  readonly settled: boolean;
+  readonly decision: string;
+  readonly refusal?: SettleRefusal;
+  readonly terminalLink?: { pids: number[]; checkedAt: string };
+}
+
+async function pidsAlive(pids: readonly number[]): Promise<number[]> {
+  if (pids.length === 0) return [];
+  const raw = await psql(
+    `select pid::text from pg_stat_activity where pid = any('{${pids.join(",")}}'::int[]);`,
+  );
+  return raw
+    .trim()
+    .split("\n")
+    .map((l) => Number(l))
+    .filter((p) => Number.isFinite(p) && p > 0);
+}
+
+/**
+ * settle ด้วยหลักฐานจริง ไม่ใช่คำบอกเล่า (r22 8m/8n · r25 fabricated-500):
+ * (1) scan ก่อน claim เสมอ — blockerPids ยังมีชีวิต = ปฏิเสธ blocked-backend
+ *     (claim 5xx ที่แจ้งมาหลัง backend ยังยุ่ง = fabricated — scan ชนะ)
+ * (2) claimed 'evidenced-no-response' (abort/kill ก่อนได้ response): ต้องมี
+ *     attribution (blockerPids ที่ scan ตายหมดแล้ว) — ไม่มี = no-terminal-link
+ * (3) claimed 'evidenced': ต้องมี responseStatus จริงติดมือ — ไม่มี = no-terminal-link
+ * (4) ผ่าน = settle-decision row เดียว (scan+decision คู่กัน) + invocationClose settled
+ */
+export async function settleHttpWithEvidence(
+  opKey: string,
+  opts: SettleHttpEvidenceOptions,
+): Promise<SettleHttpEvidenceResult> {
+  const inv = await invocationState(opKey);
+  if (inv === null) {
+    throw new Error(`settleHttpWithEvidence: ไม่เจอ invocation ของ opKey ${opKey}`);
+  }
+  if (inv.status !== "running") {
+    throw new Error(
+      `settleHttpWithEvidence: invocation ${inv.invocationId} (${opKey}) สถานะ ${inv.status} แล้ว — settle ซ้ำ?`,
+    );
+  }
+  const invocationId = inv.invocationId;
+  const label = opts.label ?? "settleHttpWithEvidence";
+  // (1) scan ก่อน claim เสมอ
+  const alive = await pidsAlive(opts.blockerPids ?? []);
+  if (alive.length > 0) {
+    await writeSettleDecision(invocationId, opKey, "settle-refused-blocked-backend", false, {
+      alivePids: alive,
+      label,
+      claimed: opts.claimed,
+    });
+    return {
+      settled: false,
+      decision: "settle-refused-blocked-backend",
+      refusal: "settle-refused-blocked-backend",
+    };
+  }
+  // (2)+(3) ตรวจหลักฐานตาม claim
+  if (opts.claimed === "evidenced-no-response") {
+    const pids = opts.blockerPids ?? [];
+    if (pids.length === 0) {
+      await writeSettleDecision(invocationId, opKey, "settle-refused-no-terminal-link", false, {
+        label,
+        note: "no-attribution",
+      });
+      return {
+        settled: false,
+        decision: "settle-refused-no-terminal-link",
+        refusal: "settle-refused-no-terminal-link",
+      };
+    }
+    const terminalLink = { pids: [...pids], checkedAt: new Date().toISOString() };
+    await writeSettleDecision(invocationId, opKey, "completed-evidenced-no-response", true, {
+      terminalLink,
+      label,
+    });
+    await invocationClose(invocationId, opKey, "settled", {
+      class: "completed-evidenced-no-response",
+      transport: "settleHttpWithEvidence",
+      terminalLink,
+    });
+    return { settled: true, decision: "completed-evidenced-no-response", terminalLink };
+  }
+  if (typeof opts.responseStatus !== "number" || !Number.isFinite(opts.responseStatus)) {
+    await writeSettleDecision(invocationId, opKey, "settle-refused-no-terminal-link", false, {
+      label,
+      note: "no-response-evidence",
+    });
+    return {
+      settled: false,
+      decision: "settle-refused-no-terminal-link",
+      refusal: "settle-refused-no-terminal-link",
+    };
+  }
+  const terminalLink =
+    (opts.blockerPids ?? []).length > 0
+      ? { pids: [...(opts.blockerPids ?? [])], checkedAt: new Date().toISOString() }
+      : undefined;
+  await writeSettleDecision(invocationId, opKey, "completed-evidenced", true, {
+    responseStatus: opts.responseStatus,
+    terminalLink: terminalLink ?? null,
+    label,
+  });
+  await invocationClose(invocationId, opKey, "settled", {
+    class: "completed-evidenced",
+    transport: "settleHttpWithEvidence",
+    responseStatus: opts.responseStatus,
+    terminalLink: terminalLink ?? null,
+  });
+  return {
+    settled: true,
+    decision: "completed-evidenced",
+    ...(terminalLink !== undefined ? { terminalLink } : {}),
+  };
 }
 
 // ─── 9) EVIDENCE_SETTLE_MANIFEST (machine-verified · opKey = transport-derived) ──
