@@ -271,9 +271,13 @@ const EDIT_SORT_ORDER_MAX = 999;
  * - options ตาม D79: เดิม (มี id) ส่ง id เดิม = update · ใหม่ (ไม่มี id) = insert — ไม่มีลบ
  * - options เปล่าได้ตาม schema PATCH (แก้ข้อร่างที่ยังไม่มีตัวเลือก — UI ไม่มีทางลบแถว
  *   อยู่แล้วตาม D79) — กติกาความถูกต้องของเฉลยบังคับเฉพาะเมื่อมีตัวเลือก ≥ 1 แถว
+ * - originalType = ประเภทเดิมจาก edit GET — เปลี่ยนประเภทเป็นเลือกตอบเดียว/ถูกผิด
+ *   ต้องมีเฉลยถูกเพียง 1 ตัวก่อนส่ง (trigger 0005 trg_questions_type_correctness จะ
+ *   rollback ถ้าส่งไปโดยไม่ครบ — gate r2 m2: ฟ้องที่ฟอร์ม ไม่ใช่ error กลางที่ปลายทาง)
  */
 export function buildQuestionPatchBody(
   form: EditQuestionFormState,
+  originalType?: ExamAdminQuestionType,
 ): { ok: true; body: EditQuestionPatchBody } | { ok: false, errors: EditFormErrors } {
   const errors: Record<string, string> = {};
   const questionText = form.questionText.trim();
@@ -333,6 +337,16 @@ export function buildQuestionPatchBody(
     } else if (correctCount !== 1) {
       errors["options"] = errors["options"] ?? "ข้อสอบเลือกตอบเดียว/ถูกผิด ต้องมีตัวเลือกที่ถูกเพียง 1 ตัว";
     }
+  } else if (
+    originalType !== undefined &&
+    form.type !== originalType &&
+    form.type !== "multiple_choice"
+  ) {
+    // gate r2 m2: ข้อร่างไร้ตัวเลือก (options: []) เปลี่ยนประเภทได้เฉพาะไปหา
+    // "ตอบหลายข้อ" — ไปเลือกตอบเดียว/ถูกผิดโดน trigger 0005 rollback ที่ปลายทาง
+    // (ต้องมีเฉลยถูก 1 ตัวซึ่งเป็นไปไม่ได้เมื่อไม่มีตัวเลือกเลย) → ฟ้องที่ฟอร์มก่อนส่ง
+    errors["options"] =
+      errors["options"] ?? "เปลี่ยนประเภทข้อเป็นเลือกตอบเดียว/ถูกผิด ต้องมีตัวเลือกที่ถูกเพียง 1 ตัวก่อนบันทึก";
   }
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
@@ -507,21 +521,30 @@ export function editModalSaveStart(state: EditModalState): EditModalState {
 }
 
 /**
- * ตัวตนของรอบบันทึก — เทียบกับ state ปัจจุบัน (qid + saveSeq ตรงทั้งคู่เป็นรอบเดียวกัน)
+ * ตัวตนของรอบบันทึก — เทียบกับ state ปัจจุบัน (qid + requestId + saveSeq ตรงครบ
+ * เป็นรอบเดียวกัน) · gate r2 M1: requestId ของการเปิดต้องเข้าชุดตัวตนด้วย —
+ * saveSeq ถูก reset เป็น 0 ทุกครั้งเปิด (editModalOpenFor) การอาศัย qid+saveSeq
+ * อย่างเดียวทำให้ "ปิด/เปลี่ยน props กลางคันแล้วเปิดข้อเดิมใหม่" ชนตัวตนกับรอบเก่า
  * late response ของรอบเก่า (บันทึกซ้ำ/ปิดแล้วเปิดใหม่/เปลี่ยนข้อ) จึงถูกทิ้งเสมอ
  */
-function saveRoundMatches(state: EditModalState, qid: string, saveSeq: number): boolean {
-  return state.qid === qid && state.saveSeq === saveSeq;
+function saveRoundMatches(
+  state: EditModalState,
+  qid: string,
+  requestId: number,
+  saveSeq: number,
+): boolean {
+  return state.qid === qid && state.requestId === requestId && state.saveSeq === saveSeq;
 }
 
 /** บันทึกสำเร็จ — เก็บเวอร์ชันใหม่เพื่อแสดงคู่ข้อความสำเร็จ (last-write-wins จดไว้ใน UI) */
 export function editModalSaveSuccess(
   state: EditModalState,
   qid: string,
+  requestId: number,
   saveSeq: number,
   version: number,
 ): EditModalState {
-  if (state.phase !== "saving" || !saveRoundMatches(state, qid, saveSeq)) {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, requestId, saveSeq)) {
     return state;
   }
   return {
@@ -535,12 +558,16 @@ export function editModalSaveSuccess(
 /**
  * authorization ล้มระหว่างบันทึก (PATCH ตอบ 401/403) — **ล้าง resource+form ทันที**
  * (D74: auth ล้ม = ล้าง state) แล้วแสดงข้อความ — ปิดแล้วเปิดใหม่จะ fetch/authorize ใหม่
+ * รับเฉพาะ phase "saving" ของรอบตรงชุด (gate r2 M1: outcome หนึ่งรอบมาถึงครั้งเดียว
+ * ตอน saving — ที่มาถึงตอน ready เป็นซ้ำ/ค้างของรอบเก่า ต้องทิ้ง)
  */
-export function editModalDeny(state: EditModalState, qid: string, saveSeq: number): EditModalState {
-  if (
-    (state.phase !== "saving" && state.phase !== "ready") ||
-    !saveRoundMatches(state, qid, saveSeq)
-  ) {
+export function editModalDeny(
+  state: EditModalState,
+  qid: string,
+  requestId: number,
+  saveSeq: number,
+): EditModalState {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, requestId, saveSeq)) {
     return state;
   }
   return {
@@ -559,10 +586,11 @@ export function editModalDeny(state: EditModalState, qid: string, saveSeq: numbe
 export function editModalSaveError(
   state: EditModalState,
   qid: string,
+  requestId: number,
   saveSeq: number,
   message: string,
 ): EditModalState {
-  if (state.phase !== "saving" || !saveRoundMatches(state, qid, saveSeq)) {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, requestId, saveSeq)) {
     return state;
   }
   return {
@@ -576,10 +604,11 @@ export function editModalSaveError(
 export function editModalSaveApiValidation(
   state: EditModalState,
   qid: string,
+  requestId: number,
   saveSeq: number,
   apiFieldLabels: readonly string[],
 ): EditModalState {
-  if (state.phase !== "saving" || !saveRoundMatches(state, qid, saveSeq)) {
+  if (state.phase !== "saving" || !saveRoundMatches(state, qid, requestId, saveSeq)) {
     return state;
   }
   return {
@@ -776,14 +805,16 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
     if (state.phase !== "ready" || state.form === null || state.qid === null) {
       return;
     }
-    const built = buildQuestionPatchBody(state.form);
+    const built = buildQuestionPatchBody(state.form, state.resource?.type);
     if (!built.ok) {
       setState(editModalSaveValidationError(state, built.errors));
       return;
     }
     const saveQid = state.qid;
-    // ตัวตนของรอบบันทึกนี้ — editModalSaveStart จะยก saveSeq เป็นค่านี้เอง
-    // (late outcome ของรอบก่อนหน้าถูก guard qid+saveSeq ทิ้งเสมอ — gate r1 M1)
+    // ตัวตนของรอบบันทึกนี้ — ผูกทั้ง requestId ของการเปิด (gate r2 M1: กันชนตัวตน
+    // กับรอบเก่าเมื่อปิด/เปลี่ยน props กลางคันแล้วเปิดข้อเดิมใหม่ — saveSeq ถูก reset
+    // ตอนเปิด) และ saveSeq ที่ editModalSaveStart จะยกให้เอง (gate r1 M1)
+    const saveRequest = state.requestId;
     const saveRound = state.saveSeq + 1;
     setState(editModalSaveStart(state));
     try {
@@ -797,22 +828,31 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
           editModalSaveError(
             previous,
             saveQid,
+            saveRequest,
             saveRound,
             "บันทึกสำเร็จแต่อ่านเวอร์ชันกลับไม่สำเร็จ — ปิดแล้วเปิดใหม่เพื่อตรวจข้อมูลล่าสุด",
           ),
         );
         return;
       }
-      setState((previous) => editModalSaveSuccess(previous, saveQid, saveRound, version));
+      setState((previous) =>
+        editModalSaveSuccess(previous, saveQid, saveRequest, saveRound, version),
+      );
       router.refresh();
     } catch (error) {
       if (error instanceof AdminApiError && (error.status === 401 || error.status === 403)) {
-        setState((previous) => editModalDeny(previous, saveQid, saveRound));
+        setState((previous) => editModalDeny(previous, saveQid, saveRequest, saveRound));
         return;
       }
       if (error instanceof AdminApiError && error.code === "ERR-VAL-001") {
         setState((previous) =>
-          editModalSaveApiValidation(previous, saveQid, saveRound, validationFieldLabels(error.fields)),
+          editModalSaveApiValidation(
+            previous,
+            saveQid,
+            saveRequest,
+            saveRound,
+            validationFieldLabels(error.fields),
+          ),
         );
         return;
       }
@@ -820,6 +860,7 @@ export function EditQuestionModal({ bankId, qid, canEdit }: EditQuestionModalPro
         editModalSaveError(
           previous,
           saveQid,
+          saveRequest,
           saveRound,
           error instanceof AdminApiError ? error.message : TRANSPORT_FALLBACK_MESSAGE,
         ),

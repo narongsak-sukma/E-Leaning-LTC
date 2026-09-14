@@ -29,6 +29,29 @@ export type ConfirmModalProps = {
   onConfirm?: (() => void) | undefined;
 };
 
+/**
+ * ตัดสินการ wrap ของ focus trap — pure (ทดสอบใน node env ได้โดยไม่ต้อง DOM)
+ * gate r2 m1: focus ที่ dialog root (หรือนอกรายการโฟกัสได้) ต้องถูก wrap เข้า
+ * กล่องเสมอ — มิฉะนั้น Shift+Tab จาก root หลุดออกไปหลังฉากหลังได้
+ * @returns "first" = กระโดดไปตัวแรก · "last" = ไปตัวสุดท้าย · null = ปล่อยตามธรรมชาติ
+ */
+export function confirmFocusWrap<T>(
+  shiftKey: boolean,
+  items: readonly T[],
+  activeElement: T | null,
+): "first" | "last" | null {
+  if (items.length === 0) {
+    return null;
+  }
+  const first = items[0];
+  const last = items[items.length - 1];
+  const activeInside = activeElement !== null && items.includes(activeElement);
+  if (shiftKey) {
+    return !activeInside || activeElement === first ? "last" : null;
+  }
+  return !activeInside || activeElement === last ? "first" : null;
+}
+
 export function ConfirmModal({
   open,
   onClose,
@@ -94,11 +117,19 @@ export function ConfirmModal({
       if (!first || !last) {
         return;
       }
-      const active = document.activeElement;
-      if (event.shiftKey && active === first) {
+      // gate r2 m1: ส่ง active เป็น null เมื่อไม่ใช่ HTMLElement ในรายการ (เช่น focus
+      // ค้างที่ dialog root) — confirmFocusWrap จะ wrap กลับเข้ากล่องแทนที่จะปล่อย
+      // ออกไปหลังฉากหลัง
+      const active =
+        document.activeElement instanceof HTMLElement &&
+        items.includes(document.activeElement)
+          ? document.activeElement
+          : null;
+      const wrap = confirmFocusWrap(event.shiftKey, items, active);
+      if (wrap === "last") {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && active === last) {
+      } else if (wrap === "first") {
         event.preventDefault();
         first.focus();
       }

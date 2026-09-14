@@ -1047,15 +1047,24 @@ describe.skipIf(!DB_URL)(
         await activateFromOtherSession(Q_WA2, staffExam.id);
       }
       // (2) deployment proof — ฟังก์ชันที่ deploy จริงต้องมี re-check ของ 0048
+      // gate r2 m3: ตรวจ predicate + raise ใน prosrc **พร้อมกันแบบผูกตำแหน่ง** —
+      // 'คลังข้อไม่พอ' ต้องอยู่ในหน้าต่าง 600 อักษรถัดจาก predicate ของ re-check
+      // (raise ที่ :178/:197 อยู่ "ก่อน" predicate จึงไม่ช่วยให้ผ่าน) — กะเพาะ body
+      // เป็น NULL; โดยคง predicate แล้วเทสต้องแดง · ขอบเขตที่ยอมรับ: หลักฐานระดับ
+      // substring ของ source ที่ deploy — mutation test จริง (แก้ฟังก์ชันระหว่างรัน)
+      // ต้องแตะของส่วนรวม ไม่ทำใน IT ของ dev DB ที่แชร์กัน
       const deployedGuard = await psqlScalar(`
         select count(*) from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'public' and p.proname = 'start_attempt'
-          and p.prosrc like '%cardinality(v_qids) < v_rules.question_count%';
+          and p.prosrc like '%cardinality(v_qids) < v_rules.question_count%'
+          and position('คลังข้อไม่พอ' in substring(
+                p.prosrc from position('cardinality(v_qids) < v_rules.question_count' in p.prosrc)
+                for 600)) > 0;
       `);
       expect(
         deployedGuard,
-        "start_attempt ที่ deploy ต้องมี re-check 0048 ใน prosrc (หาย = regression หน้าต่าง A)",
+        "start_attempt ที่ deploy ต้องมี re-check 0048 พร้อม raise จริงใน prosrc (หาย/ถูกกะเพาะ = regression หน้าต่าง A)",
       ).toBe("1");
     }, 120_000);
 
