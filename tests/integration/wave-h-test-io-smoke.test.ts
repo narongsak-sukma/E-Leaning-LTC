@@ -61,6 +61,9 @@ describe("wave-h test-io engine (D89-3)", { timeout: 120_000 }, () => {
       await manualClearPoison(opKey, "smoke-manual-clear");
       const c = await attemptBegin(opKey, "attempt-4-after-clear");
       expect(c.ok).toBe(true);
+      // ปิด invocation สุดท้ายด้วย — audit-lifecycle-ledger จับค้าง 'running' ได้จริง
+      // (9 leftover จากรอบก่อนหน้าคือหลักฐานว่าลืมปิด = audit FAIL)
+      await invocationClose(c.invocationId, opKey, "settled", { class: "smoke-complete" });
     });
 
     it("session identity: nonce+pid+backend_start + end()", async () => {
