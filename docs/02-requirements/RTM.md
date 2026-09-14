@@ -3,7 +3,7 @@
 |          |                                                                           |
 | -------- | ------------------------------------------------------------------------- |
 | เอกสาร   | RTM (Requirement Traceability Matrix)                                     |
-| เวอร์ชัน | 1.1.0 — DCR-11 (Wave E Phase 5): จัดคอลัมน์ "API/หน้าจอ" ให้ตรง API-SPEC 1.2.0 — IDENT-001 `/profile`→**`/me` (GET/PATCH)** · IDENT-002 ยื่นใบอนุญาต → **`PUT /me/license`** (multipart+หลักฐาน) · IDENT-003 → **`PATCH /admin/license-applications/{id}`** · IDENT-005 `/license/status`→**`GET /me/license`** · IDENT-008 เพิ่ม **`GET /profile/delete/confirm`** (สาธารณะ — ยืนยัน token ลบบัญชี) · AUD-003 ชี้ทั้งคู่ **หน้า `/admin/audit` + API `GET /admin/audit-logs`** (หน้าตาม RTM เดิม endpoint ตาม spec §3.8) — ตัวสิ่งที่ต้องพิสูจน์ของทุกแถวไม่เปลี่ยน · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B   |
+| เวอร์ชัน | 1.2.0 — DCR Wave G P3 (feat/wave-g-p3 · [#93] · F15 ของแผน D81): จัด 2 แถวตาม as-built — **LRN-009** path `/lessons/{id}/resume` → resume ฝังในหน้าเรียน (การ์ด "เรียนต่อ" 1 คลิก + seed ตำแหน่งวินาทีจริงจาก `video_max_position_sec` ที่บันทึกผ่าน `POST /courses/{id}/progress` · เล่นต่อที่ `GET /courses/{id}/learn`) · ตาราง `lesson_progress` คงเดิม · **ASM-012** path `/attempts/{id}/review` → **`/my/exams/{attemptId}`** + `GET /attempts/{id}/result` ใต้ `learner_attempt_view` (เปิดเฉลยเมื่อ passed/ครบ max_attempts ตาม `exam_review_mode` 0049 · บล็อกสอบซ้ำเมื่อผ่าน B3.5) · ตาราง `exam_attempt_questions, exam_answers` → `assessment_attempts, attempt_answers (question_snapshot)` — ตัวสิ่งที่ต้องพิสูจน์ของทั้งสองแถวไม่เปลี่ยน (พิสูจน์ IT + e2e-21 + unit) · 1.1.0 — DCR-11 (Wave E Phase 5): จัดคอลัมน์ "API/หน้าจอ" ให้ตรง API-SPEC 1.2.0 — IDENT-001 `/profile`→**`/me` (GET/PATCH)** · IDENT-002 ยื่นใบอนุญาต → **`PUT /me/license`** (multipart+หลักฐาน) · IDENT-003 → **`PATCH /admin/license-applications/{id}`** · IDENT-005 `/license/status`→**`GET /me/license`** · IDENT-008 เพิ่ม **`GET /profile/delete/confirm`** (สาธารณะ — ยืนยัน token ลบบัญชี) · AUD-003 ชี้ทั้งคู่ **หน้า `/admin/audit` + API `GET /admin/audit-logs`** (หน้าตาม RTM เดิม endpoint ตาม spec §3.8) — ตัวสิ่งที่ต้องพิสูจน์ของทุกแถวไม่เปลี่ยน · 1.0.0 — ผ่าน CTO gate (codex รอบ 5: PASS — D17) · baseline สำหรับ Wave B   |
 | วันที่    | 2026-09-12                                                                 |
 | สถานะ    | Approved — ผ่าน CTO gate (codex รอบ 5: PASS — D17)                          |
 | เจ้าของ   | worker-2 (Task A2)                                                         |
@@ -88,7 +88,7 @@ Auth · Identity & License · Catalog · Learning & Progress · Assessment · Ce
 | LRN-006 | บันทึก progress รายบทเรียน (server ตัดสิน) | Learning & Progress | `/lessons/{id}/progress` | lesson_progress, watch_events | I | TC-LRN-06 | D13, D14 |
 | LRN-007 | ความคืบหน้ารวมหลักสูตร | Learning & Progress | `/me/enrollments/{id}/progress` | lesson_progress | U, I | TC-LRN-07 | D13, D14 |
 | LRN-008 | เงื่อนไขผ่านบทเรียน (config) | Learning & Progress | (server logic) | lesson_progress, config | U, I | TC-LRN-08 | D13, D14 |
-| LRN-009 | resume ตำแหน่งล่าสุด | Learning & Progress | `/lessons/{id}/resume` | lesson_progress | E | TC-LRN-09 | D13, D14 |
+| LRN-009 | resume ตำแหน่งล่าสุด | Learning & Progress | การ์ด "เรียนต่อ" + seed วินาทีจริงที่หน้าเรียน (`POST /courses/{id}/progress` → `video_max_position_sec` · เล่นต่อที่ `GET /courses/{id}/learn`) | lesson_progress | E | TC-LRN-09 | D13, D14 |
 | LRN-010 | เงื่อนไขเข้าเรียนเพิ่มเติม (S) | Learning & Progress | ตรวจสิทธิ์ที่ `/enrollments` | courses, enrollments | I | TC-LRN-10 | D13, D14 |
 
 ### ASM (14)
@@ -106,7 +106,7 @@ Auth · Identity & License · Catalog · Learning & Progress · Assessment · Ce
 | ASM-009 | ตรวจอัตโนมัติทุกประเภทปรนัย | Assessment | (grading engine) | exam_answers, questions | U, I | TC-ASM-09 | D13, D14 |
 | ASM-010 | แสดง+แจ้งผลสอบ | Assessment | `/attempts/{id}/result` | exam_attempts, notifications | I, E | TC-ASM-10 | D13, D14 |
 | ASM-011 | anti-cheat พื้นฐาน + block session ซ้ำ (S) | Assessment + Security (X) | `/attempts/{id}/events` | exam_attempt_events | I, SEC | TC-ASM-11 | D13, D14, D17 |
-| ASM-012 | ทบทวนข้อสอบหลังสอบ (S) | Assessment | `/attempts/{id}/review` | exam_attempt_questions, exam_answers | E | TC-ASM-12 | D13, D14 |
+| ASM-012 | ทบทวนข้อสอบหลังสอบ (S) | Assessment | `/my/exams/{attemptId}` + `GET /attempts/{id}/result` (ใต้ `learner_attempt_view` — เปิดเฉลยเมื่อ passed/ครบ max_attempts ตาม `exam_review_mode` 0049) | assessment_attempts, attempt_answers (question_snapshot) | E | TC-ASM-12 | D13, D14 |
 | ASM-013 | เงื่อนไขเข้าสอบ | Assessment | `/exam-sets/{id}/attempts` (ตรวจ) | lesson_progress, enrollments | I | TC-ASM-13 | D13, D14 |
 | ASM-014 | ประวัติการสอบ + สถิติข้อสอบ | Assessment | `/me/attempts`, `/admin/exams/statistics` | exam_attempts | E | TC-ASM-14 | D13, D14 |
 
