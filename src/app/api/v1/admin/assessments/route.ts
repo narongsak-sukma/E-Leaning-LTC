@@ -54,7 +54,8 @@ const ADMIN_ASSESSMENT_SELECT =
   "id,code,title,description,is_final,status,course_id,created_at," +
   "course:courses!left(id,created_by)," +
   "assessment_rules(version,pass_pct,time_limit_minutes,question_count,max_attempts," +
-  "attempt_cooldown_minutes,shuffle_questions,shuffle_options,proctoring_mode,effective_from)";
+  "attempt_cooldown_minutes,shuffle_questions,shuffle_options,proctoring_mode," +
+  "exam_review_mode,effective_from)";
 
 /** สะท้อน x-request-id ที่ middleware สร้าง กลับทุก response (SDS §5.4) */
 function optionsOf(request: Request): JsonResponseOptions {
@@ -90,7 +91,7 @@ function assessmentInsertPayloadOf(
   return payload;
 }
 
-/** insert ของ assessment_rules — คอลัมน์ตรง 0005 L66-L82 (version/effective_from ให้ DB default ได้) */
+/** insert ของ assessment_rules — คอลัมน์ตรง 0005 L66-L82 + exam_review_mode (0049) (version/effective_from ให้ DB default ได้) */
 function ruleInsertPayloadOf(
   assessmentId: string,
   rules: AssessmentRuleInputParsed,
@@ -107,6 +108,7 @@ function ruleInsertPayloadOf(
     shuffle_options: rules.shuffleOptions,
     require_course_complete: rules.requireCourseComplete,
     proctoring_mode: rules.proctoringMode,
+    exam_review_mode: rules.examReviewMode,
   };
   if (rules.selection !== undefined) {
     payload["selection"] = rules.selection;

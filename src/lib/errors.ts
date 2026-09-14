@@ -100,6 +100,10 @@ export const ERROR_REGISTRY = {
     httpStatus: 403,
     message: "คุณไม่ใช่เจ้าของรอบการสอบนี้",
   },
+  "ERR-ASM-007": {
+    httpStatus: 422,
+    message: "ผ่านการสอบนี้แล้ว จึงสอบซ้ำไม่ได้ — ดูผลสอบได้ที่หน้าผลสอบ",
+  },
   "ERR-CERT-001": {
     httpStatus: null,
     retired: true,

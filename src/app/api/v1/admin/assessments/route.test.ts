@@ -154,6 +154,7 @@ function assessmentRow(overrides: Record<string, unknown> = {}): Record<string, 
         shuffle_questions: true,
         shuffle_options: true,
         proctoring_mode: "basic",
+        exam_review_mode: "after_final_attempt",
         effective_from: CREATED_AT,
       },
     ],
@@ -217,6 +218,8 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(call?.select).toContain("assessment_rules");
     // pass_pct เปิดตั้งแต่ 0019 (column grant สะสม) — ต้องอยู่ใน embed · is_correct ยังห้าม
     expect(call?.select?.includes("pass_pct")).toBe(true);
+    // exam_review_mode เปิดตั้งแต่ 0049 (Wave G P3) — ต้องอยู่ใน embed ให้ mapper เดียวใช้สองทาง
+    expect(call?.select?.includes("exam_review_mode")).toBe(true);
     expect(call?.select?.includes("is_correct")).toBe(false);
     expect(call?.orders).toContainEqual({
       column: "effective_from",
@@ -280,6 +283,10 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     const ruleInsert = calls.find((call) => call.table === "assessment_rules");
     expect((ruleInsert?.payload as Record<string, unknown>)?.["pass_pct"]).toBe(70);
     expect((ruleInsert?.payload as Record<string, unknown>)?.["time_limit_minutes"]).toBe(90);
+    // exam_review_mode ลงทุกแถว rules ที่แทรก (0049 — default จาก schema เมื่อ body ไม่ส่ง)
+    expect((ruleInsert?.payload as Record<string, unknown>)?.["exam_review_mode"]).toBe(
+      "after_final_attempt",
+    );
   });
 
   it("instructor สร้าง draft ของหลักสูตรตัวเอง (ไม่แนบ rules) → 201 และไม่แตะ assessment_rules", async () => {

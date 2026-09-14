@@ -1,0 +1,355 @@
+/**
+ * Integration — Wave G P3 (D87): POST /api/v1/admin/assessments/{id}/rules บนสแตกจริง
+ * (db + kong + container app) · API-SPECIFICATION §3.8 แถว 226 + RPC admin_add_assessment_rules
+ * (0049) · pattern ตาม wave-g-qb-bank-detail.test.ts
+ *
+ * ครอบ:
+ * - 201 + version = max+1 จริง (seed v1 → POST ได้ v2) · แถว DB สะท้อน exam_review_mode
+ * - 403 สองแบบ: instructor (ERR-RBAC-001 ก่อนแตะ DB) · staff:exam แต่ aal1 (ERR-AUTH-004)
+ * - flip โหมดเปิดเฉลยสองทิศผ่าน HTTP (never → GET embed สะท้อน → กลับ after_final_attempt)
+ * - VAL pass_pct 0 → 400 ERR-VAL-001 (ขา BFF zod ตรวจก่อน RPC — ตามทะเบียน §2 แถว 72;
+ *   เอกสาร §3.8 แถว 226 เขียน 422 ซึ่ง implementable ไม่ได้ — flag ที่รายงาน lead แล้ว)
+ * - NF: assessment ถูก soft-delete → 404 ERR-NF-001 จาก RPC
+ * - audit: ASSESSMENT_CONFIG_CHANGE (0049 ข้อ 5) ลง audit_logs ของ version ใหม่
+ *   ทุกครั้งที่ POST ผ่าน endpoint (ปิด 3 ทาง — POST v1 เดิมรวมอยู่ด้วย)
+ */
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { TEST_PASSWORD, createTestUser, psql, psqlScalar, restCall, type TestUser } from "./helpers.js";
+import { STAFF_EXAM_DEMO_ID } from "./helpers-d8.js";
+import { mintAal2Token } from "./helpers-aal2.js";
+
+const DB_URL = process.env.TEST_DATABASE_URL;
+
+/** container app (next dev) — BFF จริงของทุกเคส */
+const APP_URL = process.env["TEST_APP_URL"] ?? "http://localhost:3000";
+
+/** ชื่อ cookie session ของ @supabase/ssr ใน container app — sb-<host ส่วนแรก>-auth-token */
+const AUTH_COOKIE = "sb-kong-auth-token";
+
+// ─── fixture ids ตายตัว (on conflict do nothing — seed ซ้ำได้ · ลบทันทีใน cleanup) ──
+
+const COURSE_ID = "cccccccc-0000-4000-8000-0000000000d1";
+const ASSESS_ID = "aaaaaaaa-0000-4000-8000-0000000000d1";
+const RULES_V1 = "aaaaaaaa-0000-4000-8000-0000000000d2";
+
+/** path ของ endpoint ใหม่ + list GET สำหรับดู embed */
+const RULES_PATH = `/api/v1/admin/assessments/${ASSESS_ID}/rules`;
+const LIST_PATH = "/api/v1/admin/assessments";
+
+/** body ขั้นต่ำของ POST — passPct เป็นฟิลด์บังคับเดียว ที่เหลือ default จาก schema */
+const MIN_BODY = { passPct: 70 };
+
+// ─── cleanup + seed ───────────────────────────────────────────────────────────
+
+/** ลบโลก fixture ทั้งหมด — เรียงตามลำดับ FK · audit_logs เป็น append-only (trigger
+ * prevent_audit_mutation ห้าม DELETE — BRIEF §8/D6/D11-7) จึงไม่แตะ audit เลย:
+ * แถว audit ของ fixture ค้างไว้เป็นหลักฐานตามธรรมชาติของระบบ (ไม่มี FK ย้อนกลับ) */
+async function cleanupWorld(): Promise<void> {
+  await psql(`
+    delete from public.assessment_rules where assessment_id = '${ASSESS_ID}';
+    delete from public.assessments where id = '${ASSESS_ID}';
+    delete from public.courses where id = '${COURSE_ID}';
+    delete from public.role_assignments where user_id in (select id from auth.users where email like 'wgp3-rules-%');
+    delete from public.profiles where id in (select id from auth.users where email like 'wgp3-rules-%');
+    delete from auth.users where email like 'wgp3-rules-%';
+  `);
+}
+
+/** seed หลักสูตร + ชุดข้อสอบ published + กติกา v1 (exam_review_mode default) — โครงเดียวกับ seedWindows */
+async function seedWorld(): Promise<void> {
+  await psql(`
+    insert into public.courses
+      (id, code, category_id, created_by, title_th, is_public, status, published_at)
+    values
+      ('${COURSE_ID}', 'E14-GP3-RULES',
+       (select id from public.course_categories order by id limit 1), '${STAFF_EXAM_DEMO_ID}',
+       'หลักสูตร probe กติกา (wave-g-admin-assessment-rules)', true, 'published', now())
+    on conflict (id) do nothing;
+    insert into public.assessments
+      (id, course_id, code, title, description, is_final, status, published_at) values
+      ('${ASSESS_ID}', '${COURSE_ID}', 'EXAM-GP3-RULES', 'สอบ probe กติกา (GP3)', null, false, 'published', now())
+    on conflict (id) do nothing;
+    insert into public.assessment_rules
+      (id, assessment_id, version, time_limit_minutes, question_count, pass_pct, max_attempts,
+       attempt_cooldown_minutes, shuffle_questions, shuffle_options, selection,
+       require_course_complete, proctoring_mode, effective_from) values
+      ('${RULES_V1}', '${ASSESS_ID}', 1, 60, 30, 70, 3, 1440, true, true,
+       '{}'::jsonb, true, 'basic', now() - interval '1 day')
+    on conflict (id) do nothing;
+  `);
+}
+
+// ─── cookie session + ตัวเรียก BFF ────────────────────────────────────────────
+
+interface JwtPayload {
+  readonly exp?: number;
+}
+
+/**
+ * base64url ของ session JSON — ตรงสูตร cookieEncoding:"base64url" ของ @supabase/ssr
+ * (โครงเดียวกับ dcr13 · user.factors ต้องมี — mfa.getAuthenticatorAssuranceLevel อ่านตรง)
+ */
+function sessionCookieValue(accessToken: string, userId: string): string {
+  const part = accessToken.split(".")[1] ?? "";
+  const payload = JSON.parse(Buffer.from(part, "base64").toString("utf8")) as JwtPayload;
+  const expiresAt = typeof payload.exp === "number"
+    ? payload.exp
+    : Math.floor(Date.now() / 1000) + 3600;
+  const session = {
+    access_token: accessToken,
+    token_type: "bearer",
+    expires_in: 3600,
+    expires_at: expiresAt,
+    refresh_token: "wgp3-unused-no-refresh",
+    user: {
+      id: userId,
+      aud: "authenticated",
+      role: "authenticated",
+      email: "",
+      factors: [],
+    },
+  };
+  return `base64-${Buffer.from(JSON.stringify(session)).toString("base64url")}`;
+}
+
+function cookieHeader(accessToken: string, userId: string): string {
+  return `${AUTH_COOKIE}=${sessionCookieValue(accessToken, userId)}`;
+}
+
+interface BffResult {
+  readonly status: number;
+  readonly text: string;
+  readonly json: unknown;
+  readonly requestId: string | null;
+}
+
+/** GET ผ่าน BFF จริงด้วย cookie session (middleware สร้าง x-request-id ให้เอง) */
+async function bffGet(path: string, token: string, userId: string): Promise<BffResult> {
+  const response = await fetch(`${APP_URL}${path}`, {
+    headers: {
+      cookie: cookieHeader(token, userId),
+      "x-forwarded-for": "10.7.0.1",
+    },
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await response.text();
+  let json: unknown = null;
+  try { json = JSON.parse(text); } catch { /* ไม่ใช่ JSON — คง null */ }
+  return { status: response.status, text, json, requestId: response.headers.get("x-request-id") };
+}
+
+/**
+ * POST ผ่าน BFF — แนบ Origin: APP_URL (CSRF เชิงโครงสร้าง SDS §5.4: Node fetch
+ * ไม่มี Origin/Sec-Fetch-Site เอง → fail-closed ปฏิเสธ 403 csrf_origin_mismatch)
+ */
+async function bffPost(path: string, token: string, userId: string, body?: unknown): Promise<BffResult> {
+  const response = await fetch(`${APP_URL}${path}`, {
+    method: "POST",
+    headers: {
+      cookie: cookieHeader(token, userId),
+      "content-type": "application/json",
+      origin: APP_URL,
+      "x-forwarded-for": "10.7.0.1",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(45_000),
+  });
+  const text = await response.text();
+  let json: unknown = null;
+  try { json = JSON.parse(text); } catch { /* ไม่ใช่ JSON — คง null */ }
+  return { status: response.status, text, json, requestId: response.headers.get("x-request-id") };
+}
+
+// ─── ผู้ใช้ + สถานะรวมของ suite ───────────────────────────────────────────────
+
+let staffExam: TestUser;
+let instructor: TestUser;
+let examAal2 = "";
+let instructorAal2 = "";
+
+/** container app เข้าถึงได้หรือไม่ — ไม่ได้ = skip ทุกเคส (สแตกบางสภาพรันแค่ db+kong) */
+let appReachable = false;
+
+describe.skipIf(!DB_URL)(
+  "Wave G P3 — POST /admin/assessments/{id}/rules + embed exam_review_mode (D87)",
+  () => {
+    beforeAll(async () => {
+      await cleanupWorld();
+      staffExam = await createTestUser("wgp3-rules-exam", "staff:exam");
+      instructor = await createTestUser("wgp3-rules-inst", "instructor");
+      await seedWorld();
+      examAal2 = await mintAal2Token(staffExam);
+      instructorAal2 = await mintAal2Token(instructor);
+      try {
+        const probe = await fetch(APP_URL, { signal: AbortSignal.timeout(5_000) });
+        appReachable = probe.status < 500;
+      } catch {
+        appReachable = false;
+      }
+    }, 300_000);
+
+    afterAll(async () => {
+      await cleanupWorld();
+    });
+
+    // ─── กลุ่ม 1 — 201 + version = max+1 + embed สะท้อน ──────────────────────
+
+    it("staff:exam → 201 · version = max+1 จริง (seed v1 → ได้ v2) · แถว DB สะท้อน body", async (ctx) => {
+      if (!appReachable) return ctx.skip();
+      const res = await bffPost(RULES_PATH, examAal2, staffExam.id, {
+        ...MIN_BODY,
+        passPct: 80,
+        timeLimitMinutes: 90,
+        examReviewMode: "after_final_attempt",
+      });
+      expect(res.status, res.text.slice(0, 300)).toBe(201);
+      expect(typeof res.requestId).toBe("string");
+      const body = res.json as { data: { version: number; examReviewMode: string; passPct: number } };
+      expect(body.data.version).toBe(2); // seed v1 → max+1 = 2
+      expect(body.data.passPct).toBe(80);
+      expect(body.data.examReviewMode).toBe("after_final_attempt");
+      // แถวจริงใน DB ตรง response
+      const dbVersion = await psqlScalar(
+        `select max(version) from public.assessment_rules where assessment_id = '${ASSESS_ID}'`,
+      );
+      expect(dbVersion).toBe("2");
+      const dbMode = await psqlScalar(
+        `select exam_review_mode from public.assessment_rules
+          where assessment_id = '${ASSESS_ID}' and version = 2`,
+      );
+      expect(dbMode).toBe("after_final_attempt");
+    }, 60_000);
+
+    it("flip สองทิศ: never → GET embed สะท้อน never → กลับ after_final_attempt → GET สะท้อนกลับ", async (ctx) => {
+      if (!appReachable) return ctx.skip();
+      // ทิศ 1 — POST never (ได้ v3)
+      const postNever = await bffPost(RULES_PATH, examAal2, staffExam.id, {
+        ...MIN_BODY,
+        examReviewMode: "never",
+      });
+      expect(postNever.status, postNever.text.slice(0, 300)).toBe(201);
+      const neverBody = postNever.json as { data: { version: number } };
+      expect(neverBody.data.version).toBe(3);
+      // GET list — embed กติกาล่าสุดสะท้อน never
+      const getNever = await bffGet(LIST_PATH, examAal2, staffExam.id);
+      expect(getNever.status, getNever.text.slice(0, 300)).toBe(200);
+      const neverList = getNever.json as {
+        data: Array<{ id: string; rules: { version: number; examReviewMode: string } | null }>;
+      };
+      const neverRow = neverList.data.find((item) => item.id === ASSESS_ID);
+      expect(neverRow?.rules?.version).toBe(3);
+      expect(neverRow?.rules?.examReviewMode).toBe("never");
+      // ทิศ 2 — POST กลับ after_final_attempt (ได้ v4) + GET สะท้อนกลับ
+      const postBack = await bffPost(RULES_PATH, examAal2, staffExam.id, {
+        ...MIN_BODY,
+        examReviewMode: "after_final_attempt",
+        passPct: 65,
+        maxAttempts: 5,
+      });
+      expect(postBack.status, postBack.text.slice(0, 300)).toBe(201);
+      const backBody = postBack.json as { data: { version: number; examReviewMode: string } };
+      expect(backBody.data.version).toBe(4);
+      expect(backBody.data.examReviewMode).toBe("after_final_attempt");
+      const getBack = await bffGet(LIST_PATH, examAal2, staffExam.id);
+      const backList = getBack.json as {
+        data: Array<{ id: string; rules: { version: number; examReviewMode: string } | null }>;
+      };
+      const backRow = backList.data.find((item) => item.id === ASSESS_ID);
+      expect(backRow?.rules?.version).toBe(4);
+      expect(backRow?.rules?.examReviewMode).toBe("after_final_attempt");
+    }, 90_000);
+
+    // ─── กลุ่ม 2 — 403: บทบาท + aal ──────────────────────────────────────────
+
+    it("instructor → 403 ERR-RBAC-001 ก่อนเรียก RPC · ไม่มี version ใหม่ใน DB", async (ctx) => {
+      if (!appReachable) return ctx.skip();
+      const res = await bffPost(RULES_PATH, instructorAal2, instructor.id, MIN_BODY);
+      expect(res.status).toBe(403);
+      const body = res.json as { error: { code: string } };
+      expect(body.error.code).toBe("ERR-RBAC-001");
+      const dbVersion = await psqlScalar(
+        `select max(version) from public.assessment_rules where assessment_id = '${ASSESS_ID}'`,
+      );
+      expect(dbVersion).toBe("4"); // คง v4 — ไม่มีแถวใหม่
+    }, 60_000);
+
+    it("staff:exam แต่ session aal1 → 403 ERR-AUTH-004 (mfa_required)", async (ctx) => {
+      if (!appReachable) return ctx.skip();
+      // token aal1 ของรอบ — grant ใหม่ ณ จุดเรียก (แบบ dcr13 เคส d): GoTrue เพิกถอน
+      // session อื่นของผู้ใช้เมื่อยืนยัน MFA (factor verify ใน mintAal2Token ตอน
+      // beforeAll) ทำให้ accessToken ดิบจาก createTestUser ตาย → 401 ไม่ใช่ 403
+      const freshGrant = await restCall(
+        "POST",
+        "/auth/v1/token?grant_type=password",
+        {},
+        { email: staffExam.email, password: TEST_PASSWORD },
+      );
+      expect(freshGrant.status, freshGrant.text.slice(0, 200)).toBe(200);
+      const aal1Token = ((freshGrant.json ?? {}) as { access_token?: string }).access_token ?? "";
+      expect(aal1Token.startsWith("ey")).toBe(true); // JWT จริง — ไม่ใช่ body แปลกปลอม
+      const res = await bffPost(RULES_PATH, aal1Token, staffExam.id, MIN_BODY);
+      expect(res.status).toBe(403);
+      const body = res.json as { error: { code: string } };
+      expect(body.error.code).toBe("ERR-AUTH-004");
+    }, 60_000);
+
+    // ─── กลุ่ม 3 — VAL/NF ────────────────────────────────────────────────────
+
+    it("passPct 0 → 400 ERR-VAL-001 (ขา BFF zod ตรวจก่อน RPC — ทะเบียน §2 แถว 72; §3.8 แถว 226 เขียน 422 ซึ่ง implementable ไม่ได้ — flag lead แล้ว)", async (ctx) => {
+      if (!appReachable) return ctx.skip();
+      const res = await bffPost(RULES_PATH, examAal2, staffExam.id, { passPct: 0 });
+      expect(res.status).toBe(400);
+      const body = res.json as { error: { code: string } };
+      expect(body.error.code).toBe("ERR-VAL-001");
+      const dbVersion = await psqlScalar(
+        `select max(version) from public.assessment_rules where assessment_id = '${ASSESS_ID}'`,
+      );
+      expect(dbVersion).toBe("4"); // ไม่มี version ใหม่
+    }, 60_000);
+
+    it("assessment ถูก soft-delete → 404 ERR-NF-001 จาก RPC · คืนสถานะหลังเคส", async (ctx) => {
+      if (!appReachable) return ctx.skip();
+      await psql(`update public.assessments set deleted_at = now() where id = '${ASSESS_ID}'`);
+      try {
+        const res = await bffPost(RULES_PATH, examAal2, staffExam.id, MIN_BODY);
+        expect(res.status).toBe(404);
+        const body = res.json as { error: { code: string; details?: { reason?: string } } };
+        expect(body.error.code).toBe("ERR-NF-001");
+        expect(body.error.details?.reason).toBe("assessment_not_found");
+      } finally {
+        await psql(`update public.assessments set deleted_at = null where id = '${ASSESS_ID}'`);
+      }
+    }, 60_000);
+
+    // ─── กลุ่ม 4 — audit ผ่าน endpoint ───────────────────────────────────────
+
+    it("POST ผ่าน endpoint → audit_logs มี ASSESSMENT_CONFIG_CHANGE ของ version ใหม่ + actor ถูกคน", async (auditCtx) => {
+      if (!appReachable) return auditCtx.skip();
+      const marker = await psqlScalar("select now()");
+      const res = await bffPost(RULES_PATH, examAal2, staffExam.id, {
+        ...MIN_BODY,
+        passPct: 75,
+      });
+      expect(res.status, res.text.slice(0, 300)).toBe(201);
+      const body = res.json as { data: { version: number } };
+      expect(body.data.version).toBe(5);
+      const auditCount = await psqlScalar(`
+        select count(*) from public.audit_logs
+         where action = 'ASSESSMENT_CONFIG_CHANGE'
+           and occurred_at >= '${marker}'::timestamptz
+           and entity_id in (
+             select id from public.assessment_rules
+              where assessment_id = '${ASSESS_ID}' and version = 5)
+      `);
+      expect(Number(auditCount)).toBeGreaterThanOrEqual(1);
+      const actor = await psqlScalar(`
+        select actor_user_id from public.audit_logs
+         where action = 'ASSESSMENT_CONFIG_CHANGE'
+           and entity_id in (
+             select id from public.assessment_rules
+              where assessment_id = '${ASSESS_ID}' and version = 5)
+         order by occurred_at desc limit 1
+      `);
+      expect(actor).toBe(staffExam.id);
+    }, 60_000);
+  });
