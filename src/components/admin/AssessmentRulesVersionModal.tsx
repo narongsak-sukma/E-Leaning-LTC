@@ -435,6 +435,13 @@ export const unresolvedRulesRegistry = new UnresolvedRulesRegistry();
 const subscribeRulesRegistry = (onChange: () => void): (() => void) =>
   unresolvedRulesRegistry.subscribe(onChange);
 const getRulesRegistryVersion = (): number => unresolvedRulesRegistry.version();
+/**
+ * R6-M1: server snapshot ของ registry สำหรับ SSR — คืน 0 เสมอ (registry เริ่มนับที่ 0
+ * ทุกโหลดหน้า) ตรงกับ render แรกบน client ก่อนเกิด mutation ใด ๆ (ผล POST เกิดหลัง
+ * hydration เท่านั้น) — ไม่ใส่ค่านี้ renderToString จะ throw "Missing getServerSnapshot"
+ * ทุกครั้งที่หน้า assessments ถูก server-render
+ */
+const getRulesRegistryServerSnapshot = (): number => 0;
 
 /**
  * ตัดสินผลของการบันทึกที่ค้าง "ไม่แน่นอน" จาก version ล่าสุดจริงบนเซิร์ฟเวอร์ — pure:
@@ -840,7 +847,12 @@ export function AssessmentRulesVersionModal({
    * แต่ไร้ปุ่ม) · definitive rejection → ปลดล็อก gate ที่ค้าง "ยังไม่เสร็จ" ·
    * startResolution ผ่าน ref (ประกาศหลัง early-return ไม่ได้ — กัน TDZ ของ deps)
    */
-  const registryVersion = useSyncExternalStore(subscribeRulesRegistry, getRulesRegistryVersion);
+  // R6-M1: ต้องส่ง getServerSnapshot เป็น argument ที่สาม — หน้านี้ถูก server-render
+  const registryVersion = useSyncExternalStore(
+    subscribeRulesRegistry,
+    getRulesRegistryVersion,
+    getRulesRegistryServerSnapshot,
+  );
   const startResolutionRef = useRef<((assessmentId: string) => void) | null>(null);
   const retryNoticeVisible = resolveNotice !== null && resolveNotice.retry;
   useEffect(() => {

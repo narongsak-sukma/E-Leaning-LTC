@@ -15,8 +15,10 @@
  * เปิดใหม่ต้องยังล็อกจนคำขอเสร็จ
  * R5-M1 (gate GP3 r5): registry observable + ผล deferred ปลุกโมดัลที่เปิดอยู่ — uncertain → เริ่ม read-back เอง (deferredRegistryReaction)
  * · หาง callback จริง applyDeferredRulesOutcome (registry ทุกกรณี + refresh ทุกผล รวม definitive 400)
+ * R6-M1 (gate GP3 r6): SSR ของ component จริงผ่าน react-dom/server — useSyncExternalStore
+ * ต้องมี getServerSnapshot (server snapshot = 0 ตรง client ตอน hydration) ไม่งั้น renderToString throw
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AdminApiError } from "@/lib/exam-admin.client";
 import {
@@ -36,10 +38,24 @@ import {
   readCreatedRulesVersion,
   resolveUnsavedRulesOutcome,
   submitBlockedGate,
+  AssessmentRulesVersionModal,
   type AssessmentRulesPrefill,
   type ModalCoreState,
   type RulesPostOutcome,
 } from "./AssessmentRulesVersionModal";
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
+
+// R6-M1: component จริงเรียก useRouter ตอน render — mock เฉพาะตัวนี้ (เทียบวิธีพิสูจน์ของ gate r6)
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: () => undefined,
+    push: () => undefined,
+    replace: () => undefined,
+    prefetch: () => undefined,
+    back: () => undefined,
+  }),
+}));
 
 const PREFILL: AssessmentRulesPrefill = {
   version: 4,
@@ -782,5 +798,28 @@ describe("ลำดับจบจริงของผล deferred ผ่าน
         registry,
       }),
     ).toEqual({ kind: "start_read_back" });
+  });
+});
+
+
+/* ─── R6-M1 (gate GP3 r6): SSR ของ component จริง — registry store ต้องมี server snapshot ─── */
+
+describe("SSR ของ component จริง (R6-M1 — renderToString ผ่าน react-dom/server)", () => {
+  it("renderToString ต้องไม่ throw ทั้ง allowRules=false (early return) และ true (ปุ่มเปิดโมดัล) — เดิม throw Missing getServerSnapshot", () => {
+    // allowRules=false: hooks ทุกตัว (รวม useSyncExternalStore) ยังรันก่อน early return — จุดที่ SSR เคย throw
+    const closedHtml = renderToString(
+      createElement(AssessmentRulesVersionModal, { assessmentOptions: [], allowRules: false }),
+    );
+    expect(closedHtml).not.toContain("เพิ่มกติกา version ใหม่");
+    // allowRules=true: render เต็มถึงปุ่ม trigger (วิธีเดียวกับ repro ของ gate r6 — "ได้ปุ่มตามปกติ")
+    const openHtml = renderToString(
+      createElement(AssessmentRulesVersionModal, {
+        assessmentOptions: [
+          { id: "a1", label: "ชุดที่ 1", currentVersion: 3, currentRules: null },
+        ],
+        allowRules: true,
+      }),
+    );
+    expect(openHtml).toContain("+ เพิ่มกติกา version ใหม่");
   });
 });
