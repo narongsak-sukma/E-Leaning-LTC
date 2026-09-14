@@ -19,8 +19,9 @@
  * ธงระหว่างพัฒนา (ให้ lead ตรวจตอนรัน battery):
  * - [ปิดแล้ว lead] ป้ายสถานะไทยของข้อ sync กับ W2 จริงแล้ว — retired = "ปลดจากการใช้งาน"
  *   (ตาม QUESTION_STATUS_LABEL_TH ของ bank-detail.view.ts · ไม่ใช่ "เลิกใช้" ฉบับร่างแรก)
- * - W1/W2 ยังไม่เสร็จขณะเขียนไฟล์ — ไฟล์นี้เดินตามสัญญา API-SPEC 1.3.0 + แผน section 4 W2;
- *   รันจริงเป็นของ lead หลัง W1/W2 ปิด (D-f-7 — ห้ามรัน e2e ระหว่าง W1 ใช้ dev stack)
+ * - [ปิดแล้ว lead] การแกก body: edit GET / status PATCH คืน envelope { data } (§1.1)
+ *   — ฉบับร่างแรกอ่าน resource ตรง top level ทำให้ editBody.id เป็น undefined
+ *   (W3 เขียนก่อน W1 เสร็จ · แกพร้อม dataOf + ปิดธงตามแผน §5)
  */
 import { expect, test, type Page } from "@playwright/test";
 
@@ -117,6 +118,19 @@ function jsonOf<T>(result: { bodyText: string }): T {
   return JSON.parse(result.bodyText) as T;
 }
 
+/**
+ * แกก { data } ของ envelope §1.1 — edit GET / status PATCH คืน { data: resource }
+ * (W1 as-built เดียวกับ integration wave-g ที่ assert ผ่าน body.data.id) ·
+ * สองเส้นนี้เป็น resource เดี่ยวเสมอ (ไม่มีรูป array ตรง)
+ */
+function dataOf<T>(result: { bodyText: string }): T {
+  const parsed = JSON.parse(result.bodyText) as { data?: T } | null;
+  if (parsed === null || typeof parsed !== "object" || !("data" in parsed)) {
+    throw new Error(`คาด envelope { data } แต่ได้: ${result.bodyText.slice(0, 200)}`);
+  }
+  return parsed.data as T;
+}
+
 /** ล้าง fixture ของ suite (เรียงตาม FK: options -> questions -> bank) — รันซ้ำได้ */
 async function cleanupQuestionBankFixture(): Promise<void> {
   await psql(`
@@ -204,7 +218,7 @@ test.describe("e2e-20 — คลังข้อสอบฝั่ง admin (staf
     const edit = await fetchJson(page, "GET", editQuestionPath(BANK_ID, Q1_ID));
     expect(edit.status).toBe(200);
     expect(edit.cacheControl).toContain("no-store");
-    const editBody = jsonOf<{
+    const editBody = dataOf<{
       id: string;
       status: string;
       options: ReadonlyArray<{ id: string; isCorrect: boolean }>;
@@ -222,7 +236,7 @@ test.describe("e2e-20 — คลังข้อสอบฝั่ง admin (staf
     // PATCH draft → active (D75 — RPC admin_set_question_status · version +1)
     const toActive = await fetchJson(page, "PATCH", statusPath(BANK_ID, Q1_ID), { status: "active" });
     expect(toActive.status).toBe(200);
-    const activeBody = jsonOf<{ status: string; version: number }>(toActive);
+    const activeBody = dataOf<{ status: string; version: number }>(toActive);
     expect(activeBody.status).toBe("active");
     expect(activeBody.version).toBe(2);
 
@@ -233,7 +247,7 @@ test.describe("e2e-20 — คลังข้อสอบฝั่ง admin (staf
     // PATCH active → retired
     const toRetired = await fetchJson(page, "PATCH", statusPath(BANK_ID, Q1_ID), { status: "retired" });
     expect(toRetired.status).toBe(200);
-    const retiredBody = jsonOf<{ status: string; version: number }>(toRetired);
+    const retiredBody = dataOf<{ status: string; version: number }>(toRetired);
     expect(retiredBody.status).toBe("retired");
     expect(retiredBody.version).toBe(3);
 
