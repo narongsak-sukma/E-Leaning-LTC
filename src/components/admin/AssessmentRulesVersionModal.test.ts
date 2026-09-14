@@ -5,6 +5,9 @@
  * เห็น undefined เสมอ) · body ต้องส่งต่อ selection เดิม ไม่ใช่ '{}' ทับขอบเขตคลัง (M2) ·
  * state machine การส่ง (nextModalCoreState/confirmGateOf — R2-M1 ล็อกกันสร้าง version
  * ซ้ำ · R2-M2 ปิดกลาง POST แล้วเปิดใหม่ต้องไม่ติดค้าง)
+ * R3-M1 (gate GP3 r3): registry
+ * unresolved รอดการปิดโมดัล · outcome_resolved ทางออกเดียวจาก uncertain · read-back
+ * parser fail-closed · submitBlockedGate = gate ที่ handleSubmit ใช้จริง
  */
 import { describe, expect, it } from "vitest";
 
@@ -12,12 +15,16 @@ import { AdminApiError } from "@/lib/exam-admin.client";
 import {
   ASSESSMENT_RULES_FORM_DEFAULTS,
   MODAL_CORE_CLOSED,
+  UnresolvedRulesRegistry,
   buildAssessmentRuleVersionBody,
   confirmGateOf,
   formStateForAssessment,
   isDefinitiveRejection,
   nextModalCoreState,
+  parseRulesReadBack,
   readCreatedRulesVersion,
+  resolveUnsavedRulesOutcome,
+  submitBlockedGate,
   type AssessmentRulesPrefill,
   type ModalCoreState,
 } from "./AssessmentRulesVersionModal";
@@ -213,5 +220,184 @@ describe("isDefinitiveRejection — แยก 4xx ที่แน่ใจว่
   it("transport ธรรมดา (TypeError fetch ล้ม) → false = ผลยังไม่แน่นอน", () => {
     expect(isDefinitiveRejection(new TypeError("fetch failed"))).toBe(false);
     expect(isDefinitiveRejection(new Error("network"))).toBe(false);
+  });
+});
+
+/* ─── R3-M1 (gate GP3 r3): unresolved รอดการปิดโมดัล + ปลดล็อกผูกกับการตรวจจริง ─── */
+
+describe("nextModalCoreState — outcome_resolved (ทางออกเดียวจาก uncertain)", () => {
+  const OPEN_UNCERTAIN: ModalCoreState = { ...OPEN_IDLE, uncertainSave: true };
+
+  it("จาก uncertainSave → กลับ idle แก้/ส่งใหม่ได้ (ปลดล็อกเพราะการตรวจเสร็จจริง)", () => {
+    expect(nextModalCoreState(OPEN_UNCERTAIN, { kind: "outcome_resolved" })).toEqual(OPEN_IDLE);
+  });
+
+  it("ตอน idle/submitting/closed = ทิ้งเงียบ (ไม่ใช่ทางเข้าสถานะใด)", () => {
+    expect(nextModalCoreState(OPEN_IDLE, { kind: "outcome_resolved" })).toBe(OPEN_IDLE);
+    expect(nextModalCoreState(OPEN_SUBMITTING, { kind: "outcome_resolved" })).toBe(OPEN_SUBMITTING);
+    expect(nextModalCoreState(MODAL_CORE_CLOSED, { kind: "outcome_resolved" })).toBe(MODAL_CORE_CLOSED);
+  });
+
+  it("ลำดับเต็ม: submit → uncertain → resolved → submit ใหม่ได้อีก (วงจรปกติหลังตรวจ)", () => {
+    let state = nextModalCoreState(OPEN_IDLE, { kind: "submit_start" });
+    state = nextModalCoreState(state, { kind: "outcome_uncertain" });
+    expect(state.uncertainSave).toBe(true);
+    state = nextModalCoreState(state, { kind: "outcome_resolved" });
+    expect(state).toEqual(OPEN_IDLE);
+    state = nextModalCoreState(state, { kind: "submit_start" });
+    expect(state.submitting).toBe(true);
+  });
+});
+
+describe("UnresolvedRulesRegistry — สถานะ unresolved รอดการปิดโมดัล", () => {
+  it("register → peek เห็น knownVersionAtSend · resolve → หาย (ปลดเฉพาะเมื่อตรวจเสร็จ)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a0000000-0000-4000-8000-000000000001", 3);
+    expect(registry.peek("a0000000-0000-4000-8000-000000000001")).toMatchObject({
+      assessmentId: "a0000000-0000-4000-8000-000000000001",
+      knownVersionAtSend: 3,
+    });
+    registry.resolve("a0000000-0000-4000-8000-000000000001");
+    expect(registry.peek("a0000000-0000-4000-8000-000000000001")).toBeUndefined();
+  });
+
+  it("register knownVersionAtSend null ได้ (ชุดยังไม่มีกติกาตอนส่ง)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a0000000-0000-4000-8000-000000000002", null);
+    expect(registry.peek("a0000000-0000-4000-8000-000000000002")?.knownVersionAtSend).toBeNull();
+  });
+
+  it("แยกรายการต่อชุดข้อสอบ — ชุดอื่นไม่โดนล็อกไปด้วย", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a0000000-0000-4000-8000-000000000001", 1);
+    expect(registry.peek("a0000000-0000-4000-8000-000000000099")).toBeUndefined();
+    registry.resolve("a0000000-0000-4000-8000-000000000001");
+    expect(registry.peek("a0000000-0000-4000-8000-000000000001")).toBeUndefined();
+  });
+
+  it("clear ล้างทั้งหมด (ใช้ใน test เท่านั้น)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a0000000-0000-4000-8000-000000000001", null);
+    registry.clear();
+    expect(registry.peek("a0000000-0000-4000-8000-000000000001")).toBeUndefined();
+  });
+});
+
+describe("resolveUnsavedRulesOutcome — ตัดสินจาก version ล่าสุดจริงบนเซิร์ฟเวอร์ (pure)", () => {
+  it("เซิร์ฟเวอร์ยังไม่มีกติกาเลย → not_committed ทุกกรณี", () => {
+    expect(resolveUnsavedRulesOutcome(null, null)).toBe("not_committed");
+    expect(resolveUnsavedRulesOutcome(3, null)).toBe("not_committed");
+  });
+
+  it("known null + เซิร์ฟเวอร์มี v1 → committed_expected (การบันทึกครั้งนั้นสำเร็จ)", () => {
+    expect(resolveUnsavedRulesOutcome(null, 1)).toBe("committed_expected");
+  });
+
+  it("known N + เซิร์ฟเวอร์ N+1 → committed_expected", () => {
+    expect(resolveUnsavedRulesOutcome(1, 2)).toBe("committed_expected");
+    expect(resolveUnsavedRulesOutcome(4, 5)).toBe("committed_expected");
+  });
+
+  it("เซิร์ฟเวอร์สูงกว่า expected → committed_newer (prefill จากของจริงบนเซิร์ฟเวอร์)", () => {
+    expect(resolveUnsavedRulesOutcome(1, 5)).toBe("committed_newer");
+    expect(resolveUnsavedRulesOutcome(null, 2)).toBe("committed_newer");
+  });
+
+  it("เซิร์ฟเวอร์ไม่สูงกว่า known (ไม่มี version ใหม่) → not_committed — บันทึกใหม่ได้", () => {
+    expect(resolveUnsavedRulesOutcome(1, 1)).toBe("not_committed");
+    expect(resolveUnsavedRulesOutcome(3, 2)).toBe("not_committed");
+  });
+});
+
+describe("parseRulesReadBack — envelope ของ GET ?id=… fail-closed", () => {
+  const RULES = {
+    version: 5,
+    passPct: 70,
+    timeLimitMinutes: 60,
+    questionCount: 30,
+    maxAttempts: 3,
+    cooldownMinutes: 1440,
+    shuffleQuestions: true,
+    shuffleOptions: false,
+    requireCourseComplete: true,
+    selection: { bank_ids: ["b00000000-0000-4000-8000-000000000001"] },
+    proctoringMode: "basic",
+    examReviewMode: "after_final_attempt",
+    effectiveFrom: "2026-09-14T00:00:00Z",
+  };
+
+  it("แถวมี rules ครบ → kind rules + version + prefill ครบทุกฟิลด์", () => {
+    const readBack = parseRulesReadBack({ data: [{ id: "x", rules: RULES }], page: {} });
+    expect(readBack.kind).toBe("rules");
+    if (readBack.kind === "rules") {
+      expect(readBack.version).toBe(5);
+      expect(readBack.prefill.cooldownMinutes).toBe(1440);
+      expect(readBack.prefill.selection).toEqual(RULES.selection);
+      expect(readBack.prefill.examReviewMode).toBe("after_final_attempt");
+    }
+  });
+
+  it("rules = null (ยังไม่มีกติกาบนเซิร์ฟเวอร์) → no_rules", () => {
+    expect(parseRulesReadBack({ data: [{ id: "x", rules: null }] })).toEqual({ kind: "no_rules" });
+  });
+
+  it("data ไม่ใช่ array / ว่าง / แถวไม่ใช่ object → unreadable", () => {
+    expect(parseRulesReadBack({ data: null }).kind).toBe("unreadable");
+    expect(parseRulesReadBack({ data: [] }).kind).toBe("unreadable");
+    expect(parseRulesReadBack({ data: ["x"] }).kind).toBe("unreadable");
+    expect(parseRulesReadBack(undefined).kind).toBe("unreadable");
+  });
+
+  it("rules ผิดชนิดสักฟิลด์ → unreadable ไม่ปล่อย prefill เพี้ยนเข้าฟอร์ม", () => {
+    expect(parseRulesReadBack({ data: [{ rules: { ...RULES, version: 0 } }] }).kind).toBe("unreadable");
+    expect(parseRulesReadBack({ data: [{ rules: { ...RULES, passPct: "70" } }] }).kind).toBe("unreadable");
+    expect(parseRulesReadBack({ data: [{ rules: { ...RULES, shuffleQuestions: "yes" } }] }).kind).toBe("unreadable");
+    expect(parseRulesReadBack({ data: [{ rules: { ...RULES, proctoringMode: "strict" } }] }).kind).toBe("unreadable");
+    expect(parseRulesReadBack({ data: [{ rules: { ...RULES, selection: null } }] }).kind).toBe("unreadable");
+  });
+});
+
+describe("submitBlockedGate — gate รวมที่ handleSubmit ใช้จริง (R3-M1)", () => {
+  const ASSESSMENT_ID = "a0000000-0000-4000-8000-000000000001";
+
+  it("ไม่มีรายการค้าง + idle → ปลดล็อก (ส่งได้ปกติ)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    expect(submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, null, registry).disabled).toBe(false);
+  });
+
+  it("registry มีรายการของชุดที่เลือก → ล็อก แม้ core จะ idle สดหลังปิด-เปิดโมดัลใหม่", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register(ASSESSMENT_ID, 2);
+    const gate = submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, null, registry);
+    expect(gate.disabled).toBe(true);
+    expect(gate.reason).toContain("ตรวจสอบอีกครั้ง");
+  });
+
+  it("กำลังตรวจ read-back ของชุดนั้น (resolvingId ตรง) → ล็อกพร้อมเหตุผลรอ", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register(ASSESSMENT_ID, 2);
+    const gate = submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, ASSESSMENT_ID, registry);
+    expect(gate.disabled).toBe(true);
+    expect(gate.reason).toContain("กำลังตรวจสอบ");
+  });
+
+  it("registry.resolve แล้ว (ตรวจเสร็จ) → ปลดล็อกทันที — ปลดล็อกผูกกับการตรวจจริง", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register(ASSESSMENT_ID, 2);
+    registry.resolve(ASSESSMENT_ID);
+    expect(submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, null, registry).disabled).toBe(false);
+  });
+
+  it("รายการค้างเป็นชุดอื่น → ชุดที่เลือกไม่โดนล็อก (แยกรายการต่อชุด)", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register("a0000000-0000-4000-8000-000000000099", 1);
+    expect(submitBlockedGate(OPEN_IDLE, ASSESSMENT_ID, null, registry).disabled).toBe(false);
+  });
+
+  it("assessmentId ว่าง (ยังไม่เลือก) → ตกไปชั้น confirmGateOf ตามปกติ", () => {
+    const registry = new UnresolvedRulesRegistry();
+    registry.register(ASSESSMENT_ID, 1);
+    expect(submitBlockedGate(OPEN_IDLE, "", null, registry).disabled).toBe(false);
+    expect(submitBlockedGate(OPEN_SUBMITTING, "", null, registry).disabled).toBe(true);
   });
 });

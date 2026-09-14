@@ -7,6 +7,9 @@
  * · rpc ที่ไม่ใช่ my_roles ดึงจากคิวต่อชื่อฟังก์ชัน (default = แถวว่าง) — กติกาล่าสุด
  * ของ GET/POST มาจาก **RPC admin_latest_assessment_rules (0051)** แล้ว merge ที่ BFF
  * ไม่ใช่ embed ตารางอีกต่อไป (gate GP3 r2 R2-M3)
+ * R3 (gate GP3 r3): R3-m1 ตรวจ drift ต่อแถว RPC (membership/uniqueness/UUID/schema ของ
+ * projection) → 503 admin_assessments_rules_rpc_drift · R3-M1 query id=<uuid> additive
+ * (read-back ของโมดัลกติกา) — กรอง .eq("id", …) แถวเดียว + ไม่ใช่ UUID = 400 ERR-VAL-001
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -303,7 +306,7 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift"); // R3-m1: caught at RPC helper layer (projection strict) before merge
   });
 
   it("R2-M3: RPC 0051 ล้ม → 503 admin_assessments_rules_rpc_failed (ไม่กลืนเป็น 'ไม่มีกติกา')", async () => {
@@ -358,6 +361,98 @@ describe("GET /admin/assessments — สิทธิ์ + envelope §1.2", () =>
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.details?.reason).toBe("admin_assessments_rows_not_array");
+  });
+
+  it("R3-m1: RPC คืน id นอกชุดที่ขอ (membership) → 503 admin_assessments_rules_rpc_drift", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      {
+        admin_latest_assessment_rules: [
+          { data: [rulesRpcRow({ assessment_id: "d0000000-0000-4000-8000-000000000099" })] },
+        ],
+      },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R3-m1: RPC คืน id เดิมซ้ำสองแถว (uniqueness พัง) → 503 admin_assessments_rules_rpc_drift", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow(), rulesRpcRow()] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R3-m1: RPC คืน assessment_id ไม่ใช่ UUID → 503 admin_assessments_rules_rpc_drift", async () => {
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow({ assessment_id: "not-a-uuid" })] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("R3-m1: RPC คืนแถวขาดคอลัมน์กติกา (version หาย) → 503 ที่ชั้น helper ก่อน merge", async () => {
+    const row = rulesRpcRow();
+    delete row["version"];
+    mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [row] }] },
+    );
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift");
+  });
+
+  it("F5: แถว assessments เอง drift (title null · RPC ตอบแถวว่าง) → 503 admin_assessment_row_drift", async () => {
+    mockClient({ assessments: [{ data: [assessmentRow({ title: null })] }] }, ["staff:exam"]);
+    const res = await GET(adminUrl());
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.details?.reason).toBe("admin_assessment_row_drift");
+  });
+
+  it("R3-M1: query id=<uuid> → กรอง .eq(\"id\", …) แถวเดียว 200 (read-back ของโมดัลกติกา)", async () => {
+    const { calls } = mockClient(
+      { assessments: [{ data: [assessmentRow()] }] },
+      ["staff:exam"],
+      { admin_latest_assessment_rules: [{ data: [rulesRpcRow()] }] },
+    );
+    const res = await GET(adminUrl(`?id=${ASSESSMENT_ID}`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: Array<{ id: string; rules: { version: number } | null }> };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]?.id).toBe(ASSESSMENT_ID);
+    expect(body.data[0]?.rules?.version).toBe(1);
+    const call = calls.find((item) => item.table === "assessments");
+    expect(call?.filters).toContainEqual({ column: "id", value: ASSESSMENT_ID });
+  });
+
+  it("R3-M1: query id ไม่ใช่ UUID → 400 ERR-VAL-001 (strict query schema) ก่อนถึง DB", async () => {
+    const { calls } = mockClient({ assessments: [{ data: [] }] }, ["staff:exam"]);
+    const res = await GET(adminUrl("?id=not-a-uuid"));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ERR-VAL-001");
+    expect(calls.some((call) => call.table === "assessments")).toBe(false);
   });
 });
 
@@ -465,7 +560,7 @@ describe("POST /admin/assessments — สร้าง draft + กติกา", 
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: { code: string; details?: { reason?: string } } };
     expect(body.error.code).toBe("ERR-SYS-002");
-    expect(body.error.details?.reason).toBe("admin_assessment_row_drift"); // F5: ตายที่ขาเข้าก่อน map
+    expect(body.error.details?.reason).toBe("admin_assessments_rules_rpc_drift"); // R3-m1: caught at RPC helper layer (projection strict) before merge
   });
 
   it("r3-G3: INSERT คืนแถวที่ id หาย (created drift) → 503 ERR-SYS-002 ก่อนแตะ rules/reload ด้วย id ที่ไม่ผ่าน validation", async () => {

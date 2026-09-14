@@ -38,6 +38,8 @@ const AUTH_COOKIE = "sb-kong-auth-token";
 // ─── fixture ids ตายตัว (on conflict do nothing — seed ซ้ำได้ · ลบทันทีใน cleanup) ──
 
 const COURSE_ID = "cccccccc-0000-4000-8000-0000000000d1";
+/** หลักสูตรที่ instructor เป็นเจ้าของ (กลุ่ม 7 · R3-M2) — แยกจาก fixture หลักของ staff:exam */
+const INST_COURSE_ID = "cccccccc-0000-4000-8000-0000000000e1";
 const ASSESS_ID = "aaaaaaaa-0000-4000-8000-0000000000d1";
 const RULES_V1 = "aaaaaaaa-0000-4000-8000-0000000000d2";
 
@@ -175,8 +177,10 @@ async function bffPost(path: string, token: string, userId: string, body?: unkno
 let staffExam: TestUser;
 let instructor: TestUser;
 let learner: TestUser;
+let registrar: TestUser;
 let examAal2 = "";
 let instructorAal2 = "";
+let registrarAal2 = "";
 
 /** container app เข้าถึงได้หรือไม่ — ไม่ได้ = skip ทุกเคส (สแตกบางสภาพรันแค่ db+kong) */
 let appReachable = false;
@@ -215,9 +219,11 @@ describeDb(
       staffExam = await createTestUser("wgp3-rules-exam", "staff:exam");
       instructor = await createTestUser("wgp3-rules-inst", "instructor");
       learner = await createTestUser("wgp3-rules-learn", "lawyer");
+      registrar = await createTestUser("wgp3-rules-reg", "staff:registrar");
       await seedWorld();
       examAal2 = await mintAal2Token(staffExam);
       instructorAal2 = await mintAal2Token(instructor);
+      registrarAal2 = await mintAal2Token(registrar);
       try {
         const probe = await fetch(APP_URL, { signal: AbortSignal.timeout(5_000) });
         appReachable = probe.status < 500;
@@ -492,5 +498,69 @@ describeDb(
            where course_id = '${COURSE_ID}' and user_id = '${learner.id}';
         `);
       }
+    }, 60_000);
+
+    // ─── กลุ่ม 7 — R3-M2 (gate GP3 r3): audience RPC 0052 = 2 สายแรกของ ar_read จริง ──
+    // regression 0051: instructor/registrar ผ่าน RBAC ของ BFF แล้วโดน RPC ยก 42501 →
+    // POST กลายเป็น 503 หลัง INSERT สำเร็จ · GET กลายเป็น 503 — 0052 คืน 201/200 ตาม as-built
+
+    it("R3-M2: instructor POST หลักสูตรตัวเอง → 201 rules=null (เดิม 0051 = 503 หลัง INSERT สำเร็จ) + GET เห็นเฉพาะของตัวเอง + ?id= ชี้แถวเดียวได้", async (ctx) => {
+      requireAppOrSkip(ctx);
+      // หลักสูตรที่ instructor เป็นเจ้าของจริง (asm_insert/asm_read + RPC 0052 row-filter
+      // ผูก created_by ของ courses — ไม่ใช่ fixture หลักที่เป็นของ staff:exam)
+      await psql(`
+        insert into public.courses
+          (id, code, category_id, created_by, title_th, is_public, status, published_at)
+        values
+          ('${INST_COURSE_ID}', 'E14-GP3-R3-INST',
+           (select id from public.course_categories order by id limit 1), '${instructor.id}',
+           'หลักสูตร instructor เจ้าของ (R3-M2)', true, 'published', now())
+        on conflict (id) do nothing;
+      `);
+      try {
+        const res = await bffPost(LIST_PATH, instructorAal2, instructor.id, {
+          courseId: INST_COURSE_ID,
+          code: "EXAM-GP3-R3-01",
+          title: "ชุดข้อสอบ draft ของ instructor (R3-M2)",
+        });
+        expect(res.status, res.text.slice(0, 300)).toBe(201);
+        const created = (
+          res.json as { data: { id: string; status: string; createdBy: string; rules: unknown } }
+        ).data;
+        expect(created.status).toBe("draft");
+        expect(created.createdBy).toBe(instructor.id);
+        expect(created.rules).toBeNull(); // ยังไม่มีกติกา — RPC 0052 ตอบแถวว่าง ไม่ใช่ 42501
+        // GET list ของ instructor: RLS กรองเห็นเฉพาะหลักสูตรตัวเอง (ไม่เห็น fixture ของ staff:exam)
+        const list = await bffGet(LIST_PATH, instructorAal2, instructor.id);
+        expect(list.status, list.text.slice(0, 300)).toBe(200);
+        const ids = ((list.json as { data: Array<{ id: string }> }).data ?? []).map((row) => row.id);
+        expect(ids).toContain(created.id);
+        expect(ids).not.toContain(ASSESS_ID);
+        // R3-M1 read-back บนสแตกจริง: ?id=<uuid> ตอบแถวเดียวของชุดที่เพิ่งสร้าง
+        const single = await bffGet(`${LIST_PATH}?id=${created.id}`, instructorAal2, instructor.id);
+        expect(single.status, single.text.slice(0, 300)).toBe(200);
+        const singleRows = ((single.json as { data: Array<{ id: string }> }).data ?? []);
+        expect(singleRows).toHaveLength(1);
+        expect(singleRows[0]?.id).toBe(created.id);
+      } finally {
+        await psql(`
+          delete from public.assessment_rules where assessment_id in
+            (select id from public.assessments where course_id = '${INST_COURSE_ID}');
+          delete from public.assessments where course_id = '${INST_COURSE_ID}';
+          delete from public.enrollments where course_id = '${INST_COURSE_ID}';
+          delete from public.courses where id = '${INST_COURSE_ID}';
+        `);
+      }
+    }, 90_000);
+
+    it("R3-M2: staff:registrar GET → 200 เห็น fixture + กติกา merge จาก RPC 0052 (เดิม 0051 = 503 หลังผ่าน RBAC ของ BFF)", async (ctx) => {
+      requireAppOrSkip(ctx);
+      // กรอง courseId = fixture หลัก → deterministic หนึ่งแถวพอดี (ไม่เกี่ยว pagination)
+      const res = await bffGet(`${LIST_PATH}?courseId=${COURSE_ID}`, registrarAal2, registrar.id);
+      expect(res.status, res.text.slice(0, 300)).toBe(200);
+      const rows =
+        (res.json as { data: Array<{ id: string; rules: { version: number } | null }> }).data ?? [];
+      expect(rows.map((row) => row.id)).toEqual([ASSESS_ID]);
+      expect(rows[0]?.rules?.version).toBeGreaterThanOrEqual(1); // กติกา merge จาก RPC 0052 ได้จริง
     }, 60_000);
   });

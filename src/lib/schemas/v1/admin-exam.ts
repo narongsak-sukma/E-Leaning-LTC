@@ -55,6 +55,8 @@ export const AdminAssessmentsQuery = z
     ...PageQuery.shape,
     status: z.enum(ADMIN_ASSESSMENT_STATUSES).optional(),
     courseId: z.uuid().optional(),
+    // additive (gate GP3 r3 R3-M1): ชี้แถวเดียว — read-back ของโมดัลกติกา (cache:"no-store")
+    id: z.uuid().optional(),
   })
   .strict();
 

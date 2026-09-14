@@ -10,6 +10,7 @@
  * ผู้เรียนอ่าน selection ทางตรง PostgREST ได้ (gate GP3 r2 R2-M3) → 0051 revoke คืน + เจ้าหน้าที่
  * อ่านผ่าน RPC ที่คุมบทบาทในตัว (staff:exam/staff:viewer/super_admin + aal2 · "ล่าสุด" =
  * version สูงสุดต่อ assessment — เกณฑ์เดียวกับ max+1 ของ RPC 0049)
+ * และ 0052 (gate GP3 r3 R3-M2): audience ของ RPC ขยายเป็น 2 สายแรกของ ar_read จริง — staff เต็ม (viewer/exam/registrar/super_admin) + instructor แบบ row-filter (เจ้าของหลักสูตรเท่านั้น) — instructor POST กลับมาเป็น 201 และ GET ของ instructor/registrar กลับมาเป็น 200 (เดิม 0051 กรอบ instructor จน 503 หลัง INSERT สำเร็จ)
  *
  * POST — requirePermission("assessment:create") (instructor/staff:exam/super_admin):
  * - status = 'draft' เสมอ — server-controlled ห้ามรับจาก body (schema strict ไม่มี status);
@@ -38,6 +39,7 @@ import { requirePermission, type RequirePermissionResult } from "@/lib/rbac";
 import {
   AdminAssessmentResource,
   AssessmentCreateBody,
+  AssessmentRuleRowSchema,
   type AssessmentCreateBodyParsed,
   type AssessmentRuleInputParsed,
   mapAdminExamDbError,
@@ -58,11 +60,18 @@ const ADMIN_ASSESSMENT_SELECT =
   "id,code,title,description,is_final,status,course_id,created_at," +
   "course:courses!left(id,created_by)";
 
+/** UUID v4 lowercase/uppercase ตรงรูปแบบ z.uuid() ของ query (R3-m1 — ตรวจ id ที่ RPC คืนก่อนเชื่อ) */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * กติกา version ล่าสุดต่อ assessment จาก RPC 0051 — คืน map assessment_id → แถวรูป
+ * กติกา version ล่าสุดต่อ assessment จาก RPC 0051/0052 — คืน map assessment_id → แถวรูป
  * เดียวกับ embed เดิม (คอลัมน์ 14 ตัวตาม AssessmentRuleRow) เพื่อให้ parseAdminAssessmentRow
  * ตรวจ strict ต่อได้เหมือนเดิม · หน้าว่าง (ids เปล่า) = map เปล่า ไม่ยิง RPC
  * · RPC ล้ม/คืนไม่ใช่ array = 503 ERR-SYS-002 fail-closed (ไม่กลืนเป็น "ไม่มีกติกา")
+ * · **R3-m1 (gate GP3 r3)**: ตรวจ drift ต่อแถวก่อนเชื่อ — id ต้องเป็น UUID จริง · เป็น id
+ * ที่เราขอเท่านั้น (membership) · ไม่ซ้ำต่อ assessment (uniqueness — ซ้ำคือ criteria
+ * "ล่าสุด" พัง = แถวที่กลืนกันจะ override กันเงียบ ๆ) · แถวที่โปรเจกต์แล้วต้องผ่าน
+ * AssessmentRuleRowSchema strict — ใด ๆ พัง = 503 drift ไม่ปล่อย `rules: null` เงียบ
  */
 async function latestRulesByAssessment(
   supabase: Awaited<ReturnType<typeof createSupabaseSsrClient>>,
@@ -72,6 +81,11 @@ async function latestRulesByAssessment(
   if (assessmentIds.length === 0) {
     return map;
   }
+  const requested = new Set(assessmentIds);
+  const drift = (): AppError =>
+    new AppError("ERR-SYS-002", {
+      details: { reason: "admin_assessments_rules_rpc_drift" },
+    });
   const { data, error } = await supabase.rpc("admin_latest_assessment_rules", {
     p_assessment_ids: assessmentIds,
   });
@@ -81,26 +95,25 @@ async function latestRulesByAssessment(
     });
   }
   if (!Array.isArray(data)) {
-    throw new AppError("ERR-SYS-002", {
-      details: { reason: "admin_assessments_rules_rpc_drift" },
-    });
+    throw drift();
   }
   for (const row of data) {
     if (typeof row !== "object" || row === null) {
-      throw new AppError("ERR-SYS-002", {
-        details: { reason: "admin_assessments_rules_rpc_drift" },
-      });
+      throw drift();
     }
     const record = row as Record<string, unknown>;
     const id = record["assessment_id"];
-    if (typeof id !== "string") {
-      throw new AppError("ERR-SYS-002", {
-        details: { reason: "admin_assessments_rules_rpc_drift" },
-      });
+    if (
+      typeof id !== "string" ||
+      !UUID_PATTERN.test(id) ||
+      !requested.has(id) ||
+      map.has(id)
+    ) {
+      throw drift();
     }
     // โปรเจกต์เฉพาะคอลัมน์ของ embed เดิม — คีย์อื่น (เช่น assessment_id ของ RPC) ห้าม
     // ไหลเข้า AssessmentRuleRowSchema ที่ strict
-    map.set(id, {
+    const projected: Record<string, unknown> = {
       version: record["version"],
       pass_pct: record["pass_pct"],
       time_limit_minutes: record["time_limit_minutes"],
@@ -114,7 +127,11 @@ async function latestRulesByAssessment(
       proctoring_mode: record["proctoring_mode"],
       exam_review_mode: record["exam_review_mode"],
       effective_from: record["effective_from"],
-    });
+    };
+    if (!AssessmentRuleRowSchema.safeParse(projected).success) {
+      throw drift();
+    }
+    map.set(id, projected);
   }
   return map;
 }
@@ -207,6 +224,11 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
     if (query.courseId !== undefined) {
       builder = builder.eq("course_id", query.courseId);
+    }
+    // R3-M1 read-back: โมดัลกติกาขอแถวเดียวด้วย id (cache:"no-store") เพื่อตัดสินผล
+    // ที่ค้าง "ไม่แน่นอน" — แถวที่ไม่มี/ไม่เข้าถึง = หน้าว่าง data:[] (เหมือน list ปกติ)
+    if (query.id !== undefined) {
+      builder = builder.eq("id", query.id);
     }
     if (cursorPayload !== null) {
       builder = builder.or(cursorFilterOf(cursorPayload));
