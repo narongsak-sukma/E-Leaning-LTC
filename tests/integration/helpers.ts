@@ -200,15 +200,12 @@ export async function assignRole(userId: string, role: string): Promise<void> {
   );
 }
 
-/** ลบข้อมูลของผู้ใช้ทดสอบ (เรียงตาม FK — RESTRICT) */
+/** ลบข้อมูลของผู้ใช้ทดสอบ — ผ่าน builder กลาง D89-1 (TX เดียว · guard สามชั้น ·
+ *  retry 55P03/40P01 · post-guard RAISE เมื่อเหลือแถวอ้างผู้ใช้ — เช่น NOT NULL actor
+ *  ที่ suite ต้องเคลียร์เองก่อน) */
 export async function deleteTestUser(userId: string): Promise<void> {
-  await psql(`
-    delete from public.lesson_progress where enrollment_id in (select id from public.enrollments where user_id = '${userId}');
-    delete from public.enrollments where user_id = '${userId}';
-    delete from public.role_assignments where user_id = '${userId}';
-    delete from public.profiles where id = '${userId}';
-    delete from auth.users where id = '${userId}';
-  `);
+  const { runUserCleanupVia } = await import("./cleanup-builder");
+  await runUserCleanupVia(psql, [userId]);
 }
 
 /** แจ้ง PostgREST โหลด schema cache ใหม่ (หลัง apply migration 0012) */

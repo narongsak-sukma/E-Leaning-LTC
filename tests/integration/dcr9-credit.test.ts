@@ -360,22 +360,10 @@ async function drainAccrualQueue(): Promise<void> {
   }
 }
 
-/** ล้าง ledger ของผู้ใช้ fixture ภายใต้ TX เดียวกับการ disable/enable trigger append-only —
- *  (เหตุผล + ความปลอดภัยดู header ไฟล์) · ขอบเขต user list เป๊ะ ไม่แตะของคนอื่น */
-async function purgeLedgerOf(userIds: readonly string[]): Promise<void> {
-  if (userIds.length === 0) return;
-  const list = userIds.map((id) => `'${id}'`).join(",");
-  await psql(`
-    begin;
-    alter table public.credit_ledger_entries disable trigger trg_append_only_rows;
-    delete from public.credit_ledger_entries where user_id in (${list});
-    alter table public.credit_ledger_entries enable trigger trg_append_only_rows;
-    commit;
-  `);
-}
-
-/** ล้างโลกของ suite ทั้งชุด (เรียงตาม FK — RESTRICT) ครอบคลุมของค้างจากรอบที่พังกลางทาง ·
- *  audit_logs เป็น append-only ตามดีไซน์ — ตั้งใจคงไว้ (เหมือนชุด D-8) */
+/** ล้างโลกของ suite ทั้งชุด ครอบคลุมของค้างจากรอบที่พังกลางทาง ·
+ *  audit_logs เป็น append-only ตามดีไซน์ — ตั้งใจคงไว้ (เหมือนชุด D-8) ·
+ *  ก้อนผู้ใช้ทั้งหมดผ่าน builder กลาง D89-1 (TX เดียว · ledger ก่อน certificates —
+ *  แก้ลำดับเดิมที่เคยพังจริง r6:2311 · toggle append-only ใน TX เดียวแทน purgeLedgerOf) */
 async function cleanupE12World(): Promise<void> {
   // B8 — tracked-first: ลบด้วย id ที่รันนี้จดไว้ก่อน แล้วค่อยกวาด prefix 'dcr9-credit-%'
   // เป็นเข็มขัดชั้นสอง (ครอบของค้างจากรันที่พังกลางทาง — ไม่แตะผู้ใช้ของชุดอื่น)
@@ -385,37 +373,21 @@ async function cleanupE12World(): Promise<void> {
      where email like 'dcr9-credit-%'
        ${trackedList.length > 0 ? `or id in (${trackedList})` : ""}
   `);
-  // ก้อน user-scoped — รันเมื่อมีผู้ใช้ทดสอบค้างอยู่เท่านั้น (กัน `in ('')` uuid พัง)
+  // กวาด attempts ตามรอบสอบของ suite ก่อน (กันของค้างจากรอบที่ผู้ใช้ถูกลบไปแล้ว)
+  await psql(`
+    delete from public.event_outbox
+     where payload ->> 'source_id' in (
+       select a.id::text from public.assessment_attempts a
+       where a.assessment_id in ('${E12_ASSESSMENTS.main}', '${E12_ASSESSMENTS.snap}'));
+    delete from public.attempt_answers
+     where attempt_id in (select id from public.assessment_attempts
+                          where assessment_id in ('${E12_ASSESSMENTS.main}', '${E12_ASSESSMENTS.snap}'));
+    delete from public.assessment_attempts
+     where assessment_id in ('${E12_ASSESSMENTS.main}', '${E12_ASSESSMENTS.snap}');
+  `);
   if (users.length > 0) {
-    const list = users.map((u) => `'${u.id}'`).join(",");
-    await psql(`
-      delete from public.event_outbox
-       where payload ->> 'source_id' in (select id::text from public.assessment_attempts
-                                          where assessment_id in ('${E12_ASSESSMENTS.main}', '${E12_ASSESSMENTS.snap}'))
-          or (topic = 'credit.accrual' and payload ->> 'user_id' in (${list}));
-      delete from public.attempt_answers
-       where attempt_id in (select id from public.assessment_attempts
-                             where assessment_id in ('${E12_ASSESSMENTS.main}', '${E12_ASSESSMENTS.snap}'));
-      delete from public.assessment_attempts
-       where assessment_id in ('${E12_ASSESSMENTS.main}', '${E12_ASSESSMENTS.snap}');
-      delete from public.certificate_verifications
-       where verify_code in (select verify_code from public.certificates where user_id in (${list}));
-      delete from public.certificates where user_id in (${list});
-    `);
-    await purgeLedgerOf(users.map((u) => u.id));
-    await psql(`
-      delete from public.renewal_cycles where user_id in (${list});
-      delete from public.license_applications where user_id in (${list});
-      delete from public.lesson_progress
-       where enrollment_id in (select id from public.enrollments where user_id in (${list}));
-      delete from public.enrollments where user_id in (${list});
-      -- แจ้งเตือนจากการออกใบประกาศของ suite (Wave E notifications — recipients
-      -- ชี้ FK เข้า profiles ก่อนถึงแถวผู้ใช้ ไม่ลบก่อน = cleanup ทั้งชุดตายที่ profiles)
-      delete from public.notification_recipients where user_id in (${list});
-      delete from public.role_assignments where user_id in (${list});
-      delete from public.profiles where id in (${list});
-      delete from auth.users where email like 'dcr9-credit-%';
-    `);
+    const { runUserCleanupVia } = await import("./cleanup-builder");
+    await runUserCleanupVia(psql, users.map((u) => u.id));
   }
   // ก้อน fixture — id ตายตัวของ suite ลบได้เสมอ (ครั้งแรกที่ยังไม่มีผู้ใช้ก็ต้องผ่าน)
   await psql(`
