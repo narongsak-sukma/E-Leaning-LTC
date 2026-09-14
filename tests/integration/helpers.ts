@@ -24,8 +24,10 @@ export const TEST_PASSWORD = process.env["TEST_USER_PASSWORD"] ?? "Integration#2
 
 // ─── SQL (psql ใน container db) ───────────────────────────────────────────────
 
-/** รัน SQL ผ่าน psql ใน container `db` — คืน stdout (psql -At) */
-export function psql(sql: string): Promise<string> {
+/** รัน SQL ผ่าน psql ใน container `db` — คืน stdout (psql -At)
+ * opts.quiet: เพิ่ม -q เพื่อตัด command tag (UPDATE n/INSERT n) ออกจาก stdout —
+ * จำเป็นเมื่อ parse ผล UPDATE…RETURNING (ไม่งั้น "UPDATE 0\n" ทำให้เหมือนมีผลลัพธ์) */
+export function psql(sql: string, opts: { quiet?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "docker",
@@ -36,7 +38,9 @@ export function psql(sql: string): Promise<string> {
         "db",
         "sh",
         "-c",
-        'PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -At',
+        `PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -At${
+          opts.quiet === true ? " -q" : ""
+        }`,
       ],
       { cwd: REPO_ROOT },
     );

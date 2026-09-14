@@ -566,10 +566,11 @@ export async function findBackendByNonce(
   return { found: true, state: state ?? null, backendStart: backendStart ?? null };
 }
 
-/** pg_terminate_backend — คืนสำเร็จ/ไม่ (terminate-error = transient ไม่มีป้าย ERR- — F53) */
+/** pg_terminate_backend — คืนสำเร็จ/ไม่ (terminate-error = transient ไม่มีป้าย ERR- — F53)
+ * เทียบ 'true' เพราะ ::text ของ boolean = 'true'/'false' (ไม่ใช่ t/f ของ psql display) */
 export async function terminateBackend(pid: number): Promise<boolean> {
   const raw = await psql(`select pg_terminate_backend(${pid})::text;`);
-  return raw.trim() === "t";
+  return raw.trim() === "true";
 }
 
 // ─── 7) sqlWrite (normal/abnormal — r23) ─────────────────────────────────────
