@@ -134,7 +134,63 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
  * โดย `E` เขียนเฉพาะส่วนแรก escape semantics คงอยู่ตลอด (§4.1.2.2 ·
  * quotecontinue ของ scan.l อยู่ในโหมด xe ต่อ) · ของ `'…'` ธรรมดาไม่ต้อง
  * ตรวจจุดต่อ: ในโหมดธรรมดา `\'` ปิด string อยู่แล้วทั้งสองการตีความ
+ * (v12): ตัวคั่นจุดต่อตาม quotecontinue ของ scan.l จริง (r14 พิสูจน์ว่า
+ * space/tab/CR/LF อย่างเดียวยังไม่ครบ): `horiz_whitespace* newline
+ * special_whitespace*` แล้ว `'` — horiz มี line comment `--…` และ form
+ * feed · newline คือ `[\n\r]` (CR ลำพังนับเป็น newline) · special มี
+ * newline เพิ่มและ line comment · **ไม่มี block comment** ใน quotecontinue
  */
+/** line comment `--{non_newline}*` — คืนตำแหน่งหลัง comment (ไม่กินตัวจบบรรทัด) */
+function lineCommentEnd(sql: string, p: number): number {
+  let q = p + 2;
+  while (q < sql.length && sql[q] !== "\n" && sql[q] !== "\r") q += 1;
+  return q;
+}
+
+/**
+ * ตัวคั่น quotecontinue ตาม scan.l ของ PostgreSQL 15 จริง (r14 พิสูจน์:
+ * รูป space/tab/CR/LF อย่างเดียวยังไม่ครบ): `horiz_whitespace* newline
+ * special_whitespace*` แล้วเปิด string ต่อด้วย `'` — horiz_whitespace =
+ * `[ \t\f]` หรือ line comment · newline = `[\n\r]` ตัวเดียวบังคับ (CRLF ส่วน
+ * LF เป็น special_whitespace) · special_whitespace = `[ \t\n\r\f]` หรือ line
+ * comment · **ไม่มี block comment ใน quotecontinue** ของ PG 15 · คืนตำแหน่ง
+ * หลังตัวคั่น หรือ -1 เมื่อไม่ใช่รูปประกอบ (ผู้เรียกตรวจ `'` ที่ตำแหน่งนั้น)
+ */
+function skipQuoteContinueSeparator(sql: string, p: number): number {
+  let q = p;
+  // horiz_whitespace*
+  for (;;) {
+    if (q < sql.length && (sql[q] === " " || sql[q] === "\t" || sql[q] === "\f")) {
+      q += 1;
+      continue;
+    }
+    if (q + 1 < sql.length && sql[q] === "-" && sql[q + 1] === "-") {
+      q = lineCommentEnd(sql, q);
+      continue;
+    }
+    break;
+  }
+  // newline หนึ่งตัว — บังคับ
+  if (q >= sql.length || (sql[q] !== "\n" && sql[q] !== "\r")) return -1;
+  q += 1;
+  // special_whitespace*
+  for (;;) {
+    if (
+      q < sql.length &&
+      (sql[q] === " " || sql[q] === "\t" || sql[q] === "\n" || sql[q] === "\r" || sql[q] === "\f")
+    ) {
+      q += 1;
+      continue;
+    }
+    if (q + 1 < sql.length && sql[q] === "-" && sql[q + 1] === "-") {
+      q = lineCommentEnd(sql, q);
+      continue;
+    }
+    break;
+  }
+  return q;
+}
+
 function stripSqlDataParts(sql: string): string {
   let out = "";
   let i = 0;
@@ -155,22 +211,15 @@ function stripSqlDataParts(sql: string): string {
             i += 2;
             continue;
           }
-          // จุดต่อข้าม newline (r13 MAJOR): string ที่คั่นด้วย whitespace "ที่มี
-          // newline อย่างน้อยหนึ่งตัว" ต่อกันเป็น string เดียว และ escape
-          // semantics คงอยู่ตลอด (E เขียนเฉพาะส่วนแรก — quotecontinue ของ scan.l
-          // อยู่ในโหมด xe ต่อ) · `'…'` ธรรมดาไม่ต้องมีขานี้: ในโหมดธรรมดา `\'`
-          // ปิด string อยู่แล้วทั้งการตีความต่อกันหรือแยก ตำแหน่งจบจึงตรงกันเสมอ
-          let j = i + 1;
-          let sawNewline = false;
-          while (
-            j < sql.length &&
-            (sql[j] === " " || sql[j] === "\t" || sql[j] === "\r" || sql[j] === "\n")
-          ) {
-            if (sql[j] === "\n") sawNewline = true;
-            j += 1;
-          }
-          if (sawNewline && sql[j] === "'") {
-            i = j + 1;
+          // จุดต่อข้าม newline (r13/r14 MAJOR) ตาม quotecontinue ของ scan.l
+          // จริง: ตัวคั่น = horiz_whitespace* newline special_whitespace* (มี
+          // line comment และ form feed ได้ · newline = [\n\r]) แล้ว `'` เปิด
+          // ส่วนถัดไป — escape semantics คงอยู่ตลอด (E เขียนเฉพาะส่วนแรก ·
+          // xqs กลับโหมด xe) · `'…'` ธรรมดาไม่ต้องมีขานี้: ตำแหน่ง quote ปิด
+          // ตรงกันทั้งการตีความต่อกันหรือแยก จึงไม่เปลี่ยนผล strip
+          const sep = skipQuoteContinueSeparator(sql, i + 1);
+          if (sep >= 0 && sql[sep] === "'") {
+            i = sep + 1;
             continue;
           }
           i += 1;
