@@ -135,7 +135,7 @@ describe("8q refresh fixtures — ก mint exp-in-past + refresh confirmed · �
   );
 
   it(
-    "(ข) หยุด auth → refresh วน 30 วิ ทุกครั้ง unresolved-gateway → budget poison → guard ปฏิเสธ → restart+health ใน finally",
+    "(ข) หยุด auth → refresh วนตามงบ 60 วิ ทุกครั้ง unresolved-gateway → budget poison → guard ปฏิเสธ → restart+health ใน finally",
     async () => {
       // RT สดต่อ fixture — ของ ก ถูก rotation กินไปแล้ว
       const user2 = await createTestUser("h8q-kh");
@@ -170,7 +170,11 @@ describe("8q refresh fixtures — ก mint exp-in-past + refresh confirmed · �
           elapsedMs: Date.now() - warmupStart,
           outcome: warmupStatus,
         });
-        const loopDeadline = Date.now() + 30_000;
+        // งบ 60 วิ (เดิม 30 วิ — battery r10 ล้มจริง: dispatch หลัง auth ตายแพงตาม
+        // จริง 17.6s/18.7s วัดก่อนหน้า และรอบ r10 หนึ่ง dispatch กิน ≥28 วิ จน window
+        // 30 วิใส่ได้ 1 อันเดียว — สิ่งที่พิสูจน์คือ "วนจริง ≥2 ครั้ง ทุกครั้ง gateway-5xx"
+        // งบจึงต้องครอบ dispatch ที่แพงสุดที่เคยวัด 2 ครั้ง + sleep พร้อม margin)
+        const loopDeadline = Date.now() + 60_000;
         while (Date.now() < loopDeadline) {
           const dispatchStart = Date.now();
           const res = await httpWrite(
@@ -189,10 +193,11 @@ describe("8q refresh fixtures — ก mint exp-in-past + refresh confirmed · �
           expect(res.settledAs, "gateway 5xx = retryable ไม่มี terminal — ห้าม settle").toBe("unresolved-gateway");
           await sleep(2_000);
         }
-        // หมายเหตุขนาดจริง (วัดจาก stack): dispatch หนึ่งครั้งหลัง auth ตายแพง ~17-18 วิ
-        // (Kong balancer ลองต่อ upstream 3 รอบ × connect-timeout — ไม่มี healthcheck
-        // ให้ mark target ถาวร) ดังนั้น window 30 วิ ได้ ~2 dispatches — สิ่งที่ต้อง
-        // พิสูจน์คือ "วนจริงอย่างน้อยสองครั้ง ทุกครั้งคือ gateway-5xx unresolved" ไม่ใช่จำนวน
+        // หมายเหตุขนาดจริง (วัดจาก stack): dispatch หนึ่งครั้งหลัง auth ตายแพง 17.6s/18.7s
+        // (วัด 2026-09-15 00:28) จนถึง ≥28 วิ (วัด r10 08:35) — Kong balancer ลองต่อ
+        // upstream หลายรอบ × connect-timeout ไม่มี healthcheck ให้ mark target ถาวร
+        // ความแปรผันนี้เป็นของจริงของ stack สิ่งที่ต้องพิสูจน์คือ "วนจริงอย่างน้อยสองครั้ง
+        // ทุกครั้งคือ gateway-5xx unresolved" ไม่ใช่จำนวนสูงสุด
         expect(statuses.length, "วนจริง ≥2 dispatches ภายในงบ loop 30 วิ").toBeGreaterThanOrEqual(2);
         expect((await invocationState(opKey))?.status, "หลัง dispatch สุดท้ายยังไม่ terminal-settled").toBe("unresolved");
 
