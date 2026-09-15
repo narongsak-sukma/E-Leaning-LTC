@@ -66,19 +66,31 @@ export interface LedgerRow {
   readonly payload: Record<string, unknown>;
 }
 
-export function currentRunId(): string {
+/** run_id ตรึงตั้งแต่โหลดโมดูล — battery-run.mjs ตั้ง env RUN_ID หนึ่งครั้งก่อน
+ * spawn vitest ของ stage นั้น · env ที่ถูกเปลี่ยนกลางวิ่งคือ override ที่ต้อง
+ * ปฏิเสธ (D89-4 CC "run-id override ปฏิเสธ") — ledger ผูก run เดียวต่อ process */
+const FROZEN_RUN_ID = (() => {
   const v = process.env["RUN_ID"];
-  if (v === undefined || v === "") return "adhoc";
-  return v;
+  return v === undefined || v === "" ? "adhoc" : v;
+})();
+
+export function currentRunId(): string {
+  return FROZEN_RUN_ID;
 }
 
-/** เขียน ledger row หนึ่งแถว (append-only) */
+/** เขียน ledger row หนึ่งแถว (append-only) — ปฏิเสธ run-id override กลางวิ่ง */
 export async function ledgerWrite(
   kind: LedgerKind,
   payload: Record<string, unknown>,
   refs: { opKey?: string | undefined; invocationId?: string | undefined } = {},
 ): Promise<string> {
   await ensureTestInfra();
+  const envRunId = process.env["RUN_ID"];
+  if (envRunId !== undefined && envRunId !== "" && envRunId !== FROZEN_RUN_ID) {
+    throw new Error(
+      `run-id-override-refused: RUN_ID env ถูกเปลี่ยนกลางวิ่ง (${FROZEN_RUN_ID} → ${envRunId}) — ledger ผูก run เดียวต่อ process`,
+    );
+  }
   const id = randomUUID();
   const safePayload = JSON.stringify(payload).replace(/'/g, "''");
   const opKey = refs.opKey === undefined ? null : `'${refs.opKey}'`;
@@ -433,6 +445,32 @@ async function restStartedAfter(iso: string): Promise<boolean> {
     });
     child.on("error", () => resolve(false));
   });
+}
+
+/**
+ * ตัดสิน kong-path 500 (r26-r30): มีสิทธิ์ evidence-settle เฉพาะ op ที่อยู่ใน
+ * EVIDENCE_SETTLE_MANIFEST เท่านั้น — เขียนมือลอยไม่มีสิทธิ์ (limitation 22) ·
+ * เรียงตามความกำกวม: rest restart ใน window = หลักฐานขาดความต่อเนื่อง → ปฏิเสธ
+ * ก่อน · nonce เดียว >1 line = กำกวม · ไม่มี line = ไม่มี terminal ต้นทาง ·
+ * ครบทุกเงื่อนไข + อยู่ manifest → 'completed-evidenced(rejected|state-changed)'
+ */
+export function kong500Decision(
+  fence: { readonly matches: number; readonly restRestartedInWindow: boolean },
+  opKey: string,
+): { readonly settledAs: string; readonly terminal: boolean } {
+  if (fence.restRestartedInWindow) {
+    return { settledAs: "settle-refused-rest-restart-in-window", terminal: false };
+  }
+  if (fence.matches > 1) {
+    return { settledAs: "settle-refused-ambiguous", terminal: false };
+  }
+  if (fence.matches === 0) {
+    return { settledAs: "settle-refused-no-upstream-terminal", terminal: false };
+  }
+  if (manifestByOpKey(opKey) === undefined) {
+    return { settledAs: "settle-refused-op-not-eligible", terminal: false };
+  }
+  return { settledAs: "completed-evidenced(rejected|state-changed)", terminal: true };
 }
 
 /** before-snapshot ของ touchSet — scoped ตาม entity keys · แถวว่าง = [] · stable key (r26) */
@@ -817,29 +855,39 @@ export async function httpWrite(
     return { status, json, text, invocationId, opKey, uaNonce, settledAs: "held-running" };
   }
   // completion ตาม provenance (r26-r28):
-  // kong-path: 2xx/4xx = confirmed · 500 = ต้อง access-log fence · 502/503/504/52x = unresolved
+  // kong-path /rest/v1: 2xx/4xx = confirmed · 500 = ต้อง access-log fence (ของ rest)
+  // kong-path อื่น (/auth/v1 ฯลฯ): 5xx ทุกตัว = gateway class — fence ของ rest ใช้เทียบ
+  //   ไม่ได้ (upstream คนละตัว · วัดจริง: auth กำลัง stop ระบาย request บางส่วน ตอบ 500
+  //   ทั้งที่ส่วนมากได้ 503 — ทั้งคู่ไม่มี terminal ต้นทาง = retryable unresolved)
   // app-direct: 2xx/4xx = confirmed · 5xx = evidenced เมื่อมี manifest (ที่ชั้นนี้ยังไม่มี manifest
-  // ก็ confirmed-by-handler-response ตาม route contract — manifest settle engine ทำชั้นบน)
-  const class5xxGateway = status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 530);
+  //   ก็ confirmed-by-handler-response ตาม route contract — manifest settle engine ทำชั้นบน)
+  const urlPath = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] ?? "";
+  const restUpstream = transportTarget === "kong-path" && urlPath.startsWith("/rest/v1");
+  const class5xxGateway =
+    status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 530);
   let settledAs: string;
   if (status >= 200 && status < 500) {
     settledAs = `confirmed-${status}`;
     await invocationClose(invocationId, opKey, "settled", { class: settledAs, transportTarget });
-  } else if (status === 500 && transportTarget === "kong-path" && cursor !== null) {
+  } else if (status === 500 && restUpstream && cursor !== null) {
     const fence = await accessLogFence(cursor, {
       uaNonce,
       method,
       pathNorm: normalizePathForLog(transportTarget, url),
       status: 500,
     });
-    if (fence.matches === 1 && !fence.restRestartedInWindow) {
-      settledAs = "completed-evidenced(rejected|state-changed)";
+    const decision = kong500Decision(fence, opKey);
+    settledAs = decision.settledAs;
+    if (decision.terminal) {
       await invocationClose(invocationId, opKey, "settled", { class: settledAs, transportTarget, fenceLine: fence.lines[0]?.slice(0, 400) });
     } else {
-      settledAs = fence.matches > 1 ? "settle-refused-ambiguous" : "settle-refused-no-upstream-terminal";
       await invocationClose(invocationId, opKey, "poisoned", { reason: settledAs, transportTarget, matches: fence.matches });
     }
-  } else if (class5xxGateway) {
+  } else if (class5xxGateway || (status === 500 && transportTarget === "kong-path")) {
+    // gateway class: 502/503/504/52x ทุก transport + kong-path 500 ที่ไม่มี fence
+    // ประกอบ (auth-upstream ตาย/draining) = retryable ไม่มี terminal ต้นทาง —
+    // ห้าม settle (unresolved จนกว่าจะมีหลักฐาน terminal) · app-direct 500 อยู่ else
+    // ท้าย (handler จบจริง = evidenced)
     settledAs = "unresolved-gateway";
     await invocationClose(invocationId, opKey, "unresolved", { class: settledAs, transportTarget });
   } else {
