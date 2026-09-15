@@ -455,6 +455,63 @@ export async function accessLogFenceAnyStatus(
   };
 }
 
+export interface KongAccessFenceResult {
+  readonly matches: number;
+  readonly statuses: number[];
+  readonly lines: string[];
+}
+
+/**
+ * kong access-line fence (gate waveh-r5 M1.1) — ขา evidence ของเคส "response ถึงมือ
+ * caller แล้วแต่ body opaque" (แกะ JSON ไม่ได้ เช่น 500 "Something went wrong" ที่
+ * gateway ตัดขาคอร์ดของ P0002-raise): Kong เขียน access line หนึ่งแถวต่อหนึ่ง
+ * request "เมื่อปิด response" — line ยังไม่ปรากฏ = request ยังค้างในทาง (queued/
+ * hung ที่ upstream — ไม่มีทางรู้ว่าจะเริ่มแตะ DB ภายหลัง) = ห้าม settle ·
+ * หนึ่งแถวพอดี + status ตรง response ที่ caller ถือ = gateway ปิด request ของ
+ * nonce นี้ไปแล้วด้วย status นั้น · >1 แถว = กำกวม = ปฏิเสธ
+ * ตรวจจริง 2026-09-15: Kong access log (combined) มี UA ของ nonce ทุก status
+ * class และไม่มีฟิลด์ $upstream_status — status ใน line คือ status ที่ Kong ปิดไป
+ */
+export async function kongAccessFence(
+  sinceIso: string,
+  probe: { uaNonce: string; method: string; pathNorm: string },
+): Promise<KongAccessFenceResult> {
+  // หัก margin 2s กัน clock skew ระหว่าง host กับ container — nonce ไม่ซ้ำในโลก
+  // จึงปลอดภัยที่จะขยายหน้าต่างย้อนหลัง (เจอเกิน = กำกวม → ปฏิเสธอยู่ดี)
+  const since = new Date(new Date(sinceIso).getTime() - 2_000).toISOString();
+  const logs = await dockerCompose(["logs", "--since", since, "--no-color", "kong"]);
+  if (logs.code !== 0) {
+    throw new Error(`kongAccessFence: docker compose logs kong failed: ${logs.stderr.slice(0, 200)}`);
+  }
+  const methodUpper = probe.method.toUpperCase();
+  const needle = `"${methodUpper} ${probe.pathNorm} HTTP/`;
+  const lines = logs.stdout
+    .split("\n")
+    .filter((l) => l.includes(probe.uaNonce) && l.includes(needle));
+  const statuses = lines.map((l) => {
+    const m = /" ([0-9]{3}) [0-9]+ "/.exec(l);
+    return m === null ? -1 : Number.parseInt(m[1] ?? "-1", 10);
+  });
+  return { matches: lines.length, statuses, lines };
+}
+
+/**
+ * ขอบเขตจริงของ role authenticator (gate waveh-r5 M1.1 ขา ค): pg_db_role_setting
+ * ต้องถือ statement_timeout=8s + lock_timeout=8s ตามที่วัดไว้ (ตรวจจริง 2026-09-15:
+ * setconfig = {session_preload_libraries=safeupdate,statement_timeout=8s,
+ * lock_timeout=8s} — supabase_admin ไม่มี) — คำยืนยัน "ณ เวลา settle" ว่า statement
+ * ของ role นี้มีขอบเขตเวลาเสมอ ไม่ใช่ข้ออ้าง static จาก config ที่อ่านไว้ตอนอื่น
+ */
+export async function authenticatorRoleBoundsOk(): Promise<boolean> {
+  const raw = await psql(
+    `select coalesce(array_to_string(s.setconfig, ','), '')
+       from pg_db_role_setting s join pg_roles r on r.oid = s.setrole
+      where r.rolname = 'authenticator';`,
+  );
+  const cfg = raw.trim();
+  return cfg.includes("statement_timeout=8s") && cfg.includes("lock_timeout=8s");
+}
+
 async function restStartedAfter(iso: string): Promise<boolean> {
   const child = spawn("docker", ["inspect", "--format", "{{.State.StartedAt}}", "ltc-dev-rest"], { cwd: REPO_ROOT });
   return await new Promise<boolean>((resolve) => {
@@ -803,6 +860,15 @@ export async function httpWrite(
   }
   const uaNonce = mintUaNonce();
   const invocationId = opts.invocationId ?? randomUUID();
+  // gate waveh-r5 M1.1: requestRef = p_request_id ใน body ของ rpc — ปรากฏตรงใน
+  // pg_stat_activity.query ขณะ statement รันอยู่ (ตรวจจริง) = หมุดผูก "activity"
+  // เข้ากับ invocation นี้ (ขา ก ของ opaque fence ที่ settleScenario ใช้ตอน settle)
+  const requestRef =
+    typeof body === "object" &&
+    body !== null &&
+    typeof (body as Record<string, unknown>)["p_request_id"] === "string"
+      ? ((body as Record<string, unknown>)["p_request_id"] as string)
+      : null;
   // waveh-r1 M1: จับ log-cursor เฉพาะ rest-upstream — fence ถูกปรึกษาเฉพาะ 500 ของ
   // /rest/v1 เท่านั้น ส่วน /auth/v1 · /storage/v1 เป็น gateway-class (ไม่มีทางใช้ cursor)
   // · restCall/storageCall เข้าทางนี้ทุก write แล้ว captureLogCursor (dump log ทั้งก้อน)
@@ -820,7 +886,13 @@ export async function httpWrite(
       opKey,
       transport: "httpWrite",
       transportTarget,
-      binding: { opKey, method: method.toUpperCase(), urlNormalized: normalizePathForLog(transportTarget, url), uaNonce },
+      binding: {
+        opKey,
+        method: method.toUpperCase(),
+        urlNormalized: normalizePathForLog(transportTarget, url),
+        uaNonce,
+        ...(requestRef !== null ? { requestRef } : {}),
+      },
     },
     { opKey, invocationId },
   );

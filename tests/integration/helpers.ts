@@ -164,15 +164,31 @@ export async function restCall(
  * invocation นี้" ทั้งคู่ — เรียงภายในเดียว ห้ามสลับ:
  *  1. probe terminal ก่อน (scenarioTerminalProbe — ขา lock + ขา activity): backend
  *     ยังรันอยู่ = ปฏิเสธทันที ไม่รอ (fail-loud · invocation คง 'running' ให้ audit จับ)
- *  2. ขา upstream-terminal ผูกกับ invocation (r4) — บังคับเฉพาะเคส "ไม่มี response
- *     ถึงมือ caller" (res.status < 0: abort/network): CLF line ของ nonce ต้อง
- *     ปรากฏ "หนึ่งแถวพอดี" (completion หรือ cancellation — line 500 จาก
- *     lock_timeout 57014 ก็นับ) = PostgREST serve ครบหนึ่งครั้ง · line ยังไม่ปรากฏ
- *     = upstream ยังไม่ terminal (request อาจยังค้างในคิว — ห้าม settle) · >1 แถว
- *     = serve ซ้ำ/กำกวม = ปฏิเสธ · singleDispatch ใน manifest ยืนยันไม่มี dispatch
- *     ซ้ำของ invocation เดียวกัน = "ไม่มีงานเริ่มตามหลัง" ที่พิสูจน์ได้ใน stack นี้ ·
- *     เคส "มี response ถึงมือแล้ว" (status ≥ 0) ไม่บังคับ line — response = upstream
- *     serve จบ (P0002-raise ถูก gateway ตัดหลัง statement จบ — ไม่มี line ตามจริง)
+ *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4 + r5):
+ *     a. status < 0 (abort/network — ไม่มี response ถึงมือ caller): CLF line ของ
+ *        nonce (rest) ต้องปรากฏ "หนึ่งแถวพอดี" (completion หรือ cancellation —
+ *        line 500 จาก lock_timeout 57014 ก็นับ) = PostgREST serve ครบหนึ่งครั้ง ·
+ *        line ยังไม่ปรากฏ = upstream ยังไม่ terminal (request อาจยังค้างในคิว —
+ *        ห้าม settle) · >1 แถว = serve ซ้ำ/กำกวม = ปฏิเสธ · singleDispatch ใน
+ *        manifest ยืนยันไม่มี dispatch ซ้ำของ invocation เดียวกัน
+ *     b. status ≥ 0 + body เป็น JSON: upstream serve จบ "โดยโครงสร้าง" — JSON body
+ *        ได้มาจาก upstream เท่านั้น (PostgREST อนุกรมผล statement ที่จบแล้วเป็น
+ *        response — เขียน body ก่อน statement จบไม่ได้) หรือเป็นการปฏิเสธของ
+ *        gateway ก่อนแตะ upstream (key-auth 401 ฯลฯ — ไม่มีงานเริ่มตามหลังได้เลย)
+ *        ทั้งคู่จึงไม่ต้อง fence เพิ่ม (gate r5: "response = terminal" ใช้ได้กับ
+ *        class นี้ เพราะ code ตรวจที่มาของ body เองแล้ว)
+ *     c. status ≥ 0 + body opaque (แกะ JSON ไม่ได้ เช่น 500 "Something went
+ *        wrong" ที่ gateway ตัดขาคอร์ดของ P0002-raise): ต้องครบสามขาพิสูจน์ —
+ *        (ก) kong access line ของ nonce หนึ่งแถวพอดีและ status ตรง res.status
+ *            (Kong เขียน line "เมื่อปิด response" — ยังไม่มี line = request ยัง
+ *            ค้างในทาง = ห้าม settle แม้ caller ถือ response แล้ว — กันเคส
+ *            gateway สังเคราะห์คำตอบก่อน upstream serve)
+ *        (ข) ไม่มี pg_stat_activity ผูก requestRef (p_request_id ของ invocation
+ *            นี้ — ปรากฏตรงใน query text ขณะ statement รัน ตรวจจริง) = ไม่มี
+ *            statement ของ invocation นี้ยังรันอยู่
+ *        (ค) role authenticator ถือ statement_timeout=8s + lock_timeout=8s
+ *            ตามจริง (อ่าน pg_db_role_setting ณ เวลา settle) = statement ของ
+ *            role นี้มีขอบเขตเวลาเสมอ — หลักฐานเชิงโครงสร้างของ stack นี้
  *  3. postTerminalAssert (r4): อ่าน-assert snapshot "ใหม่" ตรงนี้เท่านั้น — หลัง
  *     terminal ยืนยันครบทั้งสองขา (อ่านก่อนขา 2 อาจได้ของเก่าขณะ backend ยัง
  *     มีชีวิต — race ที่ r4 จับ) · assert ล้ม = invocation คง 'running' (fail-loud)
@@ -184,7 +200,8 @@ export async function settleScenario(
   terminalProbe: () => Promise<void>,
   postTerminalAssert?: () => Promise<void>,
 ): Promise<void> {
-  const { invocationClose, manifestByOpKey, accessLogFenceAnyStatus } = await import("./test-io");
+  const { invocationClose, manifestByOpKey, accessLogFenceAnyStatus, kongAccessFence, authenticatorRoleBoundsOk } =
+    await import("./test-io");
   if (res.invocationId === undefined || res.opKey === undefined) {
     throw new Error(`scenario dispatch ไม่มี invocationId/opKey กลับมา (${evidence})`);
   }
@@ -195,21 +212,17 @@ export async function settleScenario(
   }
   // (1) probe terminal ก่อน — โยน = ไม่ settle (r2/r3)
   await terminalProbe();
-  // (2) upstream-terminal ผูก nonce ของ invocation นี้ (r4) — บังคับเฉพาะเคส
-  // "ไม่มี response ถึงมือ caller" (res.status < 0 เช่น abort/network — caller ไม่มี
-  //หลักฐาน terminal ฝั่งตัวเอง): ต้องเห็น CLF line ของ nonce (ua_nonce ใน UA) หนึ่ง
-  // แถวพอดี = PostgREST serve ครบหนึ่งครั้ง (completion หรือ cancellation — เช่น
-  // line 500 จาก lock_timeout 57014 ก็นับ ตรวจจริง 2026-09-15) · ส่วนเคส "มี response
-  // ถึงมือแล้ว" (status ≥ 0): response = upstream serve จบแล้วตามธรรมชาติของ stack
-  // (แม้ P0002-raise จะถูก gateway ตัดกลางทางจนไม่มี CLF line — ตรวจจริง: RAISE
-  // ข้อความไทย → connection ขาด → Kong สังเคราะห์ 500 เปล่า — การตัดเกิดหลัง
-  // statement จบ) จึงไม่บังคับ line · cursor/nonce อ่านจาก ledger ของ invocation
-  // (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error ไม่มี res กลับมา)
+  // (2) upstream-terminal ผูกกับ invocation นี้ (r4+r5) — แยกตาม class ของ response
+  // (doc เต็มด้านบน): a. status<0 = CLF fence ของ rest · b. status≥0 + JSON body =
+  // body-proven โดยโครงสร้าง · c. status≥0 + opaque = kong line หนึ่งแถว status ตรง
+  // + ไม่มี activity ผูก requestRef + role bounds ตามจริง · nonce/cursor/requestRef
+  // อ่านจาก ledger ของ invocation (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error)
   const m = /^rpc:([a-z0-9_]+):(POST|PATCH|PUT|DELETE)$/i.exec(res.opKey);
-  if (m !== null && res.status < 0) {
+  if (m !== null) {
     const [rpcName, httpMethod] = [m[1] as string, m[2] as string];
-    const [binding] = await psqlRows<{ ua: string | null }>(`
-      select payload -> 'binding' ->> 'uaNonce' as ua
+    const [binding] = await psqlRows<{ ua: string | null; requestRef: string | null }>(`
+      select payload -> 'binding' ->> 'uaNonce' as ua,
+             payload -> 'binding' ->> 'requestRef' as "requestRef"
         from test_infra.lifecycle_ledger
        where kind = 'invocation' and invocation_id = '${res.invocationId}'
        order by ts desc limit 1;`);
@@ -218,34 +231,101 @@ export async function settleScenario(
         from test_infra.lifecycle_ledger
        where kind = 'attempt' and invocation_id = '${res.invocationId}'
        order by ts desc limit 1;`);
-    if (binding?.ua === null || binding === undefined || attempt?.cursor == null) {
+    if (binding?.ua === null || binding === undefined || attempt === undefined) {
       throw new Error(
-        `scenario settle ปฏิเสธ: ไม่พบ nonce/logCursor ของ invocation ใน ledger — ไม่มีทางพิสูจน์ upstream terminal (${evidence})`,
+        `scenario settle ปฏิเสธ: ไม่พบ nonce/attempt ของ invocation ใน ledger — ไม่มีทางพิสูจน์ upstream terminal (${evidence})`,
       );
     }
-    const deadline = Date.now() + 12_000; // ครอบ lock_timeout 8s ของ stack (ตรวจจริง)
-    let fence = { matches: 0, restRestartedInWindow: false };
-    for (;;) {
-      fence = await accessLogFenceAnyStatus(attempt.cursor as { capturedAt: string; lineCount: number; restStartedAt: string }, {
-        uaNonce: binding.ua,
-        method: httpMethod,
-        pathNorm: `/rpc/${rpcName}`,
-      });
-      if (fence.matches > 1) {
+    if (res.status < 0) {
+      // a. ไม่มี response ถึงมือ caller (abort/network) — CLF fence ของ rest (r4)
+      if (attempt.cursor == null) {
         throw new Error(
-          `scenario settle ปฏิเสธ: CLF line ของ nonce กำกวม (${fence.matches} แถว) — serve ซ้ำ? (${evidence})`,
+          `scenario settle ปฏิเสธ: ไม่มี logCursor ของ invocation ใน ledger — ไม่มีหน้าต่าง access log ให้พิสูจน์ (${evidence})`,
         );
       }
-      if (fence.restRestartedInWindow) {
-        throw new Error(`scenario settle ปฏิเสธ: rest restart ใน window — หลักฐานขาดความต่อเนื่อง (${evidence})`);
+      const deadline = Date.now() + 12_000; // ครอบ lock_timeout 8s ของ stack (ตรวจจริง)
+      let fence = { matches: 0, restRestartedInWindow: false };
+      for (;;) {
+        fence = await accessLogFenceAnyStatus(attempt.cursor as { capturedAt: string; lineCount: number; restStartedAt: string }, {
+          uaNonce: binding.ua,
+          method: httpMethod,
+          pathNorm: `/rpc/${rpcName}`,
+        });
+        if (fence.matches > 1) {
+          throw new Error(
+            `scenario settle ปฏิเสธ: CLF line ของ nonce กำกวม (${fence.matches} แถว) — serve ซ้ำ? (${evidence})`,
+          );
+        }
+        if (fence.restRestartedInWindow) {
+          throw new Error(`scenario settle ปฏิเสธ: rest restart ใน window — หลักฐานขาดความต่อเนื่อง (${evidence})`);
+        }
+        if (fence.matches === 1 || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
-      if (fence.matches === 1 || Date.now() >= deadline) break;
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-    if (fence.matches !== 1) {
-      throw new Error(
-        `scenario settle ปฏิเสธ: ไม่มี CLF terminal ของ invocation นี้หลังรอ 12s — upstream ยังไม่จบ (${evidence})`,
-      );
+      if (fence.matches !== 1) {
+        throw new Error(
+          `scenario settle ปฏิเสธ: ไม่มี CLF terminal ของ invocation นี้หลังรอ 12s — upstream ยังไม่จบ (${evidence})`,
+        );
+      }
+    } else if (res.json !== null && typeof res.json === "object") {
+      // b. body-proven — JSON body มาจาก upstream ที่ serve จบแล้ว หรือ gateway
+      // ปฏิเสธก่อนแตะ upstream ทั้งคู่ = ไม่มีงานเริ่มตามหลังได้ (ไม่ต้อง fence เพิ่ม)
+    } else {
+      // c. opaque response-in-hand (gate r5 M1) — kong line + requestRef + role bounds
+      if (binding.requestRef === null || binding.requestRef === undefined) {
+        throw new Error(
+          `scenario settle ปฏิเสธ: opaque response แต่ไม่มี requestRef (p_request_id) ของ invocation ใน ledger — ไม่มีหมุดผูก activity (${evidence})`,
+        );
+      }
+      if (attempt.cursor == null) {
+        throw new Error(
+          `scenario settle ปฏิเสธ: opaque response แต่ไม่มี logCursor ของ invocation — ไม่มีขอบเขตหน้าต่าง kong log (${evidence})`,
+        );
+      }
+      if (!(await authenticatorRoleBoundsOk())) {
+        throw new Error(
+          `scenario settle ปฏิเสธ: role authenticator ไม่ถือ statement/lock_timeout=8s ตามจริง (pg_db_role_setting) — ขอบเขตเวลาของ statement ใช้พิสูจน์ไม่ได้ (${evidence})`,
+        );
+      }
+      const deadline = Date.now() + 12_000;
+      let fence: { matches: number; statuses: number[] } = { matches: 0, statuses: [] };
+      for (;;) {
+        // kong access log บันทึก path "เต็มตามที่ client ส่ง" (ตรวจจริง 2026-09-15:
+        // "POST /rest/v1/rpc/complete_data_export_job HTTP/1.1" 500 31) — ต่างจาก CLF
+        // ของ rest เองที่เห็น path หลัง strip_path (`/rpc/<name>`) ขา a จึงใช้คนละรูป
+        fence = await kongAccessFence(attempt.cursor.capturedAt, {
+          uaNonce: binding.ua,
+          method: httpMethod,
+          pathNorm: `/rest/v1/rpc/${rpcName}`,
+        });
+        if (fence.matches > 1) {
+          throw new Error(
+            `scenario settle ปฏิเสธ: kong access line ของ nonce กำกวม (${fence.matches} แถว) — serve ซ้ำ? (${evidence})`,
+          );
+        }
+        if (fence.matches === 1 && fence.statuses[0] !== res.status) {
+          throw new Error(
+            `scenario settle ปฏิเสธ: kong line status ${fence.statuses[0]} ≠ response ${res.status} ที่ caller ถือ — หลักฐานไม่ผูกกับ invocation นี้ (${evidence})`,
+          );
+        }
+        if (fence.matches === 1 || Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      if (fence.matches !== 1) {
+        throw new Error(
+          `scenario settle ปฏิเสธ: ไม่มี kong access line ของ invocation นี้หลังรอ 12s — gateway ยังไม่ปิด request (ยังค้าง/queued) = ยังไม่ terminal (${evidence})`,
+        );
+      }
+      const busy = await psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%${binding.requestRef}%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
+      if (busy !== "0") {
+        throw new Error(
+          `scenario settle ปฏิเสธ: statement ของ invocation นี้ยังรันอยู่ (pg_stat_activity เห็น p_request_id ของ invocation นี้ ${busy} ตัว) (${evidence})`,
+        );
+      }
     }
   }
   // (3) snapshot ใหม่หลัง terminal ยืนยันแล้วเท่านั้น (r4 M1)

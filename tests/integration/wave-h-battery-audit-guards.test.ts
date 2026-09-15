@@ -23,6 +23,14 @@
  *   เดียว: client จบด้วย abort ขณะ backend ยังค้างก่อนตาราง (PostgREST ไม่ cancel
  *   ตาม client — ตรวจจริง) → settle ปฏิเสธ · ปล่อย blocker → งานจบจริง (nonce CLF
  *   ปรากฏ) → snapshot ใหม่ → settle ผ่าน
+ * M1 (waveh-r5) · เส้นตาย "response = terminal" ใช้กับ opaque response ไม่ได้แบบ
+ *   ไม่มีเงื่อนไข — code ต้องตรวจ "ที่มาของ response" เอง: JSON body = body-proven
+ *   โดยโครงสร้าง · opaque ต้องครบสามขา (kong line หนึ่งแถว status ตรง + ไม่มี
+ *   pg_stat_activity ผูก p_request_id ของ invocation + role authenticator
+ *   ถือ timeout 8s/8s ตามจริง) · เคสพิสูจน์ = D1 ถือ 500 opaque ไว้ในมือขณะ D2
+ *   ของ RPC เดียวกันยังค้าง → settle D1 ปฏิเสธ (ขา activity) จน D2 จบจริง → ผ่าน
+ *   gate สามขา + snapshot ใหม่ · ทิศสกปรกของ fence: อ้าง status ไม่ตรง kong line
+ *   = หลักฐานไม่ผูกกัน = ปฏิเสธ
  *
  * two-way proof ตาม [[regression-test-two-way-proof]] ระดับฟังก์ชัน: ทิศสกปรก/ล้ม
  * ต้องถูกปฏิเสธ ทิศสะอาด/ผ่านต้องไปต่อ — ผูกกับ audit()/shouldBreakAfter ของ script
@@ -375,4 +383,121 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       await session.end();
     }
   }, 60_000);
+
+  // ─── M1 (gate waveh-r5): response ถึงมือ caller แล้ว (opaque) ยังต้องพิสูจน์ terminal ──
+  // r5 จับ: เส้นตายเดิม "response = upstream serve จบ" อ้าย่างเดียวไม่พอสำหรับ
+  // opaque response — code ต้องตรวจที่มาของ response เอง (D-f-13) · รูปเคส: D1 ถือ
+  // 500 opaque ไว้ในมือ (body "Something went wrong" ที่ Kong ตัดขาคอร์ด — แกะ
+  // JSON ไม่ได้) ขณะ D2 ของ RPC เดียวกันยังค้าง "ก่อนตารางเป้าหมาย" → settle D1
+  // ต้องปฏิเสธ (ขา activity ของ probe โยนก่อนขาอื่น) จน D2 จบจริง → settle D2/D1
+  // ผ่าน gate opaque สามขา (kong line หนึ่งแถว status ตรง + ไม่มี activity ผูก
+  // requestRef + role bounds 8s/8s) · ทิศสกปรกของ fence เอง: D3 จบจริง (kong line
+  // status 500) แต่ settle อ้าง status 502 = หลักฐานไม่ผูกกับ invocation = ปฏิเสธ
+  it("response-in-hand ขณะงานอื่นของ RPC เดียวกันยังค้าง = ปฏิเสธ settle · งานจบ + snapshot ใหม่ = ผ่าน · อ้าง status ไม่ตรง kong line = ปฏิเสธ (waveh-r5 M1)", async ({ skip }) => {
+    if (DB_URL === undefined) skip();
+    const { restCall, settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } =
+      await import("./helpers");
+    const { httpWrite, startPsqlSession } = await import("./test-io");
+    const jobId = "00000000-0000-4000-8000-0000000000f7"; // ไม่มีอยู่ → P0002 opaque 500
+    const dispatchBody = () => ({
+      p_job_id: jobId,
+      p_file_media_id: "00000000-0000-4000-8000-0000000000f8",
+      p_chunks: 1,
+      p_request_id: crypto.randomUUID(), // requestRef ผูก activity ราย invocation
+      p_claim_token: crypto.randomUUID(),
+    });
+    const invStatus = (id: string | undefined) =>
+      psqlScalar(`
+        select payload ->> 'status' from test_infra.lifecycle_ledger
+         where kind = 'invocation' and invocation_id = '${id}'
+         order by ts desc, id desc limit 1;`);
+    const busyCount = () =>
+      psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%complete_data_export_job%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
+    const probe = () => scenarioTerminalProbe("public.event_outbox", "complete_data_export_job");
+
+    // D1: ถือ response ไว้ในมือ "ก่อน" blocker ยึด — opaque 500 (P0002-raise ถูก
+    // gateway ตัด → body "Something went wrong" แกะ JSON ไม่ได้ → class opaque)
+    const d1 = await restCall(
+      "POST",
+      "/rest/v1/rpc/complete_data_export_job",
+      { apiKey: SERVICE_KEY, token: SERVICE_KEY, settleMode: "scenario" },
+      dispatchBody(),
+    );
+    expect(d1.status).toBe(500);
+    expect(d1.json, "D1 ต้องเป็น opaque response (แกะ JSON ไม่ได้)").toBeNull();
+    expect(d1.invocationId).toBeDefined();
+
+    const session = await startPsqlSession("scenario-guard-r5-holder");
+    try {
+      await session.exec("begin;");
+      await session.exec("lock table public.data_export_jobs in access exclusive mode;");
+      // D2: dispatch จริงที่ค้างก่อนตารางแรกของทางเดิน RPC (evidence-driven: รอ busy=1)
+      const d2 = httpWrite(
+        "POST",
+        "/rest/v1/rpc/complete_data_export_job",
+        dispatchBody(),
+        {
+          apiKey: SERVICE_KEY,
+          token: SERVICE_KEY,
+          settleMode: "scenario",
+          label: "m1r5-hung-d2",
+        },
+      );
+      let busy = "0";
+      for (let i = 0; i < 50 && busy === "0"; i += 1) {
+        busy = await busyCount();
+        if (busy === "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(busy, "D2 ต้องค้างเป็น backend active จริงก่อนตรวจขั้นถัดไป").toBe("1");
+
+      // settle D1 ขณะงาน (D2) ยังค้าง = ปฏิเสธ "แม้ response อยู่ในมือแล้ว" —
+      // probe โยนก่อนขาอื่น · invocation คง 'running' ให้ audit จับ
+      await expect(
+        settleScenario(d1, "guard-r5-response-in-hand-must-refuse", probe),
+      ).rejects.toThrow(/ยังรัน complete_data_export_job อยู่/);
+      expect(await invStatus(d1.invocationId)).toBe("running");
+
+      // ปล่อย blocker → D2 วิ่งจบ (P0002 → opaque 500) — settle ผ่าน gate opaque
+      // สามขาเอง (kong line ปรากฏเมื่อ Kong ปิด response ของ D2)
+      await session.exec("rollback;");
+      const d2res = await d2;
+      expect(d2res.status).toBe(500);
+      await settleScenario(d2res, "guard-r5-d2-opaque-fence-passed", probe);
+      expect(await invStatus(d2res.invocationId)).toBe("settled");
+
+      // D1 settle หลังงานจบจริง: ผ่าน gate opaque สามขา + snapshot "ใหม่" (r4 ข้อ ค)
+      await settleScenario(d1, "guard-r5-d1-terminal-proven(post-work)", probe, async () => {
+        expect(
+          await psqlScalar(`select count(*)::text from public.data_export_jobs where id = '${jobId}';`),
+          "job ไม่มีอยู่จริงต้องไม่ถูกสร้าง (P0002 = TX abort)",
+        ).toBe("0");
+      });
+      expect(await invStatus(d1.invocationId)).toBe("settled");
+    } finally {
+      await session.exec("rollback;");
+      await session.end();
+    }
+
+    // ทิศสกปรกของ fence เอง: D3 จบจริง (kong line status 500 หนึ่งแถว) แต่ settle
+    // อ้าง status 502 — line ไม่ผูกกับ response ที่อ้าง = ปฏิเสธ คง 'running'
+    const d3 = await restCall(
+      "POST",
+      "/rest/v1/rpc/complete_data_export_job",
+      { apiKey: SERVICE_KEY, token: SERVICE_KEY, settleMode: "scenario" },
+      dispatchBody(),
+    );
+    expect(d3.status).toBe(500);
+    const d3lie = { ...d3, status: 502 };
+    await expect(
+      settleScenario(d3lie, "guard-r5-fence-status-mismatch-must-refuse", probe),
+    ).rejects.toThrow(/kong line status 500 ≠ response 502/);
+    expect(await invStatus(d3.invocationId)).toBe("running");
+    // อ้างตามจริง = ผ่าน (ทิศสะอาดของ fence ตัวเอง — ไม่ทิ้ง running ค้าง)
+    await settleScenario(d3, "guard-r5-d3-honest-settle", probe);
+    expect(await invStatus(d3.invocationId)).toBe("settled");
+  }, 90_000);
 });
