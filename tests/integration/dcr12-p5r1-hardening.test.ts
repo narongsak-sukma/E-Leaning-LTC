@@ -621,7 +621,8 @@ describe.skipIf(!DB_URL)(
           ).toBe(before);
         },
       );
-    }, 45_000);
+      // งบ 75s: settle ผ่าน fence r6 มีหน้าต่าง 12s หลัง kong line (+12s ต่อ settle ตามที่วัด)
+    }, 75_000);
 
     // ─── เคส d: SoD re-check ใน TX ของ confirm (B6) ────────────────────────────
 

@@ -164,31 +164,45 @@ export async function restCall(
  * invocation นี้" ทั้งคู่ — เรียงภายในเดียว ห้ามสลับ:
  *  1. probe terminal ก่อน (scenarioTerminalProbe — ขา lock + ขา activity): backend
  *     ยังรันอยู่ = ปฏิเสธทันที ไม่รอ (fail-loud · invocation คง 'running' ให้ audit จับ)
- *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4 + r5):
+ *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4 + r5 + r6):
  *     a. status < 0 (abort/network — ไม่มี response ถึงมือ caller): CLF line ของ
  *        nonce (rest) ต้องปรากฏ "หนึ่งแถวพอดี" (completion หรือ cancellation —
  *        line 500 จาก lock_timeout 57014 ก็นับ) = PostgREST serve ครบหนึ่งครั้ง ·
  *        line ยังไม่ปรากฏ = upstream ยังไม่ terminal (request อาจยังค้างในคิว —
  *        ห้าม settle) · >1 แถว = serve ซ้ำ/กำกวม = ปฏิเสธ · singleDispatch ใน
  *        manifest ยืนยันไม่มี dispatch ซ้ำของ invocation เดียวกัน
- *     b. status ≥ 0 + body เป็น JSON: upstream serve จบ "โดยโครงสร้าง" — JSON body
- *        ได้มาจาก upstream เท่านั้น (PostgREST อนุกรมผล statement ที่จบแล้วเป็น
- *        response — เขียน body ก่อน statement จบไม่ได้) หรือเป็นการปฏิเสธของ
- *        gateway ก่อนแตะ upstream (key-auth 401 ฯลฯ — ไม่มีงานเริ่มตามหลังได้เลย)
- *        ทั้งคู่จึงไม่ต้อง fence เพิ่ม (gate r5: "response = terminal" ใช้ได้กับ
- *        class นี้ เพราะ code ตรวจที่มาของ body เองแล้ว)
- *     c. status ≥ 0 + body opaque (แกะ JSON ไม่ได้ เช่น 500 "Something went
- *        wrong" ที่ gateway ตัดขาคอร์ดของ P0002-raise): ต้องครบสามขาพิสูจน์ —
- *        (ก) kong access line ของ nonce หนึ่งแถวพอดีและ status ตรง res.status
+ *     b. status ≥ 0 (response ถึงมือ caller แล้ว — ทุกรูปร่าง body เหมือนกัน):
+ *        gate r6 M1.1 ยกเลิกการยกเว้น "JSON body = body-proven โดยโครงสร้าง"
+ *        เพราะรูปร่าง body ไม่พิสูจน์แหล่งกำเนิด — ตรวจจริง 2026-09-15 ใน stack
+ *        นี้: Kong 2.8.1 สังเคราะห์ gateway error เป็น JSON เองได้ (404 no-route
+ *        ตอบ {"message":"no Route matched with those values"} และ 401 key-auth
+ *        ตอบ {"message":"Invalid authentication credentials"}) — JSON จึงบอก
+ *        ไม่ได้ว่ามาจาก upstream ที่ serve จบหรือ gateway สังเคราะห์ · ทุก
+ *        response-in-hand ต้องผ่าน fence สี่ขาเดียวกัน:
+ *        (ก) activity fail-fast: ไม่มี pg_stat_activity รัน RPC นี้อยู่ตอนเข้า
+ *            fence — เจอ = ปฏิเสธทันที (fail-loud ไม่รอ 12s) · หมุด = correlation
+ *            ชื่อ RPC + หน้าต่างหลัง dispatch (ไฟล์รันเรียง — correlation เดียว
+ *            กับ scenarioTerminalProbe ที่ gate ยอมรับตั้งแต่ r3) · ตรวจจริง
+ *            2026-09-15 (เทส M1-r6 เปิดโปง): PostgREST ส่ง body เป็น bind param
+ *            `$1 AS json_data` — literal p_request_id ไม่ปรากฏใน query text การ
+ *            กรองด้วย requestRef จึงเป็น 0 เสมอ (ผ่านปลอม) — requestRef เหลือ
+ *            เป็นหมุดราย invocation ที่ขา (ข) เท่านั้น (kong line ผูก nonce)
+ *        (ข) kong access line ของ nonce หนึ่งแถวพอดีและ status ตรง res.status
  *            (Kong เขียน line "เมื่อปิด response" — ยังไม่มี line = request ยัง
  *            ค้างในทาง = ห้าม settle แม้ caller ถือ response แล้ว — กันเคส
- *            gateway สังเคราะห์คำตอบก่อน upstream serve)
- *        (ข) ไม่มี pg_stat_activity ผูก requestRef (p_request_id ของ invocation
- *            นี้ — ปรากฏตรงใน query text ขณะ statement รัน ตรวจจริง) = ไม่มี
- *            statement ของ invocation นี้ยังรันอยู่
- *        (ค) role authenticator ถือ statement_timeout=8s + lock_timeout=8s
- *            ตามจริง (อ่าน pg_db_role_setting ณ เวลา settle) = statement ของ
- *            role นี้มีขอบเขตเวลาเสมอ — หลักฐานเชิงโครงสร้างของ stack นี้
+ *            gateway สังเคราะห์คำตอบก่อน upstream serve) · >1 = กำกวม = ปฏิเสธ
+ *        (ค) หน้าต่างหลัง kong line 12 วิ: การปิด response ฝั่ง gateway ไม่ใช่
+ *            หลักฐาน completion/cancellation ฝั่ง upstream (gate r6) — statement
+ *            ที่ "ยังค้างหรือเพิ่งเริ่มทีหลัง" gateway ปิด ต้องโผล่ใน
+ *            pg_stat_activity ภายในหน้าต่างนี้ (poll ทุก 300ms จนครบ 12s —
+ *            ห้ามออกเมื่อเจอ line แล้วตรวจครั้งเดียว) · role bounds 8s (ขา ง)
+ *            รับประกัน statement ใดที่เริ่มแล้วต้องจบภายใน 8s — 12s ครอบ "เริ่ม
+ *            ช้า + วิ่งจบ" · โผล่ในหน้าต่าง = หลักฐานไม่ terminal = ปฏิเสธ
+ *        (ง) role bounds ตามจริง ณ เวลา settle สองชั้น (declaration
+ *            pg_db_role_setting + effective จาก login จริงฐานะ authenticator —
+ *            authenticatorRoleBoundsOk) = statement ของ role นี้มีขอบเขตเวลา
+ *            เสมอ (รองรับเหตุผลของขา ค) · ขาพฤติกรรมวัดจาก pool session จริง
+ *            อยู่ที่ guard test M1-r6 (วัด lock_timeout ตัด ~8s ขณะ lock ถูกถือ)
  *  3. postTerminalAssert (r4): อ่าน-assert snapshot "ใหม่" ตรงนี้เท่านั้น — หลัง
  *     terminal ยืนยันครบทั้งสองขา (อ่านก่อนขา 2 อาจได้ของเก่าขณะ backend ยัง
  *     มีชีวิต — race ที่ r4 จับ) · assert ล้ม = invocation คง 'running' (fail-loud)
@@ -212,17 +226,17 @@ export async function settleScenario(
   }
   // (1) probe terminal ก่อน — โยน = ไม่ settle (r2/r3)
   await terminalProbe();
-  // (2) upstream-terminal ผูกกับ invocation นี้ (r4+r5) — แยกตาม class ของ response
-  // (doc เต็มด้านบน): a. status<0 = CLF fence ของ rest · b. status≥0 + JSON body =
-  // body-proven โดยโครงสร้าง · c. status≥0 + opaque = kong line หนึ่งแถว status ตรง
-  // + ไม่มี activity ผูก requestRef + role bounds ตามจริง · nonce/cursor/requestRef
-  // อ่านจาก ledger ของ invocation (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error)
+  // (2) upstream-terminal ผูกกับ invocation นี้ (r4+r5+r6) — แยกตาม class ของ
+  // response (doc เต็มด้านบน): a. status<0 = CLF fence ของ rest · b. status≥0
+  // ทุกรูปร่าง body = fence สี่ขาเดียวกัน (activity fail-fast + kong line
+  // หนึ่งแถว status ตรง + หน้าต่าง 12s หลัง line + role bounds declaration&
+  // effective) · nonce/cursor อ่านจาก ledger ของ invocation
+  // (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error)
   const m = /^rpc:([a-z0-9_]+):(POST|PATCH|PUT|DELETE)$/i.exec(res.opKey);
   if (m !== null) {
     const [rpcName, httpMethod] = [m[1] as string, m[2] as string];
-    const [binding] = await psqlRows<{ ua: string | null; requestRef: string | null }>(`
-      select payload -> 'binding' ->> 'uaNonce' as ua,
-             payload -> 'binding' ->> 'requestRef' as "requestRef"
+    const [binding] = await psqlRows<{ ua: string | null }>(`
+      select payload -> 'binding' ->> 'uaNonce' as ua
         from test_infra.lifecycle_ledger
        where kind = 'invocation' and invocation_id = '${res.invocationId}'
        order by ts desc limit 1;`);
@@ -267,26 +281,45 @@ export async function settleScenario(
           `scenario settle ปฏิเสธ: ไม่มี CLF terminal ของ invocation นี้หลังรอ 12s — upstream ยังไม่จบ (${evidence})`,
         );
       }
-    } else if (res.json !== null && typeof res.json === "object") {
-      // b. body-proven — JSON body มาจาก upstream ที่ serve จบแล้ว หรือ gateway
-      // ปฏิเสธก่อนแตะ upstream ทั้งคู่ = ไม่มีงานเริ่มตามหลังได้ (ไม่ต้อง fence เพิ่ม)
     } else {
-      // c. opaque response-in-hand (gate r5 M1) — kong line + requestRef + role bounds
-      if (binding.requestRef === null || binding.requestRef === undefined) {
-        throw new Error(
-          `scenario settle ปฏิเสธ: opaque response แต่ไม่มี requestRef (p_request_id) ของ invocation ใน ledger — ไม่มีหมุดผูก activity (${evidence})`,
-        );
-      }
+      // b. response-in-hand ทุกรูปร่าง body (gate r6 M1.1: JSON ไม่พิสูจน์แหล่ง
+      // กำเนิด — Kong 2.8.1 สังเคราะห์ gateway error เป็น JSON ได้ ตรวจจริง
+      // 2026-09-15) → fence สี่ขาเดียวกันทุกครั้ง
       if (attempt.cursor == null) {
         throw new Error(
-          `scenario settle ปฏิเสธ: opaque response แต่ไม่มี logCursor ของ invocation — ไม่มีขอบเขตหน้าต่าง kong log (${evidence})`,
+          `scenario settle ปฏิเสธ: response-in-hand แต่ไม่มี logCursor ของ invocation — ไม่มีขอบเขตหน้าต่าง kong log (${evidence})`,
         );
       }
+      // (ง) role bounds สองชั้น: declaration + effective (login ฐานะ authenticator)
       if (!(await authenticatorRoleBoundsOk())) {
         throw new Error(
-          `scenario settle ปฏิเสธ: role authenticator ไม่ถือ statement/lock_timeout=8s ตามจริง (pg_db_role_setting) — ขอบเขตเวลาของ statement ใช้พิสูจน์ไม่ได้ (${evidence})`,
+          `scenario settle ปฏิเสธ: role authenticator ไม่ถือ statement/lock_timeout=8s ตามจริง (declaration pg_db_role_setting + effective จาก login ฐานะ authenticator) — ขอบเขตเวลาของ statement ใช้พิสูจน์ไม่ได้ (${evidence})`,
         );
       }
+      // (ก) activity fail-fast — statement ของ invocation นี้กำลังรันอยู่ตอนเข้า
+      // fence = ไม่ terminal แน่ ปฏิเสธทันทีไม่รอ (fail-loud)
+      // หมุดจริงของ stack (ตรวจจริง 2026-09-15 — เทส M1-r6 เปิดโปง): PostgREST
+      // ส่ง body เป็น bind param (`WITH pgrst_source AS ... (SELECT $1 AS
+      // json_data)`) — literal p_request_id ไม่ปรากฏใน pg_stat_activity.query
+      // เลย การกรองด้วย requestRef จึงเป็น 0 เสมอ (ผ่านปลอม) · activity ผูก
+      // invocation ด้วย correlation ตามจริง: ชื่อ RPC + หน้าต่างหลัง dispatch
+      // (integration config รันไฟล์เรียง — ไม่มีไฟล์อื่นยิง RPC เดียวกันพร้อมกัน —
+      // correlation เดียวกับที่ gate ยอมรับใน scenarioTerminalProbe ตั้งแต่ r3)
+      // requestRef ยังเป็นหมุดราย invocation ที่ขา (ข) — kong line ผูก nonce
+      // ของ invocation นี้หนึ่งเดียว
+      const rpcBusy = () =>
+        psqlScalar(`
+          select count(*)::text from pg_stat_activity
+           where query like '%${rpcName}%'
+             and state in ('active', 'idle in transaction')
+             and pid <> pg_backend_pid();`);
+      const busyNow = await rpcBusy();
+      if (busyNow !== "0") {
+        throw new Error(
+          `scenario settle ปฏิเสธ: statement ของ invocation นี้ยังรันอยู่ (pg_stat_activity เห็น backend รัน ${rpcName} อยู่ ${busyNow} ตัว) (${evidence})`,
+        );
+      }
+      // (ข) kong access line หนึ่งแถวพอดี + status ตรง — poll ภายใน 12s
       const deadline = Date.now() + 12_000;
       let fence: { matches: number; statuses: number[] } = { matches: 0, statuses: [] };
       for (;;) {
@@ -316,15 +349,22 @@ export async function settleScenario(
           `scenario settle ปฏิเสธ: ไม่มี kong access line ของ invocation นี้หลังรอ 12s — gateway ยังไม่ปิด request (ยังค้าง/queued) = ยังไม่ terminal (${evidence})`,
         );
       }
-      const busy = await psqlScalar(`
-        select count(*)::text from pg_stat_activity
-         where query like '%${binding.requestRef}%'
-           and state in ('active', 'idle in transaction')
-           and pid <> pg_backend_pid();`);
-      if (busy !== "0") {
-        throw new Error(
-          `scenario settle ปฏิเสธ: statement ของ invocation นี้ยังรันอยู่ (pg_stat_activity เห็น p_request_id ของ invocation นี้ ${busy} ตัว) (${evidence})`,
-        );
+      // (ค) หน้าต่าง 12 วิ "หลัง" kong line — การปิด response ฝั่ง gateway ไม่ใช่
+      // หลักฐาน completion/cancellation ฝั่ง upstream: statement ที่ยังค้างหรือ
+      // เพิ่งเริ่มทีหลัง gateway ปิด ต้องโผล่ในหน้าต่างนี้ (role bounds 8s รับประกัน
+      // ว่า statement ที่เริ่มแล้วต้องจบภายใน 8s — 12s ครอบ) · poll จนครบ deadline
+      // ทุก 300ms — ห้ามตรวจครั้งเดียวแล้วออก (gate r6 M1.1-ก) · หมุด activity =
+      // correlation ชื่อ RPC ตาม doc ขา (ก)
+      const postLineDeadline = Date.now() + 12_000;
+      for (;;) {
+        const busy = await rpcBusy();
+        if (busy !== "0") {
+          throw new Error(
+            `scenario settle ปฏิเสธ: statement ของ invocation นี้โผล่/ยังรันในหน้าต่าง 12s หลัง kong line (${busy} ตัว) — gateway ปิด response ไปแล้วแต่ upstream ยังไม่ terminal (${evidence})`,
+          );
+        }
+        if (Date.now() >= postLineDeadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
     }
   }

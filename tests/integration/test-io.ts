@@ -496,11 +496,23 @@ export async function kongAccessFence(
 }
 
 /**
- * ขอบเขตจริงของ role authenticator (gate waveh-r5 M1.1 ขา ค): pg_db_role_setting
- * ต้องถือ statement_timeout=8s + lock_timeout=8s ตามที่วัดไว้ (ตรวจจริง 2026-09-15:
- * setconfig = {session_preload_libraries=safeupdate,statement_timeout=8s,
- * lock_timeout=8s} — supabase_admin ไม่มี) — คำยืนยัน "ณ เวลา settle" ว่า statement
- * ของ role นี้มีขอบเขตเวลาเสมอ ไม่ใช่ข้ออ้าง static จาก config ที่อ่านไว้ตอนอื่น
+ * ขอบเขตจริงของ role authenticator (gate waveh-r5 ขา ค + r6 M1.1 ปิดช่อง
+ * "default ≠ effective"): สองชั้น —
+ * (1) declaration: pg_db_role_setting ต้องถือ statement_timeout=8s +
+ *     lock_timeout=8s (ตรวจจริง 2026-09-15: setconfig =
+ *     {session_preload_libraries=safeupdate,statement_timeout=8s,lock_timeout=8s})
+ * (2) effective: เปิด session ใหม่ "ในฐานะ authenticator" แล้วอ่าน
+ *     current_setting จาก session นั้น — ค่า ALTER ROLE มีผลเมื่อ session ใหม่
+ *     เริ่มเท่านั้น (PostgreSQL sql-alterrole.html) การอ่าน pg_db_role_setting
+ *     เฉย ๆ จึงพิสูจน์ได้แค่ค่าที่จอดอยู่ใน catalog ไม่ใช่ค่าที่ session ได้รับจริง ·
+ *     login ผ่าน trust ใน container (ตรวจจริง 2026-09-15: pg_hba
+ *     `host all all 127.0.0.1/32 trust` + `psql host=127.0.0.1
+ *     user=authenticator` ตอบ st=8s/lt=8s) — dev-stack เท่านั้น (integration
+ *     tests รันบน dev stack อยู่แล้ว)
+ * ขาพฤติกรรม (session เก่าใน pool ที่เริ่มก่อน ALTER จะกลับไปอ่านจาก catalog
+ * ไม่ได้): guard test M1-r6 วัดการถูก lock_timeout ตัดจริง ~8s บน pool session
+ * ที่ serve request จริง ขณะ lock ยังถูกถืออยู่ — สามชั้นรวมกันจึงเป็นคำยืนยัน
+ * "ณ เวลา settle" ที่ไม่ใช่ข้ออ้าง static จาก config ที่อ่านไว้ตอนอื่น
  */
 export async function authenticatorRoleBoundsOk(): Promise<boolean> {
   const raw = await psql(
@@ -509,7 +521,24 @@ export async function authenticatorRoleBoundsOk(): Promise<boolean> {
       where r.rolname = 'authenticator';`,
   );
   const cfg = raw.trim();
-  return cfg.includes("statement_timeout=8s") && cfg.includes("lock_timeout=8s");
+  if (!cfg.includes("statement_timeout=8s") || !cfg.includes("lock_timeout=8s")) {
+    return false;
+  }
+  // effective — ค่าที่ session ใหม่ของ role นี้ (role เดียวกับที่ PostgREST ต่อ)
+  // ได้รับจริง ณ การ login (conninfo ผ่าน argv ตรง ๆ ไม่ผ่าน shell)
+  const r = await dockerCompose([
+    "exec",
+    "-T",
+    "db",
+    "psql",
+    "host=127.0.0.1 user=authenticator dbname=postgres",
+    "-At",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    "select current_setting('statement_timeout') || '/' || current_setting('lock_timeout');",
+  ]);
+  return r.code === 0 && r.stdout.trim() === "8s/8s";
 }
 
 async function restStartedAfter(iso: string): Promise<boolean> {
@@ -860,9 +889,12 @@ export async function httpWrite(
   }
   const uaNonce = mintUaNonce();
   const invocationId = opts.invocationId ?? randomUUID();
-  // gate waveh-r5 M1.1: requestRef = p_request_id ใน body ของ rpc — ปรากฏตรงใน
-  // pg_stat_activity.query ขณะ statement รันอยู่ (ตรวจจริง) = หมุดผูก "activity"
-  // เข้ากับ invocation นี้ (ขา ก ของ opaque fence ที่ settleScenario ใช้ตอน settle)
+  // gate waveh-r5 M1.1 → แก้ตามหลักฐานจริงรอบ r6: requestRef = p_request_id ใน
+  // body ของ rpc บันทึกลง binding เป็นหมุด audit correlation ราย invocation ·
+  // ข้อจริงที่วัดได้ (เทส M1-r6 เปิดโปง): PostgREST ส่ง body เป็น bind param
+  // (`SELECT $1 AS json_data`) — literal p_request_id ไม่ปรากฏใน
+  // pg_stat_activity.query เลย requestRef จึงไม่ใช่ activity anchor — การผูก
+  // activity ใช้ correlation ชื่อ RPC + หน้าต่างเวลา (helpers.ts ขา ก)
   const requestRef =
     typeof body === "object" &&
     body !== null &&

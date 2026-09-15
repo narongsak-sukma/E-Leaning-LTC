@@ -31,6 +31,18 @@
  *   ของ RPC เดียวกันยังค้าง → settle D1 ปฏิเสธ (ขา activity) จน D2 จบจริง → ผ่าน
  *   gate สามขา + snapshot ใหม่ · ทิศสกปรกของ fence: อ้าง status ไม่ตรง kong line
  *   = หลักฐานไม่ผูกกัน = ปฏิเสธ
+ * M1 (waveh-r6) · (1) JSON body ไม่พิสูจน์แหล่งกำเนิด — ตรวจจริง: Kong 2.8.1
+ *   สังเคราะห์ gateway error เป็น JSON (404/401 = {"message":...}) การยกเว้น
+ *   "JSON = body-proven" จึงถูกยกเลิก — response-in-hand ทุกรูปร่างผ่าน fence
+ *   เดียวกัน (2) fence ต้องเฝ้าหน้าต่าง "หลัง" kong line ครบ 12s (การปิด
+ *   response ฝั่ง gateway ≠ upstream terminal — statement อาจเพิ่งเริ่มทีหลัง)
+ *   (3) role bounds ต้องเป็นค่า effective ไม่ใช่แค่ default ใน catalog (ALTER
+ *   ROLE มีผลกับ session ใหม่เท่านั้น) · เคสพิสูจน์ = invocation เดียว: ถือ
+ *   response (สังเคราะห์โดย gateway ก่อน upstream serve) ขณะ upstream ของ
+ *   "ตัวเอง" ยังค้าง (ผูก p_request_id รายตัว) โดย probe ที่ใช้ "ผ่าน" (lock-only
+ *   บนตารางเป้าหมาย) = การปฏิเสธต้องเกิดจาก fence เอง ไม่ใช่ probe · lock ยัง
+ *   ถูกถือ → lock_timeout ตัดจริง ~8s (ขาพฤติกรรมของ role bounds บน pool
+ *   session ที่ serve จริง) → response จริงมาถึง → settle ผ่านทุกขา + snapshot ใหม่
  *
  * two-way proof ตาม [[regression-test-two-way-proof]] ระดับฟังก์ชัน: ทิศสกปรก/ล้ม
  * ต้องถูกปฏิเสธ ทิศสะอาด/ผ่านต้องไปต่อ — ผูกกับ audit()/shouldBreakAfter ของ script
@@ -403,7 +415,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       p_job_id: jobId,
       p_file_media_id: "00000000-0000-4000-8000-0000000000f8",
       p_chunks: 1,
-      p_request_id: crypto.randomUUID(), // requestRef ผูก activity ราย invocation
+      p_request_id: crypto.randomUUID(), // หมุด audit correlation ราย invocation (บันทึกใน binding ของ ledger)
       p_claim_token: crypto.randomUUID(),
     });
     const invStatus = (id: string | undefined) =>
@@ -500,4 +512,153 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     await settleScenario(d3, "guard-r5-d3-honest-settle", probe);
     expect(await invStatus(d3.invocationId)).toBe("settled");
   }, 90_000);
+
+  // ─── M1 (gate waveh-r6): invocation เดียว — ถือ response ขณะ upstream ของตัวเองค้าง ──
+  // รูปเคสที่ r6 สั่ง (ต่างจาก r5 ที่ refusal มาจาก probe เพราะ D2 เป็น invocation
+  // คนละตัว): invocation เดียว X ค้างบน lock ตารางแรกของทางเดิน RPC (ผูก
+  // p_request_id รายตัว — พิสูจน์ด้วย pg_stat_activity จริง) ขณะ caller "ถือ
+  // response แล้ว" (สถานะที่ gate เป็นห่วง: gateway สังเคราะห์คำตอบก่อน upstream
+  // serve — จำลองด้วย handle ผูก invocationId จริงของ X ทิศเดียวกับ d3lie ที่ gate
+  // ยอมรับ) → probe ที่ใช้ต้อง "ผ่าน" (lock-only บนตารางเป้าหมาย event_outbox —
+  // จับ backend ที่ค้างก่อนตารางไม่ได้ ตามที่ r3 พิสูจน์) = การปฏิเสธเกิดจาก fence
+  // เอง (ขา activity fail-fast) ไม่ใช่ probe · แล้วปล่อยให้กลไกจริงตัดงาน: lock
+  // ยังถูกถือ → lock_timeout=8s (effective) ตัด statement ของ pool session ที่
+  // serve จริง (ขาพฤติกรรมของ role bounds — วัดเป็น ms) → response จริงของ X
+  // มาถึง (500 opaque) → ปล่อย blocker → settle ผ่านครบทุกขา + snapshot ใหม่
+  it("invocation เดียว: response-in-hand ขณะ upstream ของตัวเองยังค้าง = fence ปฏิเสธเอง (probe ผ่าน) · lock_timeout ตัดจริง ~8s (effective) → settle จริงผ่าน + snapshot ใหม่ (waveh-r6 M1)", async ({ skip }) => {
+    if (DB_URL === undefined) skip();
+    const { settleScenario, scenarioTerminalProbe, tableTerminalProbe, psqlScalar, SERVICE_KEY } =
+      await import("./helpers");
+    const { httpWrite, startPsqlSession } = await import("./test-io");
+    const jobId = "00000000-0000-4000-8000-0000000000fb"; // ไม่มีอยู่ → P0002 เมื่อได้วิ่ง
+    const requestRef = crypto.randomUUID(); // หมุดผูก activity ราย invocation (r5)
+    const invocationId = crypto.randomUUID();
+    const invStatus = () =>
+      psqlScalar(`
+        select payload ->> 'status' from test_infra.lifecycle_ledger
+         where kind = 'invocation' and invocation_id = '${invocationId}'
+         order by ts desc, id desc limit 1;`);
+    const busyRef = () =>
+      psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%complete_data_export_job%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
+    // probe ที่ "ต้องผ่าน" ขณะ upstream ค้าง: lock-only บนตารางเป้าหมาย — X ค้าง
+    // อยู่ก่อนตารางแรกของทางเดิน (data_export_jobs) ยังไม่เคยแตะ event_outbox
+    const passingProbe = () => tableTerminalProbe("public.event_outbox");
+
+    const session = await startPsqlSession("scenario-guard-r6-holder");
+    try {
+      await session.exec("begin;");
+      await session.exec("lock table public.data_export_jobs in access exclusive mode;");
+      // X: dispatch จริงผ่าน transport กลาง (invocationId เรากำหนด — จะได้ผูก
+      // response handle เข้า invocation เดียวกัน) — ค้างรอ lock ตารางแรก
+      const dispatch = httpWrite(
+        "POST",
+        "/rest/v1/rpc/complete_data_export_job",
+        {
+          p_job_id: jobId,
+          p_file_media_id: "00000000-0000-4000-8000-0000000000fc",
+          p_chunks: 1,
+          p_request_id: requestRef,
+          p_claim_token: crypto.randomUUID(),
+        },
+        {
+          apiKey: SERVICE_KEY,
+          token: SERVICE_KEY,
+          settleMode: "scenario",
+          invocationId,
+          label: "m1r6-hung-x",
+        },
+      );
+      // หลักฐาน: statement ของ invocation "นี้" ขึ้นจริงและค้าง — correlation ชื่อ
+      // RPC + หน้าต่างหลัง dispatch (ไฟล์รันเรียงไม่มีตัวอื่นยิง RPC นี้พร้อมกัน ·
+      // ตรวจจริง r6: body เป็น bind param — literal p_request_id ไม่อยู่ใน query
+      // text การกรองด้วย requestRef เป็นศูนย์เสมอ = ผ่านปลอม)
+      let busy = "0";
+      for (let i = 0; i < 50 && busy === "0"; i += 1) {
+        busy = await busyRef();
+        if (busy === "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(busy, "X ต้องค้างเป็น backend active จริง (correlation ชื่อ RPC หลัง dispatch ของเรา)").toBe("1");
+
+      // แสดงหลักฐานในเทส: probe ตัวนี้ "ผ่าน" ขณะ upstream ของ X ค้างอยู่จริง —
+      // การปฏิเสธด้านล่างจึงต้องมาจาก fence เองเท่านั้น (ข้อ M1.3 ของ gate r6:
+      // อย่าให้ refusal มาจาก probe เดิมก่อนเข้า fence ใหม่)
+      await passingProbe();
+
+      // สถานะที่กลัว: caller ถือ response แล้ว (gateway สังเคราะห์ก่อน upstream
+      // serve) ขณะ upstream ของ invocation "นี้เอง" ยังค้าง → fence ปฏิเสธที่ขา
+      // activity fail-fast คง 'running' ให้ audit จับ
+      const xlie = {
+        status: 500,
+        json: null,
+        text: "",
+        invocationId,
+        opKey: "rpc:complete_data_export_job:POST",
+      } as const;
+      await expect(
+        settleScenario(xlie, "guard-r6-own-upstream-hung-must-refuse", passingProbe),
+      ).rejects.toThrow(/statement ของ invocation นี้ยังรันอยู่/);
+      expect(await invStatus()).toBe("running");
+
+      // ไม่ปล่อย blocker — กลไกจริงของ stack ตัดงานเอง: lock_timeout=8s (ค่า
+      // effective บน pool session ที่ serve X จริง) ยกเลิก statement → วัดเป็น ms
+      // เป็นขาพฤติกรรมของ role bounds (declaration+effective อ่านที่ fence · ตัว
+      // เก่าใน pool ที่เริ่มก่อน ALTER กลับไปอ่านจาก catalog ไม่ได้ — วัดพฤติกรรม
+      // ตรงนี้จึงเป็นหลักฐานของ session ที่รัน invocation จริง)
+      const cutStart = Date.now();
+      for (let i = 0; i < 150 && busy !== "0"; i += 1) {
+        busy = await busyRef();
+        if (busy !== "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      const cutMs = Date.now() - cutStart;
+      expect(busy, "statement ต้องถูก lock_timeout ตัดเองภายในขอบเขต (lock ยังถูกถืออยู่)").toBe("0");
+      expect(
+        cutMs,
+        `การตัดต้องเกิดภายในขอบเขต effective ~8s+margin (วัดจริง ${cutMs}ms ขณะ lock ถูกถือ)`,
+      ).toBeLessThanOrEqual(10_500);
+
+      // response จริงของ X มาถึงหลังถูกตัด — 500 สองรูปตามจริงของ stack (วัดจริง r6):
+      // (1) JSON {"code":"57014","message":"canceling statement due to statement
+      // timeout"} เมื่อ PostgREST serialize cancellation error ออกมาเองผ่าน
+      // gateway ได้ (ต่างจาก P0002 ข้อความไทยที่โดนตัดขาคอร์ด) — และนี่แหละหลักฐาน
+      // สดว่า "JSON body ≠ แหล่งกำเนิดเดียว" ที่ทำให้ gate r6 ยกเลิก class b
+      // (2) opaque เมื่อ gateway ตัดขาคอร์ด — ทั้งคู่คือ cancellation ผูก invocation
+      // เดียวกัน และ fence ต้องพิสูจน์ terminal ได้ทั้งคู่ (สี่ขา ไม่แยก JSON/opaque)
+      const xres = await dispatch;
+      expect(xres.status).toBe(500);
+      if (xres.json !== null && typeof xres.json === "object") {
+        expect((xres.json as { code?: unknown }).code).toBe("57014");
+      } else {
+        expect(xres.json).toBeNull();
+      }
+      expect(xres.invocationId).toBe(invocationId);
+
+      // ปล่อย blocker เพื่อให้ probe เต็ม (lock+activity) และ snapshot อ่านได้ —
+      // ไม่สร้างงานใหม่ (request เดียวของ invocation นี้ถูกยกเลิกไปแล้ว · dispatch
+      // ปลายทางได้รับ response แล้ว · manifest singleDispatch)
+      await session.exec("rollback;");
+
+      // settle จริงของ invocation เดียวกัน: ผ่านครบทุกขา (activity fail-fast +
+      // kong line หนึ่งแถว status ตรง + หน้าต่าง 12s หลัง line สะอาด + role
+      // bounds declaration&effective) แล้วจึงอ่าน snapshot "ใหม่" (r4 ข้อ ค)
+      await settleScenario(
+        xres,
+        "guard-r6-x-terminal-proven(all-legs)",
+        () => scenarioTerminalProbe("public.event_outbox", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(`select count(*)::text from public.data_export_jobs where id = '${jobId}';`),
+            "job ไม่มีอยู่จริงต้องไม่ถูกสร้าง (statement ถูก lock_timeout ยกเลิก = TX abort)",
+          ).toBe("0");
+        },
+      );
+      expect(await invStatus()).toBe("settled");
+    } finally {
+      await session.exec("rollback;");
+      await session.end();
+    }
+  }, 120_000);
 });
