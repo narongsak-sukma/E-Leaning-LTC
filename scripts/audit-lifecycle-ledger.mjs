@@ -27,7 +27,7 @@
  * Exit: 0 = ผ่านทั้งหมด · 1 = audit ล้มอย่างน้อยหนึ่งข้อ · 2 = ใช้งานผิด/สภาพแวดล้อมไม่พร้อม
  */
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TABLE = "test_infra.lifecycle_ledger";
@@ -37,9 +37,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const USAGE = `\
 ใช้: node scripts/audit-lifecycle-ledger.mjs --run-id <id1,id2,...> [--expect-clean] [--truncate]
-  --run-id       บังคับ — run_id ที่จะ audit (comma-separated → SQL in-list)
-  --expect-clean สถานะ invocation ล่าสุดห้ามเป็น poisoned/unresolved (stage ปกติ)
-  --truncate     ลบแถวของ run-id เหล่านั้น — ทำหลัง audit ผ่านเท่านั้น
+
+  --run-id        บังคับ — run_id ที่จะ audit (comma-separated → SQL in-list)
+  --expect-clean  สถานะ invocation ล่าสุดห้ามเป็น poisoned/unresolved และต้องมี invocation
+                  ≥1 (audit บนชุดว่างเปล่า = ผ่านปลอม — ใช้กับ stage ปกติของ battery)
+  --truncate      ลบแถวของ run-id เหล่านั้น — ทำหลัง audit ผ่านเท่านั้น · บังคับเงื่อนไข
+                  clean เสมอแม้ไม่ใส่ --expect-clean: ห้ามใช้ script ลบหลักฐาน
+                  poisoned/unresolved — แถวพวกนั้นต้องเคลียร์มือตาม limitation 5
 `;
 
 // ─── 1) CLI ──────────────────────────────────────────────────────────────────
@@ -202,8 +206,13 @@ function settleProblems(row) {
  * หัวใจ audit — คืนรายการ failures (ว่าง = ผ่านทั้งหมด)
  * กฎ fail-closed: status ล่าสุดอ่านไม่ได้ (null) = malformed = FAIL ด้วย
  * (row 'invocation' ที่เขียนถูกต้องต้องมี payload.status เสมอ — อ่านไม่ได้คือ ledger พัง)
+ *
+ * gate waveh-r1 M3: poisoned/unresolved ต้องล้มทั้ง --expect-clean และ --truncate
+ * (เดิมผูกกับ expectClean อย่างเดียว — truncate ลบหลักฐาน poison ได้โดยไม่ผ่าน
+ * manual-with-intent ขัด limitation 5) · --expect-clean บนชุด invocation ว่าง = ล้ม
+ * (audit ว่างเปล่า = ผ่านปลอม — เกิดจริงกับ audit-e2e r3: invocations:0 ยัง ok:true)
  */
-function audit({ invLast, settle, guardRefusals }, runIds, expectClean) {
+function audit({ invLast, settle, guardRefusals }, runIds, expectClean, truncate = false) {
   const failures = [];
   for (const inv of invLast) {
     const invId = inv.invocation_id ?? "(null)";
@@ -221,11 +230,16 @@ function audit({ invLast, settle, guardRefusals }, runIds, expectClean) {
       );
       continue;
     }
-    if (expectClean && (status === "poisoned" || status === "unresolved")) {
+    if ((expectClean || truncate) && (status === "poisoned" || status === "unresolved")) {
       failures.push(
-        `invocation ${invId} สถานะล่าสุด '${status}' (op_key=${opKey}) — --expect-clean ห้าม terminal แบบนี้`,
+        `invocation ${invId} สถานะล่าสุด '${status}' (op_key=${opKey}) — ${truncate ? "ห้าม truncate หลักฐาน poisoned/unresolved — เคลียร์มือตาม limitation 5 (จด intent ใน PROJECT-STATE)" : "--expect-clean ห้าม terminal แบบนี้"}`,
       );
     }
+  }
+  if (expectClean && invLast.length === 0) {
+    failures.push(
+      `run-id (${runIds.join(",")}) ไม่มี invocation เลย — audit บนชุดว่างเปล่า = ผ่านปลอม (fail-closed)`,
+    );
   }
   for (const row of settle) {
     const problems = settleProblems(row);
@@ -241,35 +255,46 @@ function audit({ invLast, settle, guardRefusals }, runIds, expectClean) {
 
 // ─── 4) main ─────────────────────────────────────────────────────────────────
 
-const { runIds, expectClean, truncate } = parseArgs(process.argv.slice(2));
-try {
-  const inList = runIds.map(sqlLiteral).join(", ");
-  const data = await fetchAuditData(inList);
-  const { failures, invocations, guardRefusals } = audit(data, runIds, expectClean);
-  const ok = failures.length === 0;
+/** รันจริงในฐานะ script (แยกจาก audit เพื่อ import ในเทสได้โดยไม่แตะ DB) */
+async function main() {
+  const { runIds, expectClean, truncate } = parseArgs(process.argv.slice(2));
+  try {
+    const inList = runIds.map(sqlLiteral).join(", ");
+    const data = await fetchAuditData(inList);
+    const { failures, invocations, guardRefusals } = audit(data, runIds, expectClean, truncate);
+    const ok = failures.length === 0;
 
-  // รายงาน JSON บรรทัดเดียวทาง stdout (ตัดสิน exit code จาก ok เท่านั้น)
-  console.log(JSON.stringify({ ok, runIds, invocations, guardRefusals, failures }));
+    // รายงาน JSON บรรทัดเดียวทาง stdout (ตัดสิน exit code จาก ok เท่านั้น)
+    console.log(JSON.stringify({ ok, runIds, invocations, guardRefusals, failures }));
 
-  // --truncate: ผู้คุม truncate เดี่ยว — audit ล้ม = ห้ามลบแม้แต่แถวเดียว
-  if (truncate) {
-    if (!ok) {
-      process.stderr.write(
-        `audit-lifecycle-ledger: audit ล้ม ${failures.length} ข้อ — ห้าม truncate (ผู้คุม truncate เดี่ยว)\n`,
-      );
-    } else {
-      const deleted = await truncateRunIds(inList);
-      process.stderr.write(
-        `audit-lifecycle-ledger: truncate run_id in (${runIds.join(",")}) แล้ว ${deleted} แถว\n`,
-      );
+    // --truncate: ผู้คุม truncate เดี่ยว — audit ล้ม = ห้ามลบแม้แต่แถวเดียว
+    if (truncate) {
+      if (!ok) {
+        process.stderr.write(
+          `audit-lifecycle-ledger: audit ล้ม ${failures.length} ข้อ — ห้าม truncate (ผู้คุม truncate เดี่ยว)\n`,
+        );
+      } else {
+        const deleted = await truncateRunIds(inList);
+        process.stderr.write(
+          `audit-lifecycle-ledger: truncate run_id in (${runIds.join(",")}) แล้ว ${deleted} แถว\n`,
+        );
+      }
     }
-  }
 
-  process.exit(ok ? 0 : 1);
-} catch (err) {
-  // docker/psql ล้ม = สภาพแวดล้อมไม่พร้อม (ไม่ใช่ audit FAIL) — exit 2 แบบ heap-sampler
-  process.stderr.write(
-    `audit-lifecycle-ledger: สภาพแวดล้อม/DB ล้ม: ${err instanceof Error ? err.message : String(err)}\n`,
-  );
-  process.exit(2);
+    process.exit(ok ? 0 : 1);
+  } catch (err) {
+    // docker/psql ล้ม = สภาพแวดล้อมไม่พร้อม (ไม่ใช่ audit FAIL) — exit 2 แบบ heap-sampler
+    process.stderr.write(
+      `audit-lifecycle-ledger: สภาพแวดล้อม/DB ล้ม: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    process.exit(2);
+  }
 }
+
+// เรียกตรงเมื่อรันเป็น script เท่านั้น — import จากเทส (wave-h-battery-audit-guards)
+// ได้ audit() แบบ in-memory โดยไม่แตะ CLI/DB
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  await main();
+}
+
+export { audit, main };

@@ -755,6 +755,9 @@ export interface HttpWriteOptions {
   readonly signal?: AbortSignal;
   /** header เพิ่มของ caller (cookie/origin/x-forwarded-for ของ BFF — D89-3: httpWrite ครอบ bffPatch) */
   readonly extraHeaders?: Record<string, string>;
+  /** true = ส่ง body ตรงตามที่ได้มา (Uint8Array ของ binary เช่นอัปโหลด mp4) —
+   *  ไม่ JSON.stringify และไม่ตั้ง content-type ปริยาย (caller กำหนดผ่าน extraHeaders) */
+  readonly rawBody?: boolean;
   /** 'scenario' = ผู้เรียกเป็นผู้ settle เองผ่าน settleHttpWithEvidence — transport
    *  ห้ามปิด invocation เองไม่ว่าจะได้ response หรือ error (row คง 'running') */
   readonly settleMode?: "auto" | "scenario";
@@ -777,7 +780,13 @@ export async function httpWrite(
   }
   const uaNonce = mintUaNonce();
   const invocationId = opts.invocationId ?? randomUUID();
-  const cursor = transportTarget === "kong-path" ? await captureLogCursor() : null;
+  // waveh-r1 M1: จับ log-cursor เฉพาะ rest-upstream — fence ถูกปรึกษาเฉพาะ 500 ของ
+  // /rest/v1 เท่านั้น ส่วน /auth/v1 · /storage/v1 เป็น gateway-class (ไม่มีทางใช้ cursor)
+  // · restCall/storageCall เข้าทางนี้ทุก write แล้ว captureLogCursor (dump log ทั้งก้อน)
+  // จะแพงเกินจำเป็นกับ path ที่ไม่ใช้ — คำนวณล่วงหน้าให้ settle ด้านล่างใช้ร่วม
+  const urlPath = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] ?? "";
+  const restUpstream = transportTarget === "kong-path" && urlPath.startsWith("/rest/v1");
+  const cursor = restUpstream ? await captureLogCursor() : null;
   const snapshot =
     opts.touchSet !== undefined && opts.touchSet.length > 0 ? await beforeSnapshot(opts.touchSet) : null;
   await ledgerWrite(
@@ -805,12 +814,13 @@ export async function httpWrite(
   if (opts.token !== undefined && opts.token !== null) {
     headers["authorization"] = `Bearer ${opts.token}`;
   }
-  if (body !== undefined) headers["content-type"] = "application/json";
+  if (body !== undefined && opts.rawBody !== true) headers["content-type"] = "application/json";
   for (const [k, v] of Object.entries(opts.extraHeaders ?? {})) {
     headers[k] = v;
   }
   const init: RequestInit = { method, headers };
-  if (body !== undefined) init.body = JSON.stringify(body);
+  // rawBody (binary): ส่งตรง — caller กำหนด content-type เองผ่าน extraHeaders
+  if (body !== undefined) init.body = opts.rawBody === true ? (body as BodyInit) : JSON.stringify(body);
   if (opts.signal !== undefined) init.signal = opts.signal;
   let status = -1;
   let text = "";
@@ -861,8 +871,6 @@ export async function httpWrite(
   //   ทั้งที่ส่วนมากได้ 503 — ทั้งคู่ไม่มี terminal ต้นทาง = retryable unresolved)
   // app-direct: 2xx/4xx = confirmed · 5xx = evidenced เมื่อมี manifest (ที่ชั้นนี้ยังไม่มี manifest
   //   ก็ confirmed-by-handler-response ตาม route contract — manifest settle engine ทำชั้นบน)
-  const urlPath = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0] ?? "";
-  const restUpstream = transportTarget === "kong-path" && urlPath.startsWith("/rest/v1");
   const class5xxGateway =
     status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 530);
   let settledAs: string;
@@ -1197,6 +1205,9 @@ export interface TrackedClientOptions {
   readonly label: string;
   readonly supabaseUrl?: string;
   readonly apiKey?: string;
+  /** header ระดับ global ของ SDK (เช่น Authorization คงที่ของ repeated-or-cursor) —
+   *  ผ่าน createClient global.headers ตามเดิม คู่กับ fetch injection ของ transport */
+  readonly globalHeaders?: Record<string, string>;
   /** invocation ของ scenario (ถ้ามี — attempt rows ผูกเข้า) · ไม่มี = attempt-level tracking เท่านั้น */
   readonly invocationId?: string;
   readonly opKey?: string;
@@ -1257,7 +1268,10 @@ export function createTrackedClient(opts: TrackedClientOptions): TrackedClient {
     return response;
   };
   const client = createClient(url, apiKey, {
-    global: { fetch: trackedFetch },
+    global: {
+      fetch: trackedFetch,
+      ...(opts.globalHeaders !== undefined ? { headers: opts.globalHeaders } : {}),
+    },
     auth: { persistSession: false, autoRefreshToken: false },
   });
   return { client, parentCallKey };

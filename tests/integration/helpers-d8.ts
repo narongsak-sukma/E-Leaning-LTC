@@ -302,21 +302,36 @@ export interface StorageResult {
   readonly text: string;
 }
 
-/** เรียก storage API ผ่าน Kong ด้วย service key (upload/delete/GET object) */
+/** เรียก storage API ผ่าน Kong ด้วย service key (upload/delete/GET object)
+ * waveh-r1 M1: การเขียน (POST/DELETE) ผ่าน transport กลาง httpWrite — ledger ครบ
+ * ทุก dispatch · rawBody ส่งไบต์ mp4 ตรง (ไม่ JSON) · GET คง fetch ตรง (อ่าน
+ * ไม่มี lifecycle) · dynamic import กัน static วนรอบกับ test-io */
 export async function storageCall(
   method: "GET" | "POST" | "DELETE",
   path: string,
   body?: Buffer,
 ): Promise<StorageResult> {
+  if (method !== "GET") {
+    const { httpWrite } = await import("./test-io");
+    const r = await httpWrite(
+      method,
+      path,
+      body === undefined ? undefined : new Uint8Array(body),
+      {
+        apiKey: SERVICE_KEY,
+        token: SERVICE_KEY,
+        label: "storageCall",
+        rawBody: true,
+        extraHeaders: body === undefined ? {} : { "content-type": "video/mp4" },
+      },
+    );
+    return { status: r.status, text: r.text };
+  }
   const headers: Record<string, string> = {
     apikey: SERVICE_KEY,
     authorization: `Bearer ${SERVICE_KEY}`,
   };
   const init: RequestInit = { method, headers };
-  if (body !== undefined) {
-    headers["content-type"] = "video/mp4";
-    init.body = new Uint8Array(body);
-  }
   const response = await fetch(`${REST_URL}${path}`, init);
   const text = await response.text();
   return { status: response.status, text };

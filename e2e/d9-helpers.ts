@@ -26,6 +26,18 @@ import { psql, psqlRows } from "./helpers/db";
 import { ANON_KEY, REST_BASE, TEST_PASSWORD } from "./helpers/env";
 import { restCall } from "./helpers/rest";
 import { createLearnerUser, type LearnerUser } from "./helpers/users";
+// waveh-r1 M2: cleanup ของ D-9 (builder กลาง + lifecycle rows) ย้ายไปโมดูล
+// Playwright-safe เพื่อ integration fk-proof เรียก "helper จริง" ได้ — ค่าคงที่
+// FAST-A ใช้ร่วมจากทางเดียวกัน (แหล่งเดียว ไม่มิเรอร์ซ้ำ)
+import {
+  cleanupD9World,
+  cleanupFastExamARows,
+  deleteD9User,
+  FAST_A,
+  FAST_A_QUESTIONS,
+} from "./helpers/d9-cleanup";
+
+export { cleanupD9World, cleanupFastExamARows, deleteD9User, FAST_A, FAST_A_QUESTIONS };
 
 // ─── id ตายตัวของ "สอบเร็ว" (มิเรอร์ค่าจาก tests/integration/helpers-d8.ts ชุดเดียวกัน) ──
 
@@ -37,22 +49,6 @@ export const SEED_EXAM_ID = "cccccccc-cccc-4ccc-8ccc-000000000001";
 export const COURSE3_LESSON_ID = "66666666-6666-4666-8666-000000000006";
 /** profile สาธิต staff:exam ของ seed (guard_question_activation ต้องผ่านในนามผู้ใช้นี้) */
 export const STAFF_EXAM_DEMO_ID = "11111111-1111-4111-8111-000000000002";
-
-/** id ตายตัวของรอบสอบสอบเร็ว FAST-A (max_attempts 2 · cooldown 0 · 4 ข้อ) */
-export const FAST_A = {
-  assessment: "cccccccc-cccc-4ccc-8ccc-0000000000d8",
-  rules: "dddddddd-dddd-4ddd-8ddd-0000000000d8",
-  bank: "eeeeeeee-eeee-4eee-8eee-0000000000d8",
-  code: "EXAM-D8-FAST-A",
-} as const;
-
-/** id โจทย์ 4 ข้อของ FAST-A (เฉลย = ตัวเลือก sort_order 1 เสมอ — ตามธงของ D-8) */
-export const FAST_A_QUESTIONS: readonly string[] = [
-  "f0f0f0f0-f0f0-4f0f-8f0f-0000000000d1",
-  "f0f0f0f0-f0f0-4f0f-8f0f-0000000000d2",
-  "f0f0f0f0-f0f0-4f0f-8f0f-0000000000d3",
-  "f0f0f0f0-f0f0-4f0f-8f0f-0000000000d4",
-];
 
 /** ตัวเลือก 4 ตัวต่อข้อ — id ล็อกรูป f1f1f1f1-...-000000000<d|e><ข้อที่><ลำดับ> (มิเรอร์ D-8) */
 function optionId(questionKey: string, optionNo: number): string {
@@ -155,64 +151,10 @@ export async function seedFastExamA(): Promise<void> {
 }
 
 /**
- * ลบแถวสอบเร็ว FAST-A ทั้งชุด — เรียงตาม FK (RESTRICT):
- * event_outbox/attempt_answers/assessment_attempts ของรอบนี้ (ผู้ใช้ใดก็ได้ — id รอบเป็น
- * uuid ตายตัวของ suite) ก่อนลบโจทย์/ตัวเลือก/ธนาคาร/กติกา/รอบสอบ ไม่งั้น beforeAll ซ้ำชน FK
+ * ลบแถวสอบเร็ว FAST-A ทั้งชุด · ล้างโลก D-9 · ลบผู้ใช้รายคน — ย้ายไป
+ * e2e/helpers/d9-cleanup.ts แล้ว (waveh-r1 M2: builder กลาง + lifecycle rows)
+ * คง re-export ไว้ที่ header เพื่อ spec เดิม import จากที่เดิมได้ต่อ
  */
-export async function cleanupFastExamARows(): Promise<void> {
-  const questionList = FAST_A_QUESTIONS.map((id) => `'${id}'`).join(",");
-  await psql(`
-    delete from public.event_outbox
-     where payload ->> 'source_id' in (
-       select id::text from public.assessment_attempts where assessment_id = '${FAST_A.assessment}');
-    delete from public.attempt_answers
-     where attempt_id in (select id from public.assessment_attempts where assessment_id = '${FAST_A.assessment}');
-    delete from public.assessment_attempts where assessment_id = '${FAST_A.assessment}';
-    delete from public.question_options where question_id in (${questionList});
-    delete from public.questions where bank_id = '${FAST_A.bank}';
-    delete from public.question_banks where id = '${FAST_A.bank}';
-    delete from public.assessment_rules where id = '${FAST_A.rules}';
-    delete from public.assessments where id = '${FAST_A.assessment}';
-  `);
-}
-
-/**
- * ล้างโลกของ suite D-9 ทั้งชุด (เทียบเท่า cleanupD8World ของ D-8) — เรียกใน beforeAll
- * เพื่อเก็บของค้างจากรอบก่อนที่พังกลางทาง และใน afterAll เพื่อเก็บของตัวเอง:
- * - แถวของผู้ใช้ email pattern 'd9-%' (ทุก spec ของ D-9 สร้าง prefix d9-) ครบ FK-chain
- * - แถวสอบเร็ว FAST-A (รวม attempts ของผู้ใช้อื่นบนรอบนี้ — id ตายตัวของ suite)
- * NB: audit_logs เป็น append-only ตามดีไซน์ — ตั้งใจคงไว้
- */
-export async function cleanupD9World(): Promise<void> {
-  const d9Users = `(select id from auth.users where email like 'd9-%')`;
-  await psql(`
-    delete from public.event_outbox
-     where payload ->> 'source_id' in (
-       select id::text from public.assessment_attempts where user_id in ${d9Users});
-    delete from public.attempt_answers
-     where attempt_id in (select id from public.assessment_attempts where user_id in ${d9Users});
-    delete from public.assessment_attempts where user_id in ${d9Users};
-    delete from public.certificate_verifications
-     where verify_code in (select c.verify_code from public.certificates c where c.user_id in ${d9Users});
-    delete from public.certificates where user_id in ${d9Users};
-    delete from public.media_assets
-     where uploaded_by in ${d9Users}
-       and not exists (select 1 from public.certificates c where c.pdf_media_id = media_assets.id)
-       and not exists (select 1 from public.courses cr where cr.cover_media_id = media_assets.id)
-       and not exists (select 1 from public.lessons l where l.media_id = media_assets.id)
-       and not exists (select 1 from public.lawyer_licenses ll where ll.evidence_media_id = media_assets.id)
-       and not exists (select 1 from public.license_applications la where la.evidence_media_id = media_assets.id)
-       and not exists (select 1 from public.report_exports re where re.file_media_id = media_assets.id);
-    delete from public.lesson_progress
-     where enrollment_id in (select id from public.enrollments where user_id in ${d9Users});
-    delete from public.enrollments where user_id in ${d9Users};
-    -- granted_by รวมด้วย — เหตุผลเดียวกับ deleteD9User (FK จากแถวที่ผู้ใช้ d9 เป็นผู้มอบ)
-    delete from public.role_assignments where user_id in ${d9Users} or granted_by in ${d9Users};
-    delete from public.profiles where id in ${d9Users};
-    delete from auth.users where email like 'd9-%';
-  `);
-  await cleanupFastExamARows();
-}
 
 /** ผู้ใช้ทดสอบพร้อมบทบาท */
 export interface D9User extends LearnerUser {
@@ -243,71 +185,6 @@ export async function createStaffRoleUser(prefix: string, role: string): Promise
      values ('${user.id}', '${role}', null, 'e2e D-9 (${role})');`,
   );
   return { ...user, roles: ["citizen", role] };
-}
-
-/**
- * ลบผู้ใช้ d9 คนเดียวครบทุกแถวที่ FK ผูกอยู่ (เรียงตาม RESTRICT):
- * event_outbox(ของ attempt) → attempt_answers → assessment_attempts →
- * certificate_verifications → certificates → media_assets(PDF ใบประกาศที่ uploaded_by
- * เป็นผู้ออกใบ/ผู้เรียน — ลบเฉพาะแถวที่ไม่มีตารางใดอ้างอิงค้าง) → lesson_progress →
- * enrollments → role_assignments → profiles → auth.users
- * NB: audit_logs เป็น append-only ตามดีไซน์ (trigger ห้ามลบทุก role) — ตั้งใจคงไว้เหมือน D-8;
- *     ไฟล์ใน storage.objects ของ PDF คงค้างได้ (ไม่มี FK — ไม่บังการรันซ้ำ)
- */
-export async function deleteD9User(userId: string): Promise<void> {
-  await psql(`
-    delete from public.event_outbox
-     where payload ->> 'source_id' in (
-       select id::text from public.assessment_attempts where user_id = '${userId}');
-    delete from public.attempt_answers
-     where attempt_id in (select id from public.assessment_attempts where user_id = '${userId}');
-    delete from public.assessment_attempts where user_id = '${userId}';
-    delete from public.certificate_verifications
-     where verify_code in (select verify_code from public.certificates where user_id = '${userId}');
-    delete from public.certificates where user_id = '${userId}';
-    -- credit_ledger_entries + consents เป็น append-only (0010 §4) — พัก trigger
-    -- เพื่อลบของ fixture เหมือน cleanup ของ DCR-10 (แถว audit_logs คงไว้ตามดีไซน์)
-    begin;
-    alter table public.credit_ledger_entries disable trigger trg_append_only_rows;
-    delete from public.credit_ledger_entries
-     where user_id = '${userId}' or created_by = '${userId}';
-    alter table public.credit_ledger_entries enable trigger trg_append_only_rows;
-    alter table public.consents disable trigger trg_append_only_rows;
-    delete from public.consents where user_id = '${userId}';
-    alter table public.consents enable trigger trg_append_only_rows;
-    commit;
-    delete from public.media_assets
-     where uploaded_by = '${userId}'
-       and not exists (select 1 from public.certificates c where c.pdf_media_id = media_assets.id)
-       and not exists (select 1 from public.courses cr where cr.cover_media_id = media_assets.id)
-       and not exists (select 1 from public.lessons l where l.media_id = media_assets.id)
-       and not exists (select 1 from public.lawyer_licenses ll where ll.evidence_media_id = media_assets.id)
-       and not exists (select 1 from public.license_applications la where la.evidence_media_id = media_assets.id)
-       and not exists (select 1 from public.report_exports re where re.file_media_id = media_assets.id);
-    delete from public.lesson_progress
-     where enrollment_id in (select id from public.enrollments where user_id = '${userId}');
-    delete from public.enrollments where user_id = '${userId}';
-    -- โลกของ Phase 3/4 (credit bank + notifications) ที่ FK ยึด profiles — cron จริง
-    -- (credit-accrual/notification-dispatch ทุก 1 นาที) สร้างแถวเหล่านี้ให้ผู้ใช้ที่สอบ
-    -- ผ่าน/ได้ใบระหว่าง suite เอง: renewal_cycles + ledger (append-only — พัก trigger
-    -- เหมือน cleanup ของ DCR-10) + event/outbox/recipients/notifications/settings/consents
-    delete from public.event_outbox where payload ->> 'user_id' = '${userId}';
-    delete from public.email_outbox where recipient_user_id = '${userId}';
-    -- recipients ก่อน notifications (FK immediate ไม่ cascade) — CTE จับ id ที่เพิ่งลบ
-    with mine as (
-      delete from public.notification_recipients where user_id = '${userId}'
-      returning notification_id
-    )
-    delete from public.notifications n using mine where n.id = mine.notification_id;
-    delete from public.notification_settings where user_id = '${userId}';
-    delete from public.renewal_cycles where user_id = '${userId}';
-    -- รวมแถวที่ผู้ใช้เป็น "ผู้มอบ" (granted_by) เช่น instructor/staff:viewer ที่ BFF
-    -- มอบให้ผู้อื่น — เจ้าของแถวยังอยู่ก็ตาม ไม่งั้น profiles delete โดน FK
-    -- role_assignments_granted_by_fkey (แถว revoke แล้วก็ยังอ้างอิงอยู่)
-    delete from public.role_assignments where user_id = '${userId}' or granted_by = '${userId}';
-    delete from public.profiles where id = '${userId}';
-    delete from auth.users where id = '${userId}';
-  `);
 }
 
 /**

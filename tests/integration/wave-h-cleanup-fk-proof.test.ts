@@ -17,7 +17,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { psql } from "./helpers";
+import { deleteTestUser, psql } from "./helpers";
+import { cleanupD8World } from "./helpers-d8";
 import {
   APPEND_ONLY_KEEP,
   APPEND_ONLY_TRIGGER,
@@ -31,12 +32,18 @@ import { openIsolatedWindow, releaseWindow, type WindowHandle } from "./window-c
 
 const DB_URL = process.env["TEST_DATABASE_URL"];
 
-/** สร้างโลกผู้ใช้เต็มสาย (ทุกนโยบาย) ด้วย SQL ตรง — คืน { id, verifyCode, tag } */
-async function insertFkWorld(id: string, tag: string): Promise<{ verifyCode: string }> {
+/** สร้างโลกผู้ใช้เต็มสาย (ทุกนโยบาย) ด้วย SQL ตรง — คืน { id, verifyCode, tag }
+ * emailPrefix: M2 ต้องการผู้ใช้ใน namespace ของ helper จริงแต่ละตัว
+ * (d8-examcert-fk… / d9-fk…) ให้ cleanup ของ suite นั้นเก็บไปเอง */
+async function insertFkWorld(
+  id: string,
+  tag: string,
+  emailPrefix = "wave-h-fk",
+): Promise<{ verifyCode: string }> {
   const verifyCode = `WAVEHFKVC-${tag}`;
   await psql(`
     insert into auth.users (id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data)
-    values ('${id}', 'wave-h-fk-${tag}@ltc.test', 'probe-only', now(), '{}'::jsonb, '{"display_name":"fk-proof"}'::jsonb);
+    values ('${id}', '${emailPrefix}-${tag}@ltc.test', 'probe-only', now(), '{}'::jsonb, '{"display_name":"fk-proof"}'::jsonb);
     insert into public.enrollments (user_id, course_id)
       values ('${id}', '44444444-4444-4444-8444-000000000001');
     insert into public.renewal_cycles (user_id, cycle_no, starts_on, ends_on, required_credits)
@@ -59,7 +66,7 @@ async function insertFkWorld(id: string, tag: string): Promise<{ verifyCode: str
     insert into public.notice_acknowledgments (user_id, notice_key, version)
       values ('${id}', 'WAVEHFK-notice-${tag}', 'v1');
     insert into public.email_outbox (to_email, template_key, recipient_user_id)
-      values ('wave-h-fk-${tag}@ltc.test', 'fk-proof', '${id}');
+      values ('${emailPrefix}-${tag}@ltc.test', 'fk-proof', '${id}');
     insert into public.report_exports (requested_by, report_type) values ('${id}', 'fk-proof');
     insert into public.data_export_jobs (user_id) values ('${id}');
     insert into public.media_assets (provider, media_type, bucket, storage_path, mime_type, size_bytes, uploaded_by)
@@ -100,7 +107,9 @@ describe("wave-h cleanup-fk-proof (D89-1)", { timeout: 240_000 }, () => {
     beforeEach(async () => {
       // เคลียร์ของค้างจากรอบที่พังกลางทาง — ครั้งแรกอาจล้มถ้ามีแถว ASSERT-FAIL ค้าง
       // (question_banks ของ AF) → ลบแถวนั้นก่อนแล้วเคลียร์ผู้ใช้ให้สะอาดจริง
-      const leftovers = (await psql(`select id::text from auth.users where email like 'wave-h-fk-%';`))
+      const leftovers = (await psql(`
+        select id::text from auth.users
+         where email like 'wave-h-fk-%' or email like 'd8-examcert-fk%' or email like 'd9-fk%';`))
         .trim()
         .split("\n")
         .filter((l) => l.length > 0);
@@ -317,6 +326,64 @@ describe("wave-h cleanup-fk-proof (D89-1)", { timeout: 240_000 }, () => {
       }
       const ok = await runCleanup([randomUUID()]);
       expect(ok.attempts).toBe(1);
+    });
+
+    // ─── M2 (gate waveh-r1): helper จริงทั้งสามที่ทีมใช้จริง — ไม่ใช่แค่ builder ──
+    // deleteTestUser (integration) · cleanupD8World (helpers-d8) · deleteD9User
+    // (e2e/helpers/d9-cleanup — builder + lifecycle rows) ต้องล้าง fixture ที่มี
+    // certificates + credit_ledger_entries + renewal_cycles ครบทุกตาราง
+
+    it("M2a deleteTestUser จริง ล้าง fixture cert/ledger/cycle ครบ + profiles/auth.users หาย", async () => {
+      const id = randomUUID();
+      await insertFkWorld(id, id.slice(0, 8));
+      // มีของจริงก่อนลบ (กัน fake pass)
+      expect(await scalar(`select count(*) from public.certificates where user_id = '${id}';`)).toBe("1");
+      expect(await scalar(`select count(*) from public.credit_ledger_entries where user_id = '${id}';`)).toBe("1");
+      expect(await scalar(`select count(*) from public.renewal_cycles where user_id = '${id}';`)).toBe("1");
+      await deleteTestUser(id);
+      expect(await scalar(`select count(*) from public.profiles where id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from auth.users where id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.certificates where user_id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.credit_ledger_entries where user_id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.renewal_cycles where user_id = '${id}';`)).toBe("0");
+    });
+
+    it("M2b cleanupD8World จริง กวาดผู้ใช้ namespace d8-examcert-% (ผ่าน builder) ครบทุกตาราง", async () => {
+      const id = randomUUID();
+      const tag = id.slice(0, 8);
+      await insertFkWorld(id, tag, `d8-examcert-fk${tag}`);
+      expect(await scalar(`select count(*) from public.certificates where user_id = '${id}';`)).toBe("1");
+      expect(await scalar(`select count(*) from public.credit_ledger_entries where user_id = '${id}';`)).toBe("1");
+      await cleanupD8World(); // fast-rows ก่อน + builder กวาดผู้ใช้ d8-examcert-% ทั้งชุด
+      expect(await scalar(`select count(*) from public.profiles where id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from auth.users where id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.certificates where user_id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.credit_ledger_entries where user_id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.renewal_cycles where user_id = '${id}';`)).toBe("0");
+    });
+
+    it("M2c deleteD9User จริง (e2e helper — builder + lifecycle rows) ล้างครบ + ledger settled", async () => {
+      const id = randomUUID();
+      const tag = id.slice(0, 8);
+      await insertFkWorld(id, tag, `d9-fk${tag}`);
+      expect(await scalar(`select count(*) from public.certificates where user_id = '${id}';`)).toBe("1");
+      expect(await scalar(`select count(*) from public.credit_ledger_entries where user_id = '${id}';`)).toBe("1");
+      // helper จริงของ e2e (Playwright-safe module — ไม่ลาก @playwright/test)
+      const { deleteD9User } = await import("../../e2e/helpers/d9-cleanup");
+      await deleteD9User(id);
+      expect(await scalar(`select count(*) from public.profiles where id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from auth.users where id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.certificates where user_id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.credit_ledger_entries where user_id = '${id}';`)).toBe("0");
+      expect(await scalar(`select count(*) from public.renewal_cycles where user_id = '${id}';`)).toBe("0");
+      // lifecycle rows จริง (gate M1/M2): invocation ล่าสุดของ opKey = settled —
+      // audit-e2e --expect-clean ของ battery จึงเห็นหลักฐานจริง ไม่ใช่ชุดว่างปลอม
+      expect(
+        await scalar(`
+          select payload ->> 'status' from test_infra.lifecycle_ledger
+           where kind = 'invocation' and op_key = 'e2e:delete-d9-user'
+           order by ts desc, id desc limit 1;`),
+      ).toBe("settled");
     });
   });
 });

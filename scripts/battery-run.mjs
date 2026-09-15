@@ -15,6 +15,7 @@
  * ใช้:
  *   node scripts/battery-run.mjs                     # battery เต็ม (fail-fast)
  *   node scripts/battery-run.mjs --keep-going        # stage ล้มก็รันต่อ (เก็บผลทุก stage)
+ *                                                     #  ยกเว้น health ล้ม = หยุดเสมอ (ห้ามปล่อย e2e ตอน app ไม่ 200 — gate waveh-r1 M4)
  *   node scripts/battery-run.mjs --stages unit,tsc   # subset ตามลำดับปกติ (ใช้ตอนพัฒนา)
  *
  * ออก (stdout): [stage-id] START <iso-ts> / [stage-id] EXIT <code> <duration-ms> ทุก stage
@@ -25,7 +26,7 @@
 import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -313,21 +314,42 @@ async function runStage(stage) {
 
 // ─── 4) main — ลำดับตายตัว · fail-fast · RC = OR ────────────────────────────
 
-const { keepGoing, selectedIds } = parseArgs(process.argv.slice(2));
-const selected = selectStages(selectedIds);
-assertHealthGate(selected);
-await assertLedgerFresh(selected);
-
-const results = [];
-for (const stage of selected) {
-  const result = await runStage(stage);
-  results.push(result);
-  // fail-fast: stage ล้ม = หยุดทันที (เก็บ timeline ที่รันไปแล้ว — ไม่รัน stage ถัดไป)
-  if (result.code !== 0 && !keepGoing) break;
+/**
+ * ตัดสินว่าจะหยุดหลัง stage นี้หรือไม่ (gate waveh-r1 M4):
+ * · ผ่าน = ไปต่อเสมอ
+ * · ล้ม + ไม่มี --keep-going = หยุดทันที (fail-fast เดิม)
+ * · health ล้ม = หยุดเสมอ แม้ --keep-going — ปล่อย e2e ตอน app ไม่ 200 คือข้าด D-f-7
+ *   (ลำดับ integration → health 200 → e2e ต้องถูกเคารพที่ผลลัพธ์ ไม่ใช่แค่ลำดับชื่อ stage)
+ * · stage อื่นล้ม + --keep-going = ไปต่อ (เก็บผลทุก stage ตามเจตนาของ flag)
+ */
+export function shouldBreakAfter(result, keepGoing) {
+  if (result.code === 0) return false;
+  if (!keepGoing) return true;
+  return result.id === "health";
 }
 
-const passed = results.filter((r) => r.code === 0).length;
-const allRan = results.length === selected.length;
-const rc = allRan && passed === selected.length ? 0 : 1;
-console.log(`BATTERY ${rc === 0 ? "PASS" : "FAIL"} stages=${passed}/${selected.length} rc=${rc}`);
-process.exit(rc);
+async function main() {
+  const { keepGoing, selectedIds } = parseArgs(process.argv.slice(2));
+  const selected = selectStages(selectedIds);
+  assertHealthGate(selected);
+  await assertLedgerFresh(selected);
+
+  const results = [];
+  for (const stage of selected) {
+    const result = await runStage(stage);
+    results.push(result);
+    if (shouldBreakAfter(result, keepGoing)) break;
+  }
+
+  const passed = results.filter((r) => r.code === 0).length;
+  const allRan = results.length === selected.length;
+  const rc = allRan && passed === selected.length ? 0 : 1;
+  console.log(`BATTERY ${rc === 0 ? "PASS" : "FAIL"} stages=${passed}/${selected.length} rc=${rc}`);
+  process.exit(rc);
+}
+
+// เรียกตรงเมื่อรันเป็น script เท่านั้น — import จากเทส (wave-h-battery-audit-guards)
+// ได้ shouldBreakAfter แบบ in-memory โดยไม่ตั้ง stage ใด
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  await main();
+}

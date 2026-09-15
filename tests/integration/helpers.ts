@@ -88,20 +88,46 @@ export interface RestResult {
   readonly status: number;
   readonly json: unknown;
   readonly text: string;
+  /** id ของ invocation ใน lifecycle ledger (มีเฉพาะ path การเขียนผ่าน httpWrite) */
+  readonly invocationId?: string;
+  /** opKey ที่ transport กลาง derive ไว้ — ใช้คู่ invocationId ตอน settle เอง */
+  readonly opKey?: string;
 }
 
 export interface RestCallOptions {
   readonly apiKey?: string;
   readonly token?: string | null;
+  /** "auto" (default) = transport ตัดสิน settle เองตาม provenance ·
+   * "scenario" = ผู้เรียกถือหลักฐาน terminal และเป็นคน settle เองผ่าน
+   * settleScenario() — ใช้กับ dispatch ที่ตัวเทสพิสูจน์สภาพปลายทางเองอยู่แล้ว
+   * (เช่น opaque 500 จาก upstream ที่ connection ขาดกลางทาง — Kong log อย่างเดียว
+   * พิสูจน์ไม่ได้ว่า TX ไม่ commit เพราะอาจ commit แล้วตายก่อนตอบ — เทสที่
+   * snapshot DB ไว้และ assert ไม่เปลี่ยนคือหลักฐานจริง) */
+  readonly settleMode?: "auto" | "scenario";
 }
 
-/** เรียก REST ผ่าน Kong — apikey default = anon key */
+/** เรียก REST ผ่าน Kong — apikey default = anon key
+ * waveh-r1 M1: "การเขียน" (method ที่ไม่ใช่ GET/HEAD) ต้องผ่าน transport กลาง
+ * httpWrite ทุกครั้ง — invocation/attempt row + ua_nonce + settle ตาม completion
+ * class ครบทุก dispatch · การอ่าน (GET/HEAD — ไม่มี lifecycle) คง fetch ตรง
+ * dynamic import เพราะ test-io นำเข้า helpers อยู่แล้ว (ห้าม static วนรอบ) */
 export async function restCall(
   method: string,
   path: string,
   options: RestCallOptions = {},
   body?: unknown,
 ): Promise<RestResult> {
+  const m = method.toUpperCase();
+  if (m !== "GET" && m !== "HEAD") {
+    const { httpWrite } = await import("./test-io");
+    const r = await httpWrite(m, path, body, {
+      ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+      ...(options.token !== undefined ? { token: options.token } : {}),
+      ...(options.settleMode !== undefined ? { settleMode: options.settleMode } : {}),
+      label: "restCall",
+    });
+    return { status: r.status, json: r.json, text: r.text, invocationId: r.invocationId, opKey: r.opKey };
+  }
   const headers: Record<string, string> = {
     apikey: options.apiKey ?? ANON_KEY,
     accept: "application/json",
@@ -127,6 +153,49 @@ export async function restCall(
     }
   }
   return { status: response.status, json, text };
+}
+
+/** ปิด invocation ของ dispatch แบบ settleMode:"scenario" — ผู้เรียกเป็นคน settle
+ * เองด้วยหลักฐาน terminal ที่ตัวเทสพิสูจน์ (เช่น snapshot DB ไม่เปลี่ยนหลัง opaque 500
+ * ที่ upstream connection ขาด — ไม่มี rest CLF line ให้ access-log fence ใช้ตัดสิน
+ * ตาม kong500Decision → matches===0 จะ poison ทั้งที่เทสถือหลักฐานจริงอยู่)
+ *
+ * gate waveh-r2 M1: หลักฐานต้องพิสูจน์ "backend จบจริง" ไม่ใช่แค่ "ยังไม่เห็นการเปลี่ยน"
+ * — snapshot ไม่เปลี่ยนอ่านได้แม้ TX ของ RPC ยังค้างอยู่ (race) จึงบังคับ terminalProbe
+ * ทุกครั้ง: probe ล้ม = ปฏิเสธ settle (invocation ค้าง 'running' ให้ audit จับ —
+ * fail-loud) · ต้องเรียกหลัง assert หลักฐานผ่านครบเท่านั้นเช่นกัน */
+export async function settleScenario(
+  res: RestResult,
+  evidence: string,
+  terminalProbe: () => Promise<void>,
+): Promise<void> {
+  const { invocationClose, manifestByOpKey } = await import("./test-io");
+  if (res.invocationId === undefined || res.opKey === undefined) {
+    throw new Error(`scenario dispatch ไม่มี invocationId/opKey กลับมา (${evidence})`);
+  }
+  // limitation 22: เขียนมือลอยไม่มีสิทธิ์ settle — scenario settle เปิดเฉพาะ opKey
+  // ที่อยู่ใน EVIDENCE_SETTLE_MANIFEST (มี touchSet กำกับหลักฐานอยู่แล้ว)
+  if (manifestByOpKey(res.opKey) === undefined) {
+    throw new Error(`scenario settle ปฏิเสธ: opKey ${res.opKey} ไม่อยู่ใน manifest (${evidence})`);
+  }
+  // gate waveh-r2 M1: พิสูจน์ terminal ก่อนลงมือเสมอ — probe โยน = ไม่ settle
+  await terminalProbe();
+  await invocationClose(res.invocationId, res.opKey, "settled", {
+    class: "completed-evidenced(rejected|state-changed)",
+    transportTarget: "kong-path",
+    evidence,
+  });
+}
+
+/** probe terminal แบบ lock (ใช้กับ settleScenario): ยึด lock ระดับตาราง nowait ได้ =
+ * ไม่มี TX ค้างถือแถวของตารางนั้นอยู่ (TX ของ RPC ใดจะ commit/rollback ก็ต้องถือ lock
+ * จนจบ) — คู่กับ snapshot "ไม่เปลี่ยน" ที่เทส assert ไว้ = backend จบจริง ·
+ * TX อื่นถืออยู่ = NOWAIT 55P03 โยนทันที (ใช้เป็นทิศปฏิเสธของ guard test)
+ * ต้องครอบ begin/commit เสมอ — ตรวจจริง: LOCK TABLE เปล่า ๆ นอก transaction block
+ * โดนปฏิเสธ ("LOCK TABLE can only be used in transaction blocks")
+ * @param table ชื่อตารางเต็ม schema-qualified — มาจากค่าคงที่ของเทสเท่านั้น (ไม่รับ user input) */
+export async function tableTerminalProbe(table: string): Promise<void> {
+  await psql(`begin; lock table ${table} in access exclusive mode nowait; commit;`);
 }
 
 // ─── ผู้ใช้ทดสอบ (GoTrue จริง) ────────────────────────────────────────────────

@@ -45,6 +45,9 @@ import {
   REPO_ROOT,
   restCall,
   SERVICE_KEY,
+  settleScenario,
+  tableTerminalProbe,
+  type RestCallOptions,
   type RestResult,
   type TestUser,
 } from "./helpers.js";
@@ -79,8 +82,8 @@ interface JobResult {
   readonly claimToken?: string;
 }
 
-function svcRpc(name: string, body: unknown): Promise<RestResult> {
-  return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: SERVICE_KEY, token: SERVICE_KEY }, body);
+function svcRpc(name: string, body: unknown, options: RestCallOptions = {}): Promise<RestResult> {
+  return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: SERVICE_KEY, token: SERVICE_KEY, ...options }, body);
 }
 
 /** เรียก RPC ในนามผู้ใช้ (JWT จริง — ทางเดียวกับที่ BFF เรียก) */
@@ -360,15 +363,28 @@ describe.skipIf(!DB_URL)(
       // complete ซ้ำบนงานที่ done แล้ว — ไม่พบงานสถานะ processing → ปฏิเสธ ·
       // (P0002 ผ่าน gateway ของ stack นี้ร่างกาย error หาย — บทเรียน dcr10 §"P0002" —
       //  จึง assert เฉพาะสถานะ; แท็ก ERR-NF-001|job_not_processing พิสูจน์ที่ชั้น DB)
+      // settleMode:"scenario" — opaque 500 นี้ upstream connection ขาดกลางทาง
+      // (ไม่มี rest CLF line → fence ตัดไม่ได้) แต่เทสถือหลักฐาน terminal เอง:
+      // แถวงานยัง done ครบทุกคอลัมน์หลัง reject = ผู้เรียก settle เอง
       const again = await svcRpc("complete_data_export_job", {
         p_job_id: jobId,
         p_file_media_id: E16_MEDIA_DONE,
         p_chunks: 3,
         p_request_id: crypto.randomUUID(),
         p_claim_token: exportTokenA,
-      });
+      }, { settleMode: "scenario" });
       expect(again.status, again.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
       expect(again.json, "P0002 ผ่าน gateway ต้องไม่กลายเป็น 200 เงียบ").toBeNull();
+      // หลักฐานของผู้เรียก: งานยัง done + file_media_id เดิม (ไม่มีอะไรเปลี่ยน)
+      expect(
+        await psqlScalar(`select status::text from public.data_export_jobs where id = '${jobId}';`),
+      ).toBe("done");
+      expect(
+        await psqlScalar(`select file_media_id::text from public.data_export_jobs where id = '${jobId}';`),
+      ).toBe(E16_MEDIA_DONE);
+      // probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือตารางงาน = backend จบจริง
+      await settleScenario(again, "job-row-still-done(file-media-intact)", () =>
+        tableTerminalProbe("public.data_export_jobs"));
     }, 45_000);
 
     // ─── เคส d: fail path — failed + error + completed_at ──────────────────────
@@ -425,7 +441,7 @@ describe.skipIf(!DB_URL)(
         p_chunks: 1,
         p_request_id: crypto.randomUUID(),
         p_claim_token: crypto.randomUUID(), // token ใด ๆ — ด่านสถานะมาก่อนด่าน lease (0039)
-      });
+      }, { settleMode: "scenario" }); // opaque 500 ไม่มี rest CLF — เทส settle เองด้วย snapshot ด้านล่าง
       // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|job_not_processing หายที่ gateway
       expect(failed.status, failed.text.slice(0, 300)).toBe(500);
       expect(failed.json, "P0002 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
@@ -441,6 +457,10 @@ describe.skipIf(!DB_URL)(
         select status::text from public.data_export_jobs where id = '${jobId}';
       `);
       expect(statusAfter).toBe("pending");
+      // หลักฐานของผู้เรียกครบแล้ว (แถว byte-identical + สถานะ pending) → settle เอง
+      // พร้อม probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือตารางงาน
+      await settleScenario(failed, "job-row-byte-identical(status-pending)", () =>
+        tableTerminalProbe("public.data_export_jobs"));
     }, 45_000);
 
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──
