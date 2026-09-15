@@ -255,15 +255,16 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
 
   // ─── M1 (gate waveh-r4): invocation เดียว — client จบแล้วแต่ backend ยังค้าง ────
   // รูปเคสที่ r4 สั่ง (ต่างจาก r3 ที่ settle D1 ขณะ D2 ค้าง): invocation เดียว
-  // ที่ "client ได้จบฝั่งตัวเองแล้ว" (abort ที่ 1s) ขณะ backend ของ invocation นั้น
-  // ยังค้างอยู่ก่อนตารางเป้าหมาย (ติด lock ตารางแรก data_export_jobs) — พิสูจน์ด้วย
-  // pg_stat_activity จริง · ผ่าน stack จริง: PostgREST ไม่ cancel query ตาม client
-  // ที่หายไป (วัดจริง: backend ยัง active หลัง abort) และถูกตัดโดย lock_timeout=8s
-  // ของ role authenticator (ขอบเขตตามจริง) · settle ต้องปฏิเสธขณะงานยังไม่จบ
-  // และผ่านก็ต่อเมื่อ (1) probe terminal (2) CLF line ของ nonce หนึ่งแถวพอดี
-  // (= PostgREST serve ครบหนึ่งครั้ง — completion ผูกกับ invocation นี้) แล้วจึง
-  // (3) อ่าน snapshot ใหม่หลังงานจบจริง และ (4) settle
-  it("invocation เดียว: client จบ (abort) ขณะ backend ค้างก่อนตาราง = ปฏิเสธ settle · ปล่อยแล้ว nonce-CLF + snapshot ใหม่ → settle ผ่าน (waveh-r4 M1)", async ({ skip }) => {
+  // ที่ "client ได้จบฝั่งตัวเองแล้ว" (abort หลังเห็น backend ค้างจริง) ขณะ backend
+  // ของ invocation นั้นยังค้างอยู่ก่อนตารางเป้าหมาย (ติด lock ตารางแรก
+  // data_export_jobs) — พิสูจน์ด้วย pg_stat_activity จริง · ผ่าน stack จริง:
+  // PostgREST ไม่ cancel query ตาม client ที่หายไป (วัดจริง: backend ยัง active
+  // หลัง abort) และถูกตัดโดย lock_timeout=8s ของ role authenticator (ขอบเขต
+  // ตามจริง) · settle ต้องปฏิเสธขณะงานยังไม่จบ และผ่านก็ต่อเมื่อ (1) probe
+  // terminal (2) CLF line ของ nonce หนึ่งแถวพอดี (= PostgREST serve ครบหนึ่งครั้ง —
+  // cancellation ผูกกับ invocation นี้: line 500 ของ 57014) แล้วจึง (3) อ่าน
+  // snapshot ใหม่หลังงานจบจริง และ (4) settle
+  it("invocation เดียว: client จบ (abort) ขณะ backend ค้างก่อนตาราง = ปฏิเสธ settle · ยกเลิกโดย lock_timeout (nonce-CLF) + snapshot ใหม่ → settle ผ่าน (waveh-r4 M1)", async ({ skip }) => {
     if (DB_URL === undefined) skip();
     const { settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } = await import("./helpers");
     const { httpWrite, startPsqlSession } = await import("./test-io");
