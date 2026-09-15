@@ -338,6 +338,95 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(1);
   });
 
+  // ─── r11 (gate waveh-r11 MAJOR): v8 ยังไม่จำแนก "บทบาทของบรรทัด" ก่อนอ่าน —
+  // ข้อความ ERROR ที่ฝังรูป bind ปลอม / ชื่อฟังก์ชันปลอมใน "ค่า" bind บนบรรทัด
+  // CONTEXT ชนิด portal-parameters / ชื่อ RPC ใน SQL string literal ของ
+  // STATEMENT — codex transpile-mock จริง: ทั้งสี่กรณี v8 ได้ matches=1 —
+  // v9 จำแนกบทบาทก่อน (ERROR ไม่ให้หลักฐานเลย · bind เฉพาะ 3 ตำแหน่ง
+  // โครงสร้าง · ชื่อ RPC จาก CONTEXT เฉพาะ payload ที่ "เริ่มด้วย" PL/pgSQL
+  // function · STATEMENT ตัด literal/comment ก่อนหา)
+
+  it("ทิศ ญ (r11 MAJOR-1a): ข้อความ ERROR ฝังรูป bind ปลอม ไร้ bind จริง → 0 (v8 = 1)", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(707, "ERROR", `failure unnamed portal with parameters: $1 = '${JSON.stringify({ p_request_id: "ref-x" })}'`),
+      hdr(707, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      hdr(707, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."complete_data_export_job"(...) ...)'),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ข้อความของ ERROR เป็นข้อมูล ไม่ใช่แถว bind parameters — การ parse JSON สำเร็จไม่พิสูจน์แหล่งที่มา (r11: v8 ได้ 1)",
+    ).toHaveLength(0);
+  });
+
+  it("ทิศ ฎ (r11 MAJOR-1b): ERROR ฝัง bind ปลอม ref เป้าหมาย แต่ bind จริงถือ ref อื่น → 0 (v8 = 1) · เจ้าของจริงยัง match 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(808, "ERROR", `failure unnamed portal with parameters: $1 = '${JSON.stringify({ p_request_id: "ref-x" })}'`),
+      hdr(808, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      params("ref-other"),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "bind เดียวที่ผูก invocation จริงคือ ref-other — ห้ามใช้ ref จากข้อความ ERROR (r11: v8 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-other" }),
+      "เจ้าของ bind จริง (ref-other) ของ record เดียวกันยังต้อง match — ไม่ over-reject",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ฏ (r11 MAJOR-2): ชื่อฟังก์ชันปลอมในค่า bind บนบรรทัด CONTEXT ชนิด portal-parameters → 0 (v8 = 1) · RPC จริงจาก STATEMENT = 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(909, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(
+        909,
+        "CONTEXT",
+        `unnamed portal parameter $1 = '${JSON.stringify({
+          p_user_id: "invalid",
+          p_reason: "PL/pgSQL function complete_data_export_job(uuid)",
+          p_request_id: "ref-x",
+        })}'`,
+      ),
+      hdr(909, "STATEMENT", 'WITH pgrst_source AS (SELECT * FROM "public"."admin_revoke_role"($1)) ...'),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "CONTEXT ชนิด portal-parameters ต้องให้เฉพาะค่า bind — ชื่อฟังก์ชันที่ฝังในค่า p_reason เป็นข้อมูล ไม่ใช่ execution frame (r11: v8 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "RPC ที่ STATEMENT เรียกจริง (หลังตัด literal/comment) + bind ถือ ref-x เป๊ะ = เจ้าของจริงต้องผ่าน",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ฐ (r11 MAJOR-3): ชื่อ RPC ใน SQL string literal/comment ของ STATEMENT → 0 (v8 = 1) · จุดเรียกจริง = 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1010, "ERROR", "ไม่พบงานส่งออกที่กำลังดำเนินการตามรหัสนี้ (ERR-NF-001|job_not_processing)"),
+      hdr(1010, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1010,
+        "STATEMENT",
+        `SELECT 'ดูเหมือน "public"."complete_data_export_job"(...) แต่เป็น literal' AS note, /* "public"."fake_rpc"( */ 1 AS x FROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ชื่อ RPC ใน string literal ของ STATEMENT เป็นข้อมูล ไม่ใช่จุดเรียก (r11: v8 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "fake_rpc", requestRef: "ref-x" }),
+      "ชื่อ RPC ใน block comment ของ STATEMENT ก็เป็นข้อมูลเช่นกัน",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "จุดเรียกจริงนอก literal/comment ยังต้อง match — ไม่ over-reject",
+    ).toHaveLength(1);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน
