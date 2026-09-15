@@ -43,6 +43,20 @@
  *   บนตารางเป้าหมาย) = การปฏิเสธต้องเกิดจาก fence เอง ไม่ใช่ probe · lock ยัง
  *   ถูกถือ → lock_timeout ตัดจริง ~8s (ขาพฤติกรรมของ role bounds บน pool
  *   session ที่ serve จริง) → response จริงมาถึง → settle ผ่านทุกขา + snapshot ใหม่
+ * M1 (waveh-r7) · (1) หน้าต่างของ fence ต้อง anchor ที่ "เวลา dispatch จริง" ไม่ใช่
+ *   นาฬิกาคงที่จากตอนเข้า settle — คำขอที่ค้างในคิว pool ของ PostgREST (pool=10
+ *   ไม่มี override — ตรวจสดด้วย postgrestPoolAcquisitionBoundMs) ไร้ backend ไร้
+ *   CLF line จนได้ serve: activity ณ ตอนเข้า + kong line + หน้าต่างคงที่เห็น
+ *   "มันเพิ่งเริ่มทีหลัง" ไม่ได้ · แก้ด้วยขา CLF (ข′) หน้าต่าง dispatch+acq+stmt+
+ *   margin + in-poll activity (2) ขอบเขต timeout ต้องพิสูจน์ใน execution context
+ *   ที่เกี่ยวข้อง — role bounds เหลือเป็นขอบเขตสนับสนุน ส่วน pooled session ที่
+ *   serve จริงพิสูจน์ด้วยขาพฤติกรรม (วัดการตัด ≤9.5s จากสังเกต busy ครั้งแรก ·
+ *   errcode 57014 ใช้ร่วมกัน statement/lock — ไม่ฟันธงตัวตัด) · เคสพิสูจน์ = เติม
+ *   pool ให้เต็มด้วย holder 10 ตัว (RPC ต่างชื่อ = มองไม่เห็นใน busy filter ของ
+ *   X) → X ตัวที่ 11 ค้างในคิว (busy=0 + CLF 0 แถว = "ยังไม่เริ่ม RPC" ตาม
+ *   เงื่อนไขปิดของ gate) → dirty settle ถือ response ปลอม 504 ขณะ X ยังไม่เริ่ม
+ *   → fence ปฏิเสธเองเมื่อ X ได้ slot เริ่ม statement ระหว่างเฝ้า → ทุกตัวถูกตัด
+ *   โดยขอบเขตเวลาของ role → settle จริงครบทุกขา + snapshot ใหม่
  *
  * two-way proof ตาม [[regression-test-two-way-proof]] ระดับฟังก์ชัน: ทิศสกปรก/ล้ม
  * ต้องถูกปฏิเสธ ทิศสะอาด/ผ่านต้องไปต่อ — ผูกกับ audit()/shouldBreakAfter ของ script
@@ -185,7 +199,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     await settleScenario(res, "guard-neg-terminal-proven(lock-free)", () =>
       tableTerminalProbe("public.data_export_jobs"));
     expect(await invStatus()).toBe("settled");
-  }, 45_000);
+  }, 75_000);
 
   // ─── M1 (gate waveh-r3): ช่องว่างของ lock-only — request ค้าง "ก่อนถึงตารางเป้าหมาย" ──
   // complete_data_export_job แตะ public.data_export_jobs ก่อน (select … for update
@@ -271,7 +285,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       await session.exec("rollback;");
       await session.end();
     }
-  }, 60_000);
+  }, 120_000);
 
   // ─── M1 (gate waveh-r4): invocation เดียว — client จบแล้วแต่ backend ยังค้าง ────
   // รูปเคสที่ r4 สั่ง (ต่างจาก r3 ที่ settle D1 ขณะ D2 ค้าง): invocation เดียว
@@ -394,7 +408,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       await session.exec("rollback;");
       await session.end();
     }
-  }, 60_000);
+  }, 90_000);
 
   // ─── M1 (gate waveh-r5): response ถึงมือ caller แล้ว (opaque) ยังต้องพิสูจน์ terminal ──
   // r5 จับ: เส้นตายเดิม "response = upstream serve จบ" อ้าย่างเดียวไม่พอสำหรับ
@@ -511,7 +525,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // อ้างตามจริง = ผ่าน (ทิศสะอาดของ fence ตัวเอง — ไม่ทิ้ง running ค้าง)
     await settleScenario(d3, "guard-r5-d3-honest-settle", probe);
     expect(await invStatus(d3.invocationId)).toBe("settled");
-  }, 90_000);
+  }, 150_000);
 
   // ─── M1 (gate waveh-r6): invocation เดียว — ถือ response ขณะ upstream ของตัวเองค้าง ──
   // รูปเคสที่ r6 สั่ง (ต่างจาก r5 ที่ refusal มาจาก probe เพราะ D2 เป็น invocation
@@ -577,10 +591,12 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       // ตรวจจริง r6: body เป็น bind param — literal p_request_id ไม่อยู่ใน query
       // text การกรองด้วย requestRef เป็นศูนย์เสมอ = ผ่านปลอม)
       let busy = "0";
+      let firstBusyAt = 0; // เวลา "สังเกต busy ครั้งแรก" = statement เริ่ม + ≤100ms (จังหวะ poll) — จุด anchor วัดการตัด (r7 M1.1-2)
       for (let i = 0; i < 50 && busy === "0"; i += 1) {
         busy = await busyRef();
         if (busy === "0") await new Promise((r) => setTimeout(r, 100));
       }
+      if (busy === "1" && firstBusyAt === 0) firstBusyAt = Date.now();
       expect(busy, "X ต้องค้างเป็น backend active จริง (correlation ชื่อ RPC หลัง dispatch ของเรา)").toBe("1");
 
       // แสดงหลักฐานในเทส: probe ตัวนี้ "ผ่าน" ขณะ upstream ของ X ค้างอยู่จริง —
@@ -603,22 +619,24 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       ).rejects.toThrow(/statement ของ invocation นี้ยังรันอยู่/);
       expect(await invStatus()).toBe("running");
 
-      // ไม่ปล่อย blocker — กลไกจริงของ stack ตัดงานเอง: lock_timeout=8s (ค่า
-      // effective บน pool session ที่ serve X จริง) ยกเลิก statement → วัดเป็น ms
-      // เป็นขาพฤติกรรมของ role bounds (declaration+effective อ่านที่ fence · ตัว
-      // เก่าใน pool ที่เริ่มก่อน ALTER กลับไปอ่านจาก catalog ไม่ได้ — วัดพฤติกรรม
-      // ตรงนี้จึงเป็นหลักฐานของ session ที่รัน invocation จริง)
-      const cutStart = Date.now();
+      // ไม่ปล่อย blocker — กลไกจริงของ stack ตัดงานเองภายในขอบเขตเวลาของ role
+      // (statement_timeout/lock_timeout 8s — errcode 57014 ใช้ร่วมกันระหว่างสองตัว
+      // นี้ ข้อความ "canceling statement due to statement timeout" ตรวจจริงแม้สิ่ง
+      // ที่ตัดคือการรอ lock เราจึงไม่ฟันธงว่าตัวใดเป็นตัวตัด) → วัดเป็น ms นับจาก
+      // "สังเกต busy ครั้งแรก" (statement เริ่ม + ≤100ms ตามจังหวะ poll) — ขา
+      // พฤติกรรมของขอบเขต role บน pool session ที่ serve X จริง (execution context
+      // จริงตามเงื่อนไขปิดของ gate r7 M1.1-2: catalog ย้อน session เก่าใน pool ไม่
+      // ได้ วัดพฤติกรรมตรงนี้จึงเป็นหลักฐานของ session ที่รัน invocation จริง)
       for (let i = 0; i < 150 && busy !== "0"; i += 1) {
         busy = await busyRef();
         if (busy !== "0") await new Promise((r) => setTimeout(r, 100));
       }
-      const cutMs = Date.now() - cutStart;
-      expect(busy, "statement ต้องถูก lock_timeout ตัดเองภายในขอบเขต (lock ยังถูกถืออยู่)").toBe("0");
+      const cutMs = firstBusyAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - firstBusyAt;
+      expect(busy, "statement ต้องถูกตัดเองภายในขอบเขตเวลาของ role (lock ยังถูกถืออยู่)").toBe("0");
       expect(
         cutMs,
-        `การตัดต้องเกิดภายในขอบเขต effective ~8s+margin (วัดจริง ${cutMs}ms ขณะ lock ถูกถือ)`,
-      ).toBeLessThanOrEqual(10_500);
+        `การตัดต้องอยู่ในขอบเขตเวลาของ role 8s นับจากสังเกต busy ครั้งแรก +margin (วัดจริง ${cutMs}ms ขณะ lock ถูกถือ)`,
+      ).toBeLessThanOrEqual(9_500);
 
       // response จริงของ X มาถึงหลังถูกตัด — 500 สองรูปตามจริงของ stack (วัดจริง r6):
       // (1) JSON {"code":"57014","message":"canceling statement due to statement
@@ -661,4 +679,250 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       await session.end();
     }
   }, 120_000);
+
+  // ─── M1 (gate waveh-r7): คำขอที่ "ยังไม่ได้เริ่ม statement" — ค้างในคิว pool ของ PostgREST ──
+  // gate r7 M1.1-1 ชี้ช่องว่าง: คำขอที่ dispatch ไปแล้วแต่ยังไม่ได้ pool slot ไร้
+  // backend ไร้ CLF line — fence รุ่นก่อน (activity ณ ตอนเข้า + kong line + หน้าต่าง
+  // คงที่) ไม่มีทางเห็น "มันเพิ่งเริ่มทีหลัง" · รูปเคส: เติม pool ให้เต็มด้วย holder
+  // 10 ตัวของ RPC "ต่างชื่อ" (admin_revoke_role — มองไม่เห็นใน busy filter ของ
+  // complete_data_export_job) ที่ค้างบน lock ของ role_assignments → X
+  // (complete_data_export_job) ถูก push เป็นตัวที่ 11 ในคิว pool (pool=10 ไม่มี
+  // override — postgrestPoolAcquisitionBoundMs ตรวจสดที่ fence · ตรวจจริง
+  // 2026-09-15 probe P5: ตัวที่ 11 ไร้ backend จนมีช่อง ~8s แล้ว serve จบ ~16s) →
+  // dirty settle ถือ response ปลอม {504} ขณะ X "ยังไม่เริ่ม RPC" (busy=0 + CLF 0
+  // แถว = หลักฐานในเทส ตามเงื่อนไขปิด "request ยังไม่เริ่ม RPC" ของ gate) → fence
+  // v5 ขา ข′ ต้องปฏิเสธเองด้วย in-poll activity เมื่อ X ได้ slot และเริ่ม statement
+  // ระหว่างหน้าต่างเฝ้า · holders ถูกตัดโดยขอบเขตเวลาของ role ~8s → X ได้ serve ต่อ
+  // → response จริงของ X มาถึง → ปล่อย blocker → settle จริงทั้ง X และ holders ทั้ง
+  // 11 invocation ครบทุกขา + snapshot ใหม่ (ไม่ทิ้ง running)
+  it("คำขอค้างในคิว pool ยังไม่เริ่ม statement = ปฏิเสธเมื่อเพิ่งเริ่มระหว่างเฝ้า · serve จบจริง = settle ผ่านครบทุกขา (waveh-r7 M1.1-1)", async ({ skip }) => {
+    if (DB_URL === undefined) skip();
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const {
+      REPO_ROOT,
+      SERVICE_KEY,
+      ANON_KEY,
+      createTestUser,
+      deleteTestUser,
+      settleScenario,
+      scenarioTerminalProbe,
+      psqlScalar,
+      psqlRows,
+    } = await import("./helpers");
+    const { httpWrite, startPsqlSession, accessLogFenceAnyStatus } = await import("./test-io");
+    const { mintAal2Token } = await import("./helpers-aal2");
+    // หยุด mailer กัน noise: dev worker ยิง complete_data_export_job เอง (probe P4
+    // เห็น backend ของมันกิน pool slot ทำให้จำนวนตัวที่ค้างในคิวเพี้ยน) — dcr12 pattern
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
+
+    const jobId = "00000000-0000-4000-8000-000000000101"; // ไม่มีอยู่ → P0002 เมื่อ X ได้วิ่ง
+    const invocationIdX = crypto.randomUUID();
+    const invStatusX = () =>
+      psqlScalar(`
+        select payload ->> 'status' from test_infra.lifecycle_ledger
+         where kind = 'invocation' and invocation_id = '${invocationIdX}'
+         order by ts desc, id desc limit 1;`);
+    const busyComplete = () =>
+      psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%complete_data_export_job%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
+    const busyRevoke = () =>
+      psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%admin_revoke_role%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
+
+    let admin: Awaited<ReturnType<typeof createTestUser>> | null = null;
+    let adminAal2 = "";
+    try {
+      // admin จริง + AAL2 จริง (admin_revoke_role ต้องการ super_admin aal2 — ทาง
+      // เดียวกับ dcr12 เคส c) — ต้องสร้าง "ก่อน" blocker ยึด lock: signup ของ GoTrue
+      // มี trigger เขียนบทบาทเริ่มต้นลง public.role_assignments (จับได้จากรอบแรกที่
+      // ล้ม: signup ค้างบน lock ของเราเอง → GoTrue 504 request_timeout) · สร้างหลัง
+      // stopMailer ได้ (signup ไม่พึ่ง mailer — dcr12 พิสูจน์)
+      admin = await createTestUser("m1r7-pool-admin", "super_admin");
+      adminAal2 = await mintAal2Token(admin);
+      expect(adminAal2).not.toBe("");
+    } catch (err) {
+      await startMailer().catch(() => undefined);
+      throw err;
+    }
+    const adminId = admin.id;
+
+    const session = await startPsqlSession("m1r7-pool-blocker");
+    try {
+      // blocker TX เดียวถือสองตาราง: X ค้างที่ตารางแรกของทางเดิน
+      // complete_data_export_job · holders ค้างที่ตารางของทางเดิน admin_revoke_role
+      await session.exec("begin;");
+      await session.exec("lock table public.data_export_jobs in access exclusive mode;");
+      await session.exec("lock table public.role_assignments in access exclusive mode;");
+
+      // holders 10 ตัว = เติม pool ให้เต็มพอดี — RPC ต่างชื่อจาก X จึงมองไม่เห็นใน
+      // busyComplete filter (จุดตั้งใจ: จำลองงานอื่นที่กิน pool ซึ่ง fence ของ X
+      // ต้องไม่สนใจ) · p_reason ปลอด digit-run ตามกติกา PII
+      const holderBody = () => ({
+        p_user_id: adminId,
+        p_role: "staff:viewer",
+        p_reason: "m1r7-pool-holder",
+        p_request_id: crypto.randomUUID(),
+      });
+      const holders = Array.from({ length: 10 }, () =>
+        httpWrite("POST", "/rest/v1/rpc/admin_revoke_role", holderBody(), {
+          apiKey: ANON_KEY,
+          token: adminAal2,
+          settleMode: "scenario",
+          label: "m1r7-holder",
+        }),
+      );
+      // หลักฐาน: holders ต้อง "เริ่ม statement จริง" ทั้ง 10 (เต็ม pool) — ไม่ใช่
+      // ถูกปฏิเสธก่อนแตะตาราง — ก่อน X ถึงจะเป็น "ตัวที่ 11 ในคิว" จริง
+      let busyHolders = "0";
+      for (let i = 0; i < 80 && busyHolders !== "10"; i += 1) {
+        busyHolders = await busyRevoke();
+        if (busyHolders !== "10") await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(busyHolders, "holders 10 ตัวต้อง active จริงพร้อมกัน (เต็ม pool) ก่อน dispatch X").toBe("10");
+
+      // X ตัวที่ 11: ค้างในคิว pool — ยังไม่มี backend ยังไม่มี statement
+      const dispatchX = httpWrite(
+        "POST",
+        "/rest/v1/rpc/complete_data_export_job",
+        {
+          p_job_id: jobId,
+          p_file_media_id: "00000000-0000-4000-8000-000000000102",
+          p_chunks: 1,
+          p_request_id: crypto.randomUUID(),
+          p_claim_token: crypto.randomUUID(),
+        },
+        {
+          apiKey: SERVICE_KEY,
+          token: SERVICE_KEY,
+          settleMode: "scenario",
+          invocationId: invocationIdX,
+          label: "m1r7-queued-x",
+        },
+      );
+
+      // หลักฐานตามเงื่อนไขปิดของ gate r7 M1.1-1 ("request ยังไม่เริ่ม RPC ตอนพบ
+      // line"): X ยังไร้ statement และยังไร้ CLF line ของ nonce ตัวเอง · httpWrite
+      // เขียน invocation/attempt rows "ก่อน" fetch แต่ captureLogCursor (docker
+      // logs) กินเวลา — poll แถวจาก ledger แทนอ่านครั้งเดียว (กัน race กับ
+      // pre-fetch section ของ transport)
+      expect(await busyComplete(), "X ต้องยังไม่เริ่ม statement (ค้างในคิว pool หลัง pool เต็ม)").toBe("0");
+      let bindingX: { ua: string | null } | undefined;
+      let attemptX: { cursor: { capturedAt: string; lineCount: number; restStartedAt: string } | null } | undefined;
+      for (let i = 0; i < 50 && (bindingX?.ua == null || attemptX?.cursor == null); i += 1) {
+        [bindingX] = await psqlRows<{ ua: string | null }>(`
+          select payload -> 'binding' ->> 'uaNonce' as ua
+            from test_infra.lifecycle_ledger
+           where kind = 'invocation' and invocation_id = '${invocationIdX}'
+           order by ts desc limit 1;`);
+        [attemptX] = await psqlRows<{ cursor: { capturedAt: string; lineCount: number; restStartedAt: string } | null }>(`
+          select payload -> 'logCursor' as cursor
+            from test_infra.lifecycle_ledger
+           where kind = 'attempt' and invocation_id = '${invocationIdX}'
+           order by ts desc limit 1;`);
+        if (bindingX?.ua == null || attemptX?.cursor == null) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      if (bindingX?.ua == null || attemptX?.cursor == null) {
+        throw new Error("m1r7: ไม่พบ nonce/cursor ของ X ใน ledger — หลักฐาน CLF-0 พิสูจน์ไม่ได้");
+      }
+      const clf0 = await accessLogFenceAnyStatus(attemptX.cursor, {
+        uaNonce: bindingX.ua,
+        method: "POST",
+        pathNorm: "/rpc/complete_data_export_job",
+      });
+      expect(clf0.matches, "X ยังไม่ถูก serve → ต้องไร้ CLF line ของ nonce ตัวเอง").toBe(0);
+
+      // ทิศสกปรกที่ gate r7 เป็นห่วง: caller ถือ response ปลอม (ทิศเดียวกับ xlie
+      // ที่ gate ยอมรับมาแล้ว) ขณะ invocation ของตัวเอง "ยังไม่เริ่ม RPC เลย" —
+      // fence v5 ขา ข′ ต้องปฏิเสธเองด้วย in-poll activity เมื่อ X ได้ slot และ
+      // เริ่ม statement ภายในหน้าต่างเฝ้า (dispatch+acq+stmt+margin)
+      const xlie = {
+        status: 504,
+        json: null,
+        text: "",
+        invocationId: invocationIdX,
+        opKey: "rpc:complete_data_export_job:POST",
+      } as const;
+      await expect(
+        settleScenario(xlie, "guard-r7-queued-request-must-refuse-when-it-starts", () =>
+          scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
+      ).rejects.toThrow(/เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF/);
+      expect(await invStatusX()).toBe("running");
+
+      // วัดการตัดของ X จาก "สังเกต busy ครั้งแรกหลัง refusal" (statement เริ่ม +
+      // ≤1s ตามจังหวะ poll) — ขาพฤติกรรมของขอบเขตเวลาของ role บน pool session
+      // ที่ serve X จริง (เงื่อนไขปิด M1.1-2 ครึ่งหลัง) — blocker ยังถือ lock อยู่
+      let busyX = "0";
+      let firstBusyAt = 0;
+      for (let i = 0; i < 50 && busyX === "0"; i += 1) {
+        busyX = await busyComplete();
+        if (busyX === "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      if (busyX !== "0") firstBusyAt = Date.now();
+      expect(busyX, "X ต้องได้ slot และเริ่ม statement จริงหลัง holders ถูกตัด").toBe("1");
+      for (let i = 0; i < 150 && busyX !== "0"; i += 1) {
+        busyX = await busyComplete();
+        if (busyX !== "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      const cutMs = firstBusyAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - firstBusyAt;
+      expect(busyX, "statement ของ X ต้องถูกตัดภายในขอบเขตเวลาของ role (lock ยังถูกถือ)").toBe("0");
+      expect(
+        cutMs,
+        `การตัดของ X ต้องอยู่ในขอบเขตเวลาของ role 8s นับจากสังเกต busy ครั้งแรก +margin (วัดจริง ${cutMs}ms)`,
+      ).toBeLessThanOrEqual(9_500);
+
+      // response จริงของ X มาถึงหลังถูกตัด (500 — 57014 JSON หรือ opaque ตามจริง
+      // ของ stack) · holders ถูกตัดทั้งหมดเช่นกัน (blocker ยังถือ role_assignments)
+      const xres = await dispatchX;
+      expect(xres.status, "response จริงของ X หลังถูกตัดโดยขอบเขตเวลาของ role").toBeGreaterThanOrEqual(500);
+      expect(xres.invocationId).toBe(invocationIdX);
+      const holderResults = await Promise.all(holders);
+      for (const h of holderResults) {
+        expect(h.status, "holder ต้องถูกตัดโดยขอบเขตเวลาของ role (blocker ยังถือ lock)").toBeGreaterThanOrEqual(500);
+      }
+
+      // ปล่อย blocker — ไม่มีงานเกิดใหม่ (ทุก invocation ถูกตัด/ตอบจบแล้ว · manifest
+      // singleDispatch ทั้งสอง opKey) → settle จริงทั้ง 11 invocation ครบทุกขา +
+      // snapshot ใหม่ ไม่ทิ้ง running ค้าง
+      await session.exec("rollback;");
+
+      await settleScenario(
+        xres,
+        "guard-r7-x-terminal-proven(all-legs)",
+        () => scenarioTerminalProbe("public.event_outbox", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(`select count(*)::text from public.data_export_jobs where id = '${jobId}';`),
+            "job ไม่มีอยู่จริงต้องไม่ถูกสร้าง (statement ของ X ถูกยกเลิก = TX abort)",
+          ).toBe("0");
+        },
+      );
+      expect(await invStatusX()).toBe("settled");
+
+      const probeRevoke = () => scenarioTerminalProbe("public.role_assignments", "admin_revoke_role");
+      for (const h of holderResults) {
+        await settleScenario(h, "guard-r7-holder-settled(all-legs)", probeRevoke);
+      }
+    } finally {
+      await session.exec("rollback;").catch(() => undefined);
+      await session.end();
+      if (admin !== null) {
+        await deleteTestUser(admin.id);
+      }
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r7: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
+    }
+  }, 300_000);
 });

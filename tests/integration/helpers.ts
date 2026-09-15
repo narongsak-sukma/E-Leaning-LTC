@@ -160,17 +160,28 @@ export async function restCall(
  * ให้ access-log fence ตาม kong500Decision ใช้ตัดสิน — matches===0 จะ poison ทั้งที่
  * เทสถือหลักฐานจริงอยู่)
  *
- * gate waveh-r2/r3/r4 M1 (สะสม): หลักฐานต้องพิสูจน์ "backend จบจริง" และ "ผูกกับ
+ * gate waveh-r2/r3/r4/r5/r6/r7 M1 (สะสม): หลักฐานต้องพิสูจน์ "backend จบจริง" และ "ผูกกับ
  * invocation นี้" ทั้งคู่ — เรียงภายในเดียว ห้ามสลับ:
  *  1. probe terminal ก่อน (scenarioTerminalProbe — ขา lock + ขา activity): backend
  *     ยังรันอยู่ = ปฏิเสธทันที ไม่รอ (fail-loud · invocation คง 'running' ให้ audit จับ)
- *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4 + r5 + r6):
+ *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4+r5+r6+r7):
+ *     หน้าต่างร่วมของทุกขา (r7 M1.1-1): anchor ที่ "เวลา dispatch" จริงจาก ledger
+ *     (attempt.ts — เขียนก่อน fetch ทุกครั้ง) ยาว acq+stmt+margin — คำขอที่ "ยัง
+ *     ไม่ได้เริ่ม statement" (ค้างในคิว pool ของ PostgREST — ไร้ backend ไร้ CLF
+ *     line จนได้ serve: ตรวจจริง 2026-09-15 dispatch 11 ตัวพร้อมกัน บน pool เต็ม
+ *     10 → ตัวที่ 11 ไร้ backend ~8s แล้วได้ serve จบ ~16s พร้อม CLF line) ถูก
+ *     ครอบด้วยขอบเขตที่พิสูจน์จาก container จริง: ได้ช่อง pool ≤ acq (10s —
+ *     postgrestPoolAcquisitionBoundMs ตรวจสดว่าไม่มี override) + งานที่เริ่มแล้ว
+ *     จบ ≤ stmt (8s — ขา ง) — นาฬิกาคงที่ 12s จาก kong line จึงไม่ถูกใช้เป็น
+ *     เหตุผลเดี่ยวอีกต่อไป
  *     a. status < 0 (abort/network — ไม่มี response ถึงมือ caller): CLF line ของ
  *        nonce (rest) ต้องปรากฏ "หนึ่งแถวพอดี" (completion หรือ cancellation —
- *        line 500 จาก lock_timeout 57014 ก็นับ) = PostgREST serve ครบหนึ่งครั้ง ·
- *        line ยังไม่ปรากฏ = upstream ยังไม่ terminal (request อาจยังค้างในคิว —
- *        ห้าม settle) · >1 แถว = serve ซ้ำ/กำกวม = ปฏิเสธ · singleDispatch ใน
- *        manifest ยืนยันไม่มี dispatch ซ้ำของ invocation เดียวกัน
+ *        line 500 จากการตัดตามขอบเขต role 57014 ก็นับ) = PostgREST serve ครบ
+ *        หนึ่งครั้ง · poll ภายในหน้าต่าง dispatch+acq+stmt+margin · >1 แถว =
+ *        serve ซ้ำ/กำกวม = ปฏิเสธ · activity ของ RPC นี้โผล่ระหว่าง poll =
+ *        statement เพิ่งเริ่ม = ปฏิเสธทันที · ครบหน้าต่างไม่มี line = ปฏิเสธ
+ *        (fail-closed — ไม่มี response ในมือจึงไม่มีทางเดินขอบเขตแบบขา b)
+ *        singleDispatch ใน manifest ยืนยันไม่มี dispatch ซ้ำของ invocation เดียวกัน
  *     b. status ≥ 0 (response ถึงมือ caller แล้ว — ทุกรูปร่าง body เหมือนกัน):
  *        gate r6 M1.1 ยกเลิกการยกเว้น "JSON body = body-proven โดยโครงสร้าง"
  *        เพราะรูปร่าง body ไม่พิสูจน์แหล่งกำเนิด — ตรวจจริง 2026-09-15 ใน stack
@@ -178,15 +189,34 @@ export async function restCall(
  *        ตอบ {"message":"no Route matched with those values"} และ 401 key-auth
  *        ตอบ {"message":"Invalid authentication credentials"}) — JSON จึงบอก
  *        ไม่ได้ว่ามาจาก upstream ที่ serve จบหรือ gateway สังเคราะห์ · ทุก
- *        response-in-hand ต้องผ่าน fence สี่ขาเดียวกัน:
+ *        response-in-hand ต้องผ่าน fence เดียวกันครบทุกขา:
  *        (ก) activity fail-fast: ไม่มี pg_stat_activity รัน RPC นี้อยู่ตอนเข้า
- *            fence — เจอ = ปฏิเสธทันที (fail-loud ไม่รอ 12s) · หมุด = correlation
+ *            fence — เจอ = ปฏิเสธทันที (fail-loud ไม่รอ) · หมุด = correlation
  *            ชื่อ RPC + หน้าต่างหลัง dispatch (ไฟล์รันเรียง — correlation เดียว
- *            กับ scenarioTerminalProbe ที่ gate ยอมรับตั้งแต่ r3) · ตรวจจริง
- *            2026-09-15 (เทส M1-r6 เปิดโปง): PostgREST ส่ง body เป็น bind param
- *            `$1 AS json_data` — literal p_request_id ไม่ปรากฏใน query text การ
- *            กรองด้วย requestRef จึงเป็น 0 เสมอ (ผ่านปลอม) — requestRef เหลือ
- *            เป็นหมุดราย invocation ที่ขา (ข) เท่านั้น (kong line ผูก nonce)
+ *            กับ scenarioTerminalProbe ที่ gate ยอมรับตั้งแต่ r3 · gate r7
+ *            บันทึกยอมรับเป็น activity guard แบบ conservative ภายใต้ serial
+ *            invariant) · ตรวจจริง 2026-09-15 (เทส M1-r6 เปิดโปง): PostgREST
+ *            ส่ง body เป็น bind param `$1 AS json_data` — literal p_request_id
+ *            ไม่ปรากฏใน query text การกรองด้วย requestRef จึงเป็น 0 เสมอ
+ *            (ผ่านปลอม) — requestRef เหลือเป็นหมุดราย invocation ใน ledger
+ *            binding เท่านั้น (ขา ข′/ข ผูก nonce)
+ *        (ข′) rest CLF line ของ nonce หนึ่งแถวพอดี (r7 M1.1-1 ปิดด้วยทาง
+ *            "หลักฐาน terminal ตรง" ไม่ใช่ข้อสมมติ): PostgREST เขียน CLF line
+ *            หนึ่งต่อหนึ่ง serve ทุกครั้งที่ serve จบ ทุกสถานะ (ตรวจจริง
+ *            2026-09-15: 200 · 400-22P02 · 500-57014 มี line ครบ · เขียนแม้
+ *            client abort กลางทาง) — line ของ nonce ปรากฏ = upstream serve
+ *            ครบหนึ่งครั้งของ invocation "นี้" = terminal โดยหลักฐาน ไม่ต้อง
+ *            อาศัยข้อสมมติเรื่อง timeout ของ pooled session เลย (ตอบ gate r7
+ *            M1.1-2 ครึ่งหลังด้วย) · >1 = กำกวม = ปฏิเสธ · activity ของ RPC
+ *            นี้โผล่ระหว่าง poll = statement เพิ่งเริ่มหลังเข้า settle = ปฏิเสธ
+ *            ทันที · ครบหน้าต่างยัง 0 line = มีรูปเดียวที่ "serve จบแล้วแต่
+ *            ไร้ line" คือ P0002-raise ข้อความไทยที่ gateway ตัดขาคอร์ด
+ *            (ตรวจจริง 2026-09-15: dispatch จริงได้ 500 opaque + kong line
+ *            แต่ rest เงียบสนิท) — กรณีนั้นเดินต่อด้วยทาง "ขอบเขตพิสูจน์ครบ
+ *            ทุกช่วง" เท่านั้น: คำขอใดที่ยังไม่เริ่มต้องได้ช่อง ≤ dispatch+acq
+ *            และจบ ≤ dispatch+acq+stmt — ไม่มี activity ตลอดหน้าต่างที่เฝ้าถึง
+ *            ครบขอบเขตนี้ = ไม่มี statement ของ RPC นี้เริ่มช่วงนั้น = invocation
+ *            นี้ "ยังรออยู่" เป็นไปไม่ได้ภายในขอบเขตที่พิสูจน์
  *        (ข) kong access line ของ nonce หนึ่งแถวพอดีและ status ตรง res.status
  *            (Kong เขียน line "เมื่อปิด response" — ยังไม่มี line = request ยัง
  *            ค้างในทาง = ห้าม settle แม้ caller ถือ response แล้ว — กันเคส
@@ -195,14 +225,15 @@ export async function restCall(
  *            หลักฐาน completion/cancellation ฝั่ง upstream (gate r6) — statement
  *            ที่ "ยังค้างหรือเพิ่งเริ่มทีหลัง" gateway ปิด ต้องโผล่ใน
  *            pg_stat_activity ภายในหน้าต่างนี้ (poll ทุก 300ms จนครบ 12s —
- *            ห้ามออกเมื่อเจอ line แล้วตรวจครั้งเดียว) · role bounds 8s (ขา ง)
- *            รับประกัน statement ใดที่เริ่มแล้วต้องจบภายใน 8s — 12s ครอบ "เริ่ม
- *            ช้า + วิ่งจบ" · โผล่ในหน้าต่าง = หลักฐานไม่ terminal = ปฏิเสธ
+ *            ห้ามออกเมื่อเจอ line แล้วตรวจครั้งเดียว) · โผล่ในหน้าต่าง = หลักฐาน
+ *            ไม่ terminal = ปฏิเสธ
  *        (ง) role bounds ตามจริง ณ เวลา settle สองชั้น (declaration
  *            pg_db_role_setting + effective จาก login จริงฐานะ authenticator —
- *            authenticatorRoleBoundsOk) = statement ของ role นี้มีขอบเขตเวลา
- *            เสมอ (รองรับเหตุผลของขา ค) · ขาพฤติกรรมวัดจาก pool session จริง
- *            อยู่ที่ guard test M1-r6 (วัด lock_timeout ตัด ~8s ขณะ lock ถูกถือ)
+ *            authenticatorRoleBoundsOk) — gate r7 ถอดหน้าที่เหลือเป็น "ขอบเขต
+ *            สนับสนุน" ของเหตุผลหน้าต่าง (ขา ข′ ทาง bounds + ขา ค) ไม่ใช่หลักฐาน
+ *            terminal โดยลำพัก · ขาพฤติกรรมบน pooled session ที่ serve จริงอยู่
+ *            ที่ guard test M1-r6/M1-r7 (วัดการตัด ≤9.5s นับจากสังเกต busy ครั้ง
+ *            แรก — execution context จริงตามเงื่อนไขปิดของ gate r7 M1.1-2)
  *  3. postTerminalAssert (r4): อ่าน-assert snapshot "ใหม่" ตรงนี้เท่านั้น — หลัง
  *     terminal ยืนยันครบทั้งสองขา (อ่านก่อนขา 2 อาจได้ของเก่าขณะ backend ยัง
  *     มีชีวิต — race ที่ r4 จับ) · assert ล้ม = invocation คง 'running' (fail-loud)
@@ -214,8 +245,14 @@ export async function settleScenario(
   terminalProbe: () => Promise<void>,
   postTerminalAssert?: () => Promise<void>,
 ): Promise<void> {
-  const { invocationClose, manifestByOpKey, accessLogFenceAnyStatus, kongAccessFence, authenticatorRoleBoundsOk } =
-    await import("./test-io");
+  const {
+    invocationClose,
+    manifestByOpKey,
+    accessLogFenceAnyStatus,
+    kongAccessFence,
+    authenticatorRoleBoundsOk,
+    postgrestPoolAcquisitionBoundMs,
+  } = await import("./test-io");
   if (res.invocationId === undefined || res.opKey === undefined) {
     throw new Error(`scenario dispatch ไม่มี invocationId/opKey กลับมา (${evidence})`);
   }
@@ -226,12 +263,12 @@ export async function settleScenario(
   }
   // (1) probe terminal ก่อน — โยน = ไม่ settle (r2/r3)
   await terminalProbe();
-  // (2) upstream-terminal ผูกกับ invocation นี้ (r4+r5+r6) — แยกตาม class ของ
-  // response (doc เต็มด้านบน): a. status<0 = CLF fence ของ rest · b. status≥0
-  // ทุกรูปร่าง body = fence สี่ขาเดียวกัน (activity fail-fast + kong line
-  // หนึ่งแถว status ตรง + หน้าต่าง 12s หลัง line + role bounds declaration&
-  // effective) · nonce/cursor อ่านจาก ledger ของ invocation
-  // (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error)
+  // (2) upstream-terminal ผูกกับ invocation นี้ (r4+r5+r6+r7) — แยกตาม class ของ
+  // response (doc เต็มด้านบน): a. status<0 = CLF fence ของ rest หน้าต่าง
+  // dispatch-anchored · b. status≥0 ทุกรูปร่าง body = fence ขาเดียวกัน (activity
+  // fail-fast + CLF line ของ nonce ขา ข′ + kong line หนึ่งแถว status ตรง +
+  // หน้าต่าง 12s หลัง line · role bounds = ขอบเขตสนับสนุนก่อนแยกขา) · nonce/cursor/
+  // เวลา dispatch อ่านจาก ledger ของ invocation (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error)
   const m = /^rpc:([a-z0-9_]+):(POST|PATCH|PUT|DELETE)$/i.exec(res.opKey);
   if (m !== null) {
     const [rpcName, httpMethod] = [m[1] as string, m[2] as string];
@@ -240,8 +277,11 @@ export async function settleScenario(
         from test_infra.lifecycle_ledger
        where kind = 'invocation' and invocation_id = '${res.invocationId}'
        order by ts desc limit 1;`);
-    const [attempt] = await psqlRows<{ cursor: { capturedAt: string; lineCount: number; restStartedAt: string } | null }>(`
-      select payload -> 'logCursor' as cursor
+    const [attempt] = await psqlRows<{
+      cursor: { capturedAt: string; lineCount: number; restStartedAt: string } | null;
+      ts: string;
+    }>(`
+      select payload -> 'logCursor' as cursor, ts::text as ts
         from test_infra.lifecycle_ledger
        where kind = 'attempt' and invocation_id = '${res.invocationId}'
        order by ts desc limit 1;`);
@@ -250,17 +290,63 @@ export async function settleScenario(
         `scenario settle ปฏิเสธ: ไม่พบ nonce/attempt ของ invocation ใน ledger — ไม่มีทางพิสูจน์ upstream terminal (${evidence})`,
       );
     }
+    // (ง) role bounds สองชั้น: declaration + effective (login ฐานะ authenticator) —
+    // r7 ถอดหน้าที่เหลือเป็น "ขอบเขตสนับสนุน" และ hoist มาก่อนแยกขา เพราะเลข
+    // คณิตของหน้าต่าง CLF ทั้งสองขา (ด้านล่าง) ใช้ขอบเขต statement 8s นี้
+    if (!(await authenticatorRoleBoundsOk())) {
+      throw new Error(
+        `scenario settle ปฏิเสธ: role authenticator ไม่ถือ statement/lock_timeout=8s ตามจริง (declaration pg_db_role_setting + effective จาก login ฐานะ authenticator) — ขอบเขตเวลาของ statement ใช้พิสูจน์ไม่ได้ (${evidence})`,
+      );
+    }
+    // r7 M1.1-1: หน้าต่าง CLF anchor ที่ "เวลา dispatch จริง" จาก ledger (attempt.ts —
+    // attempt row เขียนก่อน fetch ทุกครั้ง) ไม่ใช่นาฬิกาคงที่จากตอนเข้า settle ·
+    // ครอบคำขอที่ค้างในคิว pool ของ PostgREST (ไร้ backend ไร้ CLF line จนได้ serve
+    // — ตรวจจริง 2026-09-15: dispatch 11 ตัวพร้อมกันบน pool เต็ม 10 → ตัวที่ 11
+    // ได้ serve จบ ~dispatch+16s พร้อม line): คำขอใดที่ยังไม่เริ่มต้องได้ช่อง
+    // ≤ dispatch+acq และงานที่เริ่มแล้วต้องจบ ≤ dispatch+acq+stmt (8s ขา ง) ·
+    // margin 4s กิน clock skew ระหว่าง host (ledger ts) กับ container (เวลาเขียน
+    // CLF line)
+    const attemptTs = Date.parse(attempt.ts);
+    if (!Number.isFinite(attemptTs)) {
+      throw new Error(
+        `scenario settle ปฏิเสธ: อ่านเวลา dispatch (attempt.ts) จาก ledger ไม่ได้ ("${attempt.ts}") — หน้าต่าง r7 พิสูจน์ไม่ได้ (${evidence})`,
+      );
+    }
+    const acqBoundMs = await postgrestPoolAcquisitionBoundMs();
+    const clfDeadline = attemptTs + acqBoundMs + 8_000 + 4_000;
+    // activity probe ร่วมของทุกขา — hoist ก่อนแยกขาเพราะขา CLF ทั้งสอง branch
+    // ต้องเช็ค "statement เพิ่งเริ่มระหว่างเฝ้าหน้าต่าง" ทุก iteration (r7: คำขอที่
+    // ค้างในคิว pool เริ่มทำงานได้หลัง settle เข้ามาแล้ว)
+    // หมุดจริงของ stack (ตรวจจริง 2026-09-15 — เทส M1-r6 เปิดโปง): PostgREST ส่ง
+    // body เป็น bind param (`WITH pgrst_source AS ... (SELECT $1 AS json_data)`) —
+    // literal p_request_id ไม่ปรากฏใน pg_stat_activity.query เลย การกรองด้วย
+    // requestRef จึงเป็น 0 เสมอ (ผ่านปลอม) · activity ผูก invocation ด้วย correlation
+    // ตามจริง: ชื่อ RPC + หน้าต่างหลัง dispatch (integration config รันไฟล์เรียง —
+    // ไม่มีไฟล์อื่นยิง RPC เดียวกันพร้อมกัน — correlation เดียวกับที่ gate ยอมรับ
+    // ใน scenarioTerminalProbe ตั้งแต่ r3 · gate r7 บันทึกยอมรับเป็น activity guard
+    // แบบ conservative ภายใต้ serial invariant) · requestRef เหลือเป็นหมุดราย
+    // invocation ใน ledger binding เท่านั้น (ขา ข′/ข ผูก nonce)
+    const rpcBusy = () =>
+      psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%${rpcName}%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
     if (res.status < 0) {
       // a. ไม่มี response ถึงมือ caller (abort/network) — CLF fence ของ rest (r4)
+      //    หน้าต่าง r7: anchor ที่เวลา dispatch จริง (acq+stmt+margin) ไม่ใช่นาฬิกา
+      //    12s จากตอนเข้า settle — คำขอที่ค้างในคิว pool ไร้ line จนได้ serve ·
+      //    ระหว่าง poll เจอ activity ของ RPC นี้ = statement เพิ่งเริ่ม (คำขอพ้นคิว
+      //    ภายหลัง) = ปฏิเสธทันที · ครบหน้าต่างไร้ line = fail-closed (ไม่มี response
+      //    ในมือ จึงไม่มีทางเดิน "ขอบเขตพิสูจน์ครบ" แบบขา b)
       if (attempt.cursor == null) {
         throw new Error(
           `scenario settle ปฏิเสธ: ไม่มี logCursor ของ invocation ใน ledger — ไม่มีหน้าต่าง access log ให้พิสูจน์ (${evidence})`,
         );
       }
-      const deadline = Date.now() + 12_000; // ครอบ lock_timeout 8s ของ stack (ตรวจจริง)
       let fence = { matches: 0, restRestartedInWindow: false };
       for (;;) {
-        fence = await accessLogFenceAnyStatus(attempt.cursor as { capturedAt: string; lineCount: number; restStartedAt: string }, {
+        fence = await accessLogFenceAnyStatus(attempt.cursor, {
           uaNonce: binding.ua,
           method: httpMethod,
           pathNorm: `/rpc/${rpcName}`,
@@ -273,12 +359,19 @@ export async function settleScenario(
         if (fence.restRestartedInWindow) {
           throw new Error(`scenario settle ปฏิเสธ: rest restart ใน window — หลักฐานขาดความต่อเนื่อง (${evidence})`);
         }
-        if (fence.matches === 1 || Date.now() >= deadline) break;
+        if (fence.matches === 1) break;
+        const busyA = await rpcBusy();
+        if (busyA !== "0") {
+          throw new Error(
+            `scenario settle ปฏิเสธ: statement ของ RPC นี้เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF (pg_stat_activity เห็น ${busyA} ตัว ก่อนมี line ของ nonce) — คำขอพ้นคิว pool ภายหลัง dispatch ยังไม่ terminal (${evidence})`,
+          );
+        }
+        if (Date.now() >= clfDeadline) break;
         await new Promise((resolve) => setTimeout(resolve, 300));
       }
       if (fence.matches !== 1) {
         throw new Error(
-          `scenario settle ปฏิเสธ: ไม่มี CLF terminal ของ invocation นี้หลังรอ 12s — upstream ยังไม่จบ (${evidence})`,
+          `scenario settle ปฏิเสธ: ไม่มี CLF terminal ของ invocation นี้ภายในหน้าต่าง dispatch+acq(${acqBoundMs}ms)+stmt(8s)+margin — upstream ยังไม่จบ (${evidence})`,
         );
       }
     } else {
@@ -290,34 +383,54 @@ export async function settleScenario(
           `scenario settle ปฏิเสธ: response-in-hand แต่ไม่มี logCursor ของ invocation — ไม่มีขอบเขตหน้าต่าง kong log (${evidence})`,
         );
       }
-      // (ง) role bounds สองชั้น: declaration + effective (login ฐานะ authenticator)
-      if (!(await authenticatorRoleBoundsOk())) {
-        throw new Error(
-          `scenario settle ปฏิเสธ: role authenticator ไม่ถือ statement/lock_timeout=8s ตามจริง (declaration pg_db_role_setting + effective จาก login ฐานะ authenticator) — ขอบเขตเวลาของ statement ใช้พิสูจน์ไม่ได้ (${evidence})`,
-        );
-      }
       // (ก) activity fail-fast — statement ของ invocation นี้กำลังรันอยู่ตอนเข้า
-      // fence = ไม่ terminal แน่ ปฏิเสธทันทีไม่รอ (fail-loud)
-      // หมุดจริงของ stack (ตรวจจริง 2026-09-15 — เทส M1-r6 เปิดโปง): PostgREST
-      // ส่ง body เป็น bind param (`WITH pgrst_source AS ... (SELECT $1 AS
-      // json_data)`) — literal p_request_id ไม่ปรากฏใน pg_stat_activity.query
-      // เลย การกรองด้วย requestRef จึงเป็น 0 เสมอ (ผ่านปลอม) · activity ผูก
-      // invocation ด้วย correlation ตามจริง: ชื่อ RPC + หน้าต่างหลัง dispatch
-      // (integration config รันไฟล์เรียง — ไม่มีไฟล์อื่นยิง RPC เดียวกันพร้อมกัน —
-      // correlation เดียวกับที่ gate ยอมรับใน scenarioTerminalProbe ตั้งแต่ r3)
-      // requestRef ยังเป็นหมุดราย invocation ที่ขา (ข) — kong line ผูก nonce
-      // ของ invocation นี้หนึ่งเดียว
-      const rpcBusy = () =>
-        psqlScalar(`
-          select count(*)::text from pg_stat_activity
-           where query like '%${rpcName}%'
-             and state in ('active', 'idle in transaction')
-             and pid <> pg_backend_pid();`);
+      // fence = ไม่ terminal แน่ ปฏิเสธทันทีไม่รอ (fail-loud · rpcBusy hoist ไว้
+      // ก่อนแยกขาแล้ว — doc หมุด correlation เต็มอยู่ที่นั่น)
       const busyNow = await rpcBusy();
       if (busyNow !== "0") {
         throw new Error(
           `scenario settle ปฏิเสธ: statement ของ invocation นี้ยังรันอยู่ (pg_stat_activity เห็น backend รัน ${rpcName} อยู่ ${busyNow} ตัว) (${evidence})`,
         );
+      }
+      // (ข′) CLF line ของ nonce (rest) — หลักฐาน terminal "ตรง" ของ upstream ผูก
+      // invocation นี้ (r7 M1.1-1 ปิดด้วยทางหลักฐาน ไม่ใช่ข้อสมมติ timeout ของ
+      // pooled session): PostgREST เขียน line หนึ่งต่อหนึ่ง serve ทุกสถานะ
+      // (ตรวจจริง 2026-09-15: 200 · 400-22P02 · 500-57014 · แม้ client abort) ·
+      // poll ภายในหน้าต่าง dispatch+acq+stmt+margin · เจอหนึ่งแถว = serve จบ
+      // หนึ่งครั้งของ invocation นี้ = terminal โดยหลักฐาน · >1/กำกวม = ปฏิเสธ ·
+      // ระหว่าง poll เจอ activity = statement เพิ่งเริ่มหลังเข้า settle = ปฏิเสธ
+      // ทันที (fail-loud — ทิศสกปรกที่ guard M1-r7 พิสูจน์) · ครบหน้าต่าง 0 line =
+      // รูปเดียวที่ "serve จบแล้วไร้ line" คือ P0002-raise ข้อความไทยที่ gateway
+      // ตัดขาคอร์ด (ตรวจจริง 2026-09-15) → เดินต่อด้วยทาง "ขอบเขตพิสูจน์ครบทุกช่วง"
+      // เท่านั้น: คำขอใดที่ยังไม่เริ่มต้องได้ช่อง ≤ dispatch+acq และจบ ≤
+      // dispatch+acq+stmt — เฝ้าจนครบขอบเขตแล้วไม่เห็นทั้ง line และ activity =
+      // ไม่มี statement ของ RPC นี้เริ่มช่วงนั้น = invocation นี้ "ยังรออยู่"
+      // เป็นไปไม่ได้ภายในขอบเขตที่พิสูจน์ (ถ้าเข้า settle หลังขอบเขตไปแล้ว
+      // ขา ก ที่เพิ่งตรวจ + ขอบเขตสองชั้นของขา ง ครอบกรณีนั้นด้วยเหตุผลเดียวกัน)
+      let clf = { matches: 0, restRestartedInWindow: false };
+      for (;;) {
+        clf = await accessLogFenceAnyStatus(attempt.cursor, {
+          uaNonce: binding.ua,
+          method: httpMethod,
+          pathNorm: `/rpc/${rpcName}`,
+        });
+        if (clf.matches > 1) {
+          throw new Error(
+            `scenario settle ปฏิเสธ: CLF line ของ nonce กำกวม (${clf.matches} แถว) — serve ซ้ำ? (${evidence})`,
+          );
+        }
+        if (clf.restRestartedInWindow) {
+          throw new Error(`scenario settle ปฏิเสธ: rest restart ใน window — หลักฐานขาดความต่อเนื่อง (${evidence})`);
+        }
+        if (clf.matches === 1) break;
+        const busyLeg = await rpcBusy();
+        if (busyLeg !== "0") {
+          throw new Error(
+            `scenario settle ปฏิเสธ: statement ของ RPC นี้เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF (pg_stat_activity เห็น ${busyLeg} ตัว ก่อนมี line ของ nonce) — response ที่ caller ถือไม่ใช่หลักฐานว่า invocation นี้จบแล้ว (${evidence})`,
+          );
+        }
+        if (Date.now() >= clfDeadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
       // (ข) kong access line หนึ่งแถวพอดี + status ตรง — poll ภายใน 12s
       const deadline = Date.now() + 12_000;

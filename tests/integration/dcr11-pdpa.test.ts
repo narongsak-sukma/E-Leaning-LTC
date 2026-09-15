@@ -391,8 +391,9 @@ describe.skipIf(!DB_URL)(
           ).toBe(E16_MEDIA_DONE);
         },
       );
-      // งบ 75s: settle ผ่าน fence r6 มีหน้าต่าง 12s หลัง kong line (+12s ต่อ settle ตามที่วัด)
-    }, 75_000);
+      // งบ 105s: settle ผ่าน fence r7 ขา CLF เฝ้าถึง dispatch+acq+stmt+margin (~20s
+      // ต่อ settle ที่ไร้ CLF line รูป P0002) + หน้าต่าง 12s หลัง kong line
+    }, 105_000);
 
     // ─── เคส d: fail path — failed + error + completed_at ──────────────────────
 
@@ -472,8 +473,9 @@ describe.skipIf(!DB_URL)(
           ).toBe("pending");
         },
       );
-      // งบ 75s: settle ผ่าน fence r6 มีหน้าต่าง 12s หลัง kong line (+12s ต่อ settle ตามที่วัด)
-    }, 75_000);
+      // งบ 105s: settle ผ่าน fence r7 ขา CLF เฝ้าถึง dispatch+acq+stmt+margin (~20s
+      // ต่อ settle ที่ไร้ CLF line รูป P0002) + หน้าต่าง 12s หลัง kong line
+    }, 105_000);
 
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──
 

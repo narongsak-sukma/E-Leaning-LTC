@@ -496,8 +496,8 @@ export async function kongAccessFence(
 }
 
 /**
- * ขอบเขตจริงของ role authenticator (gate waveh-r5 ขา ค + r6 M1.1 ปิดช่อง
- * "default ≠ effective"): สองชั้น —
+ * ขอบเขตจริงของ role authenticator (gate waveh-r5 ขา ค + r6 M1.1 + r7 ถอดหน้าที่
+ * "หลักฐาน terminal" เหลือเป็นขอบเขตสนับสนุน): สองชั้น —
  * (1) declaration: pg_db_role_setting ต้องถือ statement_timeout=8s +
  *     lock_timeout=8s (ตรวจจริง 2026-09-15: setconfig =
  *     {session_preload_libraries=safeupdate,statement_timeout=8s,lock_timeout=8s})
@@ -509,10 +509,18 @@ export async function kongAccessFence(
  *     `host all all 127.0.0.1/32 trust` + `psql host=127.0.0.1
  *     user=authenticator` ตอบ st=8s/lt=8s) — dev-stack เท่านั้น (integration
  *     tests รันบน dev stack อยู่แล้ว)
- * ขาพฤติกรรม (session เก่าใน pool ที่เริ่มก่อน ALTER จะกลับไปอ่านจาก catalog
- * ไม่ได้): guard test M1-r6 วัดการถูก lock_timeout ตัดจริง ~8s บน pool session
- * ที่ serve request จริง ขณะ lock ยังถูกถืออยู่ — สามชั้นรวมกันจึงเป็นคำยืนยัน
- * "ณ เวลา settle" ที่ไม่ใช่ข้ออ้าง static จาก config ที่อ่านไว้ตอนอื่น
+ *
+ * gate r7 M1.1-2 ชี้ตรง: สองชั้นนี้พิสูจน์ session "ใหม่" เท่านั้น ไม่ใช่ pooled
+ * session ที่ serve invocation แต่ละตัว — ฟังก์ชันนี้จึงถูกใช้เป็น "ขอบเขต
+ * สนับสนุน" ของเหตุผลหน้าต่างเท่านั้น (settleScenario ขา ง) ไม่ใช่หลักฐาน
+ * terminal โดยลำพัก · หลักฐาน terminal ของ invocation เป็นขา CLF ของ nonce
+ * (ขา ข′) ส่วนขอบเขตบน pooled session ที่ serve จริงพิสูจน์ด้วย "ขาพฤติกรรม"
+ * ใน guard test M1-r6/M1-r7: วัดการถูกตัดจริง ≤9.5s นับจาก "สังเกต busy ครั้ง
+ * แรก" (≤100ms หลัง statement เริ่ม) บน session ที่ serve request นั้นเอง
+ * · หมายเหตุ errcode 57014 ใช้ร่วมกันระหว่าง statement_timeout/lock_timeout
+ * (ข้อความ "canceling statement due to statement timeout" ตรวจจริงแม้ตัวตัด
+ * คือการรอ lock) — คำกล่าวอ้างทุกที่จึงเป็น "ขอบเขตเวลาของ role" เท่านั้น
+ * ไม่ฟันธงว่าตัวใดเป็นตัวตัด
  */
 export async function authenticatorRoleBoundsOk(): Promise<boolean> {
   const raw = await psql(
@@ -539,6 +547,49 @@ export async function authenticatorRoleBoundsOk(): Promise<boolean> {
     "select current_setting('statement_timeout') || '/' || current_setting('lock_timeout');",
   ]);
   return r.code === 0 && r.stdout.trim() === "8s/8s";
+}
+
+/**
+ * ขอบเขต pool-acquisition ของ PostgREST (gate r7 M1.1-1 — "คำขอที่ยังไม่ได้เริ่ม
+ * statement ถูกจำกัดด้วยกลไกใด"): คืน bound เป็น ms เฉพาะเมื่อพิสูจน์ได้จาก
+ * container จริง ณ เวลาเรียก — อ่าน env ของ rest: ถ้าไม่มี PGRST_DB_POOL* ใด ๆ
+ * = ใช้ค่า default ของ PostgREST v12 (pool=10 · db-pool-acquisition-timeout=10s
+ * — docs.postgrest.org/en/v12 configuration) → คืน 10_000 · ถ้ามี override ใด ๆ
+ * ปรากฏ = ขอบเขตพิสูจน์ไม่ได้จาก default → โยน (fail-closed — ฟันซ์ใช้เลขนี้เป็น
+ * เหตุผลของหน้าต่าง ห้ามเดาค่าที่ override ไว้)
+ * ตรวจจริง 2026-09-15: `docker compose exec -T rest printenv | grep PGRST`
+ * เห็นเฉพาะ URI/SCHEMAS/EXTRA_SEARCH_PATH/ANON_ROLE/JWT_SECRET/USE_LEGACY_GUCS/
+ * API_MAX_ROWS/DB_AGGREGATES_ENABLED/LOG_LEVEL — ไม่มี PGRST_DB_POOL* (compose
+ * ไม่ตั้ง) และ probe จริงบน live stack: dispatch พร้อมกัน 11 ตัวบนตารางที่ถูก
+ * ยึด lock → backend active พร้อมกันสูงสุด 10 ตัว ตัวที่ 11 ไร้ backend จนมี
+ * ช่องว่าง (~8s หลังตัวแรกถูกตัด) แล้วจบที่ ~16s — คิวมีขอบเขตจริง
+ */
+export async function postgrestPoolAcquisitionBoundMs(): Promise<number> {
+  const r = await dockerCompose([
+    "exec",
+    "-T",
+    "rest",
+    "sh",
+    "-c",
+    "printenv | grep -c '^PGRST_DB_POOL' || true",
+  ]);
+  if (r.code !== 0) {
+    throw new Error(
+      `postgrestPoolAcquisitionBoundMs: อ่าน env ของ rest ไม่ได้ (exit ${r.code}) — ขอบเขต pool พิสูจน์ไม่ได้`,
+    );
+  }
+  const count = Number.parseInt(r.stdout.trim(), 10);
+  if (!Number.isFinite(count) || r.stdout.trim() === "") {
+    throw new Error(
+      "postgrestPoolAcquisitionBoundMs: parse จำนวน PGRST_DB_POOL* ไม่ได้ — ขอบเขต pool พิสูจน์ไม่ได้",
+    );
+  }
+  if (count > 0) {
+    throw new Error(
+      `postgrestPoolAcquisitionBoundMs: rest มี env PGRST_DB_POOL* ตั้งไว้ ${count} ตัว — ขอบเขต acquisition พิสูจน์ไม่ได้ (fail-closed จนกว่าจะตรวจ/ปรับ fence)`,
+    );
+  }
+  return 10_000; // v12 default db-pool-acquisition-timeout (ไม่มี override — ตรวจสด)
 }
 
 async function restStartedAfter(iso: string): Promise<boolean> {
