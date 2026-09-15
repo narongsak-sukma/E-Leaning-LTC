@@ -129,6 +129,11 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
  * เดียว) ต่างจาก `'…'` ธรรมดาที่ `''` เป็นทางเดียว (2) block comment
  * ซ้อนกันได้ — `/* a /* b *\/ c *\/` ปิดที่ `*\/` ตัวที่ทำให้ระดับกลับเป็น
  * ศูนย์ ไม่ใช่ตัวแรก
+ * (v11): escape string ต่อข้าม newline ได้ (r13 พิสูจน์แบบเดียวกัน) —
+ * `E'a'` ตามด้วย whitespace ที่มี newline แล้ว `'b…'` เป็น string เดียว
+ * โดย `E` เขียนเฉพาะส่วนแรก escape semantics คงอยู่ตลอด (§4.1.2.2 ·
+ * quotecontinue ของ scan.l อยู่ในโหมด xe ต่อ) · ของ `'…'` ธรรมดาไม่ต้อง
+ * ตรวจจุดต่อ: ในโหมดธรรมดา `\'` ปิด string อยู่แล้วทั้งสองการตีความ
  */
 function stripSqlDataParts(sql: string): string {
   let out = "";
@@ -148,6 +153,24 @@ function stripSqlDataParts(sql: string): string {
         if (sql[i] === "'") {
           if (sql[i + 1] === "'") {
             i += 2;
+            continue;
+          }
+          // จุดต่อข้าม newline (r13 MAJOR): string ที่คั่นด้วย whitespace "ที่มี
+          // newline อย่างน้อยหนึ่งตัว" ต่อกันเป็น string เดียว และ escape
+          // semantics คงอยู่ตลอด (E เขียนเฉพาะส่วนแรก — quotecontinue ของ scan.l
+          // อยู่ในโหมด xe ต่อ) · `'…'` ธรรมดาไม่ต้องมีขานี้: ในโหมดธรรมดา `\'`
+          // ปิด string อยู่แล้วทั้งการตีความต่อกันหรือแยก ตำแหน่งจบจึงตรงกันเสมอ
+          let j = i + 1;
+          let sawNewline = false;
+          while (
+            j < sql.length &&
+            (sql[j] === " " || sql[j] === "\t" || sql[j] === "\r" || sql[j] === "\n")
+          ) {
+            if (sql[j] === "\n") sawNewline = true;
+            j += 1;
+          }
+          if (sawNewline && sql[j] === "'") {
+            i = j + 1;
             continue;
           }
           i += 1;

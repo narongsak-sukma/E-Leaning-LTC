@@ -498,6 +498,48 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(0);
   });
 
+  // ─── r13 (gate waveh-r13 MAJOR): escape string ที่ "ต่อข้าม newline" —
+  // PostgreSQL ให้ string literal ต่อกันเป็น string เดียวเมื่อคั่นด้วย
+  // whitespace ที่มี newline อย่างน้อยหนึ่งตัว (§4.1.2.2 · quotecontinue ของ
+  // scan.l อยู่ในโหมด xe ต่อ) โดย E เขียนเฉพาะส่วนแรก escape semantics คงอยู่
+  // ตลอด string — v10 ปิด escape mode ที่ quote ของส่วนแรกแล้วอ่านส่วนต่อเป็น
+  // string ธรรมดา → \' ในส่วนต่อปิด string ก่อนตำแหน่งจริง (codex วัดจริง:
+  // เป้าหมายปลอม 1 ทั้งรูปเต็มและ STATEMENT-only · เจ้าของจริง STATEMENT-only 0)
+  // — v11 ตรวจจุดต่อที่ quote ทุกตัวในโหมด E-string
+
+  it("ทิศ ณ (r13 MAJOR): ชื่อ RPC ใน escape string ที่ต่อข้าม newline (E ส่วนแรกเท่านั้น) → 0 (v10 = 1) · เจ้าของจริง = 1 ทั้งสองรูป (STATEMENT-only v10 = 0)", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1203, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1203, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1203,
+        "STATEMENT",
+        `SELECT E'prefix'\n'abc\\' "public"."complete_data_export_job"($1) rest'\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "escape semantics คงอยู่ตลอด string ที่ต่อกันข้าม newline — ชื่อใน literal เป็นข้อมูล (r13: v10 ได้ 1 ทั้งสองรูป)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "FROM หลัง literal ที่ปิดที่ quote จริง = เจ้าของจริงต้อง match",
+    ).toHaveLength(1);
+    // ทิศ STATEMENT-only (ไร้ CONTEXT): v10 ปิด escape mode ที่ quote แรกแล้ว
+    // กลืน FROM ของเจ้าของเข้า string ธรรมดาที่เปิดตามมา (เจ้าของ 0 ตามตาราง
+    // ผลตรวจซ้ำของ codex) — v11 ต้องกู้คืน 1 โดยชื่อปลอมยัง 0
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: เจ้าของจริงจาก STATEMENT เพียงแหล่งเดียว — v10 กลืนหาย (r13 ตารางผลตรวจซ้ำ: 1 → 0)",
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+    ).toHaveLength(0);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน
