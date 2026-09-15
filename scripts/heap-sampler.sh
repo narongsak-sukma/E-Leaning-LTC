@@ -1,6 +1,7 @@
 #!/bin/sh
 # Wave H D90 [#94] — heap sampler (dev-only)
-# บันทึกหนึ่งแถว JSON ต่อการเรียก ลง JSONL (append) เพื่อพิสูจน์ว่า heap 6144 พอ/ไม่พอ
+# บันทึกหนึ่งแถว JSON ต่อการเรียก ลง JSONL (append) เพื่อพิสูจน์ว่า heap ที่ตั้งอยู่พอ/ไม่พอ
+# (D90 เดิมตั้ง 6144 · ถอยเป็น 4096 ตามเกณฑ์ rollback หลัง battery r1 เจอ kernel-OOM ของ VM)
 # ใช้โดย: มือ (ติดตาม 24 ชม. ด้วย --watch) และ scripts/battery-run.mjs (จุดเริ่ม/จบ battery)
 # ต้องการ: docker · ไม่มี dependency อื่น · ไม่ log ค่าใดที่เป็นความลับ
 #

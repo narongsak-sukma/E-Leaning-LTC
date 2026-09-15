@@ -233,7 +233,15 @@ services:
       #  เห็นใน e2e-full-r3 — เพิ่มเป็น 4096 + playwright retries:1 กันขอบ)
       # Wave H D90 [#94]: 4096 → 6144 — e2e สะสมหลัง suite โตข้ามเพดาน 0.8×4096 อีก
       # พิสูจน์ด้วย scripts/heap-sampler.sh → .omc/artifacts/heap-samples.jsonl (dev-only)
-      NODE_OPTIONS: --max-old-space-size=6144
+      # Wave H D90 rollback [#94]: 6144 → 4096 ตามเกณฑ์ "restart กลาง battery = ถอย" —
+      # battery r1 (feat/wave-h-hardening @ 1f93cdb) ช่วง e2e 01:19/01:22Z เกิด kernel-OOM
+      # ของ Docker VM 7.748GiB 2 ครั้ง (docker telemetry oom-kills 01:19:12.94Z/01:22:40.25Z
+      # ตรง boot banner 01:19:14/01:22:41 · RestartCount 0→2 กลางรอบตาม sampler) ฆ่า container
+      # ทั้งลูก → e2e-10 ตายทั้ง 2 attempts (isolated rerun 1/1 ผ่าน 32.8s = ไม่ใช่ regression)
+      # ที่ 6144 เพดาน self-restart 4915MB สูงเกิน headroom ของ VM ที่แชร์กับ kong~1GiB+
+      # container อื่น ~2.6GiB — ถอยกลับ 4096 (self-restart 3277MB รีไซเคิล child ก่อน VM
+      # หมด = ระบอบที่ battery เขียวมาก่อน wave-G r11) + เปิด DCR production-build e2e
+      NODE_OPTIONS: --max-old-space-size=4096
     ports:
       - "3000:3000"
     volumes:

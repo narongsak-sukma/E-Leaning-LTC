@@ -122,6 +122,70 @@ function selectStages(selectedIds) {
 }
 
 /**
+ * กันชน ledger ซ้ำ run-id ตายตัว (pre-it/it/e2e): ก่อนรัน stage ใด ต้องไม่มีแถวเก่าของ
+ * run-id เหล่านั้นค้างใน test_infra.lifecycle_ledger — suite นับ/ตัดสินตาม opKey ข้าม run
+ * (w8f-f2 ห้ามเจอ cleanup-start ก่อน SRE · w8o settle-A ต้องมีเอ๊เดียว · attemptBegin/
+ * fileBegin ปฏิเสธเมื่อ predecessor ยังไม่ terminal) แถวค้างของ battery ก่อน (ตายกลางทาง
+ * ก่อน audit/truncate) จะทำ assertion นับข้ามรอบและ poison เก่าปฏิเสธ attempt ใหม่ —
+ * เกิดจริง: battery r1 ตายที่ e2e → r2 ล้มที่ barrier f2/8o(ก)(ข)(ง) ด้วยแถว pre-it 408 แถวของ r1
+ *
+ * เคลียร์ให้สะอาดก่อนเริ่มด้วยทางที่ชอบ:
+ *   · run ที่ audit ผ่านแล้ว → node scripts/audit-lifecycle-ledger.mjs --run-id <ids> --truncate
+ *   · แถว poison/ค้างของ run ที่ล้ม → เคลียร์มือตาม limitation 5 (จด intent ใน PROJECT-STATE)
+ * ตารางยังไม่เกิด (DB ใหม่) = ถือว่าสะอาด — รันต่อได้ · docker/db ล้มจริง = exit 2 หยุดก่อน
+ */
+async function assertLedgerFresh(selected) {
+  const runIds = [...new Set(selected.map((s) => s.runId).filter((r) => r !== undefined))];
+  if (runIds.length === 0) return;
+  const sql =
+    `select run_id || '=' || count(*) from test_infra.lifecycle_ledger ` +
+    `where run_id = any('{${runIds.join(",")}}'::text[]) group by run_id;`;
+  const res = await new Promise((resolve) => {
+    const child = spawn(
+      "docker",
+      [
+        "compose",
+        "exec",
+        "-T",
+        "db",
+        "sh",
+        "-c",
+        'PGPASSWORD="$POSTGRES_PASSWORD" psql -U supabase_admin -d postgres -At -v ON_ERROR_STOP=1',
+      ],
+      { cwd: REPO_ROOT },
+    );
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c) => {
+      out += String(c);
+    });
+    child.stderr.on("data", (c) => {
+      err += String(c);
+    });
+    child.on("error", (e) => resolve({ ok: false, out, err: String(e) }));
+    child.on("close", (code) => resolve({ ok: code === 0, out, err }));
+    child.stdin.write(sql);
+    child.stdin.end();
+  });
+  if (!res.ok) {
+    // ตาราง/schema ยังไม่เกิด = DB ใหม่ สะอาด (psql ON_ERROR_STOP=1 ให้ exit≠0 พร้อมข้อความ does not exist)
+    if (res.err.includes("does not exist")) return;
+    process.stderr.write(
+      `[battery] ledger pre-check รันไม่ได้ (docker/db ล้ม?): ${res.err.slice(0, 200)}\n`,
+    );
+    process.exit(2);
+  }
+  const leftover = res.out.trim().split("\n").filter((l) => l.trim() !== "");
+  if (leftover.length > 0) {
+    process.stderr.write(
+      `[battery] ledger มีแถวเก่าของ run-id ที่ battery จะใช้ — ห้ามเริ่ม (assertion นับข้ามรอบ + poison เก่าปฏิเสธ attempt ใหม่): ${leftover.join(" · ")}\n` +
+        `เคลียร์ก่อน: run ที่ audit ผ่าน = node scripts/audit-lifecycle-ledger.mjs --run-id <ids> --truncate · แถว poison ของ run ที่ล้ม = เคลียร์มือตาม limitation 5 (จด intent ใน PROJECT-STATE)\n`,
+    );
+    process.exit(2);
+  }
+}
+
+/**
  * กันชน (ห้าม integration กับ e2e ชนกัน): ถ้า subset เลือกทั้ง integration และ e2e
  * ต้องมี health คั่นกลางเสมอ — ข้าม health = ปฏิเสธตั้งแต่ต้น (exit 2)
  * (ลำดับเต็มผ่านเองเพราะ health อยู่ระหว่าง integration กับ e2e ใน STAGES อยู่แล้ว)
@@ -252,6 +316,7 @@ async function runStage(stage) {
 const { keepGoing, selectedIds } = parseArgs(process.argv.slice(2));
 const selected = selectStages(selectedIds);
 assertHealthGate(selected);
+await assertLedgerFresh(selected);
 
 const results = [];
 for (const stage of selected) {
