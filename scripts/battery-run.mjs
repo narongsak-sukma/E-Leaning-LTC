@@ -45,7 +45,10 @@ const STAGES = [
     id: "barrier-proof",
     runId: "pre-it",
     file: "npx",
-    args: ["vitest", "run", "--config", "vitest.integration.config.ts", "tests/barrier-proof/"],
+    // config เฉพาะของ barrier suite: AaToBbSequencer (ลำดับไฟล์ 8b→8p) + singleFork +
+    // hookTimeout 5 วิโดยตั้งใจ — รันด้วย integration config จะทำลาย proof ที่
+    // ต้องอาศัยลำดับ/timeout ตายตัว (pass 6 แก้จาก config ผิดตัวเดิม)
+    args: ["vitest", "run", "--config", "vitest.barrier-proof.config.ts", "tests/barrier-proof/"],
   },
   { id: "unit", runId: undefined, file: "npm", args: ["test"] },
   { id: "tsc", runId: undefined, file: "npx", args: ["tsc", "--noEmit"] },
