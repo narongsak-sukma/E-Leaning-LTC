@@ -57,6 +57,18 @@
  *   เงื่อนไขปิดของ gate) → dirty settle ถือ response ปลอม 504 ขณะ X ยังไม่เริ่ม
  *   → fence ปฏิเสธเองเมื่อ X ได้ slot เริ่ม statement ระหว่างเฝ้า → ทุกตัวถูกตัด
  *   โดยขอบเขตเวลาของ role → settle จริงครบทุกขา + snapshot ใหม่
+ * M1 (waveh-r8) · ขา CLF=0 ของ response-in-hand ห้าม settle โดย "อนุมานจบจาก
+ *   การไม่เห็น" — v5 เดินต่อเมื่อครบหน้าต่างไร้ line ไร้ activity (bounds-walk)
+ *   ซึ่ง verdict r8 ตัดสินว่าเป็นการอนุมานไม่ใช่หลักฐาน (attempt.ts เขียนก่อน
+ *   fetch = ขอบล่าง · role bounds พิสูจน์แค่ session ใหม่) · แก้ด้วย fence v6:
+ *   หลักฐาน terminal สองรูป "หลักแรกที่ปรากฏชนะ" — CLF line ของ nonce หรือ
+ *   error block ของ db ผูก p_request_id (P0002 ข้อความไทยที่ gateway ตัดขาคอร์ด
+ *   มี block ใน db log เมื่อ log_parameter_max_length_on_error=-1 — probe
+ *   run2) · ครบหน้าต่างไร้ทั้งสอง = fail-closed ปฏิเสธ · two-way: ทิศ ก
+ *   dispatch จริง P0002 → settle ผ่านด้วยขา db-error-block (ledger close บันทึก
+ *   evidenceLeg="db-error-block") · ทิศ ข invocation ปลอมไร้หลักฐาน → ปฏิเสธ
+ *   ด้วยข้อความ "ไม่มีหลักฐาน terminal ของ upstream ที่ผูก invocation" → ปิด
+ *   poisoned + เคลียร์มือตาม limitation 5
  *
  * two-way proof ตาม [[regression-test-two-way-proof]] ระดับฟังก์ชัน: ทิศสกปรก/ล้ม
  * ต้องถูกปฏิเสธ ทิศสะอาด/ผ่านต้องไปต่อ — ผูกกับ audit()/shouldBreakAfter ของ script
@@ -691,10 +703,13 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
   // 2026-09-15 probe P5: ตัวที่ 11 ไร้ backend จนมีช่อง ~8s แล้ว serve จบ ~16s) →
   // dirty settle ถือ response ปลอม {504} ขณะ X "ยังไม่เริ่ม RPC" (busy=0 + CLF 0
   // แถว = หลักฐานในเทส ตามเงื่อนไขปิด "request ยังไม่เริ่ม RPC" ของ gate) → fence
-  // v5 ขา ข′ ต้องปฏิเสธเองด้วย in-poll activity เมื่อ X ได้ slot และเริ่ม statement
+  // ขา ข′ ต้องปฏิเสธเองด้วย in-poll activity เมื่อ X ได้ slot และเริ่ม statement
   // ระหว่างหน้าต่างเฝ้า · holders ถูกตัดโดยขอบเขตเวลาของ role ~8s → X ได้ serve ต่อ
   // → response จริงของ X มาถึง → ปล่อย blocker → settle จริงทั้ง X และ holders ทั้ง
   // 11 invocation ครบทุกขา + snapshot ใหม่ (ไม่ทิ้ง running)
+  // gate r8 (regression gap): busy-watcher ของ X ต้องเริ่ม "ก่อน" dirty settle —
+  // firstBusyAt = สังเกต busy ครั้งแรกจริงระหว่างหน้าต่างเฝ้า (ไม่ใช่หลัง refusal
+  // จบแบบ r7 เดิมที่วัดได้แค่ "เวลาที่เหลือ")
   it("คำขอค้างในคิว pool ยังไม่เริ่ม statement = ปฏิเสธเมื่อเพิ่งเริ่มระหว่างเฝ้า · serve จบจริง = settle ผ่านครบทุกขา (waveh-r7 M1.1-1)", async ({ skip }) => {
     if (DB_URL === undefined) skip();
     const { execFile } = await import("node:child_process");
@@ -845,8 +860,19 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
 
       // ทิศสกปรกที่ gate r7 เป็นห่วง: caller ถือ response ปลอม (ทิศเดียวกับ xlie
       // ที่ gate ยอมรับมาแล้ว) ขณะ invocation ของตัวเอง "ยังไม่เริ่ม RPC เลย" —
-      // fence v5 ขา ข′ ต้องปฏิเสธเองด้วย in-poll activity เมื่อ X ได้ slot และ
+      // fence ขา ข′ ต้องปฏิเสธเองด้วย in-poll activity เมื่อ X ได้ slot และ
       // เริ่ม statement ภายในหน้าต่างเฝ้า (dispatch+acq+stmt+margin)
+      // gate r8: busy-watcher เริ่ม "ก่อน" dirty settle — firstBusyAt = สังเกต
+      // busy ครั้งแรกจริงของ statement ของ X (เกิดได้ระหว่างที่ settle กำลังเฝ้า
+      // อยู่) ไม่ใช่เวลาหลัง refusal จบ — r7 เดิมวัดหลังจบจึงพิสูจน์ได้แค่ "เวลา
+      // ที่เหลือ" ตามที่ gate r8 ชี้ (regression gap)
+      let firstBusyAt = 0;
+      const busyWatchX = (async () => {
+        for (let i = 0; i < 400 && firstBusyAt === 0; i += 1) {
+          if ((await busyComplete()) !== "0") firstBusyAt = Date.now();
+          else await new Promise((r) => setTimeout(r, 100));
+        }
+      })();
       const xlie = {
         status: 504,
         json: null,
@@ -859,18 +885,16 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
           scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
       ).rejects.toThrow(/เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF/);
       expect(await invStatusX()).toBe("running");
+      await busyWatchX;
+      expect(
+        firstBusyAt,
+        "X ต้องเริ่ม statement จริงระหว่างหน้าต่างเฝ้า — in-poll catch ของ fence เห็นสิ่งเดียวกันกับ watcher",
+      ).toBeGreaterThan(0);
 
-      // วัดการตัดของ X จาก "สังเกต busy ครั้งแรกหลัง refusal" (statement เริ่ม +
-      // ≤1s ตามจังหวะ poll) — ขาพฤติกรรมของขอบเขตเวลาของ role บน pool session
-      // ที่ serve X จริง (เงื่อนไขปิด M1.1-2 ครึ่งหลัง) — blocker ยังถือ lock อยู่
-      let busyX = "0";
-      let firstBusyAt = 0;
-      for (let i = 0; i < 50 && busyX === "0"; i += 1) {
-        busyX = await busyComplete();
-        if (busyX === "0") await new Promise((r) => setTimeout(r, 100));
-      }
-      if (busyX !== "0") firstBusyAt = Date.now();
-      expect(busyX, "X ต้องได้ slot และเริ่ม statement จริงหลัง holders ถูกตัด").toBe("1");
+      // วัดการตัดของ X จาก "สังเกต busy ครั้งแรก" (ช่วงเฝ้า) จนถูกตัด — ขา
+      // พฤติกรรมของขอบเขตเวลาของ role บน pool session ที่ serve X จริง (เงื่อนไข
+      // ปิด M1.1-2 ครึ่งหลัง) — blocker ยังถือ lock อยู่
+      let busyX = await busyComplete();
       for (let i = 0; i < 150 && busyX !== "0"; i += 1) {
         busyX = await busyComplete();
         if (busyX !== "0") await new Promise((r) => setTimeout(r, 100));
@@ -925,4 +949,161 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       });
     }
   }, 300_000);
+
+  // ─── M1 (gate waveh-r8): ขา CLF=0 ของ response-in-hand — ต้องมีหลักฐาน terminal ──
+  // ผูก invocation จริง ห้ามอนุมานจบจากการไม่เห็น (fence v6) · verdict r8 M1: v5
+  // settle ได้เมื่อ "ครบหน้าต่างไร้ line ไร้ activity" — นั่นเป็นการอนุมาน ไม่ใช่
+  // หลักฐาน (attempt.ts เขียนก่อน fetch = ขอบล่างไม่ใช่ขอบบน · role bounds
+  // พิสูจน์แค่ session ใหม่) · เงื่อนไขปิด (OR): "ขา CLF=0 ต้องปฏิเสธจนมีหลักฐาน
+  // completion/cancellation ที่ผูก invocation หรือเพิ่มหลักฐานขอบเขตทุกช่วงและ
+  // effective settings ของ execution context ที่เกี่ยวข้องให้ครบ"
+  // ทางที่เลือก = หลักฐาน terminal รูปที่สอง: error block ของ db ผูก p_request_id
+  // (probe 2026-09-15 `.omc/artifacts/probe-p0002-run2.log` — P0002 ข้อความไทย
+  // ที่ gateway ตัดขาคอร์ด: rest ไร้ CLF line แต่ db log มี ERROR/CONTEXT/
+  // parameters($1 JSON มี p_request_id)/STATEMENT เมื่อ log_parameter_max_
+  // length_on_error=-1) · two-way:
+  //  ทิศ ก (สะอาด): dispatch จริง P0002 → settle ผ่านด้วยขา db-error-block
+  //   (ledger close บันทึก evidenceLeg="db-error-block" — v5 ไม่มี field นี้
+  //   = two-way pin ทิศเดียวกัน)
+  //  ทิศ ข (สกปรก): invocation ปลอม + attempt ปลอม (ไม่เคย dispatch) ถือ
+  //   response ปลอม 500 → ครบหน้าต่างไร้ทั้ง CLF และ error block = fail-closed
+  //   ปฏิเสธ คง 'running' → ปิด poisoned + เคลียร์มือตาม limitation 5 (ข้อความ
+  //   ปฏิเสธใหม่ต่างจาก v5 ที่เดินต่อไป kong stage = two-way อีกทิศ)
+  it("CLF=0 ต้องมีหลักฐาน terminal ผูก invocation: P0002 จริง settle ผ่านด้วย error block ของ db · ปลอมไร้หลักฐาน = ปฏิเสธ fail-closed (waveh-r8 M1)", async ({ skip }) => {
+    if (DB_URL === undefined) skip();
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const {
+      REPO_ROOT,
+      SERVICE_KEY,
+      settleScenario,
+      scenarioTerminalProbe,
+      psqlScalar,
+      psqlRows,
+    } = await import("./helpers");
+    const { httpWrite, ledgerWrite, invocationClose, manualClearPoison, captureLogCursor, mintUaNonce } =
+      await import("./test-io");
+    const opKey = "rpc:complete_data_export_job:POST";
+    // หยุด mailer กัน noise ของ busy guard — dev worker ยิง complete_data_export_job
+    // เอง (pattern เดียวกับ M1-r7/dcr12)
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
+    try {
+      // ─── ทิศ ก: dispatch จริง P0002 (job ไม่มีอยู่) → 500 opaque ไร้ CLF line
+      // แต่ db log มี error block ผูก p_request_id → settle ผ่านด้วยขานั้นจริง
+      const jobId8 = "00000000-0000-4000-8000-0000000002a1";
+      const dispatch = httpWrite(
+        "POST",
+        "/rest/v1/rpc/complete_data_export_job",
+        {
+          p_job_id: jobId8,
+          p_file_media_id: "00000000-0000-4000-8000-0000000002a2",
+          p_chunks: 2,
+          p_request_id: crypto.randomUUID(),
+          p_claim_token: null,
+        },
+        {
+          apiKey: SERVICE_KEY,
+          token: SERVICE_KEY,
+          settleMode: "scenario",
+          label: "m1r8-genuine-p0002",
+        },
+      );
+      const gres = await dispatch;
+      expect(gres.status, "P0002 ผ่าน gateway จริง = 500 (probe run2 A)").toBe(500);
+      expect(gres.json).toBeNull();
+      expect(typeof gres.invocationId).toBe("string");
+
+      const invLeg = () =>
+        psqlRows<{ status: string | null; leg: string | null }>(`
+          select payload ->> 'status' as status, payload ->> 'evidenceLeg' as leg
+            from test_infra.lifecycle_ledger
+           where kind = 'invocation' and invocation_id = '${gres.invocationId}'
+           order by ts desc, id desc limit 1;`);
+      await settleScenario(
+        gres,
+        "guard-r8-genuine-p0002-settles-via-db-error-block",
+        () => scenarioTerminalProbe("public.event_outbox", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(`select count(*)::text from public.data_export_jobs where id = '${jobId8}';`),
+            "job ไม่มีอยู่จริงต้องไม่ถูกสร้าง (P0002 = TX abort)",
+          ).toBe("0");
+        },
+      );
+      // two-way pin ทิศ ก: settle ผ่านจริงด้วย "ขา error block ของ db" ไม่ใช่ CLF
+      // (P0002 ไร้ CLF line — probe run2 C) — v5 ไม่มี evidenceLeg ใน close payload
+      // = assert นี้ล้มบนโค้ดเก่า
+      const [closed] = await invLeg();
+      expect(closed?.status).toBe("settled");
+      expect(closed?.leg, "ขาหลักฐานที่พา settle ผ่านต้องเป็น error block ของ db").toBe("db-error-block");
+
+      // ─── ทิศ ข: invocation ปลอม + attempt ปลอม (ไม่เคย dispatch จริง) ถือ
+      // response ปลอม 500 → ไร้ CLF line ของ nonce ปลอม + ไร้ error block ของ db
+      // ผูก requestRef ตลอดหน้าต่างเฝ้า = ต้องปฏิเสธ fail-closed ไม่มีทางเดิน
+      // "อนุมานจบจากการไม่เห็น" อีกต่อไป
+      const fakeId = crypto.randomUUID();
+      const fakeNonce = mintUaNonce();
+      await ledgerWrite(
+        "invocation",
+        {
+          status: "running",
+          label: "m1r8-fabricated-clf0",
+          opKey,
+          transport: "httpWrite",
+          transportTarget: "kong-path",
+          binding: {
+            opKey,
+            method: "POST",
+            urlNormalized: "/rest/v1/rpc/complete_data_export_job",
+            uaNonce: fakeNonce,
+            requestRef: crypto.randomUUID(),
+          },
+        },
+        { opKey, invocationId: fakeId },
+      );
+      await ledgerWrite(
+        "attempt",
+        { transport: "httpWrite", uaNonce: fakeNonce, parentCallKey: null, logCursor: await captureLogCursor(), beforeSnapshot: null },
+        { opKey, invocationId: fakeId },
+      );
+      const invStatusFake = () =>
+        psqlScalar(`
+          select payload ->> 'status' from test_infra.lifecycle_ledger
+           where kind = 'invocation' and invocation_id = '${fakeId}'
+           order by ts desc, id desc limit 1;`);
+      const flie = {
+        status: 500,
+        json: null,
+        text: "",
+        invocationId: fakeId,
+        opKey,
+      } as const;
+      // v6 ปฏิเสธที่ขา ข′ ครบหน้าต่าง (~22s) ด้วยข้อความ "ไม่มีหลักฐาน terminal ของ
+      // upstream ที่ผูก invocation" — v5 เดินต่อไป kong stage แล้วล้มที่ข้อความ
+      // "ไม่มี kong access line" (two-way ทิศนี้)
+      await expect(
+        settleScenario(flie, "guard-r8-fabricated-clf0-must-refuse-fail-closed", () =>
+          scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
+      ).rejects.toThrow(/ไม่มีหลักฐาน terminal ของ upstream ที่ผูก invocation/);
+      expect(await invStatusFake(), "ปฏิเสธแล้ว invocation ต้องคง 'running' ให้ audit จับ").toBe("running");
+
+      // ปิด poisoned + เคลียร์มือตาม limitation 5 (negative fixture teardown —
+      // invocation ปลอมไม่มีทาง settle จริง) เพื่อไม่ทิ้ง poisoned ค้างให้
+      // audit-it --expect-clean ของ battery ล้ม
+      await invocationClose(fakeId, opKey, "poisoned", {
+        decision: "settle-refused-no-upstream-terminal-clf0",
+        settledAs: "settle-refused-no-upstream-terminal-clf0",
+      });
+      expect(await invStatusFake()).toBe("poisoned");
+      await manualClearPoison(opKey, "m1r8 negative fixture teardown — พิสูจน์ fail-closed ครบแล้ว (guard r8)");
+      expect(await invStatusFake()).toBe("cleared-manual");
+    } finally {
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r8: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
+    }
+  }, 120_000);
 });

@@ -607,6 +607,72 @@ async function restStartedAfter(iso: string): Promise<boolean> {
   });
 }
 
+async function dbStartedAfter(iso: string): Promise<boolean> {
+  const child = spawn("docker", ["inspect", "--format", "{{.State.StartedAt}}", "ltc-dev-db"], { cwd: REPO_ROOT });
+  return await new Promise<boolean>((resolve) => {
+    let out = "";
+    child.stdout.on("data", (c: Buffer) => {
+      out += String(c);
+    });
+    child.on("close", () => {
+      const started = out.trim();
+      resolve(started !== "" && started !== "unknown" && new Date(started).getTime() > new Date(iso).getTime());
+    });
+    child.on("error", () => resolve(false));
+  });
+}
+
+export interface DbErrorEvidenceResult {
+  readonly matches: number;
+  readonly blocks: string[];
+  readonly dbRestartedInWindow: boolean;
+}
+
+/**
+ * db error-block fence (gate waveh-r8 M1 — fence v6): หา "error block ของ db ที่
+ * ผูก invocation รายตัว" ในหน้าต่างตั้งแต่ cursor — รูปจริงของ stack (probe
+ * 2026-09-15 `.omc/artifacts/probe-p0002-run2.log`): P0002-raise ข้อความไทยที่
+ * gateway ตัดขาคอร์ด = rest ไม่เขียน CLF line เลย แต่ db container log มี block
+ *   ERROR:  <ข้อความไทย (ERR-…|…)>
+ *   CONTEXT:  PL/pgSQL function <rpc>(…) line N at RAISE
+ *   	unnamed portal with parameters: $1 = '{"p_job_id":"…","p_request_id":"…",…}'
+ *   STATEMENT:  WITH pgrst_source AS (… "<rpc>"(…) …)
+ * เมื่อ log_parameter_max_length_on_error=-1 (ตั้งใน command ของ db ใน
+ * docker-compose.yml) — parameters line คือหมุดผูก invocation เดียวที่พิสูจน์
+ * ได้: PostgREST v12 ส่ง body ทั้งก้อนเป็น bind $1 (ไม่มี arg literal ใน STATEMENT)
+ * · การจับคู่ = parameters line ที่มี "p_request_id":"<requestRef>" เป๊ะ และภายใน
+ * 8 แถวก่อนหน้ามีทั้ง ERROR: และชื่อ RPC (CONTEXT/STATEMENT) · หน้าต่างอ่านด้วย
+ * --since cursor-1s (กิน clock skew host↔container — บัฟเฟอร์ log ทั้งก้อนแพง
+ * เกินต่อ iteration) · db restart ใน window = หลักฐานขาดความต่อเนื่อง = ปฏิเสธ
+ */
+export async function dbErrorEvidenceFence(
+  capturedAt: string,
+  probe: { rpcName: string; requestRef: string },
+): Promise<DbErrorEvidenceResult> {
+  const sinceIso = new Date(Date.parse(capturedAt) - 1_000).toISOString();
+  const logs = await dockerCompose(["logs", "db", "--no-color", "--timestamps", "--since", sinceIso]);
+  if (logs.code !== 0) {
+    throw new Error(`dbErrorEvidenceFence: docker compose logs db failed: ${logs.stderr.slice(0, 200)}`);
+  }
+  const lines = logs.stdout.split("\n").filter((l) => l.trim().length > 0);
+  const refNeedle = `"p_request_id":"${probe.requestRef}"`;
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const ln = lines[i];
+    if (ln === undefined || !ln.includes("portal with parameters:") || !ln.includes(refNeedle)) continue;
+    const blockStart = Math.max(0, i - 8);
+    const block = lines.slice(blockStart, i + 1);
+    if (block.some((l) => l.includes(" ERROR: ")) && block.some((l) => l.includes(probe.rpcName))) {
+      blocks.push(block.join("\n"));
+    }
+  }
+  return {
+    matches: blocks.length,
+    blocks,
+    dbRestartedInWindow: await dbStartedAfter(sinceIso),
+  };
+}
+
 /**
  * ตัดสิน kong-path 500 (r26-r30): มีสิทธิ์ evidence-settle เฉพาะ op ที่อยู่ใน
  * EVIDENCE_SETTLE_MANIFEST เท่านั้น — เขียนมือลอยไม่มีสิทธิ์ (limitation 22) ·

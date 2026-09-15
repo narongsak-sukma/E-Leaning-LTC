@@ -17,10 +17,16 @@ services:
     image: supabase/postgres:15.8.1.060
     container_name: ltc-dev-db
     restart: unless-stopped
+    # log_parameter_max_length_on_error=-1: พิมพ์ bind parameters เต็มใน error log
+    # ของ db — fence v6 (gate waveh-r8 M1) ใช้ parameters line ($1 JSON มี p_request_id)
+    # เป็นหมุดผูก invocation ของ error block — ค่าเดียวกันถูกตั้งใน volume ปัจจุบัน
+    # ด้วย ALTER SYSTEM แล้ว รายการ command นี้ทำให้ fresh checkout ได้ค่าเดียวกัน
     command:
       - postgres
       - -c
       - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_parameter_max_length_on_error=-1
     environment:
       POSTGRES_HOST: /var/run/postgresql
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env (cp .env.example .env)}
