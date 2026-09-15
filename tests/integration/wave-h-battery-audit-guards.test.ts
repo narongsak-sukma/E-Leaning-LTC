@@ -427,6 +427,77 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(1);
   });
 
+  // ─── r12 (gate waveh-r12 MAJOR): stripSqlDataParts ยังไม่ตรง lexical
+  // structure ของ PostgreSQL สองข้อ — codex transpile-mock จริง: (1) escape
+  // string E'…' ที่ \' ไม่ปิด string → v9 ปิด literal ก่อนตำแหน่งจริง จึงนับ
+  // ชื่อ RPC ใน literal เป็นจุดเรียก และกลืนโค้ดจริงที่ตามมาเข้า string ที่
+  // เปิดผิด (เจ้าของจริงหาย — ทิศ STATEMENT-only) (2) block comment ซ้อนกัน
+  // ได้ → v9 หยุดที่ */ แรก จึงนับชื่อใน outer comment เป็นจุดเรียก — v10
+  // แก้ scanner ตามเอกสาร PG (E-string backslash-escape + นับระดับ comment)
+
+  it("ทิศ ฑ (r12 MAJOR-1): ชื่อ RPC ใน escape string E'…\\'…' → 0 (v9 = 1) · เจ้าของจริงจาก STATEMENT หลัง literal ที่ถูกต้อง = 1 (v9 กลืนหาย)", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1201, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1201, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1201,
+        "STATEMENT",
+        `SELECT E'abc\\' "public"."complete_data_export_job"($1) rest'\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ชื่อใน E'…\\'…' escape string เป็นข้อมูล — \\' ไม่ปิด string (PG lexical structure · r12: v9 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "เจ้าของจริง (FROM หลัง literal ปิดที่ quote จริง) ต้อง match",
+    ).toHaveLength(1);
+    // ทิศ STATEMENT-only (ไร้ CONTEXT — STATEMENT เป็นแหล่งชื่อเดียว): v9 เปิด
+    // string ผิดที่ \\' แล้วกลืน FROM ของเจ้าของเข้า string ที่เปิดตามมา = 0 —
+    // v10 ต้องกู้เจ้าของจริงคืนได้ (1) โดยชื่อปลอมยัง 0
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: ชื่อเจ้าของมาจาก STATEMENT เท่านั้น — v9 กลืนหาย (r12 ตารางผลตรวจซ้ำ: 1 → 0)",
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+    ).toHaveLength(0);
+  });
+
+  it("ทิศ ฒ (r12 MAJOR-2): ชื่อ RPC ใน block comment ซ้อน → 0 (v9 = 1) · จุดเรียกจริงหลัง comment ที่ปิดครบทุกระดับ = 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1202, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1202, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1202,
+        "STATEMENT",
+        `SELECT 1 /* outer /* inner */\n"public"."complete_data_export_job"($1) */\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "comment ของ PG ซ้อนกันได้ — ชื่อใน outer comment (หลัง */ ของ inner) เป็นข้อมูล (r12: v9 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "จุดเรียกจริงนอก comment = เจ้าของจริงต้องผ่าน",
+    ).toHaveLength(1);
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: STATEMENT เพียงแหล่งเดียวก็ต้องได้เจ้าของจริง",
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+    ).toHaveLength(0);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน

@@ -119,16 +119,45 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
 /**
  * ตัดส่วนที่ "เป็นข้อมูล ไม่ใช่โครงสร้างคำสั่ง" ออกจาก SQL ของ STATEMENT
  * (v9): string literal `'…'` (รวม escape `''`) · dollar-quoted string
- * `$tag$…$tag$` · line comment `--…` · block comment `/*…*\/` — แทนที่ด้วย
- * ช่องว่างคั่น · ชื่อ RPC ที่หลบอยู่ในส่วนเหล่านี้ไม่ถูกนับเป็นจุดเรียก
- * RPC (r11 MAJOR-3: `"public"."<rpc>("(` ใน literal/comment = ข้อมูล ไม่ใช่
+ * `$tag$…$tag$` · line comment `--…` · block comment — แทนที่ด้วยช่องว่าง
+ * คั่น · ชื่อ RPC ที่หลบอยู่ในส่วนเหล่านี้ไม่ถูกนับเป็นจุดเรียก RPC
+ * (r11 MAJOR-3: `"public"."<rpc>("(` ใน literal/comment = ข้อมูล ไม่ใช่
  * การเรียก) · ชื่อที่อยู่นอกส่วนตัดคือโครงสร้างคำสั่งจริง
+ * (v10): ตาม lexical structure ของ PostgreSQL จริงสองข้อ (r12 พิสูจน์
+ * ด้วย transpile-mock ว่า v9 หลุดทั้งคู่): (1) escape string `E'…'` —
+ * backslash เป็น escape ภายใน (`\'` ไม่ปิด string · `\\` เป็น backslash
+ * เดียว) ต่างจาก `'…'` ธรรมดาที่ `''` เป็นทางเดียว (2) block comment
+ * ซ้อนกันได้ — `/* a /* b *\/ c *\/` ปิดที่ `*\/` ตัวที่ทำให้ระดับกลับเป็น
+ * ศูนย์ ไม่ใช่ตัวแรก
  */
 function stripSqlDataParts(sql: string): string {
   let out = "";
   let i = 0;
   while (i < sql.length) {
     const ch = sql[i];
+    // escape string E'…' / e'…': backslash-escape ใช้ได้เฉพาะรูปนี้ (PG docs
+    // lexical structure) — `'…'` ธรรมดาไม่ยกเว้น backslash (การอ่านเกิน
+    // จะกลืนโค้ดจริงที่ตามมา = ทิศ over-reject ที่เลี่ยงไว้)
+    if ((ch === "E" || ch === "e") && sql[i + 1] === "'") {
+      i += 2;
+      while (i < sql.length) {
+        if (sql[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      out += " ";
+      continue;
+    }
     if (ch === "'") {
       i += 1;
       while (i < sql.length) {
@@ -151,9 +180,22 @@ function stripSqlDataParts(sql: string): string {
       continue;
     }
     if (ch === "/" && sql[i + 1] === "*") {
+      // block comment ซ้อนกันได้: นับระดับ — ปิดเมื่อระดับกลับเป็นศูนย์
+      let depth = 1;
       i += 2;
-      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i += 1;
-      i = Math.min(sql.length, i + 2);
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === "/" && sql[i + 1] === "*") {
+          depth += 1;
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          depth -= 1;
+          i += 2;
+          continue;
+        }
+        i += 1;
+      }
       out += " ";
       continue;
     }
