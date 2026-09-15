@@ -181,13 +181,19 @@ describe("M4 · battery-run health ล้มห้ามปล่อย e2e แ�
 // มี `[PID] user@db LEVEL:` ทุกข้อความของ Postgres · แถวต่อ (parameters) tab-indent
 // ไร้ header · ทิศสกปรกหลัก = scenario ที่ codex ใช้พิสูจน์ v6 หลอก (matches=1):
 // block ของ complete_data_export_job (ref อื่น) ตามด้วย block ของ RPC อื่นที่ถือ
-// ref เป้าหมาย — v6 ยืม "ERROR + STATEMENT ชื่อ RPC" จากสองก้อน · v7 ต้องปฏิเสธ
-describe("M1 (waveh-r9) · db error-block parser ผูกหลักฐานจาก record เดียว (two-way บน input จำลองรูป log จริง)", () => {
+// ref เป้าหมาย — v6 ยืม "ERROR + STATEMENT ชื่อ RPC" จากสองก้อน · v7 ต้องปฏิเสธ ·
+// r10 เพิ่ม 3 กรณี false-positive ของ v7 (ref/RPC จากข้อความ ERROR หรือค่า
+// p_reason ของ bind — codex transpile-mock ได้ matches=1 ทั้งสาม) → v8 ต้อง
+// ปฏิเสธทั้งหมดโดย genuine ยังผ่านทั้งรูปมี STATEMENT และรูป live ไร้ STATEMENT
+describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐานจาก record เดียวและแหล่งที่ถูกต้อง (two-way บน input จำลองรูป log จริง)", () => {
   const hdr = (pid: number, level: string, msg: string) =>
     `ltc-dev-db  | 2026-09-15T14:13:43.947396879Z 172.20.0.6 2026-09-15 14:13:43.947 UTC [${pid}] authenticator@postgres ${level}:  ${msg}`;
   const cont = (msg: string) => `\t${msg}`;
   const params = (ref: string) =>
     cont(`unnamed portal with parameters: $1 = '{"p_job_id":"00000000-0000-4000-8000-000000000942","p_request_id":"${ref}"}'`);
+  /** bind $1 ค่า JSON ใด ๆ (r10: พิสูจน์การอ่าน field จากค่าที่ parse ได้ ไม่ใช่การ grep ข้อความ) */
+  const paramsJson = (value: unknown) =>
+    cont(`unnamed portal with parameters: $1 = '${JSON.stringify(value)}'`);
 
   it("ทิศ ก: block จริง (ERROR+CONTEXT+parameters+STATEMENT record เดียว) → match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
@@ -265,6 +271,91 @@ describe("M1 (waveh-r9) · db error-block parser ผูกหลักฐาน�
     expect(m2[0]?.lines.join("\n")).toContain('"p_request_id":"ref-2"');
     expect(m2[0]?.lines.join("\n")).not.toContain('"p_request_id":"ref-1"');
   });
+
+  // ─── r10 (gate waveh-r10 M1): v7 ยัง includes() ทุกแถวของ record จึงรับ
+  // "ข้อความธรรมดา" เป็นหลักฐาน ref/RPC ได้ 3 กรณี (codex พิสูจน์ด้วย
+  // transpile-mock จริง: ทั้งสามกรณี v7 ได้ matches=1) — v8 ต้องปฏิเสธทั้งหมด:
+  // ref มาจาก field p_request_id ของ bind ที่ parse ได้เท่านั้น · ชื่อ RPC มาจาก
+  // บรรทัด CONTEXT/STATEMENT ของ record เท่านั้น (ไม่ใช่ข้อความ ERROR / ค่า param)
+
+  it("ทิศ จ (r10 กรณี 3): ERROR ฝัง ref/RPC เป้าหมายในข้อความ แต่ไร้ bind parameters → 0 (v7 = 1)", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const spoof = JSON.stringify({ p_request_id: "ref-x", rpc: "complete_data_export_job" });
+    const lines = [
+      hdr(202, "ERROR", `invalid input syntax for type uuid: "${spoof}"`),
+      hdr(202, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      hdr(202, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."complete_data_export_job"(...) ...)'),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ไร้ bind parameters = ไร้หมุดผูก invocation — ข้อความ ERROR ที่สะท้อนค่าข้อมูลไม่ใช่หลักฐาน (r10: v7 ได้ 1)",
+    ).toHaveLength(0);
+  });
+
+  it("ทิศ ฉ (r10 กรณี 4 — ตัวอย่างของ codex): ERROR สะท้อน ref/RPC เป้าหมาย แต่ bind จริง (รูป header CONTEXT) ถือ ref อื่น และ STATEMENT เรียก RPC อื่น → 0 (v7 = 1) · เจ้าของจริงยัง match 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const spoof = JSON.stringify({ p_request_id: "ref-x", rpc: "complete_data_export_job" });
+    const lines = [
+      hdr(202, "ERROR", `invalid input syntax for type uuid: "${spoof}"`),
+      // รูป parameters ใน header CONTEXT (จับจริงจาก container 2026-09-14:
+      // "CONTEXT:  unnamed portal parameter $1 = '…'" ไร้โคลอน) — bind จริงถือ ref อื่น
+      hdr(
+        202,
+        "CONTEXT",
+        `unnamed portal parameter $1 = '${JSON.stringify({
+          p_user_id: spoof,
+          p_role: "instructor",
+          p_reason: "m1r10-guard",
+          p_request_id: "ref-other",
+        })}'`,
+      ),
+      hdr(202, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."admin_revoke_role"(...) ...)'),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ref-x อยู่ในข้อความ ERROR เท่านั้น ไม่ใช่ field p_request_id ของ bind จริง (r10: v7 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-other" }),
+      "เจ้าของจริงของ record (bind ถือ ref-other + STATEMENT เรียก admin_revoke_role) ยังต้อง match — ไม่ over-reject",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ช (r10 กรณี 5): ชื่อ RPC เป้าหมายอยู่เฉพาะในค่า p_reason ของ bind parameters → 0 (v7 = 1) · RPC จริงของ record ยัง match 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(202, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(202, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      paramsJson({ p_request_id: "ref-x", p_reason: "โปรดเรียก complete_data_export_job แทน" }),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ชื่อ RPC ในค่า p_reason เป็นข้อมูล ไม่ใช่โครงสร้างของ record — ต้องมาจาก CONTEXT/STATEMENT เท่านั้น (r10: v7 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "record เดียวกัน: bind ถือ ref-x เป๊ะ + CONTEXT ระบุ admin_revoke_role = ของจริงต้องผ่าน",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน
+    // PostgREST มี ERROR + CONTEXT(PL/pgSQL function) + parameters ไร้ header
+    // เท่านั้น — v8 ห้าม over-reject เพราะไม่บังคับ STATEMENT (ชื่อ RPC มาจาก
+    // CONTEXT ของ plpgsql ได้)
+    const lines = [
+      hdr(1452373, "ERROR", "ไม่พบงานส่งออกที่กำลังดำเนินการตามรหัสนี้ (ERR-NF-001|job_not_processing)"),
+      hdr(1452373, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 15 at RAISE"),
+      params("probe-p0002-req-1"),
+    ];
+    const m = matchDbErrorBlocks(lines, {
+      rpcName: "complete_data_export_job",
+      requestRef: "probe-p0002-req-1",
+    });
+    expect(m, "genuine รูป live (ไร้ STATEMENT) ต้องผ่าน — v8 อ่านชื่อ RPC จาก CONTEXT ของ plpgsql").toHaveLength(1);
+    expect(m[0]?.pid).toBe(1452373);
+  });
 });
 
 // ─── M1 (gate waveh-r2): settleScenario ปฏิเสธเมื่อ probe terminal ล้ม ─────────
@@ -330,8 +421,19 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
   //    ทั้ง D1/D2 ผ่าน ไม่ทิ้ง running ค้าง
   it("request เดิมค้างก่อนถึงตารางเป้าหมาย = ปฏิเสธ settle ด้วยขา activity (ช่องว่าง lock-only ของ waveh-r3 M1)", async ({ skip }) => {
     if (DB_URL === undefined) skip();
-    const { restCall, settleScenario, tableTerminalProbe, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } =
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const { REPO_ROOT, restCall, settleScenario, tableTerminalProbe, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } =
       await import("./helpers");
+    // หยุด mailer กัน phantom ของ busy-count รายชื่อ RPC: dev worker ยิง
+    // complete_data_export_job เองเป็นรอบ (~15-30s · ตรวจจริง 2026-09-15: PID
+    // เดียวยิงซ้ำ และบล็อกบน lock ของเทสจนโดน role bounds ตัด) — busyCount กรอง
+    // ด้วยชื่อ RPC จึงไม่แยก backend ของเทสกับของ worker (pattern M1-r7/8/9 ·
+    // เจอจริง guards rerun รอบ r20 ที่ M1-r4)
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
     const dispatchBody = () => ({
       p_job_id: "00000000-0000-4000-8000-0000000000f3", // job ไม่มีอยู่ → P0002 opaque 500
       p_file_media_id: "00000000-0000-4000-8000-0000000000f4",
@@ -401,6 +503,9 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     } finally {
       await session.exec("rollback;");
       await session.end();
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r3: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
     }
   }, 120_000);
 
@@ -417,8 +522,17 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
   // snapshot ใหม่หลังงานจบจริง และ (4) settle
   it("invocation เดียว: client จบ (abort) ขณะ backend ค้างก่อนตาราง = ปฏิเสธ settle · ยกเลิกโดย lock_timeout (nonce-CLF) + snapshot ใหม่ → settle ผ่าน (waveh-r4 M1)", async ({ skip }) => {
     if (DB_URL === undefined) skip();
-    const { settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } = await import("./helpers");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const { REPO_ROOT, settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } = await import("./helpers");
     const { httpWrite, startPsqlSession } = await import("./test-io");
+    // หยุด mailer กัน phantom ของ busy-count (pattern M1-r7/8/9 · เจอจริง guards
+    // rerun r20 ที่ M1-r4 นี้เอง: backend ของ worker ค้าง lock อยู่ในนาม RPC เดียว
+    // กับของเทส ทำให้ assert "backend ยัง active หลัง abort" นับตัวผิด)
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
     const jobId = "00000000-0000-4000-8000-0000000000f5"; // ไม่มีอยู่ → P0002 เมื่อได้วิ่ง
     const invocationId = crypto.randomUUID();
     const invStatus = () =>
@@ -524,6 +638,9 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     } finally {
       await session.exec("rollback;");
       await session.end();
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r4: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
     }
   }, 90_000);
 
@@ -538,9 +655,18 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
   // status 500) แต่ settle อ้าง status 502 = หลักฐานไม่ผูกกับ invocation = ปฏิเสธ
   it("response-in-hand ขณะงานอื่นของ RPC เดียวกันยังค้าง = ปฏิเสธ settle · งานจบ + snapshot ใหม่ = ผ่าน · อ้าง status ไม่ตรง kong line = ปฏิเสธ (waveh-r5 M1)", async ({ skip }) => {
     if (DB_URL === undefined) skip();
-    const { restCall, settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } =
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const { REPO_ROOT, restCall, settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } =
       await import("./helpers");
     const { httpWrite, startPsqlSession } = await import("./test-io");
+    // หยุด mailer กัน phantom ของ busy-count รายชื่อ RPC (pattern M1-r7/8/9 ·
+    // กลไกเดียวกับที่เจอจริงที่ M1-r4 รอบ r20 — busyCount ไม่แยก backend ของ
+    // เทสกับ dev worker ที่ยิง RPC เดียวกันเป็นรอบ)
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
     const jobId = "00000000-0000-4000-8000-0000000000f7"; // ไม่มีอยู่ → P0002 opaque 500
     const dispatchBody = () => ({
       p_job_id: jobId,
@@ -623,6 +749,9 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     } finally {
       await session.exec("rollback;");
       await session.end();
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r5: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
     }
 
     // ทิศสกปรกของ fence เอง: D3 จบจริง (kong line status 500 หนึ่งแถว) แต่ settle
@@ -658,9 +787,18 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
   // มาถึง (500 opaque) → ปล่อย blocker → settle ผ่านครบทุกขา + snapshot ใหม่
   it("invocation เดียว: response-in-hand ขณะ upstream ของตัวเองยังค้าง = fence ปฏิเสธเอง (probe ผ่าน) · lock_timeout ตัดจริง ~8s (effective) → settle จริงผ่าน + snapshot ใหม่ (waveh-r6 M1)", async ({ skip }) => {
     if (DB_URL === undefined) skip();
-    const { settleScenario, scenarioTerminalProbe, tableTerminalProbe, psqlScalar, SERVICE_KEY } =
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const { REPO_ROOT, settleScenario, scenarioTerminalProbe, tableTerminalProbe, psqlScalar, SERVICE_KEY } =
       await import("./helpers");
     const { httpWrite, startPsqlSession } = await import("./test-io");
+    // หยุด mailer กัน phantom ของ busy-count รายชื่อ RPC (pattern M1-r7/8/9 ·
+    // กลไกเดียวกับที่เจอจริงที่ M1-r4 รอบ r20 — busyCount ไม่แยก backend ของ
+    // เทสกับ dev worker ที่ยิง RPC เดียวกันเป็นรอบ)
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
     const jobId = "00000000-0000-4000-8000-0000000000fb"; // ไม่มีอยู่ → P0002 เมื่อได้วิ่ง
     const requestRef = crypto.randomUUID(); // หมุดผูก activity ราย invocation (r5)
     const invocationId = crypto.randomUUID();
@@ -794,6 +932,9 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     } finally {
       await session.exec("rollback;");
       await session.end();
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r6: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
     }
   }, 120_000);
 
@@ -985,10 +1126,19 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
         invocationId: invocationIdX,
         opKey: "rpc:complete_data_export_job:POST",
       } as const;
+      // การปฏิเสธ dirty settle นี้เกิดที่ขา "เห็น statement ของ RPC นี้" สองรูป
+      // ตามจังหวะแข่งจริง: holders 10 ตัวเริ่ม statement ไม่พร้อมกัน (ต่างรอ pool)
+      // ช่วงที่ตัวแรกถูก role bounds ตัด (~8s นับจากตัวแรกเริ่ม ไม่ใช่จาก busy=10
+      // ครบ) อาจตรงกับหลัง busy=0 assert พอดี — X ได้ slot "ก่อน" settle เข้า fence
+      // (ขา fail-fast "ยังรันอยู่" helpers.ts:418 — เกิดจริง battery r19) หรือ
+      // "ระหว่าง" หน้าต่างเฝ้า CLF (ขา in-poll helpers.ts:391 — เกิดจริง r13-r18) ·
+      // สองขาพิสูจน์สิ่งเดียวกัน: fence เห็น statement ที่เพิ่งเริ่ม = ไม่ terminal ·
+      // ถ้าถอนขา in-poll ออก จังหวะกลางหน้าต่างจะหล่นไปขา fail-closed CLF=0 ของ
+      // r8 (ข้อความอื่น) = เทสล้มอยู่ดี — regex จึงรับเฉพาะสองข้อความนี้
       await expect(
         settleScenario(xlie, "guard-r7-queued-request-must-refuse-when-it-starts", () =>
           scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
-      ).rejects.toThrow(/เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF/);
+      ).rejects.toThrow(/เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF|statement ของ invocation นี้ยังรันอยู่/);
       expect(await invStatusX()).toBe("running");
       await busyWatchX;
       expect(
