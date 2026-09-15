@@ -375,17 +375,22 @@ describe.skipIf(!DB_URL)(
       }, { settleMode: "scenario" });
       expect(again.status, again.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
       expect(again.json, "P0002 ผ่าน gateway ต้องไม่กลายเป็น 200 เงียบ").toBeNull();
-      // หลักฐานของผู้เรียก: งานยัง done + file_media_id เดิม (ไม่มีอะไรเปลี่ยน)
-      expect(
-        await psqlScalar(`select status::text from public.data_export_jobs where id = '${jobId}';`),
-      ).toBe("done");
-      expect(
-        await psqlScalar(`select file_media_id::text from public.data_export_jobs where id = '${jobId}';`),
-      ).toBe(E16_MEDIA_DONE);
-      // probe terminal (gate waveh-r2 M1 + r3 M1): lock ตารางงาน + ไม่มี backend
-      // ยังรัน RPC นี้อยู่ = invocation จบจริง (จับได้แม้ค้างก่อนถึงตาราง)
-      await settleScenario(again, "job-row-still-done(file-media-intact)", () =>
-        scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"));
+      // probe terminal (r2/r3 M1) + upstream-terminal ผูก nonce (r4 M1) ผ่านก่อน —
+      // แล้วจึงอ่าน-assert snapshot "ใหม่" (r4 M1: อ่านก่อน terminal ยืนยัน = race
+      // อาจได้ของเก่าขณะ backend ยังมีชีวิต): งานยัง done + file_media_id เดิม
+      await settleScenario(
+        again,
+        "job-row-still-done(file-media-intact)",
+        () => scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(`select status::text from public.data_export_jobs where id = '${jobId}';`),
+          ).toBe("done");
+          expect(
+            await psqlScalar(`select file_media_id::text from public.data_export_jobs where id = '${jobId}';`),
+          ).toBe(E16_MEDIA_DONE);
+        },
+      );
     }, 45_000);
 
     // ─── เคส d: fail path — failed + error + completed_at ──────────────────────
@@ -448,20 +453,24 @@ describe.skipIf(!DB_URL)(
       expect(failed.json, "P0002 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
       expect(failed.text).not.toContain("ERR-");
       expect(failed.text).not.toContain("job_not_processing");
-      // P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวงานคงสภาพเดิมทุกคอลัมน์
-      expect(
-        await psqlScalar(
-          `select to_jsonb(j)::text from public.data_export_jobs j where id = '${jobId}';`,
-        ),
-      ).toBe(before);
-      const statusAfter = await psqlScalar(`
-        select status::text from public.data_export_jobs where id = '${jobId}';
-      `);
-      expect(statusAfter).toBe("pending");
-      // หลักฐานของผู้เรียกครบแล้ว (แถว byte-identical + สถานะ pending) → settle เอง
-      // พร้อม probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือตารางงาน
-      await settleScenario(failed, "job-row-byte-identical(status-pending)", () =>
-        scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"));
+      // terminal ยืนยันก่อน (probe r2/r3 + nonce-CLF r4) แล้วจึงอ่าน-assert snapshot
+      // "ใหม่" (r4 M1): P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวงานคงสภาพ
+      // เดิมทุกคอลัมน์ (เทียบกับ before ที่จับก่อน dispatch)
+      await settleScenario(
+        failed,
+        "job-row-byte-identical(status-pending)",
+        () => scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(
+              `select to_jsonb(j)::text from public.data_export_jobs j where id = '${jobId}';`,
+            ),
+          ).toBe(before);
+          expect(
+            await psqlScalar(`select status::text from public.data_export_jobs where id = '${jobId}';`),
+          ).toBe("pending");
+        },
+      );
     }, 45_000);
 
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──

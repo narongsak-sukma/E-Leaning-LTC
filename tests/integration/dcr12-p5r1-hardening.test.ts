@@ -605,17 +605,22 @@ describe.skipIf(!DB_URL)(
       expect(failed.json, "P0002 500 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
       expect(failed.text).not.toContain("ERR-");
       expect(failed.text).not.toContain("role_not_found");
-      // P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวบทบาทคงเดิมทุกค่า
-      expect(
-        await psqlScalar(`
-          select coalesce(jsonb_agg(to_jsonb(ra) order by ra.role), '[]'::jsonb)::text
-            from public.role_assignments ra where ra.user_id = '${revokeUser.id}';
-        `),
-      ).toBe(before);
-      // หลักฐานของผู้เรียกครบแล้ว (aggregate byte-identical) → settle เอง
-      // พร้อม probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือ role_assignments
-      await settleScenario(failed, "role-assignments-byte-identical", () =>
-        scenarioTerminalProbe("public.role_assignments", "admin_revoke_role"));
+      // terminal ยืนยันก่อน (probe r2/r3 + nonce-CLF r4) แล้วจึงอ่าน-assert snapshot
+      // "ใหม่" (r4 M1): P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวบทบาท
+      // คงเดิมทุกค่า (เทียบกับ before ที่จับก่อน dispatch)
+      await settleScenario(
+        failed,
+        "role-assignments-byte-identical",
+        () => scenarioTerminalProbe("public.role_assignments", "admin_revoke_role"),
+        async () => {
+          expect(
+            await psqlScalar(`
+              select coalesce(jsonb_agg(to_jsonb(ra) order by ra.role), '[]'::jsonb)::text
+                from public.role_assignments ra where ra.user_id = '${revokeUser.id}';
+            `),
+          ).toBe(before);
+        },
+      );
     }, 45_000);
 
     // ─── เคส d: SoD re-check ใน TX ของ confirm (B6) ────────────────────────────

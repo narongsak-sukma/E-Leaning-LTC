@@ -15,6 +15,14 @@
  *   (ถูกตารางแรกในทางเดิน RPC บล็อก) มองไม่เห็นด้วย lock-only — scenarioTerminalProbe
  *   เพิ่มขา pg_stat_activity ผูกกับ invocation ของ RPC นั้น · พิสูจน์ด้วย request จริง
  *   ที่ค้างอยู่: settle ต้องถูกปฏิเสธจนกว่า request จะวิ่งจบจริง
+ * M1 (waveh-r4) · probe ต้อง (ก) ถือ lock ตลอดการตรวจ activity (ปล่อยก่อนตรวจ =
+ *   request ที่ยังเข้าคิวจนพ้นรอบสุดท้ายแล้วเริ่มทำงานภายหลังได้) (ข) มีหลักฐาน
+ *   completion ผูกกับ invocation — CLF line ของ ua_nonce หนึ่งแถวพอดี = PostgREST
+ *   serve ครบหนึ่งครั้ง (ตรวจจริง: เขียน line แม้ client abort) (ค) อ่าน snapshot
+ *   "ใหม่" หลัง terminal ยืนยันเท่านั้น (postTerminalAssert) · เคสพิสูจน์ = invocation
+ *   เดียว: client จบด้วย abort ขณะ backend ยังค้างก่อนตาราง (PostgREST ไม่ cancel
+ *   ตาม client — ตรวจจริง) → settle ปฏิเสธ · ปล่อย blocker → งานจบจริง (nonce CLF
+ *   ปรากฏ) → snapshot ใหม่ → settle ผ่าน
  *
  * two-way proof ตาม [[regression-test-two-way-proof]] ระดับฟังก์ชัน: ทิศสกปรก/ล้ม
  * ต้องถูกปฏิเสธ ทิศสะอาด/ผ่านต้องไปต่อ — ผูกกับ audit()/shouldBreakAfter ของ script
@@ -239,6 +247,128 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       expect(await invStatus(d1.invocationId)).toBe("settled");
       await settleScenario(d2res, "guard-pretable-d2-settled", probe);
       expect(await invStatus(d2res.invocationId)).toBe("settled");
+    } finally {
+      await session.exec("rollback;");
+      await session.end();
+    }
+  }, 60_000);
+
+  // ─── M1 (gate waveh-r4): invocation เดียว — client จบแล้วแต่ backend ยังค้าง ────
+  // รูปเคสที่ r4 สั่ง (ต่างจาก r3 ที่ settle D1 ขณะ D2 ค้าง): invocation เดียว
+  // ที่ "client ได้จบฝั่งตัวเองแล้ว" (abort ที่ 1s) ขณะ backend ของ invocation นั้น
+  // ยังค้างอยู่ก่อนตารางเป้าหมาย (ติด lock ตารางแรก data_export_jobs) — พิสูจน์ด้วย
+  // pg_stat_activity จริง · ผ่าน stack จริง: PostgREST ไม่ cancel query ตาม client
+  // ที่หายไป (วัดจริง: backend ยัง active หลัง abort) และถูกตัดโดย lock_timeout=8s
+  // ของ role authenticator (ขอบเขตตามจริง) · settle ต้องปฏิเสธขณะงานยังไม่จบ
+  // และผ่านก็ต่อเมื่อ (1) probe terminal (2) CLF line ของ nonce หนึ่งแถวพอดี
+  // (= PostgREST serve ครบหนึ่งครั้ง — completion ผูกกับ invocation นี้) แล้วจึง
+  // (3) อ่าน snapshot ใหม่หลังงานจบจริง และ (4) settle
+  it("invocation เดียว: client จบ (abort) ขณะ backend ค้างก่อนตาราง = ปฏิเสธ settle · ปล่อยแล้ว nonce-CLF + snapshot ใหม่ → settle ผ่าน (waveh-r4 M1)", async ({ skip }) => {
+    if (DB_URL === undefined) skip();
+    const { settleScenario, scenarioTerminalProbe, psqlScalar, SERVICE_KEY } = await import("./helpers");
+    const { httpWrite, startPsqlSession } = await import("./test-io");
+    const jobId = "00000000-0000-4000-8000-0000000000f5"; // ไม่มีอยู่ → P0002 เมื่อได้วิ่ง
+    const invocationId = crypto.randomUUID();
+    const invStatus = () =>
+      psqlScalar(`
+        select payload ->> 'status' from test_infra.lifecycle_ledger
+         where kind = 'invocation' and invocation_id = '${invocationId}'
+         order by ts desc, id desc limit 1;`);
+    const busyCount = () =>
+      psqlScalar(`
+        select count(*)::text from pg_stat_activity
+         where query like '%complete_data_export_job%'
+           and state in ('active', 'idle in transaction')
+           and pid <> pg_backend_pid();`);
+    const probe = () => scenarioTerminalProbe("public.event_outbox", "complete_data_export_job");
+    const resStub = {
+      status: -1,
+      json: null,
+      text: "",
+      invocationId,
+      opKey: "rpc:complete_data_export_job:POST",
+    } as const;
+
+    const session = await startPsqlSession("scenario-guard-abort-holder");
+    const abort = new AbortController();
+    try {
+      await session.exec("begin;");
+      await session.exec("lock table public.data_export_jobs in access exclusive mode;");
+      // dispatch จริงผ่าน transport กลาง (invocationId เรากำหนด — abort จะโยน error
+      // ไม่มี res กลับมา จึงต้องรู้ id ล่วงหน้า) — ยังไม่ abort: รอหลักฐานว่า backend
+      // ของ invocation นี้ขึ้นจริงและติด lock ตารางแรก (ก่อนตารางเป้าหมาย) เสียก่อน
+      const dispatch = httpWrite(
+        "POST",
+        "/rest/v1/rpc/complete_data_export_job",
+        {
+          p_job_id: jobId,
+          p_file_media_id: "00000000-0000-4000-8000-0000000000f6",
+          p_chunks: 1,
+          p_request_id: crypto.randomUUID(),
+          p_claim_token: crypto.randomUUID(),
+        },
+        {
+          apiKey: SERVICE_KEY,
+          token: SERVICE_KEY,
+          settleMode: "scenario",
+          invocationId,
+          label: "m1r4-abort",
+          signal: abort.signal,
+        },
+      );
+      let busy = "0";
+      for (let i = 0; i < 50 && busy === "0"; i += 1) {
+        busy = await busyCount();
+        if (busy === "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(busy, "backend ของ invocation นี้ต้องขึ้นจริงและติด lock ตารางแรก").toBe("1");
+      // client จบตอนนี้ (abort หลังเห็น backend ค้าง — ไม่ใช่ตามนาฬิกา) · งานติด lock
+      // อยู่ ≥ อีก ~6s (lock_timeout 8s) การ abort จึงตกช่วง "backend ยังค้าง" แน่นอน
+      abort.abort();
+      let clientErr: unknown;
+      try {
+        await dispatch;
+      } catch (err) {
+        clientErr = err;
+      }
+      expect(String(clientErr), "client ต้องจบด้วย abort error").toMatch(/abort/i);
+      // backend ยังค้างต่อแม้ client จบแล้ว (ตรวจจริง: PostgREST ไม่ cancel ตาม client)
+      expect(await busyCount(), "backend ต้องยัง active หลัง client abort").toBe("1");
+      expect(await invStatus()).toBe("running");
+
+      // settle ขณะงานยังไม่จบ = ปฏิเสธ (probe โยนก่อนขาอื่น) — invocation ยัง 'running'
+      await expect(
+        settleScenario(resStub, "guard-r4-must-refuse-while-hung", probe),
+      ).rejects.toThrow(/ยังรัน complete_data_export_job อยู่/);
+      expect(await invStatus()).toBe("running");
+
+      // ไม่ปล่อย blocker — ปล่อยให้กลไกจริงของ stack ตัดงานเอง: lock_timeout=8s ของ
+      // role authenticator ยกเลิก statement (57014) → PostgREST serve ครบ = CLF line
+      // 500 พร้อม nonce ปรากฏ (cancellation evidence ผูกกับ invocation นี้ — ตรวจจริง:
+      // line ของ P0002-raise ข้อความไทยถูก gateway ตัดไม่มี line เลย ส่วน line ของ
+      // 57014 cancel มีเสมอ) · poll จน backend จบ (มีขอบเขต 8s เสมอ) — ตลอดช่วงนี้
+      // blocker ยังถือ lock อยู่ = การยกเลิกเกิดจาก stack เอง ไม่ใช่เพราะเราปล่อย
+      for (let i = 0; i < 120 && busy !== "0"; i += 1) {
+        busy = await busyCount();
+        if (busy !== "0") await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(busy, "backend ต้องถูก lock_timeout ตัดเองภายใน ~8s").toBe("0");
+
+      // การยกเลิกพิสูจน์แล้ว (busy=0 ขณะ lock ยังถูกถือ) — ปล่อย holder เพื่อให้อ่าน
+      // snapshot ของตารางที่มันถือไว้ได้: ปล่อยตรงนี้ไม่สร้างงานใหม่ (request เดียวของ
+      // invocation นี้ถูกยกเลิกไปแล้ว CLF line เขียนแล้ว · dispatch ถูก abort ฝั่ง
+      // client · manifest singleDispatch) — settle#2 พิสูจน์ terminal ซ้ำทุกขาหลังจากนี้
+      await session.exec("rollback;");
+
+      // terminal ยืนยันครบแล้ว (probe + nonce-CLF cancellation line) → snapshot
+      // "ใหม่" อ่านหลังงานจบจริง (r4 ข้อ ค) → settle ผ่าน
+      await settleScenario(resStub, "guard-r4-terminal-proven(nonce-clf+probe)", probe, async () => {
+        expect(
+          await psqlScalar(`select count(*)::text from public.data_export_jobs where id = '${jobId}';`),
+          "งานไม่มีอยู่จริงต้องไม่ถูกสร้าง (statement ถูกยกเลิกก่อนแตะข้อมูล)",
+        ).toBe("0");
+      });
+      expect(await invStatus()).toBe("settled");
     } finally {
       await session.exec("rollback;");
       await session.end();

@@ -156,22 +156,35 @@ export async function restCall(
 }
 
 /** ปิด invocation ของ dispatch แบบ settleMode:"scenario" — ผู้เรียกเป็นคน settle
- * เองด้วยหลักฐาน terminal ที่ตัวเทสพิสูจน์ (เช่น snapshot DB ไม่เปลี่ยนหลัง opaque 500
- * ที่ upstream connection ขาด — ไม่มี rest CLF line ให้ access-log fence ใช้ตัดสิน
- * ตาม kong500Decision → matches===0 จะ poison ทั้งที่เทสถือหลักฐานจริงอยู่)
+ * เองด้วยหลักฐาน terminal ที่ตัวเทสพิสูจน์ (เช่น opaque 500 ที่ไม่มี rest CLF line
+ * ให้ access-log fence ตาม kong500Decision ใช้ตัดสิน — matches===0 จะ poison ทั้งที่
+ * เทสถือหลักฐานจริงอยู่)
  *
- * gate waveh-r2 M1 + r3 M1: หลักฐานต้องพิสูจน์ "backend จบจริง" ไม่ใช่แค่ "ยังไม่เห็น
- * การเปลี่ยน" — snapshot ไม่เปลี่ยนอ่านได้แม้ TX ของ RPC ยังค้างอยู่ (race) และ lock
- * ตารางเป้าหมายอย่างเดียวมองไม่เห็น backend ที่ยังค้าง "ก่อนถึงตาราง" จึงบังคับ
- * terminalProbe ทุกครั้ง (ใช้ scenarioTerminalProbe = lock + pg_stat_activity):
- * probe ล้ม = ปฏิเสธ settle (invocation ค้าง 'running' ให้ audit จับ — fail-loud) ·
- * ต้องเรียกหลัง assert หลักฐานผ่านครบเท่านั้นเช่นกัน */
+ * gate waveh-r2/r3/r4 M1 (สะสม): หลักฐานต้องพิสูจน์ "backend จบจริง" และ "ผูกกับ
+ * invocation นี้" ทั้งคู่ — เรียงภายในเดียว ห้ามสลับ:
+ *  1. probe terminal ก่อน (scenarioTerminalProbe — ขา lock + ขา activity): backend
+ *     ยังรันอยู่ = ปฏิเสธทันที ไม่รอ (fail-loud · invocation คง 'running' ให้ audit จับ)
+ *  2. ขา upstream-terminal ผูกกับ invocation (r4) — บังคับเฉพาะเคส "ไม่มี response
+ *     ถึงมือ caller" (res.status < 0: abort/network): CLF line ของ nonce ต้อง
+ *     ปรากฏ "หนึ่งแถวพอดี" (completion หรือ cancellation — line 500 จาก
+ *     lock_timeout 57014 ก็นับ) = PostgREST serve ครบหนึ่งครั้ง · line ยังไม่ปรากฏ
+ *     = upstream ยังไม่ terminal (request อาจยังค้างในคิว — ห้าม settle) · >1 แถว
+ *     = serve ซ้ำ/กำกวม = ปฏิเสธ · singleDispatch ใน manifest ยืนยันไม่มี dispatch
+ *     ซ้ำของ invocation เดียวกัน = "ไม่มีงานเริ่มตามหลัง" ที่พิสูจน์ได้ใน stack นี้ ·
+ *     เคส "มี response ถึงมือแล้ว" (status ≥ 0) ไม่บังคับ line — response = upstream
+ *     serve จบ (P0002-raise ถูก gateway ตัดหลัง statement จบ — ไม่มี line ตามจริง)
+ *  3. postTerminalAssert (r4): อ่าน-assert snapshot "ใหม่" ตรงนี้เท่านั้น — หลัง
+ *     terminal ยืนยันครบทั้งสองขา (อ่านก่อนขา 2 อาจได้ของเก่าขณะ backend ยัง
+ *     มีชีวิต — race ที่ r4 จับ) · assert ล้ม = invocation คง 'running' (fail-loud)
+ *  4. invocationClose settled — เกิดเมื่อผ่านครบทุกขาเท่านั้น
+ */
 export async function settleScenario(
   res: RestResult,
   evidence: string,
   terminalProbe: () => Promise<void>,
+  postTerminalAssert?: () => Promise<void>,
 ): Promise<void> {
-  const { invocationClose, manifestByOpKey } = await import("./test-io");
+  const { invocationClose, manifestByOpKey, accessLogFenceAnyStatus } = await import("./test-io");
   if (res.invocationId === undefined || res.opKey === undefined) {
     throw new Error(`scenario dispatch ไม่มี invocationId/opKey กลับมา (${evidence})`);
   }
@@ -180,8 +193,65 @@ export async function settleScenario(
   if (manifestByOpKey(res.opKey) === undefined) {
     throw new Error(`scenario settle ปฏิเสธ: opKey ${res.opKey} ไม่อยู่ใน manifest (${evidence})`);
   }
-  // gate waveh-r2 M1: พิสูจน์ terminal ก่อนลงมือเสมอ — probe โยน = ไม่ settle
+  // (1) probe terminal ก่อน — โยน = ไม่ settle (r2/r3)
   await terminalProbe();
+  // (2) upstream-terminal ผูก nonce ของ invocation นี้ (r4) — บังคับเฉพาะเคส
+  // "ไม่มี response ถึงมือ caller" (res.status < 0 เช่น abort/network — caller ไม่มี
+  //หลักฐาน terminal ฝั่งตัวเอง): ต้องเห็น CLF line ของ nonce (ua_nonce ใน UA) หนึ่ง
+  // แถวพอดี = PostgREST serve ครบหนึ่งครั้ง (completion หรือ cancellation — เช่น
+  // line 500 จาก lock_timeout 57014 ก็นับ ตรวจจริง 2026-09-15) · ส่วนเคส "มี response
+  // ถึงมือแล้ว" (status ≥ 0): response = upstream serve จบแล้วตามธรรมชาติของ stack
+  // (แม้ P0002-raise จะถูก gateway ตัดกลางทางจนไม่มี CLF line — ตรวจจริง: RAISE
+  // ข้อความไทย → connection ขาด → Kong สังเคราะห์ 500 เปล่า — การตัดเกิดหลัง
+  // statement จบ) จึงไม่บังคับ line · cursor/nonce อ่านจาก ledger ของ invocation
+  // (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error ไม่มี res กลับมา)
+  const m = /^rpc:([a-z0-9_]+):(POST|PATCH|PUT|DELETE)$/i.exec(res.opKey);
+  if (m !== null && res.status < 0) {
+    const [rpcName, httpMethod] = [m[1] as string, m[2] as string];
+    const [binding] = await psqlRows<{ ua: string | null }>(`
+      select payload -> 'binding' ->> 'uaNonce' as ua
+        from test_infra.lifecycle_ledger
+       where kind = 'invocation' and invocation_id = '${res.invocationId}'
+       order by ts desc limit 1;`);
+    const [attempt] = await psqlRows<{ cursor: { capturedAt: string; lineCount: number; restStartedAt: string } | null }>(`
+      select payload -> 'logCursor' as cursor
+        from test_infra.lifecycle_ledger
+       where kind = 'attempt' and invocation_id = '${res.invocationId}'
+       order by ts desc limit 1;`);
+    if (binding?.ua === null || binding === undefined || attempt?.cursor == null) {
+      throw new Error(
+        `scenario settle ปฏิเสธ: ไม่พบ nonce/logCursor ของ invocation ใน ledger — ไม่มีทางพิสูจน์ upstream terminal (${evidence})`,
+      );
+    }
+    const deadline = Date.now() + 12_000; // ครอบ lock_timeout 8s ของ stack (ตรวจจริง)
+    let fence = { matches: 0, restRestartedInWindow: false };
+    for (;;) {
+      fence = await accessLogFenceAnyStatus(attempt.cursor as { capturedAt: string; lineCount: number; restStartedAt: string }, {
+        uaNonce: binding.ua,
+        method: httpMethod,
+        pathNorm: `/rpc/${rpcName}`,
+      });
+      if (fence.matches > 1) {
+        throw new Error(
+          `scenario settle ปฏิเสธ: CLF line ของ nonce กำกวม (${fence.matches} แถว) — serve ซ้ำ? (${evidence})`,
+        );
+      }
+      if (fence.restRestartedInWindow) {
+        throw new Error(`scenario settle ปฏิเสธ: rest restart ใน window — หลักฐานขาดความต่อเนื่อง (${evidence})`);
+      }
+      if (fence.matches === 1 || Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    if (fence.matches !== 1) {
+      throw new Error(
+        `scenario settle ปฏิเสธ: ไม่มี CLF terminal ของ invocation นี้หลังรอ 12s — upstream ยังไม่จบ (${evidence})`,
+      );
+    }
+  }
+  // (3) snapshot ใหม่หลัง terminal ยืนยันแล้วเท่านั้น (r4 M1)
+  if (postTerminalAssert !== undefined) {
+    await postTerminalAssert();
+  }
   await invocationClose(res.invocationId, res.opKey, "settled", {
     class: "completed-evidenced(rejected|state-changed)",
     transportTarget: "kong-path",
@@ -202,33 +272,64 @@ export async function tableTerminalProbe(table: string): Promise<void> {
   await psql(`begin; lock table ${table} in access exclusive mode nowait; commit;`);
 }
 
-/** probe terminal ที่สัมพันธ์กับ invocation (gate waveh-r3 M1) — สองขา:
- *  ขา lock   : ACCESS EXCLUSIVE nowait บนตารางเป้าหมายได้ = ไม่มี TX ค้างถือตาราง
- *  ขา activity: ไม่มี backend ที่กำลังรัน RPC นี้อยู่ (state 'active' หรือ
- *              'idle in transaction') — จับ backend ที่ยังไม่ถึงตารางเป้าหมายด้วย
- *              (ค้างที่ตารางก่อนหน้าในทางเดินเดียวกัน ซึ่งขา lock มองไม่เห็น)
+/** probe terminal ที่สัมพันธ์กับ invocation (gate waveh-r3 M1 · ปรับ r4 M1) — สองขา
+ * ต่อเป็นลำดับเดียว ห้ามปล่อย lock ก่อนตรวจ activity (r4 จับ: ถ้า commit ก่อน
+ * ตรวจสองรอบ request ที่ยังเข้าคิวอยู่จะพ้นรอบสุดท้ายแล้วเริ่มทำงานภายหลังได้):
+ *  ขา lock    : ยึด ACCESS EXCLUSIVE nowait บนตารางเป้าหมาย "ค้างไว้" ตลอดการตรวจ —
+ *               backend ที่กำลังจะแตะตารางนี้ต้องเข้าคิวรอเรา → state='active'
+ *               เห็นในขา activity ทันที (ไม่ผ่านเงียบ) · TX อื่นถืออยู่ = 55P03 โยน
+ *  ขา activity: ไม่มี backend ที่กำลังรัน RPC นี้อยู่ (state 'active' หรือ 'idle in
+ *               transaction') — จับ backend ที่ยังไม่ถึงตารางเป้าหมายด้วย (ค้างที่
+ *               ตารางก่อนหน้าในทางเดินเดียวกัน ซึ่งขา lock มองไม่เห็น) · ตรวจ
+ *               สองรอบห่าง 350ms "ขณะถือ lock" แล้วจึง commit + ตรวจท้ายอีกรอบ
+ *               (backend ที่พ้นคิวเราตอน commit ต้องเห็นที่รอบท้าย)
  *  correlation: integration config รันไฟล์เรียง (fileParallelism:false) — backend
- *  ที่ active กับ RPC นี้หลัง dispatch ของเราตอบกลับแล้ว = invocation ของเราเอง
- *  · เช็ค activity สองรอบห่าง 350ms ให้ backend ที่เพิ่งเข้าคิวมีเวลาปรากฏ
- *  (pid ของตัวเช็คเองถูกตัดออก — query ของมันบรรจุชื่อ RPC เป็น literal)
- * @param table   ตารางเป้าหมาย schema-qualified (ค่าคงที่ของเทส)
+ *  ที่ active กับ RPC นี้หลัง dispatch ของเรา = invocation ของเรา (ไม่มีไฟล์อื่น
+ *  ยิง RPC เดียวกันพร้อมกัน) · ชั้น upstream-terminal ผูก nonce อยู่ที่ settleScenario
+ *  (ขา 2) — probe นี้ตอบโจทย์ "backend จบ + ไม่มี TX ค้าง" · idle (พักใน pool หลัง
+ *  TX จบ) ไม่นับ — กัน false positive จาก last-query ที่ค้างใน query text
+ *  ขอบเขตตามจริง (ตรวจจริงใน stack 2026-09-15): backend ที่ติด lock ถูกตัดโดย
+ *  lock_timeout=8s ของ role authenticator — หน้าต่าง "ยังไม่ terminal" มีขอบเขต
+ *  เสมอ แม้เทสไม่ปล่อย blocker เอง
+ * @param table   ตารางเป้าหมาย schema-qualified (ค่าคงที่ของเทสเท่านั้น)
  * @param rpcName ชื่อ RPC (ค่าคงที่ — ใช้ substring-match ใน pg_stat_activity.query) */
 export async function scenarioTerminalProbe(table: string, rpcName: string): Promise<void> {
-  await psql(`begin; lock table ${table} in access exclusive mode nowait; commit;`);
-  for (let round = 0; round < 2; round += 1) {
-    const busy = await psqlScalar(`
+  const { startPsqlSession } = await import("./test-io");
+  const busyCount = () =>
+    psqlScalar(`
       select count(*)::text from pg_stat_activity
        where query like '%${rpcName}%'
          and state in ('active', 'idle in transaction')
          and pid <> pg_backend_pid();`);
-    if (busy !== "0") {
-      throw new Error(
-        `scenario probe: backend ยังรัน ${rpcName} อยู่ (${busy} ตัว) — invocation ยังไม่ terminal`,
-      );
+  const session = await startPsqlSession("scenario-terminal-probe");
+  try {
+    await session.exec("begin;");
+    await session.exec(`lock table ${table} in access exclusive mode nowait;`);
+    for (let round = 0; round < 2; round += 1) {
+      const busy = await busyCount();
+      if (busy !== "0") {
+        throw new Error(
+          `scenario probe: backend ยังรัน ${rpcName} อยู่ (${busy} ตัว) — invocation ยังไม่ terminal`,
+        );
+      }
+      if (round === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
     }
-    if (round === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 350));
-    }
+    await session.exec("commit;");
+  } catch (err) {
+    // assert กลางทางล้มก็ห้ามทิ้ง lock ค้าง — ปล่อยก่อนโยนต่อเสมอ
+    await session.exec("rollback;").catch(() => undefined);
+    throw err;
+  } finally {
+    await session.end();
+  }
+  // รอบท้ายหลัง commit: backend ที่เพิ่งพ้นคิวของเราและกำลังวิ่งต่อต้องเห็นที่นี่
+  const tail = await busyCount();
+  if (tail !== "0") {
+    throw new Error(
+      `scenario probe (tail): backend ยังรัน ${rpcName} อยู่ (${tail} ตัว) — invocation ยังไม่ terminal`,
+    );
   }
 }
 

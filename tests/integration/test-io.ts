@@ -432,6 +432,29 @@ export async function accessLogFence(
   };
 }
 
+/**
+ * fence แบบ any-status (gate waveh-r4 M1): จำกัดความหมายที่ "served-once terminal"
+ * ของ invocation เดียว — หา line {ua_nonce + method + path-normalized} โดยไม่สน
+ * status · ตรวจจริงใน stack (probe 2026-09-15): PostgREST เขียน CLF line หนึ่งต่อ
+ * หนึ่งทุกครั้งที่ serve จบ แม้ client abort กลางทาง (500 จาก lock_timeout 57014
+ * ปรากฏพร้อม nonce ใน UA) — line เดียว = request ถูก serve ครบ = terminal ของ
+ * invocation นั้น · >1 = กำกวม (serve ซ้ำ/retry) = ปฏิเสธ
+ */
+export async function accessLogFenceAnyStatus(
+  cursor: LogCursor,
+  probe: { uaNonce: string; method: string; pathNorm: string },
+): Promise<AccessLogFenceResult> {
+  const windowLines = await readAccessLogWindow(cursor);
+  const methodUpper = probe.method.toUpperCase();
+  const needle = `"${methodUpper} ${probe.pathNorm} HTTP/`;
+  const lines = windowLines.filter((l) => l.includes(probe.uaNonce) && l.includes(needle));
+  return {
+    matches: lines.length,
+    lines,
+    restRestartedInWindow: cursor.restStartedAt !== "unknown" && await restStartedAfter(cursor.capturedAt),
+  };
+}
+
 async function restStartedAfter(iso: string): Promise<boolean> {
   const child = spawn("docker", ["inspect", "--format", "{{.State.StartedAt}}", "ltc-dev-rest"], { cwd: REPO_ROOT });
   return await new Promise<boolean>((resolve) => {
