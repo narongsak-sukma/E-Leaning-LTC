@@ -17,6 +17,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { REPO_ROOT, psql, REST_URL, ANON_KEY } from "./helpers";
+import { matchDbErrorBlocks } from "./db-error-blocks";
 
 // ─── 1) runtime DDL (idempotent) ─────────────────────────────────────────────
 
@@ -629,10 +630,10 @@ export interface DbErrorEvidenceResult {
 }
 
 /**
- * db error-block fence (gate waveh-r8 M1 — fence v6): หา "error block ของ db ที่
- * ผูก invocation รายตัว" ในหน้าต่างตั้งแต่ cursor — รูปจริงของ stack (probe
- * 2026-09-15 `.omc/artifacts/probe-p0002-run2.log`): P0002-raise ข้อความไทยที่
- * gateway ตัดขาคอร์ด = rest ไม่เขียน CLF line เลย แต่ db container log มี block
+ * db error-block fence (gate waveh-r8 M1 → v7 ตาม gate waveh-r9 M1): หา "error
+ * block ของ db ที่ผูก invocation รายตัว" — รูปจริงของ stack (probe 2026-09-15
+ * `.omc/artifacts/probe-p0002-run2.log`): P0002-raise ข้อความไทยที่ gateway ตัด
+ * ขาคอร์ด = rest ไม่เขียน CLF line เลย แต่ db container log มี block
  *   ERROR:  <ข้อความไทย (ERR-…|…)>
  *   CONTEXT:  PL/pgSQL function <rpc>(…) line N at RAISE
  *   	unnamed portal with parameters: $1 = '{"p_job_id":"…","p_request_id":"…",…}'
@@ -640,35 +641,43 @@ export interface DbErrorEvidenceResult {
  * เมื่อ log_parameter_max_length_on_error=-1 (ตั้งใน command ของ db ใน
  * docker-compose.yml) — parameters line คือหมุดผูก invocation เดียวที่พิสูจน์
  * ได้: PostgREST v12 ส่ง body ทั้งก้อนเป็น bind $1 (ไม่มี arg literal ใน STATEMENT)
- * · การจับคู่ = parameters line ที่มี "p_request_id":"<requestRef>" เป๊ะ และภายใน
- * 8 แถวก่อนหน้ามีทั้ง ERROR: และชื่อ RPC (CONTEXT/STATEMENT) · หน้าต่างอ่านด้วย
- * --since cursor-1s (กิน clock skew host↔container — บัฟเฟอร์ log ทั้งก้อนแพง
- * เกินต่อ iteration) · db restart ใน window = หลักฐานขาดความต่อเนื่อง = ปฏิเสธ
+ *
+ * v7 (gate r9 M1) แก้สอดคล้องเงื่อนไขปิด "ตรวจ ERROR, RPC และ parameters จาก
+ * record เดียวกัน":
+ * · การจับคู่ = matchDbErrorBlocks (tests/integration/db-error-blocks.ts) —
+ *   แยก log เป็น record ตามหัวบรรทัด `[PID] user@db LEVEL:` (PID = backend
+ *   session) แล้วยอมเฉพาะ record ที่ ERROR + ชื่อ RPC + needle
+ *   `"p_request_id":"<ref>"` ครบในก้อนเดียว — v6 มองย้อน 8 แถวแล้ว some()
+ *   แยกกัน จึงยืม "ERROR จาก block ของ RPC อื่น + ชื่อ RPC จาก STATEMENT ของ
+ *   block ก่อนหน้า" ประกอบหลักฐานปลอมได้ (codex พิสูจน์ด้วย input จำลองรอบ r9)
+ * · หน้าต่างอ่านด้วย --since "เวลา dispatch −1s" (dispatchedAt = attempt.ts
+ *   จาก ledger — เขียนทันทีก่อน fetch ของ invocation "นี้") ไม่ใช่ cursor-1s
+ *   อีกต่อไป: cursor ถูกจับก่อนเขียน invocation row จึงย้อนไกลกว่าที่จำเป็น
+ *   (คำ risk ของ gate r9 ข้อ 2: กวาด block ของ invocation ก่อนหน้าเข้ามา)
+ *   · requestRef ไม่ซ้ำข้าม invocation ถูกบังคับที่ชั้น settleScenario
+ *   (collision check จาก ledger) — เงื่อนไขปิดข้อ "requestRef ซ้ำ"
+ * · db restart ใน window = หลักฐานขาดความต่อเนื่อง = ปฏิเสธ (คงจาก v6)
  */
 export async function dbErrorEvidenceFence(
-  capturedAt: string,
+  dispatchedAt: string,
   probe: { rpcName: string; requestRef: string },
 ): Promise<DbErrorEvidenceResult> {
-  const sinceIso = new Date(Date.parse(capturedAt) - 1_000).toISOString();
+  const dispatchedTs = Date.parse(dispatchedAt);
+  if (!Number.isFinite(dispatchedTs)) {
+    throw new Error(
+      `dbErrorEvidenceFence: อ่านเวลา dispatch ("${dispatchedAt}") ไม่ได้ — หน้าต่าง error block ไม่มี anchor ผูก invocation`,
+    );
+  }
+  const sinceIso = new Date(dispatchedTs - 1_000).toISOString();
   const logs = await dockerCompose(["logs", "db", "--no-color", "--timestamps", "--since", sinceIso]);
   if (logs.code !== 0) {
     throw new Error(`dbErrorEvidenceFence: docker compose logs db failed: ${logs.stderr.slice(0, 200)}`);
   }
   const lines = logs.stdout.split("\n").filter((l) => l.trim().length > 0);
-  const refNeedle = `"p_request_id":"${probe.requestRef}"`;
-  const blocks: string[] = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const ln = lines[i];
-    if (ln === undefined || !ln.includes("portal with parameters:") || !ln.includes(refNeedle)) continue;
-    const blockStart = Math.max(0, i - 8);
-    const block = lines.slice(blockStart, i + 1);
-    if (block.some((l) => l.includes(" ERROR: ")) && block.some((l) => l.includes(probe.rpcName))) {
-      blocks.push(block.join("\n"));
-    }
-  }
+  const records = matchDbErrorBlocks(lines, probe);
   return {
-    matches: blocks.length,
-    blocks,
+    matches: records.length,
+    blocks: records.map((rec) => rec.lines.join("\n")),
     dbRestartedInWindow: await dbStartedAfter(sinceIso),
   };
 }

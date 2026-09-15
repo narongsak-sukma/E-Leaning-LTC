@@ -164,7 +164,7 @@ export async function restCall(
  * invocation นี้" ทั้งคู่ — เรียงภายในเดียว ห้ามสลับ:
  *  1. probe terminal ก่อน (scenarioTerminalProbe — ขา lock + ขา activity): backend
  *     ยังรันอยู่ = ปฏิเสธทันที ไม่รอ (fail-loud · invocation คง 'running' ให้ audit จับ)
- *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4→r8):
+ *  2. ขา upstream-terminal ผูกกับ invocation แยกตาม class ของ response (r4→r9):
  *     หน้าต่างร่วมของทุกขา (fence v6 — gate r8 M1): anchor ที่ "เวลา dispatch"
  *     จริงจาก ledger (attempt.ts — เขียนก่อน fetch ทุกครั้ง จึงเป็นขอบ "ล่าง"
  *     ของเวลาถึง upstream ไม่ใช่ขอบบน) ยาว acq+stmt+margin — บทบาทเหลือเพียง
@@ -201,7 +201,8 @@ export async function restCall(
  *            (ผ่านปลอม) — requestRef เหลือเป็นหมุดราย invocation ใน ledger
  *            binding เท่านั้น (ขา ข′/ข ผูก nonce)
  *        (ข′) หลักฐาน terminal ตรงของ upstream ผูก invocation — fence v6 (gate
- *            r8 M1) สองรูป "หลักแรกที่ปรากฏชนะ" ภายในหน้าต่างเฝ้า:
+ *            r8 M1) → v7 (gate r9 M1) สองรูป "หลักแรกที่ปรากฏชนะ" ภายใน
+ *            หน้าต่างเฝ้า:
  *            (i) rest CLF line ของ nonce หนึ่งแถวพอดี (r7 M1.1-1): PostgREST
  *            เขียน line หนึ่งต่อหนึ่ง serve ทุกสถานะ (ตรวจจริง 2026-09-15:
  *            200 · 400-22P02 · 500-57014 · แม้ client abort) = serve ครบ
@@ -216,6 +217,11 @@ export async function restCall(
  *            parameters line พิมพ์ bind $1 เต็มเป็น JSON ที่มี p_request_id =
  *            หมุดผูก invocation รายตัว (dbErrorEvidenceFence) → block ที่ผูก
  *            requestRef หนึ่งก้อน = upstream จบด้วย error ของ invocation นี้จริง
+ *            · v7 ตามเงื่อนไขปิด r9: (ii) ยอมเฉพาะ block ที่ ERROR + ชื่อ RPC +
+ *            parameters ครบใน "record เดียว" (PID-grouped — db-error-blocks.ts)
+ *            ห้ามยืมแถวของ block อื่น · หน้าต่าง anchor ที่ attempt.ts (เวลา
+ *            dispatch) ไม่ใช่ cursor · และ requestRef ต้องไม่ซ้ำกับ invocation
+ *            อื่น (ข้อ (ข″) — ตรวจ ledger ก่อนเฝ้า)
  *            · >1 = กำกวม = ปฏิเสธ · activity ของ RPC นี้โผล่ระหว่าง poll =
  *            statement เพิ่งเริ่มหลังเข้า settle = ปฏิเสธทันที · ครบหน้าต่าง
  *            ยังไร้ทั้งสองรูป = fail-closed ปฏิเสธเสมอ (gate r8 M1 — ทางเดิน
@@ -269,11 +275,12 @@ export async function settleScenario(
   }
   // (1) probe terminal ก่อน — โยน = ไม่ settle (r2/r3)
   await terminalProbe();
-  // (2) upstream-terminal ผูกกับ invocation นี้ (r4→r8) — แยกตาม class ของ
+  // (2) upstream-terminal ผูกกับ invocation นี้ (r4→r9) — แยกตาม class ของ
   // response (doc เต็มด้านบน): a. status<0 = CLF fence ของ rest หน้าต่าง
   // dispatch-anchored · b. status≥0 ทุกรูปร่าง body = fence ขาเดียวกัน (activity
-  // fail-fast + หลักฐาน terminal สองรูป ขา ข′ — CLF line ของ nonce หรือ error
-  // block ของ db ผูก requestRef + kong line หนึ่งแถว status ตรง + หน้าต่าง 12s
+  // fail-fast + ข้อ (ข″) requestRef ต้องไม่ซ้ำ invocation อื่น + หลักฐาน terminal
+  // สองรูป ขา ข′ — CLF line ของ nonce หรือ error block ของ db (record เดียว)
+  // ผูก requestRef + kong line หนึ่งแถว status ตรง + หน้าต่าง 12s
   // หลัง line · role bounds = ประกอบความยาวหน้าต่าง ไม่ใช่หลักฐาน) · nonce/cursor/
   // เวลา dispatch อ่านจาก ledger ของ invocation (แหล่งความจริง — ใช้ได้แม้ dispatch โยน error)
   // evidenceLeg = ขาหลักฐาน terminal ที่พา settle ผ่าน (บันทึกลง ledger ตอน
@@ -411,20 +418,42 @@ export async function settleScenario(
           `scenario settle ปฏิเสธ: statement ของ invocation นี้ยังรันอยู่ (pg_stat_activity เห็น backend รัน ${rpcName} อยู่ ${busyNow} ตัว) (${evidence})`,
         );
       }
-      // (ข′) หลักฐาน terminal "ตรง" ของ upstream ผูก invocation นี้ — fence v6
-      // (gate r8 M1): หลักฐานสองรูป "หลักแรกที่ปรากฏชนะ" ภายในหน้าต่างเฝ้า
+      // (ข″) requestRef ต้องเป็นของ invocation นี้เพียงตัวเดียว (gate r9 M1 ข้อ 2):
+      // p_request_id มาจาก body โดยไม่มีชั้นไหนบังคับความไม่ซ้ำ — dispatch สอง
+      // invocation ด้วย ref เดียวกันได้ แล้ว error block ของตัวแรกถูกอ้างเป็น
+      // หลักฐาน terminal ของตัวที่สอง (การพบ 1 block ไม่ได้พิสูจน์ว่ามี 1 invocation)
+      // → ตรวจจาก ledger (แหล่งความจริง): มี invocation อื่นถือ ref เดียวกัน =
+      // หลักฐานผูกไม่ชัดเจน ปฏิเสธก่อนเข้าลูปเฝ้า (fail-closed)
+      if (binding.requestRef !== null) {
+        const [dup] = await psqlRows<{ others: string }>(`
+          select count(distinct invocation_id)::text as others
+            from test_infra.lifecycle_ledger
+           where kind = 'invocation'
+             and invocation_id <> '${res.invocationId}'
+             and payload -> 'binding' ->> 'requestRef' = '${binding.requestRef}';`);
+        if ((dup?.others ?? "0") !== "0") {
+          throw new Error(
+            `scenario settle ปฏิเสธ: requestRef ${binding.requestRef} ซ้ำกับ invocation อื่น (${dup?.others} ตัว) — error block ของ db ผูก invocation ไม่ชัดเจน fail-closed (gate r9 M1) (${evidence})`,
+          );
+        }
+      }
+      // (ข′) หลักฐาน terminal "ตรง" ของ upstream ผูก invocation นี้ — fence v6 → v7
+      // (gate r8 M1 → r9 M1): หลักฐานสองรูป "หลักแรกที่ปรากฏชนะ" ภายในหน้าต่างเฝ้า
       //  (i) CLF line ของ nonce (rest): PostgREST เขียน line หนึ่งต่อหนึ่ง serve
       //      ทุกสถานะ (ตรวจจริง 2026-09-15: 200 · 400-22P02 · 500-57014 · แม้ client
       //      abort) → line ของ nonce หนึ่งแถว = serve จบหนึ่งครั้งของ invocation นี้
       //      (r7 M1.1-1 — ไม่อาศัยข้อสมมติ timeout ของ pooled session)
-      // (ii) error block ของ db ที่ผูก invocation: รูปเดียวที่ "serve จบแล้วไร้
-      //      CLF line" คือ P0002-raise ข้อความไทยที่ gateway ตัดขาคอร์ด (probe
-      //      2026-09-15 `.omc/artifacts/probe-p0002-run2.log`: 500 opaque + rest
-      //      เงียบสนิท + db container มี block ERROR/CONTEXT/parameters/STATEMENT)
-      //      — เมื่อ log_parameter_max_length_on_error=-1 parameters line พิมพ์
-      //      bind $1 เต็มเป็น JSON ที่มี p_request_id = หมุดผูก invocation รายตัว
-      //      (dbErrorEvidenceFence) → block ที่ผูก requestRef หนึ่งก้อน = upstream
-      //      จบด้วย error ของ invocation นี้จริง
+      // (ii) error block ของ db ที่ผูก invocation (v7: record เดียว — gate r9
+      //      เงื่อนไขปิด "ตรวจ ERROR, RPC และ parameters จาก record เดียวกัน"):
+      //      รูปเดียวที่ "serve จบแล้วไร้ CLF line" คือ P0002-raise ข้อความไทยที่
+      //      gateway ตัดขาคอร์ด (probe 2026-09-15 probe-p0002-run2.log: 500
+      //      opaque + rest เงียบสนิท + db container มี block ERROR/CONTEXT/
+      //      parameters/STATEMENT) — เมื่อ log_parameter_max_length_on_error=-1
+      //      parameters line พิมพ์ bind $1 เต็มเป็น JSON ที่มี p_request_id =
+      //      หมุดผูก invocation รายตัว (dbErrorEvidenceFence) → block ที่ผูก
+      //      requestRef หนึ่งก้อน "ครบใน record เดียว" (PID-grouped) = upstream
+      //      จบด้วย error ของ invocation นี้จริง — v6 เคยยืมแถวข้าม block (มอง
+      //      ย้อน 8 แถว some() แยกกัน) ได้ false-positive ข้าม RPC/invocation
       //  · ระหว่าง poll เจอ activity ของ RPC นี้ = statement เพิ่งเริ่มหลังเข้า
       //    settle = ปฏิเสธทันที (fail-loud — ทิศสกปรกที่ guard M1-r7 พิสูจน์)
       //  · ครบหน้าต่างแล้วไร้ทั้งสองรูป = fail-closed ปฏิเสธเสมอ (gate r8 M1:
@@ -455,7 +484,11 @@ export async function settleScenario(
           break;
         }
         if (binding.requestRef !== null) {
-          const dbf = await dbErrorEvidenceFence(attempt.cursor.capturedAt, {
+          // v7 (gate r9 M1): anchor หน้าต่าง error block ที่ "เวลา dispatch ของ
+          // invocation นี้" (attempt.ts — เขียนทันทีก่อน fetch) ไม่ใช่ cursor
+          // (จับก่อนเขียน invocation row จึงย้อนไกลกว่าที่จำเป็นและกวาด block ของ
+          // invocation ก่อนหน้าเข้ามาได้)
+          const dbf = await dbErrorEvidenceFence(attempt.ts, {
             rpcName,
             requestRef: binding.requestRef,
           });

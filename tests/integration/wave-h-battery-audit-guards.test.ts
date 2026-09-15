@@ -69,6 +69,19 @@
  *   evidenceLeg="db-error-block") · ทิศ ข invocation ปลอมไร้หลักฐาน → ปฏิเสธ
  *   ด้วยข้อความ "ไม่มีหลักฐาน terminal ของ upstream ที่ผูก invocation" → ปิด
  *   poisoned + เคลียร์มือตาม limitation 5
+ * M1 (waveh-r9) · ขา db-error-block ต้องผูก invocation "จาก record เดียว" — v6
+ *   มองย้อน 8 แถวแล้ว some() แยกกัน จึงประกอบ "ERROR จาก block หนึ่ง + ชื่อ RPC
+ *   จาก STATEMENT ของ block ก่อนหน้า + parameters ของ block อื่น" เป็นหลักฐาน
+ *   ปลอมได้ (codex พิสูจน์ด้วย input จำลองรอบ r9: matches=1) และ requestRef
+ *   ไม่ได้รับประกันว่าเป็นของ invocation เดียว · แก้ด้วย fence v7: parser
+ *   PID-grouped (db-error-blocks.ts) ยอมเฉพาะ ERROR+RPC+parameters ครบใน record
+ *   เดียว + หน้าต่าง anchor ที่ attempt.ts + collision check จาก ledger (ref
+ *   ซ้ำ invocation อื่น = ปฏิเสธ) · two-way: pure regression บน input จำลองรูป
+ *   log จริง (codex scenario → 0 บน v7 / v6 = 1) · live ทิศ ก dispatch จริงสอง
+ *   ตัวใช้ p_request_id เดียวกัน → ตัวที่สองต้องปฏิเสธ "requestRef ซ้ำกับ
+ *   invocation อื่น" (v6 settle ผ่าน) · live ทิศ ข invocation ปลอม opKey
+ *   complete_data_export_job อ้าง requestRef ของ admin_revoke_role จริง → ปฏิเสธ
+ *   ด้วยชั้น collision (หลักฐานของ invocation อื่นห้ามถูกอ้างข้าม invocation/RPC)
  *
  * two-way proof ตาม [[regression-test-two-way-proof]] ระดับฟังก์ชัน: ทิศสกปรก/ล้ม
  * ต้องถูกปฏิเสธ ทิศสะอาด/ผ่านต้องไปต่อ — ผูกกับ audit()/shouldBreakAfter ของ script
@@ -159,6 +172,98 @@ describe("M4 · battery-run health ล้มห้ามปล่อย e2e แ�
     expect(shouldBreakAfter({ id: "integration", code: 1, ms: 1 }, true)).toBe(false);
     expect(shouldBreakAfter({ id: "unit", code: 1, ms: 1 }, false)).toBe(true);
     expect(shouldBreakAfter({ id: "e2e", code: 0, ms: 1 }, true)).toBe(false);
+  });
+});
+
+// ─── M1 (gate waveh-r9): parser ของขา db-error-block ต้องผูกหลักฐานจาก record ──
+// เดียว (PID-grouped) — pure regression บน input จำลอง "รูป header จริง" ที่ตรวจ
+// จาก container จริง 2026-09-15 (docker compose logs db --timestamps): แถว header
+// มี `[PID] user@db LEVEL:` ทุกข้อความของ Postgres · แถวต่อ (parameters) tab-indent
+// ไร้ header · ทิศสกปรกหลัก = scenario ที่ codex ใช้พิสูจน์ v6 หลอก (matches=1):
+// block ของ complete_data_export_job (ref อื่น) ตามด้วย block ของ RPC อื่นที่ถือ
+// ref เป้าหมาย — v6 ยืม "ERROR + STATEMENT ชื่อ RPC" จากสองก้อน · v7 ต้องปฏิเสธ
+describe("M1 (waveh-r9) · db error-block parser ผูกหลักฐานจาก record เดียว (two-way บน input จำลองรูป log จริง)", () => {
+  const hdr = (pid: number, level: string, msg: string) =>
+    `ltc-dev-db  | 2026-09-15T14:13:43.947396879Z 172.20.0.6 2026-09-15 14:13:43.947 UTC [${pid}] authenticator@postgres ${level}:  ${msg}`;
+  const cont = (msg: string) => `\t${msg}`;
+  const params = (ref: string) =>
+    cont(`unnamed portal with parameters: $1 = '{"p_job_id":"00000000-0000-4000-8000-000000000942","p_request_id":"${ref}"}'`);
+
+  it("ทิศ ก: block จริง (ERROR+CONTEXT+parameters+STATEMENT record เดียว) → match 1", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(101, "LOG", "duration: 1.2 ms statement: SELECT 1"),
+      hdr(101, "ERROR", "ไม่พบงานส่งออกที่กำลังดำเนินการตามรหัสนี้ (ERR-NF-001|job_not_processing)"),
+      hdr(101, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      params("ref-x"),
+      hdr(101, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."complete_data_export_job"(...) ...)'),
+    ];
+    const m = matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" });
+    expect(m, "block ที่ครบทั้งสามหลักฐานใน record เดียวต้อง match").toHaveLength(1);
+    expect(m[0]?.pid).toBe(101);
+  });
+
+  it("ทิศ ข (codex scenario): block ของ RPC เป้าหมาย (ref อื่น) ตามด้วย block ของ RPC อื่นที่ถือ ref เป้าหมาย → ต้อง 0 (v6 = 1)", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      // block ก้อนที่ 1: RPC เป้าหมาย แต่ ref อื่น
+      hdr(101, "ERROR", "ไม่พบงานส่งออกที่กำลังดำเนินการตามรหัสนี้ (ERR-NF-001|job_not_processing)"),
+      hdr(101, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      params("ref-other"),
+      hdr(101, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."complete_data_export_job"(...) ...)'),
+      // block ก้อนที่ 2 (PID ใหม่ = backend session ใหม่): RPC อื่น ถือ ref เป้าหมาย
+      hdr(202, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(202, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(202, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."admin_revoke_role"(...) ...)'),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ห้ามยืม ERROR ของก้อนที่ 2 มาประกอบกับ STATEMENT ชื่อ RPC ของก้อนที่ 1 — v6 ทำแบบนี้ (codex r9: matches=1)",
+    ).toHaveLength(0);
+    // ทิศตรงข้ามยังต้องจับได้: probe ของ RPC ที่ถือ ref จริง (record เดียวกันครบ)
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ค: STATEMENT ของ PID อื่นปิด record ก่อน parameters → หลักฐานข้าม session ไม่นับ", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(101, "ERROR", "ข้อผิดพลาดของ session 101"),
+      hdr(303, "STATEMENT", 'WITH pgrst_source AS (SELECT ... "public"."complete_data_export_job"(...) ...)'),
+      params("ref-x"),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "parameters ที่มาหลัง header ของ PID อื่นต้องไม่ถูกเย็บเข้า record ของ ERROR เดิม",
+    ).toHaveLength(0);
+  });
+
+  it("ทิศ ง: ระดับไม่ใช่ ERROR (LOG) ไม่เปิด record — parameters+RPC ใน LOG ไม่นับ + แยก invocation ของ RPC เดียวกันด้วย ref", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const logOnly = [
+      hdr(404, "LOG", 'execute fetch_from_cursor: "complete_data_export_job"'),
+      params("ref-x"),
+    ];
+    expect(
+      matchDbErrorBlocks(logOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "record ของ fence เริ่มที่ ERROR เท่านั้น — LOG แม้มี needle ครบก็ไม่ใช่หลักฐาน terminal",
+    ).toHaveLength(0);
+    // RPC เดียวกัน สอง invocation (สอง ref): probe ต้องจับเฉพาะ record ที่ถือ ref นั้น
+    const two = [
+      hdr(501, "ERROR", "ไม่พบงานส่งออก (ก้อนของ ref-1)"),
+      hdr(501, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      params("ref-1"),
+      hdr(502, "ERROR", "ไม่พบงานส่งออก (ก้อนของ ref-2)"),
+      hdr(502, "CONTEXT", "PL/pgSQL function complete_data_export_job(uuid,uuid,integer,text,uuid) line 42 at RAISE"),
+      params("ref-2"),
+    ];
+    const m2 = matchDbErrorBlocks(two, { rpcName: "complete_data_export_job", requestRef: "ref-2" });
+    expect(m2).toHaveLength(1);
+    expect(m2[0]?.pid).toBe(502);
+    expect(m2[0]?.lines.join("\n")).toContain('"p_request_id":"ref-2"');
+    expect(m2[0]?.lines.join("\n")).not.toContain('"p_request_id":"ref-1"');
   });
 });
 
@@ -1106,4 +1211,185 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       });
     }
   }, 120_000);
+
+  // ─── M1 (gate waveh-r9): ขา db-error-block ผูก invocation จาก record เดียว ────
+  // + requestRef ต้องไม่ซ้ำข้าม invocation — verdict r9: v6 matcher รวมหลักฐาน
+  // คนละ error block ได้ (codex พิสูจน์ด้วย input จำลอง) และ p_request_id ไม่มี
+  // ชั้นบังคับความไม่ซ้ำ · two-way live: ทิศ ก dispatch จริงสองตัวใช้ ref เดียวกัน
+  // → settle ตัวที่สองต้องปฏิเสธ "requestRef ซ้ำกับ invocation อื่น" (v6 ไม่มี
+  // collision check → settle ผ่าน = ล้มบนโค้ดเก่า) · ทิศ ข invocation ปลอม opKey
+  // complete_data_export_job อ้าง ref ของ admin_revoke_role จริง (P0002 จริง มี
+  // error block จริงใน db log) → ต้องปฏิเสธด้วยชั้น collision (หลักฐานของ
+  // invocation อื่นห้ามถูกอ้าง) — ชั้น parser record-เดียวพิสูจน์แยกที่ describe
+  // pure ด้านบน (input จำลอง codex → 0)
+  it("error block ผูก invocation ต้อง record เดียว + ref ไม่ซ้ำ: dispatch จริง ref ซ้ำ = ปฏิเสธ · อ้าง ref ของ RPC อื่น = ปฏิเสธ (waveh-r9 M1)", async ({ skip }) => {
+    if (DB_URL === undefined) skip();
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const {
+      REPO_ROOT,
+      SERVICE_KEY,
+      ANON_KEY,
+      createTestUser,
+      deleteTestUser,
+      settleScenario,
+      scenarioTerminalProbe,
+      psqlScalar,
+      psqlRows,
+    } = await import("./helpers");
+    const { httpWrite, ledgerWrite, invocationClose, manualClearPoison, captureLogCursor, mintUaNonce } =
+      await import("./test-io");
+    const { mintAal2Token } = await import("./helpers-aal2");
+    // หยุด mailer กัน noise (pattern M1-r7/M1-r8/dcr12)
+    const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    await stopMailer();
+    let admin: Awaited<ReturnType<typeof createTestUser>> | null = null;
+    let target: Awaited<ReturnType<typeof createTestUser>> | null = null;
+    const closeFake = async (id: string, opKey: string, label: string) => {
+      await invocationClose(id, opKey, "poisoned", { decision: label, settledAs: label });
+      await manualClearPoison(opKey, `${label} — negative fixture teardown (guard r9)`);
+    };
+    try {
+      // ─── ทิศ ก: dispatch จริงสองตัวใช้ p_request_id เดียวกัน — ตัวแรก settle
+      // ผ่าน (block ของตัวเอง record เดียว) · ตัวที่สองต้องปฏิเสธที่ collision check
+      // ก่อนเข้าลูปเฝ้า: "การพบ 1 block ไม่ได้พิสูจน์ว่ามี 1 invocation" (r9 ข้อ 2)
+      const dupRef = `m1r9-dup-${crypto.randomUUID()}`;
+      const jobIdA = "00000000-0000-4000-8000-0000000003a1";
+      const jobIdB = "00000000-0000-4000-8000-0000000003b2";
+      const dupBody = (pJobId: string) => ({
+        p_job_id: pJobId,
+        p_file_media_id: "00000000-0000-4000-8000-0000000003f1",
+        p_chunks: 1,
+        p_request_id: dupRef,
+        p_claim_token: null,
+      });
+      const first = await httpWrite("POST", "/rest/v1/rpc/complete_data_export_job", dupBody(jobIdA), {
+        apiKey: SERVICE_KEY,
+        token: SERVICE_KEY,
+        settleMode: "scenario",
+        label: "m1r9-dup-first",
+      });
+      expect(first.status, "P0002 จริงผ่าน gateway = 500 opaque (probe run2 A)").toBe(500);
+      await settleScenario(
+        first,
+        "guard-r9-dup-first-settles-own-block",
+        () => scenarioTerminalProbe("public.event_outbox", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(`select count(*)::text from public.data_export_jobs where id = '${jobIdA}';`),
+            "job ไม่มีอยู่จริงต้องไม่ถูกสร้าง (P0002 = TX abort)",
+          ).toBe("0");
+        },
+      );
+      const second = await httpWrite("POST", "/rest/v1/rpc/complete_data_export_job", dupBody(jobIdB), {
+        apiKey: SERVICE_KEY,
+        token: SERVICE_KEY,
+        settleMode: "scenario",
+        label: "m1r9-dup-second",
+      });
+      expect(second.status).toBe(500);
+      const invStatusSecond = () =>
+        psqlScalar(`
+          select payload ->> 'status' from test_infra.lifecycle_ledger
+           where kind = 'invocation' and invocation_id = '${second.invocationId}'
+           order by ts desc, id desc limit 1;`);
+      // v7: collision check จาก ledger ปฏิเสธก่อนเฝ้า — v6 ไม่มีชั้นนี้: หน้าต่าง
+      // anchor cursor ของตัวที่สองมีแค่ block ของตัวเอง (block ของตัวแรกเก่ากว่า
+      // dispatch ตัวที่สอง) → v6 settle ผ่าน = assert ข้อความใหม่ล้มบนโค้ดเก่า
+      await expect(
+        settleScenario(second, "guard-r9-duplicate-requestref-must-refuse", () =>
+          scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
+      ).rejects.toThrow(/requestRef .* ซ้ำกับ invocation อื่น/);
+      expect(await invStatusSecond(), "ปฏิเสธแล้ว invocation ต้องคง 'running' ให้ audit จับ").toBe("running");
+      await closeFake(second.invocationId as string, second.opKey as string, "settle-refused-duplicate-requestref");
+
+      // ─── ทิศ ข: error block จริงของ RPC อื่น (admin_revoke_role P0002
+      // role_not_found — ข้อความไทย ไร้ CLF มี block จริง) ถือ ref R2 · invocation
+      // ปลอมอ้าง opKey complete_data_export_job + requestRef R2 → ห้ามอ้าง
+      // หลักฐานของ invocation อื่นข้าม RPC: ชั้น collision (ledger) จับก่อน (ชั้น
+      // parser record-เดียวคือแนวรับที่สอง — พิสูจน์แยกใน describe pure)
+      admin = await createTestUser("m1r9-revoke-admin", "super_admin");
+      const adminAal2 = await mintAal2Token(admin);
+      expect(adminAal2).not.toBe("");
+      target = await createTestUser("m1r9-revoke-target"); // ถือ citizen — ไม่ถือ instructor
+      const r2 = crypto.randomUUID();
+      const revoke = await httpWrite(
+        "POST",
+        "/rest/v1/rpc/admin_revoke_role",
+        {
+          p_user_id: target.id,
+          p_role: "instructor",
+          p_reason: "m1r9-ref-cross-rpc-guard",
+          p_request_id: r2,
+        },
+        { apiKey: ANON_KEY, token: adminAal2, settleMode: "scenario", label: "m1r9-revoke-real" },
+      );
+      expect(revoke.status, "role_not_found P0002 จริง = 500 opaque (dcr12 c2)").toBe(500);
+      await settleScenario(
+        revoke,
+        "guard-r9-revoke-settles-own-block",
+        () => scenarioTerminalProbe("public.role_assignments", "admin_revoke_role"),
+      );
+      const [revokeLeg] = await psqlRows<{ leg: string | null }>(`
+        select payload ->> 'evidenceLeg' as leg
+          from test_infra.lifecycle_ledger
+         where kind = 'invocation' and invocation_id = '${revoke.invocationId}'
+         order by ts desc, id desc limit 1;`);
+      expect(revokeLeg?.leg, "revoke จริงต้อง settle ด้วย error block ของตัวเอง (record เดียว ของ RPC ตัวเอง)").toBe("db-error-block");
+
+      // invocation ปลอม: opKey complete + ref R2 (ของ revoke จริง) + nonce/cursor
+      // จริงจาก ledgerWrite — ห้าม settle ด้วยกลไกใด (หลักฐานของ invocation อื่น)
+      const fakeId = crypto.randomUUID();
+      const fakeNonce = mintUaNonce();
+      const fakeOpKey = "rpc:complete_data_export_job:POST";
+      await ledgerWrite(
+        "invocation",
+        {
+          status: "running",
+          label: "m1r9-fabricated-cross-rpc",
+          opKey: fakeOpKey,
+          transport: "httpWrite",
+          transportTarget: "kong-path",
+          binding: {
+            opKey: fakeOpKey,
+            method: "POST",
+            urlNormalized: "/rest/v1/rpc/complete_data_export_job",
+            uaNonce: fakeNonce,
+            requestRef: r2,
+          },
+        },
+        { opKey: fakeOpKey, invocationId: fakeId },
+      );
+      await ledgerWrite(
+        "attempt",
+        { transport: "httpWrite", uaNonce: fakeNonce, parentCallKey: null, logCursor: await captureLogCursor(), beforeSnapshot: null },
+        { opKey: fakeOpKey, invocationId: fakeId },
+      );
+      const flie = { status: 500, json: null, text: "", invocationId: fakeId, opKey: fakeOpKey } as const;
+      // two-way ทิศ ข: ข้อความ "ซ้ำกับ invocation อื่น" มีเฉพาะ v7 (ชั้น collision
+      // จาก ledger) — v6 ไม่มีชั้นนี้: settle ของ fake จบด้วยข้อความอื่นเสมอ
+      // ("ไม่มี kong access line" เมื่อ matcher เก่าเห็น block ของ revoke แล้วเดิน
+      // ต่อ หรือ "ไม่มีหลักฐาน terminal …" เมื่อหน้าต่าง cursor-anchored ของ v6
+      // ไม่เห็น block ใด) — assert เฉพาะข้อความของ v7 = ล้มบนโค้ดเก่าทุกกรณี ·
+      // ชั้น parser record-เดียว (ทิศสกปรกกว่า: ยืมแถวข้ามก้อน) พิสูจน์แยกที่
+      // describe pure ด้านบน (input codex → 0 บน v7 / v6 = 1)
+      await expect(
+        settleScenario(flie, "guard-r9-cross-rpc-evidence-must-refuse", () =>
+          scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
+      ).rejects.toThrow(/requestRef .* ซ้ำกับ invocation อื่น/);
+      await closeFake(fakeId, fakeOpKey, "settle-refused-cross-invocation-evidence");
+    } finally {
+      if (target !== null) {
+        await deleteTestUser(target.id).catch(() => undefined);
+      }
+      if (admin !== null) {
+        await deleteTestUser(admin.id).catch(() => undefined);
+      }
+      await startMailer().catch((err) => {
+        process.stderr.write(`m1r9: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
+      });
+    }
+  }, 240_000);
 });

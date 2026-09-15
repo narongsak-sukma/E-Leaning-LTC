@@ -18,9 +18,11 @@ services:
     container_name: ltc-dev-db
     restart: unless-stopped
     # log_parameter_max_length_on_error=-1: พิมพ์ bind parameters เต็มใน error log
-    # ของ db — fence v6 (gate waveh-r8 M1) ใช้ parameters line ($1 JSON มี p_request_id)
-    # เป็นหมุดผูก invocation ของ error block — ค่าเดียวกันถูกตั้งใน volume ปัจจุบัน
-    # ด้วย ALTER SYSTEM แล้ว รายการ command นี้ทำให้ fresh checkout ได้ค่าเดียวกัน
+    # ของ db — fence v6→v7 (gate waveh-r8/r9 M1) ใช้ parameters line ($1 JSON มี
+    # p_request_id) เป็นหมุดผูก invocation ของ error block (จับคู่ใน record เดียว
+    # ตาม PID ของ backend — tests/integration/db-error-blocks.ts) — ค่าเดียวกันถูก
+    # ตั้งใน volume ปัจจุบันด้วย ALTER SYSTEM แล้ว รายการ command นี้ทำให้ fresh
+    # checkout ได้ค่าเดียวกัน
     command:
       - postgres
       - -c
