@@ -160,10 +160,12 @@ export async function restCall(
  * ที่ upstream connection ขาด — ไม่มี rest CLF line ให้ access-log fence ใช้ตัดสิน
  * ตาม kong500Decision → matches===0 จะ poison ทั้งที่เทสถือหลักฐานจริงอยู่)
  *
- * gate waveh-r2 M1: หลักฐานต้องพิสูจน์ "backend จบจริง" ไม่ใช่แค่ "ยังไม่เห็นการเปลี่ยน"
- * — snapshot ไม่เปลี่ยนอ่านได้แม้ TX ของ RPC ยังค้างอยู่ (race) จึงบังคับ terminalProbe
- * ทุกครั้ง: probe ล้ม = ปฏิเสธ settle (invocation ค้าง 'running' ให้ audit จับ —
- * fail-loud) · ต้องเรียกหลัง assert หลักฐานผ่านครบเท่านั้นเช่นกัน */
+ * gate waveh-r2 M1 + r3 M1: หลักฐานต้องพิสูจน์ "backend จบจริง" ไม่ใช่แค่ "ยังไม่เห็น
+ * การเปลี่ยน" — snapshot ไม่เปลี่ยนอ่านได้แม้ TX ของ RPC ยังค้างอยู่ (race) และ lock
+ * ตารางเป้าหมายอย่างเดียวมองไม่เห็น backend ที่ยังค้าง "ก่อนถึงตาราง" จึงบังคับ
+ * terminalProbe ทุกครั้ง (ใช้ scenarioTerminalProbe = lock + pg_stat_activity):
+ * probe ล้ม = ปฏิเสธ settle (invocation ค้าง 'running' ให้ audit จับ — fail-loud) ·
+ * ต้องเรียกหลัง assert หลักฐานผ่านครบเท่านั้นเช่นกัน */
 export async function settleScenario(
   res: RestResult,
   evidence: string,
@@ -187,15 +189,47 @@ export async function settleScenario(
   });
 }
 
-/** probe terminal แบบ lock (ใช้กับ settleScenario): ยึด lock ระดับตาราง nowait ได้ =
- * ไม่มี TX ค้างถือแถวของตารางนั้นอยู่ (TX ของ RPC ใดจะ commit/rollback ก็ต้องถือ lock
- * จนจบ) — คู่กับ snapshot "ไม่เปลี่ยน" ที่เทส assert ไว้ = backend จบจริง ·
- * TX อื่นถืออยู่ = NOWAIT 55P03 โยนทันที (ใช้เป็นทิศปฏิเสธของ guard test)
+/** probe terminal แบบ lock (ขาเดียว — ใช้ใน guard test พิสูจน์ทิศ "มี TX ถือตาราง"):
+ * ยึด lock ระดับตาราง nowait ได้ = ไม่มี TX ค้างถือแถวของตารางนั้นอยู่ (TX ของ RPC
+ * ใดจะ commit/rollback ก็ต้องถือ lock จนจบ) — TX อื่นถืออยู่ = NOWAIT 55P03 โยนทันที
  * ต้องครอบ begin/commit เสมอ — ตรวจจริง: LOCK TABLE เปล่า ๆ นอก transaction block
  * โดนปฏิเสธ ("LOCK TABLE can only be used in transaction blocks")
+ * หมายเหตุ gate waveh-r3 M1: ขา lock อย่างเดียวพิสูจน์แค่ "ไม่มี lock ขัดแล้ว"
+ * ไม่ได้ผูกกับ invocation — backend ที่ยังค้าง "ก่อนถึงตารางเป้าหมาย" (ถูกตาราง
+ * ก่อนหน้า/advisory lock ในทางเดินเดียวกัน) มองไม่เห็น → ใช้ scenarioTerminalProbe
  * @param table ชื่อตารางเต็ม schema-qualified — มาจากค่าคงที่ของเทสเท่านั้น (ไม่รับ user input) */
 export async function tableTerminalProbe(table: string): Promise<void> {
   await psql(`begin; lock table ${table} in access exclusive mode nowait; commit;`);
+}
+
+/** probe terminal ที่สัมพันธ์กับ invocation (gate waveh-r3 M1) — สองขา:
+ *  ขา lock   : ACCESS EXCLUSIVE nowait บนตารางเป้าหมายได้ = ไม่มี TX ค้างถือตาราง
+ *  ขา activity: ไม่มี backend ที่กำลังรัน RPC นี้อยู่ (state 'active' หรือ
+ *              'idle in transaction') — จับ backend ที่ยังไม่ถึงตารางเป้าหมายด้วย
+ *              (ค้างที่ตารางก่อนหน้าในทางเดินเดียวกัน ซึ่งขา lock มองไม่เห็น)
+ *  correlation: integration config รันไฟล์เรียง (fileParallelism:false) — backend
+ *  ที่ active กับ RPC นี้หลัง dispatch ของเราตอบกลับแล้ว = invocation ของเราเอง
+ *  · เช็ค activity สองรอบห่าง 350ms ให้ backend ที่เพิ่งเข้าคิวมีเวลาปรากฏ
+ *  (pid ของตัวเช็คเองถูกตัดออก — query ของมันบรรจุชื่อ RPC เป็น literal)
+ * @param table   ตารางเป้าหมาย schema-qualified (ค่าคงที่ของเทส)
+ * @param rpcName ชื่อ RPC (ค่าคงที่ — ใช้ substring-match ใน pg_stat_activity.query) */
+export async function scenarioTerminalProbe(table: string, rpcName: string): Promise<void> {
+  await psql(`begin; lock table ${table} in access exclusive mode nowait; commit;`);
+  for (let round = 0; round < 2; round += 1) {
+    const busy = await psqlScalar(`
+      select count(*)::text from pg_stat_activity
+       where query like '%${rpcName}%'
+         and state in ('active', 'idle in transaction')
+         and pid <> pg_backend_pid();`);
+    if (busy !== "0") {
+      throw new Error(
+        `scenario probe: backend ยังรัน ${rpcName} อยู่ (${busy} ตัว) — invocation ยังไม่ terminal`,
+      );
+    }
+    if (round === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+  }
 }
 
 // ─── ผู้ใช้ทดสอบ (GoTrue จริง) ────────────────────────────────────────────────

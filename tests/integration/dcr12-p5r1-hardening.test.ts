@@ -60,8 +60,8 @@ import {
   restCall,
   REST_URL,
   SERVICE_KEY,
+  scenarioTerminalProbe,
   settleScenario,
-  tableTerminalProbe,
   type RestCallOptions,
   type RestResult,
   type TestUser,
@@ -615,7 +615,7 @@ describe.skipIf(!DB_URL)(
       // หลักฐานของผู้เรียกครบแล้ว (aggregate byte-identical) → settle เอง
       // พร้อม probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือ role_assignments
       await settleScenario(failed, "role-assignments-byte-identical", () =>
-        tableTerminalProbe("public.role_assignments"));
+        scenarioTerminalProbe("public.role_assignments", "admin_revoke_role"));
     }, 45_000);
 
     // ─── เคส d: SoD re-check ใน TX ของ confirm (B6) ────────────────────────────

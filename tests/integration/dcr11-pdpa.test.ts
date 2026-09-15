@@ -45,8 +45,8 @@ import {
   REPO_ROOT,
   restCall,
   SERVICE_KEY,
+  scenarioTerminalProbe,
   settleScenario,
-  tableTerminalProbe,
   type RestCallOptions,
   type RestResult,
   type TestUser,
@@ -382,9 +382,10 @@ describe.skipIf(!DB_URL)(
       expect(
         await psqlScalar(`select file_media_id::text from public.data_export_jobs where id = '${jobId}';`),
       ).toBe(E16_MEDIA_DONE);
-      // probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือตารางงาน = backend จบจริง
+      // probe terminal (gate waveh-r2 M1 + r3 M1): lock ตารางงาน + ไม่มี backend
+      // ยังรัน RPC นี้อยู่ = invocation จบจริง (จับได้แม้ค้างก่อนถึงตาราง)
       await settleScenario(again, "job-row-still-done(file-media-intact)", () =>
-        tableTerminalProbe("public.data_export_jobs"));
+        scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"));
     }, 45_000);
 
     // ─── เคส d: fail path — failed + error + completed_at ──────────────────────
@@ -460,7 +461,7 @@ describe.skipIf(!DB_URL)(
       // หลักฐานของผู้เรียกครบแล้ว (แถว byte-identical + สถานะ pending) → settle เอง
       // พร้อม probe terminal (gate waveh-r2 M1): ไม่มี TX ค้างถือตารางงาน
       await settleScenario(failed, "job-row-byte-identical(status-pending)", () =>
-        tableTerminalProbe("public.data_export_jobs"));
+        scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"));
     }, 45_000);
 
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──
