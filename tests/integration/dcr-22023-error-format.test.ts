@@ -13,11 +13,11 @@
  * (0019/0025/0032 — 0032 คือนิยามสุดท้ายที่รันจริงบน DB) — แก้ครบ 6 จุดที่แหล่ง
  * ตาม DCR "แก้ที่แหล่งยก error ของ 0008"
  *
- * known-legacy (ห้ามขยายขอบเขตเงียบ ๆ — แยกเป็น DCR รอคำวินิจฉัย CTO ใน closing
- * gate): raise ตระกูล '(ASM-011 — ERR-RBAC-001)' 4 จุด (0011 ×2 · 0019 · 0020)
- * ผิด convention เดียวกันแต่เป็นคนละผิ้บริโภค (attempt RPC) — fence ยกเว้นชั่วคราว
- * เฉพาะรูปข้อความนี้เป๊ะ และบังคับจำนวนเท่ากับที่ filing ไว้ (น้อยลง = ถูกแก้
- * แล้วให้ตัดรายการยกเว้น · มากกว่า = malformed ใหม่ = ล้ม)
+ * known-legacy ปิดแล้ว (Wave I เฟส 2 · DCR ASM-011 ตาม verdict r22 ข้อ 2): raise ตระกูล
+ * '(ASM-011 — ERR-RBAC-001)' 4 จุด (0011 ×2 · 0019 · 0020) ถูกแก้ที่แหล่งเป็น
+ * '(ERR-RBAC-001|session_mismatch)' ตามเอกสาร docs/09-dev/DCR-ASM-011-RPC-ERROR-FORMAT.md
+ * — exception ของ fence ถูกตัดตามคำสั่งของ fence เอง ("น้อยลง = ถูกแก้แล้วให้ตัดรายการ
+ * ยกเว้น") ทิศ ก จึงบังคับ strict ต่อจาก Wave I เฟส 2 นี้
  *
  * two-way proof [[regression-test-two-way-proof]]:
  *   ทิศสกปรก (pure): คืนข้อความ em-dash ที่ 0008 → ทิศ ก ล้มเป๊ะ (fence จับ)
@@ -40,9 +40,6 @@ const MIGRATIONS_DIR = join(import.meta.dirname, "..", "..", "supabase", "migrat
 
 /** รูปปิดท้ายที่ parser ยอมรับ — สะท้อน TRAILING_CODE_RE ของ rpc-errors.ts (นิยามเดียวกันเป๊ะ) */
 const TRAILING_OK = /\((ERR-[A-Z]+-\d{3})(?:\|([a-z0-9_]+))?\)$/;
-
-/** รูป legacy ที่ filing เป็น DCR แยก (ASM-011) — ยกเว้นชั่วคราวรอ CTO */
-const LEGACY_ASM011 = /\(ASM-011 — ERR-RBAC-001\)$/;
 
 interface RaiseSite {
   readonly file: string;
@@ -67,23 +64,15 @@ function raiseSites(): RaiseSite[] {
 }
 
 describe("DCR 22023 (pure) · raise ที่ฝัง ERR- ใน migrations ต้องจบด้วยรูป anchored (CODE|tag)", () => {
-  it("ทิศ ก: ทุกจุดยก error ผ่านรูปปิดท้าย — ยกเว้น legacy ASM-011 ที่ filing เป็น DCR เป๊ะ 4 จุด", () => {
+  it("ทิศ ก: ทุกจุดยก error ผ่านรูปปิดท้าย (strict — legacy ASM-011 ปิดแล้ว Wave I เฟส 2)", () => {
     const sites = raiseSites();
     expect(sites.length, "ต้องเจอจุดยก error ที่ฝัง code จริง (ไม่ใช่ศูนย์ — scan พัง?)").toBeGreaterThan(
       400,
     );
     const malformed = sites.filter((s) => !TRAILING_OK.test(s.message));
-    const legacy = malformed.filter((s) => LEGACY_ASM011.test(s.message));
-    const rest = malformed.filter((s) => !LEGACY_ASM011.test(s.message));
     expect(
-      legacy.length,
-      `legacy ASM-011 ต้องเท่ากับที่ filing ไว้ (4) — น้อยลง = ถูกแก้แล้วให้ตัดรายการยกเว้น · มากกว่า = จุดใหม่ [${legacy
-        .map((s) => `${s.file}:${s.line}`)
-        .join(", ")}]`,
-    ).toBe(4);
-    expect(
-      rest.map((s) => `${s.file}:${s.line}`),
-      "raise ที่ฝัง ERR- ต้องจบด้วย (CODE) หรือ (CODE|tag) เท่านั้น — ไม่ตรง = parser จัด transient → route ตอบ 503 แทน 4xx (DCR 22023)",
+      malformed.map((s) => `${s.file}:${s.line}`),
+      "raise ที่ฝัง ERR- ต้องจบด้วย (CODE) หรือ (CODE|tag) เท่านั้น — ไม่ตรง = parser จัด transient → route ตอบ 503 แทน 4xx (DCR 22023 · ASM-011 ปิดแล้วไม่มี exception เหลือ)",
     ).toEqual([]);
   });
 

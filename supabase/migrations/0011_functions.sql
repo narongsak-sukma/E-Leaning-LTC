@@ -706,7 +706,7 @@ begin
   if p_session_id is null
      or p_session_id <> v_attempt.session_id
      or p_session_id is distinct from public.auth_session_claim() then
-    raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้: session ไม่ตรง (ASM-011 — ERR-RBAC-001)';
+    raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้: session ไม่ตรง (ERR-RBAC-001|session_mismatch)';
   end if;
   if v_attempt.status <> 'in_progress' then
     raise exception 'บันทึกคำตอบไม่ได้เพราะส่งข้อสอบแล้ว (ERR-ASM-005)';
@@ -790,7 +790,7 @@ begin
   if p_session_id is null
      or p_session_id <> v_attempt.session_id
      or p_session_id is distinct from public.auth_session_claim() then
-    raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้: session ไม่ตรง (ASM-011 — ERR-RBAC-001)';
+    raise exception 'คุณไม่มีสิทธิ์ดำเนินการนี้: session ไม่ตรง (ERR-RBAC-001|session_mismatch)';
   end if;
   if v_attempt.status <> 'in_progress' then
     raise exception 'บันทึกคำตอบไม่ได้เพราะส่งข้อสอบแล้ว (ERR-ASM-005)';

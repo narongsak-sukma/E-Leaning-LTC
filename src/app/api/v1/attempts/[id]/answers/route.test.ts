@@ -195,7 +195,7 @@ describe("POST /attempts/{id}/answers — map ผล RPC save_answer", () => {
     },
     {
       label: "session ไม่ตรงของ attempt (ASM-011)",
-      message: "คุณไม่มีสิทธิ์ดำเนินการนี้ (ERR-RBAC-001)",
+      message: "คุณไม่มีสิทธิ์ดำเนินการนี้: session ไม่ตรง (ERR-RBAC-001|session_mismatch)",
       code: "ERR-RBAC-001",
       status: 403,
     },
@@ -234,6 +234,16 @@ describe("POST /attempts/{id}/answers — map ผล RPC save_answer", () => {
     const body = (await res.json()) as ErrorBody;
     expect(body.error.code).toBe("ERR-SYS-002");
     expect(body.error.message).not.toContain("SQLSTATE");
+  });
+
+  it("รูปเก่า (ASM-011 — ERR-RBAC-001) ต้องยังไม่ผ่าน parser → 503 opaque (ทิศสกปรก BFF — DCR ASM-011)", async () => {
+    const { res } = await post({
+      rpcError: { message: "คุณไม่มีสิทธิ์ดำเนินการนี้: session ไม่ตรง (ASM-011 — ERR-RBAC-001)" },
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error.code).toBe("ERR-SYS-002");
+    expect(body.error.message).not.toContain("ASM-011");
   });
 });
 

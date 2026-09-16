@@ -46,6 +46,7 @@ import {
   storageCall,
   tinyMp4Bytes,
 } from "./helpers-d8.js";
+import { parseRpcErrorCodeDetailed } from "../../src/lib/api/rpc-errors.js";
 
 const DB_URL = process.env.TEST_DATABASE_URL;
 
@@ -422,7 +423,12 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
       },
     );
     expect(result.status).toBeGreaterThanOrEqual(400);
-    expect(errMessage(result.json)).toContain("ERR-RBAC-001");
+    const msg = errMessage(result.json);
+    expect(msg).toContain("ERR-RBAC-001");
+    expect(
+      parseRpcErrorCodeDetailed({ message: msg }),
+      "message จาก DB จริงต้อง parse ได้เป็น ERR-RBAC-001|session_mismatch (DCR ASM-011 — ไม่ใช่แค่ substring)",
+    ).toEqual({ code: "ERR-RBAC-001", reason: "session_mismatch" });
   });
 
   it("save_answer ปฏิเสธ: JWT claim session_id อื่น (อุปกรณ์ 2) แม้ p_session_id ถูก (D20-B5 — ERR-RBAC-001)", async () => {
@@ -452,7 +458,12 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
       },
     );
     expect(result.status).toBeGreaterThanOrEqual(400);
-    expect(errMessage(result.json)).toContain("ERR-RBAC-001");
+    const msg = errMessage(result.json);
+    expect(msg).toContain("ERR-RBAC-001");
+    expect(
+      parseRpcErrorCodeDetailed({ message: msg }),
+      "message จาก DB จริงต้อง parse ได้เป็น ERR-RBAC-001|session_mismatch (DCR ASM-011 — ไม่ใช่แค่ substring)",
+    ).toEqual({ code: "ERR-RBAC-001", reason: "session_mismatch" });
   });
 
   it("submit_attempt ปฏิเสธ: JWT claim session_id อื่น (session binding สองชั้น — ERR-RBAC-001)", async () => {
@@ -463,7 +474,12 @@ describe.skipIf(!DB_URL)("D-8 สอบ + ใบประกาศนียบ�
       { p_attempt_id: fastAAttempt1, p_session_id: learnerSession },
     );
     expect(result.status).toBeGreaterThanOrEqual(400);
-    expect(errMessage(result.json)).toContain("ERR-RBAC-001");
+    const msg = errMessage(result.json);
+    expect(msg).toContain("ERR-RBAC-001");
+    expect(
+      parseRpcErrorCodeDetailed({ message: msg }),
+      "message จาก DB จริงต้อง parse ได้เป็น ERR-RBAC-001|session_mismatch (DCR ASM-011 — ไม่ใช่แค่ substring)",
+    ).toEqual({ code: "ERR-RBAC-001", reason: "session_mismatch" });
   });
 
   it("save_answer สำเร็จ: อุปกรณ์เจ้าของ session ตอบได้ + แถวคำตอบเปลี่ยนจริง (answered_at)", async () => {
