@@ -143,6 +143,13 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
  * หยุดเฉพาะ LF จึงกลืน `, E'prefix'` ที่อยู่หลัง CR เข้า comment จนถึง LF
  * ถัดไป — quote แรกหาย ส่วนต่อกลายเป็น string ธรรมดา ชื่อ RPC ใน literal
  * จึงรั่วออกมาเป็นจุดเรียก) — ใช้ lineCommentEnd เดียวกับตัวคั่นจุดต่อ
+ * (v14): tag ของ dollar-quote ตาม dolqdelim ของ scan.l จริง (r16 พิสูจน์:
+ * เดิม `[A-Za-z_][\w$]*` จำกัด ASCII จึงไม่รู้จัก tag อักขระสูง เช่น `$ก$`
+ * และ greedy กิน `$` เข้า tag จน closer `$tag$` กลายเป็นส่วนของ opener
+ * `$tag$abc$tag$` หาไม่เจอ กลืนโค้ดที่เหลือทั้งหมด) — dolq_start =
+ * `[A-Za-z\200-\377_]` · dolq_cont = `[A-Za-z\200-\377_0-9]` ห้าม `$` ใน
+ * tag (ต่างจาก ident_cont ที่มี `\$`) — `\200-\377` = byte สูง = อักขระ
+ * non-ASCII ใด ๆ (ใน JS คือ code unit ≥ U+0080 รวม surrogate ครบทั้งคู่)
  */
 /** line comment `--{non_newline}*` — คืนตำแหน่งหลัง comment (ไม่กินตัวจบบรรทัด) */
 function lineCommentEnd(sql: string, p: number): number {
@@ -279,8 +286,14 @@ function stripSqlDataParts(sql: string): string {
       continue;
     }
     if (ch === "$") {
-      // dollar-quoted string: $tag$ … $tag$ (tag ว่างได้ $$…$$)
-      const opener = /^\$([A-Za-z_][\w$]*)?\$/.exec(sql.slice(i));
+      // dollar-quoted string: $tag$ … $tag$ (tag ว่างได้ $$…$$) · tag ตาม
+      // dolqdelim ของ scan.l: \$({dolq_start}{dolq_cont}*)?\$ — dolq_start =
+      // [A-Za-z\200-\377_] · dolq_cont = [A-Za-z\200-\377_0-9] ห้าม "$" ใน tag
+      // (r16: เดิม [A-Za-z_][\w$]* ไม่รู้จัก tag อักขระสูง และกิน "$" เข้า tag
+      // จน closer หาย กลืนโค้ดที่เหลือ) — \200-\377 = อักขระ non-ASCII ใด ๆ
+      const opener = /^\$([A-Za-z_\u0080-\uFFFF][A-Za-z_\u0080-\uFFFF0-9]*)?\$/.exec(
+        sql.slice(i),
+      );
       if (opener !== null) {
         const closer = `$${opener[1] ?? ""}$`;
         const end = sql.indexOf(closer, i + opener[0].length);

@@ -722,6 +722,87 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(1);
   });
 
+  // ─── r16 (gate waveh-r16 MAJOR): tag ของ dollar-quote ผิด dolqdelim ของ
+  // scan.l สองทาง — เดิม `[A-Za-z_][\w$]*` (1) จำกัด ASCII จึงไม่รู้จัก tag
+  // อักขระสูง (dolq_start = [A-Za-z\200-\377_] รับอักขระ non-ASCII เช่น `$ก$`)
+  // → ข้อความใน quote ถูกอ่านเป็นโค้ด ชื่อปลอมรั่ยเป็นจุดเรียก (2) greedy กิน
+  // `$` เข้า tag ขณะที่ dolq_cont = [A-Za-z\200-\377_0-9] ห้าม `$` → opener
+  // กลืน closer `$tag$` เข้าไปใน tag `$tag$abc$tag$` หา closer ไม่เจอ กลืน
+  // โค้ดที่เหลือทั้งหมด (เจ้าของจริงหายในรูป STATEMENT-only) — v14 แก้ tag
+  // ตาม dolq_start/dolq_cont จริง
+
+  it("ทิศ น (r16 MAJOR-1): tag dollar-quote อักขระสูง — `$ก$ … $ก$` → ชื่อปลอม 0 (v13 = 1 ทั้งสองรูป) · เจ้าของจริง 1 ทั้งสองรูป", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1210, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1210, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1210,
+        "STATEMENT",
+        `SELECT $ก$ "public"."complete_data_export_job"($1) $ก$\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "dolq_start ของ scan.l รับอักขระสูง (\\200-\\377) — ชื่อใน dollar-quote ที่มี tag ไทยเป็นข้อมูล (r16: v13 ได้ 1 ทั้งสองรูป)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "FROM หลัง literal ที่ปิดที่ $ก$ ตัวปิดจริง = เจ้าของจริงต้อง match",
+    ).toHaveLength(1);
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: ชื่อปลอมจาก STATEMENT เพียงแหล่งเดียวก็ต้อง 0 — v13 รั่ย (r16 ตารางผลตรวจซ้ำ: 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: เจ้าของจริงจาก STATEMENT เพียงแหล่งเดียว — v13 ยังได้อยู่ (FROM มองเห็น) ต้องคง 1",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ บ (r16 MAJOR-2): `$` ใน tag ห้าม — `$tag$abc$tag$` ปิดที่ closer จริง → เจ้าของจริง STATEMENT-only 1 (v13 = 0) · ไม่มีชื่อปลอม", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1211, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1211, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1211,
+        "STATEMENT",
+        `SELECT $tag$abc$tag$\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "CONTEXT มีชื่ออยู่แล้ว (รูปเต็มผ่านทั้งสองเวอร์ชัน)",
+    ).toHaveLength(1);
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "dolq_cont ห้าม $ — tag ต้องหยุดที่ tag เอง หา closer $tag$ เจอ ไม่กลืน FROM (r16: v13 กลืนหาย ตารางผลตรวจซ้ำ 1 → 0 กลับทิศ)",
+    ).toHaveLength(1);
+    // คุมขอบเขต: tag ว่าง ($$) และ tag ASCII ยังเป็น literal เหมือนเดิม — v13 ก็ผ่าน
+    const emptyTag = [
+      hdr(1212, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1212, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1212,
+        "STATEMENT",
+        `SELECT $$ "public"."complete_data_export_job"($1) $$\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(emptyTag, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "tag ว่าง $$…$$ ยังเป็น literal — ชื่อปลอม 0 ทั้งสองเวอร์ชัน",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks([emptyTag[0], emptyTag[2], emptyTag[3]] as typeof emptyTag, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+    ).toHaveLength(1);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน

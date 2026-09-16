@@ -172,9 +172,15 @@ describe("cookie ชั่วคราว (pending — stash uuid · gate r1 F2/
     expect(decryptPendingStashPayload("not-json", key, aad)).toBeNull();
     expect(decryptPendingStashPayload("v2.a.b.c", key, aad)).toBeNull();
     expect(decryptPendingStashPayload("v1.only-three", key, aad)).toBeNull();
-    // แก้ ciphertext หนึ่งตัวอักษร = tag ไม่ผ่าน (tamper-evidence ของ GCM)
+    // แก้ ciphertext หนึ่งบิต = tag ไม่ผ่าน (tamper-evidence ของ GCM) · flip ที่
+    // ระดับ byte แล้ว re-encode (แก้รอบ r27: เดิม `slice(0,-2)+"xx"` เป็นการแก้
+    // "ตัวอักษร" — base64url ที่แทนที่อาจ decode กลับเป็น byte เดิมเป๊ะ P≈1/256
+    // (อักษรรองสุดท้ายต้องเป็น 'x' พอดี และอักษรสุดท้ายมี significant bits ตรง
+    // 'x' — วัดจริง 1205/300000) → GCM ถูกต้องที่จะผ่าน เทสจึงล้มเองเป็นครั้งคราว)
     const parts = (payload ?? "").split(".");
-    const tampered = `${parts[0]}.${parts[1]}.${parts[2]}.${(parts[3] ?? "").slice(0, -2)}xx`;
+    const ct = Buffer.from(parts[3] ?? "", "base64url");
+    ct[0] = (ct[0] ?? 0) ^ 0b1;
+    const tampered = `v1.${parts[1]}.${parts[2]}.${ct.toString("base64url")}`;
     expect(decryptPendingStashPayload(tampered, key, aad)).toBeNull();
     // คีย์ผิด
     expect(decryptPendingStashPayload(payload ?? "", Buffer.alloc(32, 9), aad)).toBeNull();
