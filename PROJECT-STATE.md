@@ -655,3 +655,11 @@
 - **D90 การนับ**: เริ่มนับ 3 battery ติดต่อกันก็ต่อเมื่องาน (1) รักษาหลักฐานลงแล้วเท่านั้น — container anchor `7be3fd8e1316…` (`.omc/artifacts/d90-container-anchor-r22.txt`)
 - **แผนขั้นตอน Wave I (doc-first D71 ทุกเฟส + gate codex ทุกเฟส)**: เฟส 1 = รักษาหลักฐาน (scripts/battery-run.mjs heap-sampler + กติกา dump-before-down + เอกสาร) → gate → เฟส 2 = Family B → gate → เฟส 3 = prod-build e2e → gate → closing
 
+### เฟส 1 รักษาหลักฐาน — ลงแล้ว (lead-executed · รอ gate wave-i r1)
+
+- **เอกสารก่อน (D71)**: `docs/09-dev/EVIDENCE-PRESERVATION.md` — กติกา E1 (identity ทุกแถว sampler) · E2 (dump ก่อนทำลาย fail-closed) · E3 (การนับ D90 เริ่มหลัง E1+E2 ลงจริง)
+- **E1 `scripts/heap-sampler.sh`**: ทุกแถวเพิ่ม `container_id` (full 64-hex จาก `{{.Id}}`) + `started_at` (`{{.State.StartedAt}}`) — battery-run.mjs เรียก sampler อยู่แล้วที่ heap-start/heap-end จึงได้ identity อัตโนมัติทุก battery ข้างหน้า · **two-way**: รันเวอร์ชัน HEAD (เดิม) ผ่านสำเนา → แถวไม่มีสองฟิลด์ใหม่ · รันเวอร์ชันใหม่ → มีครบ และค่าตรง anchor r22 เป๊ะ (`container_id=7be3fd8e1316…` · `started_at=2026-09-16T07:12:54.667764083Z`) — `heap-samples-proof.jsonl` สองแถวต่อกัน
+- **E2 `scripts/dump-app-logs.sh` (ใหม่)**: dump `docker logs` เต็ม → `app-logs-<UTC-ts>.log` + `app-logs-<UTC-ts>.meta.txt` (captured_at แยก + Name/ID/Created/StartedAt/Running/Status/RestartCount/OOMKilled รูป anchor) · **Makefile**: บรรทัดแรกของ `down` (:18) · `reset-db` (:46 ก่อน `down -v` :47) · เป้าหมายใหม่ `dump-logs` — make หยุดทันทีเมื่อ dump ล้ม (SHELL=/bin/sh ไม่มี -f)
+- **หลักฐานสด** (`heap-samples-proof.jsonl` + `app-logs-2026-09-16T082904Z.log/.meta.txt` + `dump-stub-negative.log`): E1 two-way ข้างบน · **E2 positive**: dump จริง 2535 แถว + meta ตรง anchor r22 ทุกฟิลด์ (RestartCount=0) · **E2 negative (fail-closed)**: stub docker (inspect ผ่าน/logs ล้ม) → **exit 2** + ไม่เกิดไฟล์ใหม่ (นับก่อน=หลัง=2) · **E2 ไม่มี container** → exit 0 พร้อมเตือน · `make -n reset-db` dry-run: บรรทัดแรก = dump ก่อน `docker compose down -v` · sh -n ผ่านทั้งสองสคริปต์ · hygiene ZWSP/C1/U+FFFF = 0 ทุกไฟล์ที่แตะ
+- **D90 การนับยังไม่เริ่ม** — battery ถัดไป (r35) จะเป็นรอบแรกที่นับก็ต่อเมื่อ gate รอบนี้ PASS (E3)
+
