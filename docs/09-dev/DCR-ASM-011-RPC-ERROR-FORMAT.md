@@ -33,7 +33,7 @@ Filing: verdict r22 ข้อ (2) "Family B DCR ASM-011 ×4" + อนุมั�
 - **ทิศสกปรก (fence)**: คืนข้อความ em-dash ที่จุดใดจุดหนึ่ง → fence ทิศ ก (ที่ตัด exception แล้ว) ต้องล้มพร้อม file:line
 - **ทิศสกปรก (BFF)**: ป้อนข้อความเก่า `(ASM-011 — ERR-RBAC-001)` ให้ route → ต้องได้ 503 ERR-SYS-002 (case opaque ครอบอยู่แล้ว — ห้ามลบ)
 - **ทิศสกปรก (live)**: ก่อน `make reset-db` ฟังก์ชันเดิมบน DB ยังยก em-dash → d8 assertion parse ใหม่ต้องล้ม (บันทึก probe ก่อน replay เป็นหลักฐาน) — หลัง reset-db (replay migration ที่แก้) ผ่านทุกด้าน
-- **ทิศสะอาด**: ทุกชั้นผ่าน — fence strict · route 403 · d8 parse เป๊ะ · battery เต็ม (r36) ผ่าน 13/13
+- **ทิศสะอาด**: ทุกชั้นผ่าน — fence strict · route 403 · d8 parse เป๊ะ (ผลจริงของ battery เต็ม r36/r37 อยู่ท้ายเอกสาร)
 
 ## ลำดับดำเนินงาน (D-f-7: integration กับ e2e ไม่ชนกัน · E2: dump ก่อนทำลาย)
 
@@ -42,5 +42,12 @@ Filing: verdict r22 ข้อ (2) "Family B DCR ASM-011 ×4" + อนุมั�
 3. probe live ทิศสกปรก (ก่อน reset-db) บันทึกผล 503/unparseable
 4. `make reset-db` (E2 dump-before-down ครอบอยู่อัตโนมัติ)
 5. integration ทั้งชุด → health 200 → e2e (ตามลำดับบัญญัติ)
-6. battery r36 เต็ม = D90 รอบ 2/3 (คน container เดิม `7be3fd8e1316…` RestartCount คงเดิม)
+6. battery r36 เต็ม (แผนเดิมคือ D90 รอบ 2/3 บน container เดิม `7be3fd8e1316…` — ผลจริง: container เปลี่ยนจาก `make reset-db` ของขั้น 4 และ r36 ล้มที่ stage e2e ดู "ผลการดำเนินงานจริง" ท้ายเอกสาร)
 7. gate เฟส 2 (wavei-r3) พร้อมหลักฐานทั้งหมด
+
+## ผลการดำเนินงานจริง (บันทึกหลัง gate wavei-r3 — แทนความคาดหมายเดิมข้างบน)
+
+- **ชั้นต่าง ๆ ตามแผน (ขั้น 1–5) ผ่านครบ**: fence ทิศ ก strict 3/3 (`asm011-fence-r1.log` · `malformed === []` ไม่มี exception เหลือ) · BFF route 46/46 รวม dirty pins รูปเก่า → 503 opaque · live probe ก่อน reset-db = 3 failed | 30 passed (ล้มเฉพาะ parse assertions ใหม่ = รูที่เทสเดิมมองไม่เห็น) · `make reset-db` ครอบ E2 (dump 4739/4739 แถว timestamp ก่อน `down -v`) · live หลัง replay 33/33 + `pg_proc` ยืนยันข้อความใหม่ · IT เต็ม 34 ไฟล์ 326/326 · health 200 · e2e เดี่ยว 41 ผ่าน + 1 flaky
+- **battery เต็ม (ขั้น 6) ไม่เป็นไปตามความคาดหมาย**: r36 FAIL 10/13 (e2e-05 ล้มทั้งสองพยายาม) · r37 FAIL 10/13 (e2e-10 ล้มทั้งสองพยายาม ล้มต่างจุด: assertion หลังคลิกยืนยันเพิกถอน · retry ล้มที่ `page.goto /login` timeout 300s) — ทุก stage ก่อน e2e เขียวครบทั้งสองรอบ (r37: unit 2722/2722 · IT 326/326 · health 200) · ใน log app จริงมี marker `Server is approaching the used memory threshold, restarting...` และ webpack TypeError bursts ในหน้าต่าง e2e ทั้งสองรอบ — **สถานะสาเหตุคงเป็นสมมติฐานตาม D-f-11** (gate wavei-r3 วินิจฉัย: correlation และการสลับเทสที่ล้มยังตัด regression ไม่ได้)
+- **D90 = 0/3**: r35 (PASS 13/13) เป็นโมฆะเพราะ container เปลี่ยนจาก reset-db (เกณฑ์ข้อ 3) · r36/r37 FAIL — เริ่มสะสมใหม่บน production runtime ตามเงื่อนไข verdict
+- **gate wavei-r3 (2026-09-16): PASS เฉพาะงาน ASM-011** — "แก้ข้อความครบ 4 จุด ตัด exception ของ fence และเพิ่ม positive/negative route tests ถูกขอบเขต … เพียงพอให้ปิดงาน ASM-011 โดยยอมรับข้อยกเว้น battery เต็มใน gate นี้อย่างชัดเจน" · อนุญาตเปิดเฟส 3 production-build e2e เป็นพาหะวัด D90 · หาก e2e-05/e2e-10 ล้มซ้ำบน production build ต้องสอบสวนต่อ
