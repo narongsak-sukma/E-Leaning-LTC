@@ -22,8 +22,6 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createClient } from "@supabase/supabase-js";
-
 import {
   buildEmailChangeCallbackUrl,
   hashEmailForAudit,
@@ -43,6 +41,8 @@ import {
   type TestUser,
 } from "./helpers.js";
 import { mintAal2Token } from "./helpers-aal2.js";
+// waveh-r1 M1: throwaway SDK ผ่าน trackedClient (fetch injection) — ห้าม createClient ตรง
+import { createTrackedClient } from "./test-io";
 
 const DB_URL = process.env.TEST_DATABASE_URL;
 
@@ -192,8 +192,7 @@ async function passwordGrant(userEmail: string): Promise<{ accessToken: string; 
  * ผ่าน RPC ด้วย user JWT จริง — ลำดับ (c)(e)(f) ถูกคุมโดย lib ไม่ใช่เทส
  */
 function realDeps(userEmail: string): EmailChangeDeps {
-  const throwaway = () =>
-    createClient(REST_URL, ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  const throwaway = () => createTrackedClient({ label: "dcr15-email-throwaway" }).client;
   return {
     verifyPassword: async (_email, password) => {
       const { error } = await throwaway().auth.signInWithPassword({ email: userEmail, password });

@@ -47,7 +47,6 @@ import { promisify } from "node:util";
 
 // gate p5-r2 B1: เคส g ต้องวิ่ง "worker จริง" ของ src (compose → upload → media →
 // complete) ไม่ใช่จำลองมือ — alias @ จัดให้โดย vitest.integration.config.ts
-import { createClient } from "@supabase/supabase-js";
 import { processDataExportJob } from "@/lib/pdpa/export";
 
 import {
@@ -61,10 +60,15 @@ import {
   restCall,
   REST_URL,
   SERVICE_KEY,
+  scenarioTerminalProbe,
+  settleScenario,
+  type RestCallOptions,
   type RestResult,
   type TestUser,
 } from "./helpers.js";
 import { mintAal2Token } from "./helpers-aal2.js";
+// waveh-r1 M1: worker SDK ผ่าน trackedClient (fetch injection) — ห้าม createClient ตรง
+import { createTrackedClient } from "./test-io";
 
 const DB_URL = process.env.TEST_DATABASE_URL;
 
@@ -104,8 +108,8 @@ function svcRpc(name: string, body: unknown): Promise<RestResult> {
 }
 
 /** เรียก RPC ในนามผู้ใช้ (JWT จริง — ทางเดียวกับที่ BFF เรียก) */
-function userRpc(name: string, token: string, body: unknown): Promise<RestResult> {
-  return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: ANON_KEY, token }, body);
+function userRpc(name: string, token: string, body: unknown, options: RestCallOptions = {}): Promise<RestResult> {
+  return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: ANON_KEY, token, ...options }, body);
 }
 
 const execFileAsync = promisify(execFile);
@@ -313,8 +317,9 @@ describe.skipIf(!DB_URL)(
       // ในบักเก็ต {user_id}/{job_id}.json (ไม่มี prefix ซ้อน) → แถว media_assets →
       // complete แนบ claimToken · client ผ่าน Kong มุมมอง host (เหมือน worker ใน
       // container ที่ใช้ SUPABASE_URL ของตัวเอง)
-      const worker = createClient(REST_URL, SERVICE_KEY, {
-        auth: { persistSession: false },
+      const { client: worker } = createTrackedClient({
+        label: "dcr12-pdpa-worker",
+        apiKey: SERVICE_KEY,
       });
       const outcome = await processDataExportJob(worker, {
         jobId,
@@ -594,20 +599,31 @@ describe.skipIf(!DB_URL)(
         p_role: "instructor", // บทบาทที่เป้าหมายไม่เคยถือ (fixture มี citizen+staff:viewer)
         p_reason: `ทดสอบ pin พฤติกรรม role_not_found ของ DCR-12 เคส c2 (D-f-6)`,
         p_request_id: crypto.randomUUID(),
-      });
+      }, { settleMode: "scenario" }); // opaque 500 ไม่มี rest CLF — เทส settle เองด้วย snapshot ด้านล่าง
       // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|role_not_found หายที่ gateway
       expect(failed.status, failed.text.slice(0, 300)).toBe(500);
       expect(failed.json, "P0002 500 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
       expect(failed.text).not.toContain("ERR-");
       expect(failed.text).not.toContain("role_not_found");
-      // P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวบทบาทคงเดิมทุกค่า
-      expect(
-        await psqlScalar(`
-          select coalesce(jsonb_agg(to_jsonb(ra) order by ra.role), '[]'::jsonb)::text
-            from public.role_assignments ra where ra.user_id = '${revokeUser.id}';
-        `),
-      ).toBe(before);
-    }, 45_000);
+      // terminal ยืนยันก่อน (probe r2/r3 + nonce-CLF r4) แล้วจึงอ่าน-assert snapshot
+      // "ใหม่" (r4 M1): P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวบทบาท
+      // คงเดิมทุกค่า (เทียบกับ before ที่จับก่อน dispatch)
+      await settleScenario(
+        failed,
+        "role-assignments-byte-identical",
+        () => scenarioTerminalProbe("public.role_assignments", "admin_revoke_role"),
+        async () => {
+          expect(
+            await psqlScalar(`
+              select coalesce(jsonb_agg(to_jsonb(ra) order by ra.role), '[]'::jsonb)::text
+                from public.role_assignments ra where ra.user_id = '${revokeUser.id}';
+            `),
+          ).toBe(before);
+        },
+      );
+      // งบ 105s: settle ผ่าน fence r7 ขา CLF เฝ้าถึง dispatch+acq+stmt+margin (~20s
+      // ต่อ settle ที่ไร้ CLF line รูป P0002) + หน้าต่าง 12s หลัง kong line
+    }, 105_000);
 
     // ─── เคส d: SoD re-check ใน TX ของ confirm (B6) ────────────────────────────
 

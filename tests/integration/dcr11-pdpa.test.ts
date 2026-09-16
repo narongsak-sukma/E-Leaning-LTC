@@ -45,6 +45,9 @@ import {
   REPO_ROOT,
   restCall,
   SERVICE_KEY,
+  scenarioTerminalProbe,
+  settleScenario,
+  type RestCallOptions,
   type RestResult,
   type TestUser,
 } from "./helpers.js";
@@ -79,8 +82,8 @@ interface JobResult {
   readonly claimToken?: string;
 }
 
-function svcRpc(name: string, body: unknown): Promise<RestResult> {
-  return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: SERVICE_KEY, token: SERVICE_KEY }, body);
+function svcRpc(name: string, body: unknown, options: RestCallOptions = {}): Promise<RestResult> {
+  return restCall("POST", `/rest/v1/rpc/${name}`, { apiKey: SERVICE_KEY, token: SERVICE_KEY, ...options }, body);
 }
 
 /** เรียก RPC ในนามผู้ใช้ (JWT จริง — ทางเดียวกับที่ BFF เรียก) */
@@ -360,16 +363,37 @@ describe.skipIf(!DB_URL)(
       // complete ซ้ำบนงานที่ done แล้ว — ไม่พบงานสถานะ processing → ปฏิเสธ ·
       // (P0002 ผ่าน gateway ของ stack นี้ร่างกาย error หาย — บทเรียน dcr10 §"P0002" —
       //  จึง assert เฉพาะสถานะ; แท็ก ERR-NF-001|job_not_processing พิสูจน์ที่ชั้น DB)
+      // settleMode:"scenario" — opaque 500 นี้ upstream connection ขาดกลางทาง
+      // (ไม่มี rest CLF line → fence ตัดไม่ได้) แต่เทสถือหลักฐาน terminal เอง:
+      // แถวงานยัง done ครบทุกคอลัมน์หลัง reject = ผู้เรียก settle เอง
       const again = await svcRpc("complete_data_export_job", {
         p_job_id: jobId,
         p_file_media_id: E16_MEDIA_DONE,
         p_chunks: 3,
         p_request_id: crypto.randomUUID(),
         p_claim_token: exportTokenA,
-      });
+      }, { settleMode: "scenario" });
       expect(again.status, again.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
       expect(again.json, "P0002 ผ่าน gateway ต้องไม่กลายเป็น 200 เงียบ").toBeNull();
-    }, 45_000);
+      // probe terminal (r2/r3 M1) + upstream-terminal ผูก nonce (r4 M1) ผ่านก่อน —
+      // แล้วจึงอ่าน-assert snapshot "ใหม่" (r4 M1: อ่านก่อน terminal ยืนยัน = race
+      // อาจได้ของเก่าขณะ backend ยังมีชีวิต): งานยัง done + file_media_id เดิม
+      await settleScenario(
+        again,
+        "job-row-still-done(file-media-intact)",
+        () => scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(`select status::text from public.data_export_jobs where id = '${jobId}';`),
+          ).toBe("done");
+          expect(
+            await psqlScalar(`select file_media_id::text from public.data_export_jobs where id = '${jobId}';`),
+          ).toBe(E16_MEDIA_DONE);
+        },
+      );
+      // งบ 105s: settle ผ่าน fence r7 ขา CLF เฝ้าถึง dispatch+acq+stmt+margin (~20s
+      // ต่อ settle ที่ไร้ CLF line รูป P0002) + หน้าต่าง 12s หลัง kong line
+    }, 105_000);
 
     // ─── เคส d: fail path — failed + error + completed_at ──────────────────────
 
@@ -425,23 +449,33 @@ describe.skipIf(!DB_URL)(
         p_chunks: 1,
         p_request_id: crypto.randomUUID(),
         p_claim_token: crypto.randomUUID(), // token ใด ๆ — ด่านสถานะมาก่อนด่าน lease (0039)
-      });
+      }, { settleMode: "scenario" }); // opaque 500 ไม่มี rest CLF — เทส settle เองด้วย snapshot ด้านล่าง
       // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|job_not_processing หายที่ gateway
       expect(failed.status, failed.text.slice(0, 300)).toBe(500);
       expect(failed.json, "P0002 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
       expect(failed.text).not.toContain("ERR-");
       expect(failed.text).not.toContain("job_not_processing");
-      // P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวงานคงสภาพเดิมทุกคอลัมน์
-      expect(
-        await psqlScalar(
-          `select to_jsonb(j)::text from public.data_export_jobs j where id = '${jobId}';`,
-        ),
-      ).toBe(before);
-      const statusAfter = await psqlScalar(`
-        select status::text from public.data_export_jobs where id = '${jobId}';
-      `);
-      expect(statusAfter).toBe("pending");
-    }, 45_000);
+      // terminal ยืนยันก่อน (probe r2/r3 + nonce-CLF r4) แล้วจึงอ่าน-assert snapshot
+      // "ใหม่" (r4 M1): P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวงานคงสภาพ
+      // เดิมทุกคอลัมน์ (เทียบกับ before ที่จับก่อน dispatch)
+      await settleScenario(
+        failed,
+        "job-row-byte-identical(status-pending)",
+        () => scenarioTerminalProbe("public.data_export_jobs", "complete_data_export_job"),
+        async () => {
+          expect(
+            await psqlScalar(
+              `select to_jsonb(j)::text from public.data_export_jobs j where id = '${jobId}';`,
+            ),
+          ).toBe(before);
+          expect(
+            await psqlScalar(`select status::text from public.data_export_jobs where id = '${jobId}';`),
+          ).toBe("pending");
+        },
+      );
+      // งบ 105s: settle ผ่าน fence r7 ขา CLF เฝ้าถึง dispatch+acq+stmt+margin (~20s
+      // ต่อ settle ที่ไร้ CLF line รูป P0002) + หน้าต่าง 12s หลัง kong line
+    }, 105_000);
 
     // ─── เคส e: ขอลบบัญชี — SoD staff · token 43 base64url · hash เท่านั้น · ซ้ำ ──
 

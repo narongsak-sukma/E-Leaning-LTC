@@ -1,0 +1,300 @@
+{
+  "recordedAt": "2026-09-15T00:37:59.011Z",
+  "scope": [
+    "tests/integration",
+    "tests/barrier-proof"
+  ],
+  "hooks": {
+    "beforeAll": {
+      "total": 55,
+      "db": 28
+    },
+    "afterAll": {
+      "total": 48,
+      "db": 12
+    },
+    "beforeEach": {
+      "total": 3,
+      "db": 3
+    },
+    "afterEach": {
+      "total": 2,
+      "db": 2
+    },
+    "onTestFinished": {
+      "total": 0,
+      "db": 0
+    }
+  },
+  "sqlEntryApis": [
+    "psql",
+    "psqlRows",
+    "psqlScalar",
+    "sqlWrite",
+    "PsqlSession.exec"
+  ],
+  "sdkFiles": [
+    "src/app/(learner)/my/security/email/actions.ts",
+    "src/lib/auth/mfa.ts",
+    "src/lib/auth/password-change.ts",
+    "src/lib/supabase/server.ts",
+    "tests/integration/dcr12-p5r1-hardening.test.ts",
+    "tests/integration/dcr15-email-change.test.ts",
+    "tests/integration/repeated-or-cursor.test.ts",
+    "tests/integration/test-io.ts"
+  ],
+  "directEntries": {
+    "tests/integration/d8-exam-cert-flow.test.ts": {
+      "fetch": 0,
+      "sql": 3,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr10-notifications.test.ts": {
+      "fetch": 8,
+      "sql": 32,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr11-admin.test.ts": {
+      "fetch": 0,
+      "sql": 6,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr11-identity.test.ts": {
+      "fetch": 0,
+      "sql": 17,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr11-pdpa.test.ts": {
+      "fetch": 0,
+      "sql": 13,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr12-p5r1-hardening.test.ts": {
+      "fetch": 8,
+      "sql": 22,
+      "spawn": 0,
+      "sdk": 1
+    },
+    "tests/integration/dcr13-admin-users.test.ts": {
+      "fetch": 2,
+      "sql": 4,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr14-mfa.test.ts": {
+      "fetch": 4,
+      "sql": 2,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr15-email-change.test.ts": {
+      "fetch": 4,
+      "sql": 3,
+      "spawn": 0,
+      "sdk": 1
+    },
+    "tests/integration/dcr16-password-reset.test.ts": {
+      "fetch": 8,
+      "sql": 2,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr4-views-and-policy.test.ts": {
+      "fetch": 0,
+      "sql": 8,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr7-cert-list-views.test.ts": {
+      "fetch": 0,
+      "sql": 5,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr8-bulk-auto-cert.test.ts": {
+      "fetch": 0,
+      "sql": 31,
+      "spawn": 4,
+      "sdk": 0
+    },
+    "tests/integration/dcr9-audit-allowlist.test.ts": {
+      "fetch": 0,
+      "sql": 5,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/dcr9-credit.test.ts": {
+      "fetch": 0,
+      "sql": 51,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/helpers-d8.ts": {
+      "fetch": 1,
+      "sql": 8,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/lesson-parent-softdelete.test.ts": {
+      "fetch": 0,
+      "sql": 14,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/my_active_enrollments.test.ts": {
+      "fetch": 0,
+      "sql": 2,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/repeated-or-cursor.test.ts": {
+      "fetch": 0,
+      "sql": 2,
+      "spawn": 0,
+      "sdk": 1
+    },
+    "tests/integration/v_enrollment_progress_softdelete.test.ts": {
+      "fetch": 0,
+      "sql": 8,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-g-admin-assessment-rules.test.ts": {
+      "fetch": 3,
+      "sql": 19,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-g-auth005-password-change.test.ts": {
+      "fetch": 2,
+      "sql": 1,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-g-login-ratelimit.test.ts": {
+      "fetch": 2,
+      "sql": 0,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-g-logout-all.test.ts": {
+      "fetch": 1,
+      "sql": 0,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-g-progress-video-position.test.ts": {
+      "fetch": 2,
+      "sql": 4,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-g-qb-bank-detail.test.ts": {
+      "fetch": 3,
+      "sql": 20,
+      "spawn": 1,
+      "sdk": 0
+    },
+    "tests/integration/wave-h-cleanup-fk-proof.test.ts": {
+      "fetch": 0,
+      "sql": 11,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/integration/wave-h-owner-proof.test.ts": {
+      "fetch": 0,
+      "sql": 10,
+      "spawn": 1,
+      "sdk": 0
+    },
+    "tests/integration/wave-h-test-io-smoke.test.ts": {
+      "fetch": 0,
+      "sql": 0,
+      "spawn": 0,
+      "sdk": 1
+    },
+    "tests/integration/wave-h-window-coordinator.test.ts": {
+      "fetch": 0,
+      "sql": 6,
+      "spawn": 1,
+      "sdk": 0
+    },
+    "tests/barrier-proof/child/gg-abandoned-setup.test.ts": {
+      "fetch": 0,
+      "sql": 1,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/child/ii-late-mutation.test.ts": {
+      "fetch": 0,
+      "sql": 1,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/child/kk-abandoned-write.test.ts": {
+      "fetch": 0,
+      "sql": 1,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8c-deadline-vs-runner-timeout.test.ts": {
+      "fetch": 0,
+      "sql": 1,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8e3-cleanup-sync-point.test.ts": {
+      "fetch": 0,
+      "sql": 3,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8f-arbitration-and-generation.test.ts": {
+      "fetch": 0,
+      "sql": 1,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8h-teardown-context.test.ts": {
+      "fetch": 0,
+      "sql": 2,
+      "spawn": 0,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8l-rest-stop-5xx-recovery.test.ts": {
+      "fetch": 1,
+      "sql": 0,
+      "spawn": 1,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8p-docker-cli-kill.test.ts": {
+      "fetch": 0,
+      "sql": 0,
+      "spawn": 1,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8q-refresh-fixtures.test.ts": {
+      "fetch": 2,
+      "sql": 0,
+      "spawn": 1,
+      "sdk": 0
+    },
+    "tests/barrier-proof/w8r-get-classification.test.ts": {
+      "fetch": 0,
+      "sql": 0,
+      "spawn": 0,
+      "sdk": 1
+    },
+    "tests/barrier-proof/w8s-negative-proofs.test.ts": {
+      "fetch": 2,
+      "sql": 3,
+      "spawn": 2,
+      "sdk": 0
+    }
+  }
+}

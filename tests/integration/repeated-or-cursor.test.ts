@@ -12,10 +12,8 @@
  * มี published_at เท่ากันเป็นคู่ tie ของ cursor
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createClient } from "@supabase/supabase-js";
 import {
   ANON_KEY,
-  REST_URL,
   createTestUser,
   deleteTestUser,
   psqlScalar,
@@ -23,6 +21,8 @@ import {
   restCall,
   type TestUser,
 } from "./helpers.js";
+// waveh-r1 M1: postgrest-js ผ่าน trackedClient (fetch injection) — ห้าม createClient ตรง
+import { createTrackedClient } from "./test-io";
 
 const DB_URL = process.env.TEST_DATABASE_URL;
 
@@ -55,8 +55,9 @@ describe.skipIf(!DB_URL)("repeated-or: คำค้น + cursor พร้อม�
   });
 
   it("postgrest-js (ชุดคำสั่งเดียวกับ BFF) เติม or= สองตัวใน URL จริง", async () => {
-    const client = createClient(REST_URL, ANON_KEY, {
-      global: { headers: { Authorization: `Bearer ${user.accessToken}` } },
+    const { client } = createTrackedClient({
+      label: "repeated-or-cursor-postgrest-js",
+      globalHeaders: { Authorization: `Bearer ${user.accessToken}` },
     });
     const builder = client
       .from("courses")

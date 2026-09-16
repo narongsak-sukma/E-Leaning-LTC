@@ -23,6 +23,10 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    // D91 [#94]: unit รวมไฟล์เทส interactive ของ component (.test.tsx) ด้วย — แต่ละ
+    // ไฟล์ .tsx ประกาศ environment เองผ่าน docblock `// @vitest-environment jsdom`
+    // (limitation 10: jsdom เฉพาะไฟล์ใหม่ src/** ไฟล์อื่นคง node) · include แยก unit/IT
+    // ไม่ชน — integration/barrier config ครอบเฉพาะ tests/** ไม่แตะ src/** ตัวนี้
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

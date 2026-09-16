@@ -20,7 +20,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ANON_KEY,
   createTestUser,
+  deleteTestUser,
   psql,
+  psqlRows,
   restCall,
   SERVICE_KEY,
   type RestResult,
@@ -112,29 +114,26 @@ describe.skipIf(!DB_URL)("DCR-7 กระดาษข้อสอบคีย์
   let validCert: { id: string; cert_no: string; verify_code: string };
   let supersededCert: { id: string; cert_no: string };
 
-  /** ล้างโลกของชุดนี้ทั้งหมด (เรียงตาม FK — RESTRICT) ครอบของค้างจากรอบที่พังกลางทาง */
+  /** ล้างโลกของชุดนี้ทั้งหมด — ผู้ใช้ผ่าน builder กลาง D89-1 (deleteTestUser) แล้ว
+   * จึงลบหลักสูตร fixture · ครอบของค้างจากรอบที่พังกลางทาง (ระบุผู้ใช้ด้วย email
+   * pattern เพราะ beforeAll เรียกก่อน createTestUser)
+   *
+   * battery r16 (2026-09-15): teardown แบบเก่าลบมือเป็นชุดของตัวเองจนถึง profiles
+   * โดยไม่รู้จัก event_outbox/notification_recipients — tick ของ mailer
+   * (email-dispatch ทุก 30s) ประมวล event certificate.issued ของผู้ใช้เจ้าของใบ
+   * (payload มี user_id — 0034) สร้าง recipient ขณะผู้ใช้ยังมีชีวิต +47 วิก่อน
+   * afterAll → delete profiles ชน FK notification_recipients_user_id_fkey (suite
+   * FAIL ทั้งที่ test body ผ่านครบ) · builder กลางถือกลุ่มตารางนี้อยู่แล้ว:
+   * event_outbox (SOLE-LINK ลบก่อน worker ได้ claim) · notification_recipients/
+   * email_outbox (OWNED) · SRE NOWAIT + retry 55P03/40P01 ดูด tick ที่วิ่งชนค้าง */
   async function cleanupE9D7World(): Promise<void> {
+    const stale = await psqlRows<{ id: string }>(
+      `select id::text from auth.users where email like 'e9-dcr7-%'`,
+    );
+    for (const row of stale) {
+      await deleteTestUser(row.id);
+    }
     await psql(`
-      delete from public.certificate_verifications
-       where verify_code in (select c.verify_code from public.certificates c
-                              where c.user_id in (select id from auth.users
-                                                   where email like 'e9-dcr7-%'));
-      delete from public.certificates
-       where user_id in (select id from auth.users where email like 'e9-dcr7-%');
-      delete from public.attempt_answers where attempt_id = '${E9D7_PAPER_ATTEMPT_ID}';
-      delete from public.assessment_attempts
-       where id in ('${E9D7_PASSED_ATTEMPT_ID}', '${E9D7_PAPER_ATTEMPT_ID}');
-      delete from public.lesson_progress
-       where enrollment_id in (select id from public.enrollments
-                                where user_id in (select id from auth.users
-                                                   where email like 'e9-dcr7-%'));
-      delete from public.enrollments
-       where user_id in (select id from auth.users where email like 'e9-dcr7-%');
-      delete from public.role_assignments
-       where user_id in (select id from auth.users where email like 'e9-dcr7-%');
-      delete from public.profiles
-       where id in (select id from auth.users where email like 'e9-dcr7-%');
-      delete from auth.users where email like 'e9-dcr7-%';
       delete from public.courses
        where id in ('${E9D7_COURSE_ID}', '${E9D7_BIG_COURSE_ID}');
     `);

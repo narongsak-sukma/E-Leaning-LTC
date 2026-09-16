@@ -224,29 +224,25 @@ export async function cleanupFastExamRows(): Promise<void> {
 export async function cleanupD8World(): Promise<void> {
   const fastIds = [D8_IDS.fastA.assessment, D8_IDS.fastB.assessment];
   const fastList = fastIds.map((id) => `'${id}'`).join(",");
-  const d8Users = `(select id from auth.users where email like 'd8-examcert-%')`;
-  const attemptScope = `(select id from public.assessment_attempts
-      where assessment_id in (${fastList}) or user_id in ${d8Users})`;
-  const d8UserIds = `(select id::text from auth.users where email like 'd8-examcert-%')`;
+  // กวาด attempts ตามรอบสอบของ suite ก่อน (กันของค้างจากรอบที่ผู้ใช้ถูกลบไปแล้ว)
   await psql(`
     delete from public.event_outbox
-     where payload ->> 'source_id' in (select x.id::text from ${attemptScope} x)
-        or payload ->> 'user_id' in ${d8UserIds};
-    delete from public.attempt_answers where attempt_id in ${attemptScope};
-    delete from public.assessment_attempts
-     where assessment_id in (${fastList}) or user_id in ${d8Users};
+     where payload ->> 'source_id' in (
+       select a.id::text from public.assessment_attempts a
+       where a.assessment_id in (${fastList}));
+    delete from public.attempt_answers where attempt_id in (
+      select id from public.assessment_attempts where assessment_id in (${fastList}));
+    delete from public.assessment_attempts where assessment_id in (${fastList});
     delete from public.certificate_verifications
-     where verify_code in (select c.verify_code from public.certificates c
-                            where c.user_id in ${d8Users})
-        or verify_code = 'LTC-2099-000000'; -- รหัส not_found ตายตัวที่ suite ใช้ทดสอบ
-    delete from public.certificates where user_id in ${d8Users};
-    delete from public.lesson_progress
-     where enrollment_id in (select id from public.enrollments where user_id in ${d8Users});
-    delete from public.enrollments where user_id in ${d8Users};
-    delete from public.role_assignments where user_id in ${d8Users};
-    delete from public.profiles where id in ${d8Users};
-    delete from auth.users where email like 'd8-examcert-%';
+     where verify_code = 'LTC-2099-000000'; -- รหัส not_found ตายตัวที่ suite ใช้ทดสอบ
   `);
+  // ผู้ใช้ทั้งชุด — ผ่าน builder กลาง D89-1 (TX เดียว · FK-topological · toggle
+  // append-only · post-guard) แทนการเขียนลำดับลบเองที่นี่
+  const { runUserCleanupVia } = await import("./cleanup-builder");
+  const ids = (
+    await psqlRows<{ id: string }>(`select id::text from auth.users where email like 'd8-examcert-%';`)
+  ).map((u) => u.id);
+  if (ids.length > 0) await runUserCleanupVia(psql, ids);
   await cleanupFastExamRows();
 }
 
@@ -306,21 +302,36 @@ export interface StorageResult {
   readonly text: string;
 }
 
-/** เรียก storage API ผ่าน Kong ด้วย service key (upload/delete/GET object) */
+/** เรียก storage API ผ่าน Kong ด้วย service key (upload/delete/GET object)
+ * waveh-r1 M1: การเขียน (POST/DELETE) ผ่าน transport กลาง httpWrite — ledger ครบ
+ * ทุก dispatch · rawBody ส่งไบต์ mp4 ตรง (ไม่ JSON) · GET คง fetch ตรง (อ่าน
+ * ไม่มี lifecycle) · dynamic import กัน static วนรอบกับ test-io */
 export async function storageCall(
   method: "GET" | "POST" | "DELETE",
   path: string,
   body?: Buffer,
 ): Promise<StorageResult> {
+  if (method !== "GET") {
+    const { httpWrite } = await import("./test-io");
+    const r = await httpWrite(
+      method,
+      path,
+      body === undefined ? undefined : new Uint8Array(body),
+      {
+        apiKey: SERVICE_KEY,
+        token: SERVICE_KEY,
+        label: "storageCall",
+        rawBody: true,
+        extraHeaders: body === undefined ? {} : { "content-type": "video/mp4" },
+      },
+    );
+    return { status: r.status, text: r.text };
+  }
   const headers: Record<string, string> = {
     apikey: SERVICE_KEY,
     authorization: `Bearer ${SERVICE_KEY}`,
   };
   const init: RequestInit = { method, headers };
-  if (body !== undefined) {
-    headers["content-type"] = "video/mp4";
-    init.body = new Uint8Array(body);
-  }
   const response = await fetch(`${REST_URL}${path}`, init);
   const text = await response.text();
   return { status: response.status, text };

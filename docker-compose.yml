@@ -17,10 +17,18 @@ services:
     image: supabase/postgres:15.8.1.060
     container_name: ltc-dev-db
     restart: unless-stopped
+    # log_parameter_max_length_on_error=-1: พิมพ์ bind parameters เต็มใน error log
+    # ของ db — fence v6→v7 (gate waveh-r8/r9 M1) ใช้ parameters line ($1 JSON มี
+    # p_request_id) เป็นหมุดผูก invocation ของ error block (จับคู่ใน record เดียว
+    # ตาม PID ของ backend — tests/integration/db-error-blocks.ts) — ค่าเดียวกันถูก
+    # ตั้งใน volume ปัจจุบันด้วย ALTER SYSTEM แล้ว รายการ command นี้ทำให้ fresh
+    # checkout ได้ค่าเดียวกัน
     command:
       - postgres
       - -c
       - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - log_parameter_max_length_on_error=-1
     environment:
       POSTGRES_HOST: /var/run/postgresql
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env (cp .env.example .env)}
@@ -106,6 +114,12 @@ services:
       # ใช้ id.count()/score_pct.avg() ผ่าน user-JWT client จึงต้องเปิดไว้ (พิสูจน์ด้วย
       # curl /rest/v1/courses?select=id.count() ก่อน-หลัง: 400 PGRST123 → 200)
       PGRST_DB_AGGREGATES_ENABLED: "true"
+      # Wave H D89-3 [#94]: access-log fence ของ evidence-settle — settle kong-path 500
+      # ได้ต่อเมื่อ window มี line {ua_nonce+method+path-normalized+" 500 "} หนึ่งต่อหนึ่ง
+      # default = silent (probe จริง: 200/404/401/42501/500 P0002 ไม่มี line ทุกสถานะที่ทดลอง)
+      # info = Apache line ทุกสถานะ เขียนเมื่อ request จบ · dev-only (ไม่ buffer — มีผล
+      # throughput) · production (Cloudflare+Supabase) ไม่มีกลไกนี้
+      PGRST_LOG_LEVEL: info
     networks: [ltc-dev]
 
   # ----------------------------------------------------------------- Storage API
@@ -225,6 +239,16 @@ services:
       # (Next dev ตรวจ used_heap > 0.8×heap_limit หลังทุก request แล้ว restart router-server
       #  ทันที — full suite 34 เทสสะสม module graph ~2.5GB+ · 3072 ยังโดน 1 ครั้งช่วง e2e-14
       #  เห็นใน e2e-full-r3 — เพิ่มเป็น 4096 + playwright retries:1 กันขอบ)
+      # Wave H D90 [#94]: 4096 → 6144 — e2e สะสมหลัง suite โตข้ามเพดาน 0.8×4096 อีก
+      # พิสูจน์ด้วย scripts/heap-sampler.sh → .omc/artifacts/heap-samples.jsonl (dev-only)
+      # Wave H D90 rollback [#94]: 6144 → 4096 ตามเกณฑ์ "restart กลาง battery = ถอย" —
+      # battery r1 (feat/wave-h-hardening @ 1f93cdb) ช่วง e2e 01:19/01:22Z เกิด kernel-OOM
+      # ของ Docker VM 7.748GiB 2 ครั้ง (docker telemetry oom-kills 01:19:12.94Z/01:22:40.25Z
+      # ตรง boot banner 01:19:14/01:22:41 · RestartCount 0→2 กลางรอบตาม sampler) ฆ่า container
+      # ทั้งลูก → e2e-10 ตายทั้ง 2 attempts (isolated rerun 1/1 ผ่าน 32.8s = ไม่ใช่ regression)
+      # ที่ 6144 เพดาน self-restart 4915MB สูงเกิน headroom ของ VM ที่แชร์กับ kong~1GiB+
+      # container อื่น ~2.6GiB — ถอยกลับ 4096 (self-restart 3277MB รีไซเคิล child ก่อน VM
+      # หมด = ระบอบที่ battery เขียวมาก่อน wave-G r11) + เปิด DCR production-build e2e
       NODE_OPTIONS: --max-old-space-size=4096
     ports:
       - "3000:3000"
