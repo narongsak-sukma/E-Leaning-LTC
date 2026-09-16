@@ -13,22 +13,30 @@
 
 เหตุผล: เกณฑ์ D90 ข้อ 1 ต้องการ "เวลา UTC, ID, StartedAt และ RestartCount ก่อน–หลัง" ต่อ battery — เมื่อทุกแถวมี identity ครบ คู่ battery-start/battery-end พิสูจน์ "container ID เดียว + counter คงเดิม" ได้จากไฟล์เดียวโดยไม่ต้องอ้างหลักฐานภายนอก
 
-### E2 — dump logs ก่อนทำลาย container ทุกครั้ง (fail-closed)
+### E2 — dump logs ก่อนทำลาย/recreate container ทุกครั้ง (fail-closed)
 
-คำสั่งที่ทำลาย container (`make down` · `make reset-db` — รวมถึงเรียก `docker compose down [-v]` มือเอง) ต้องรัน `scripts/dump-app-logs.sh` ก่อนเสมอ สคริปต์เขียนสองไฟล์ต่อการ dump:
+คำสั่งที่ทำลาย **หรือ recreate** container ต้องรัน `scripts/dump-app-logs.sh` ก่อนเสมอ สคริปต์เขียนสองไฟล์ต่อการ dump:
 
-- `.omc/artifacts/app-logs-<UTC-ts>.log` — `docker logs <container>` เต็ม (บริสุทธิ์ ไม่แต่ง เพื่อ grep ได้)
-- `.omc/artifacts/app-logs-<UTC-ts>.meta.txt` — `captured_at` แยกจากเวลาของ container + Name/ID/Created/StartedAt/Running/Status/RestartCount/OOMKilled (รูปเดียวกับ anchor)
+- `.omc/artifacts/app-logs-<UTC-ts>-<pid>.log` — `docker logs --timestamps <container>` เต็ม (ทุกบรรทัดมี timestamp ของ docker นำหน้า — เกณฑ์ D90 ข้อ 2 verbatim "เก็บ logs พร้อม timestamps ครอบคลุมทั้งหน้าต่าง"; `captured_at` ใน meta ใช้แทนไม่ได้)
+- `.omc/artifacts/app-logs-<UTC-ts>-<pid>.meta.txt` — `captured_at` + `pid` (identity ของ invocation) แยกจากเวลาของ container + Name/ID/Created/StartedAt/Running/Status/RestartCount/OOMKilled (รูปเดียวกับ anchor)
+- ชื่อไฟล์จองเฉพาะต่อ invocation (วินาที UTC + PID) — dump สองครั้งในวินาทีเดียวกันได้สองชุด ไม่ truncate ของเดิม · การ `rm` เมื่อล้มจึงแตะเฉพาะไฟล์ของ invocation ตัวเอง
 
-พฤติกรรม:
+พฤติกรรม (แยก "ยืนยันว่าไม่มี" ออกจาก "inspect ล้มด้วยเหตุอื่น" — ตาม verdict wavei-r1):
 
-| สภาพ | ผลลัพธ์ |
+| สภาพ (วิธีตรวจ) | ผลลัพธ์ |
 |---|---|
 | container มี · dump สำเร็จ | เขียนครบสองไฟล์ · exit 0 — ผู้เรียกทำลายต่อได้ |
 | container มี · `docker logs` ล้ม | **exit 2 ห้ามทำลาย** (fail-closed — หลักฐานมีค่ากว่าความสะดวก) |
-| ไม่มี container ให้ dump | เตือนแล้ว exit 0 (ไม่มีอะไรจะเสีย) |
+| ไม่มี container · **ยืนยันแล้ว** (stderr ของ inspect มี `No such object`/`No such container` จาก docker เท่านั้น) | เตือนแล้ว exit 0 (ไม่มีอะไรจะเสีย) |
+| inspect ล้มด้วยเหตุอื่น (daemon ตาย · permission · ฯลฯ) — ยืนยันว่าไม่มีไม่ได้ | **exit 3 ห้ามทำลาย** จนกว่าจะตรวจสอบด้วยตา (ไม่มีสิทธิ์เดาว่า "คงไม่มี") |
 
-Makefile เรียกสคริปต์เป็นบรรทัดแรกของ `down` และ `reset-db` — ล้ม = เป้าหมายสะดวกจะไม่ไปถึง `docker compose down` เพราะ `make` หยุดที่ exit ≠ 0 (`SHELL := /bin/sh` ไม่มี `-f`)
+ทางเข้าที่ Makefile ครอบ (สคริปต์เป็นบรรทัดแรก — `make` หยุดที่ exit ≠ 0 เพราะ `SHELL := /bin/sh` ไม่มี `-f`):
+
+- `make down` — ก่อน `docker compose down`
+- `make reset-db` — ก่อน `docker compose down -v`
+- `make up` — ก่อน `docker compose up -d --build` (rebuild อาจ recreate app container = logs เดิมสูญ) · `make dev` ผ่าน dependency `dev: up` จึงครอบอัตโนมัติ
+
+กติกาสำหรับมือ: ก่อนเรียก `docker compose down [-v]` · `docker compose up -d --build` · `docker rm <container>` · หรือคำสั่งใดที่ recreate/remove app container ด้วยมือ ให้รัน `make dump-logs` ก่อนและอ่าน exit code ตามตารางข้างบน — เครื่องมืออื่นที่จะทำลาย container ต้องเรียกสคริปต์นี้แทนการเดา
 
 ### E3 — การนับ D90 เริ่มเฉพาะหลัง E1+E2 ลงจริง
 
@@ -37,7 +45,8 @@ Makefile เรียกสคริปต์เป็นบรรทัดแ�
 ## หลักฐานของเฟสนี้ (เก็บใน `.omc/artifacts/` — ไม่ commit)
 
 - แถว sampler จริงพร้อม `container_id` + `started_at` (`heap-samples-proof.jsonl`)
-- ไฟล์ dump จริง + meta ตรง anchor ปัจจุบัน
+- ไฟล์ dump จริง + meta ตรง anchor ปัจจุบัน — ทุกบรรทัดของ `.log` ต้องมี timestamp ของ docker นำหน้า (นับ `^20xx-` ได้เท่าจำนวนแถว)
 - ทิศลบ: stub `docker` ที่ inspect ผ่านแต่ logs ล้ม → สคริปต์ต้อง exit 2 (ห้ามเขียนไฟล์ครึ่ง ๆ แล้วเงียบ)
-- กรณีไม่มี container → exit 0 พร้อมข้อความเตือน
-- ลำดับบรรทัด Makefile: บรรทัด dump อยู่ก่อน `down -v` เสมอ (grep -n)
+- กรณีไม่มี container สองแบบ: **ยืนยันแล้ว** (stub stderr `No such object` / ชื่อไม่มีจริง) → exit 0 เตือน · **ยืนยันไม่ได้** (stub permission error) → exit 3 ห้ามทำลาย
+- dump สองครั้งติดกันในวินาทีเดียวกัน → ได้สองชุดไฟล์ต่างชื่อ (PID ต่าง) ชุดเดิมไม่ถูกแตะ
+- ลำดับบรรทัด Makefile: บรรทัด dump อยู่ก่อน `down` · `down -v` · `up -d --build` เสมอ (grep -n + `make -n`)

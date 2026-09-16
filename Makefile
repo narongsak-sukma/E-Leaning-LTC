@@ -8,12 +8,15 @@ COMPOSE := docker compose
 dev: up
 	$(COMPOSE) logs -f app
 
+# บรรทัด dump ก่อน up -d --build เสมอ (wavei-r1 MAJOR 2): rebuild อาจ recreate app container = logs เดิมสูญ
 up:
 	@test -f .env || { echo "ยังไม่มี .env — รัน: cp .env.example .env แล้วลองใหม่"; exit 1; }
+	sh scripts/dump-app-logs.sh
 	$(COMPOSE) up -d --build
 	$(COMPOSE) ps
 
-# D90 (verdict r21/r22): dump logs ก่อนทำลาย container ทุกครั้ง — ล้ม = ห้าม down/reset (fail-closed)
+# D90 (verdict r21/r22 + wavei-r1): dump logs ก่อนทำลาย/recreate container ทุกครั้ง — ล้ม/ยืนยันไม่ได้ = ห้าม down/reset/up (fail-closed)
+# มือ: ก่อนเรียก docker compose down[-v]/up -d --build/rm ด้วยมือ ให้ make dump-logs ก่อน (กติกา docs/09-dev/EVIDENCE-PRESERVATION.md E2)
 dump-logs:
 	sh scripts/dump-app-logs.sh
 
