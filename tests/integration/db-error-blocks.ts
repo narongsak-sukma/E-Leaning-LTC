@@ -139,6 +139,10 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
  * special_whitespace*` แล้ว `'` — horiz มี line comment `--…` และ form
  * feed · newline คือ `[\n\r]` (CR ลำพังนับเป็น newline) · special มี
  * newline เพิ่มและ line comment · **ไม่มี block comment** ใน quotecontinue
+ * (v13): line comment "นอก string" จบที่ CR หรือ LF (r15 พิสูจน์: เดิม
+ * หยุดเฉพาะ LF จึงกลืน `, E'prefix'` ที่อยู่หลัง CR เข้า comment จนถึง LF
+ * ถัดไป — quote แรกหาย ส่วนต่อกลายเป็น string ธรรมดา ชื่อ RPC ใน literal
+ * จึงรั่วออกมาเป็นจุดเรียก) — ใช้ lineCommentEnd เดียวกับตัวคั่นจุดต่อ
  */
 /** line comment `--{non_newline}*` — คืนตำแหน่งหลัง comment (ไม่กินตัวจบบรรทัด) */
 function lineCommentEnd(sql: string, p: number): number {
@@ -247,7 +251,10 @@ function stripSqlDataParts(sql: string): string {
       continue;
     }
     if (ch === "-" && sql[i + 1] === "-") {
-      while (i < sql.length && sql[i] !== "\n") i += 1;
+      // comment = --{non_newline}* · non_newline = [^\n\r] — จบที่ CR หรือ LF
+      // ตัวใดตัวหนึ่งก่อนถึงตัวหลัง (r15: เดิมหยุดเฉพาะ LF จึงกลืนโค้ดหลัง CR
+      // เข้า comment จนถึง LF ถัดไป) · ไม่กินตัวจบบรรทัด — คงพฤติกรรมเดิม
+      i = lineCommentEnd(sql, i);
       out += " ";
       continue;
     }

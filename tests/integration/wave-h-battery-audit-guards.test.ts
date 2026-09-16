@@ -666,6 +666,62 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(0);
   });
 
+  // ─── r15 (gate waveh-r15 MAJOR): line comment "นอก string" ของ v12 หยุดเฉพาะ
+  // LF ขณะที่ comment ของ PG 15 = `--{non_newline}*` · non_newline = [^\n\r] —
+  // จบได้ทั้ง CR และ LF — comment ที่จบที่ CR ทำให้โค้ดหลัง CR ถูกกลืนเข้า comment
+  // ไปจนถึง LF ถัดไป (ตัวอย่างของ codex: `SELECT 1 -- c\r, E'prefix'\n'abc\'…'`)
+  // → quote แรกของ E-string หาย ส่วนต่อถูกอ่านเป็น string ธรรมดา: \' ปิดก่อน
+  // ตำแหน่งจริง ชื่อปลอมรั่วออกมาเป็นจุดเรียก + เจ้าของจริงถูกกลืนในรูป
+  // STATEMENT-only — v13 ใช้ lineCommentEnd (CR-aware) ที่ branch comment หลัก
+
+  it("ทิศ ธ (r15 MAJOR): line comment จบที่ CR — โค้ดหลัง CR เป็นโค้ดจริง `SELECT 1 -- c\\r, E'prefix'\\n'abc\\'…'` → ชื่อปลอม 0 (v12 = 1) · เจ้าของจริง 1 ทั้งสองรูป", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1208, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1208, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1208,
+        "STATEMENT",
+        `SELECT 1 -- c\r, E'prefix'\n'abc\\' "public"."complete_data_export_job"($1) rest'\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "comment ของ PG จบที่ CR (non_newline = [^\\n\\r]) — `, E'prefix'` หลัง CR เป็นโค้ดจริง จุดต่อข้าม \\n พาชื่อปลอมอยู่ใน literal (r15: v12 ได้ 1 ทั้งสองรูป)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "FROM หลัง literal ที่ปิดที่ quote จริง = เจ้าของจริงต้อง match",
+    ).toHaveLength(1);
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: เจ้าของจริงจาก STATEMENT เพียงแหล่งเดียว — v12 กลืนหาย (r15 ตารางผลตรวจซ้ำ: 1 → 0)",
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+    ).toHaveLength(0);
+    // ขอบเขต: comment ที่จบที่ CR ของ CRLF — v12 ก็ผ่านอยู่แล้ว (LF ถัดจาก CR
+    // เป็นตัวจบของ v12 เพียงหนึ่งอักขระ) = คุมว่า v13 ไม่หักกรณีนี้
+    const crlf = [
+      hdr(1209, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1209, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1209,
+        "STATEMENT",
+        `SELECT 1 -- c\r\n, E'prefix'\n'abc\\' "public"."complete_data_export_job"($1) rest'\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(crlf, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(crlf, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+    ).toHaveLength(1);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน
