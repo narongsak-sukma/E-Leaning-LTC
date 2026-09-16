@@ -682,3 +682,11 @@
 - **ตรวจกับของจริงแล้วทุกบรรทัด (D-f-13)**: จุด raise 4 จุดยืนยันด้วย grep บน migrations จริง · ผู้บริโภค + บริบท `code === undefined → ERR-SYS-002` อ่านจาก route จริง · แบบแผน `(ERR-RBAC-001|tag)` มี 26 จุดใน migrations เป็นบรรทัดฐาน · fence LEGACY_ASM011 + เงื่อนไขนับ 4 อ่านจากไฟล์เทสจริง
 - **ห้ามแตะ tree ระหว่าง battery r35 วิ่งอยู่** — โค้ดเฟส 2 ลงหลัง r35 จบเท่านั้น (r35 ต้องวัดจาก HEAD `95a8b8c` ที่ push ไปแล้ว) · เอกสารลงได้เพราะ battery ไม่อ่าน docs
 
+### Battery r35 = D90 รอบนับ 1/3 — PASS 13/13 (2026-09-16)
+
+- **ผล**: `BATTERY PASS stages=13/13 rc=0` (`.omc/artifacts/battery-r35.log`) บน HEAD `95a8b8c` (push แล้ว) · e2e 41 passed 13.1m · audit-e2e `{"ok":true,"runIds":["e2e"],"invocations":22,"guardRefusals":0,"failures":[]}`
+- **identity คู่ตามเกณฑ์ D90 ข้อ 1** (`heap-samples.jsonl` สองแถว): battery-start `2026-09-16T08:46:20Z` → battery-end `2026-09-16T09:22:27Z` · **container_id เดียวกัน** `7be3fd8e1316b5c8d47bad4a611ef5ea682939cf50daf97a1b704460704c199a` · started_at `2026-09-16T07:12:54.667764083Z` ทั้งคู่ · **RestartCount 0→0 คงเดิมรวมช่องว่างระหว่างรอบ** · oom_killed false · health healthy ทั้งคู่
+- **logs ครอบหน้าต่างตามเกณฑ์ข้อ 2**: dump หลัง battery `app-logs-2026-09-16T092304Z-83158.log` — **4680/4680 แถวมี timestamp ของ docker นำหน้า** ครอบประวัติ container ตั้งแต่ 07:12 ถึงหลัง battery 09:23 (รวมหน้าต่าง r35 ทั้งหมด) · meta RestartCount=0
+- **เหตุการณ์ที่ยังอธิบายไม่ได้ (เกณฑ์ข้อ 2 — ผ่าน retry ไม่ลบเหตุการณ์)**: e2e flaky 1 รายการ `e2e-20-question-bank-admin.spec.ts:203` (dialog เปลี่ยนสถานะ draft→active→retired — พบตอน r35 ครั้งแรก ต่างจาก r34 ที่เป็น e2e-15:312 `Failed to fetch`) ผ่านตอน retry · สาเหตุยังไม่ยืนยัน (D-f-11) — บันทึกไว้ ไม่อ้างว่าไม่มีปัญหา · D90 ยังนับต่อเพราะเกณฑ์ไม่ได้บังคับไม่ให้มี retry แต่บังคับให้มีหลักฐานครบ (ครบแล้ว: log + trace `e2e/.artifacts/e2e-20-…/trace.zip` + video)
+- **คงเหลือ**: D90 รอบ 2/3 (r36 = battery เฟส 2 Family B หลังแก้ ASM-011) · รอบ 3/3 ถัดไป · หาก container เปลี่ยนหรือหลักฐานขาด = เริ่มนับใหม่ตาม E3
+
