@@ -172,7 +172,7 @@ begin
   end if;
   -- D19-B2: FreeText + PII แบบ recursive ทุกชั้น (รวม object ซ้อนเช่น filters)
   if not public.audit_context_pii_ok(p_context) then
-    raise exception 'append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw)'
+    raise exception 'append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001|pii_rejected)'
       using errcode = '22023';
   end if;
   -- คีย์ uuid ที่รู้จักต้องเป็น uuid จริง

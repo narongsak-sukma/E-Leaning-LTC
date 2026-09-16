@@ -140,3 +140,37 @@ describe("parseRpcErrorCodeDetailed — แกะ code + เหตุผลร�
     });
   });
 });
+
+describe("DCR 22023 — ข้อความปฏิเสธ PII ของ append_audit_event ต้องเป็นรูป anchored (CODE|tag)", () => {
+  // ข้อความจริงจาก supabase/migrations ก่อนแก้ (probe สด 2026-09-16
+  // .omc/artifacts/dcr22023-probe-old-form.log): รูป "(CODE — ข้อความ)" ไม่ตรง
+  // TRAILING_CODE_RE → parser คืน undefined → rpcOnceWithClassification
+  // (src/lib/admin/users.ts) จัด transient → retry 3 ครั้ง → route ตอบ 503
+  // ERR-SYS-002 ทั้งที่เป็นความผิดสัญญาถาวรที่ควรตอบ 400 ERR-VAL-001 ทันที
+  // (พบใน pass 4c f4d9988 · แก้ที่แหล่งยก error ของ 0008 + สำเนา 0019/0025/0032)
+  it("รูปเก่า (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw) → undefined (ทิศสกปรกของ two-way)", () => {
+    expect(
+      parseRpcErrorCodeDetailed({
+        message: "append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw)",
+      }),
+    ).toBeUndefined();
+    expect(
+      parseRpcErrorCode({
+        message: "append_audit_event: before/after มีรูปแบบ PII (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw)",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("รูปใหม่ (ERR-VAL-001|pii_rejected) → {code, reason} (ทิศสะอาด)", () => {
+    expect(
+      parseRpcErrorCodeDetailed({
+        message: "append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001|pii_rejected)",
+      }),
+    ).toEqual({ code: "ERR-VAL-001", reason: "pii_rejected" });
+    expect(
+      parseRpcErrorCodeDetailed({
+        message: "append_audit_event: before/after มีรูปแบบ PII (ERR-VAL-001|pii_rejected)",
+      }),
+    ).toEqual({ code: "ERR-VAL-001", reason: "pii_rejected" });
+  });
+});

@@ -313,12 +313,12 @@ begin
   -- (นโยบาย DD §4.5/AUDIT §3.2: PII เก็บเฉพาะ "ชื่อฟิลด์ที่เปลี่ยน" — ค่าดิบห้ามเข้า)
   if (p_before is not null and not public.audit_diff_ok(p_before))
      or (p_after is not null and not public.audit_diff_ok(p_after)) then
-    raise exception 'append_audit_event: before/after มีรูปแบบ PII (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw)'
+    raise exception 'append_audit_event: before/after มีรูปแบบ PII (ERR-VAL-001|pii_rejected)'
       using errcode = '22023';
   end if;
   -- D19-B2: FreeText + PII scan แบบ recursive ทุกชั้น (defense-in-depth แม้เป็น path ภายใน)
   if not public.audit_context_pii_ok(p_context) then
-    raise exception 'append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw)'
+    raise exception 'append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001|pii_rejected)'
       using errcode = '22023';
   end if;
 
@@ -527,7 +527,7 @@ begin
   end if;
   -- D19-B2: FreeText + PII แบบ recursive ทุกชั้น (รวม object ซ้อนเช่น filters)
   if not public.audit_context_pii_ok(p_context) then
-    raise exception 'append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001 — ปฏิเสธ ไม่เขียน raw)'
+    raise exception 'append_audit_event: context มีรูปแบบ PII ในฟิลด์ฟรีเท็กซ์ (ERR-VAL-001|pii_rejected)'
       using errcode = '22023';
   end if;
   -- คีย์ uuid ที่รู้จักต้องเป็น uuid จริง
