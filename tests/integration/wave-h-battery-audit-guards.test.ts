@@ -883,6 +883,84 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(1);
   });
 
+  // ─── r18 (gate waveh-r18 MAJOR): branch quoted identifier ของ v15 กิน token
+  // ครบแต่ emit ข้อความตรง ๆ ต่อ ทำให้ STATEMENT_CALL_RES ตีความข้อความภายใน
+  // ชื่อเป็น keyword/การเรียกฟังก์ชันได้ — `"x' FROM public.<rpc>($1) 'y"` เป็น
+  // alias เดียวตาม §4.1.1 (quoted identifier ฝังอักขระใดก็ได้) แต่ v15 ได้ชื่อ
+  // ปลอม 1 ทั้งสองรูป record — v16 คลี่ escape `""` แล้วส่งชื่อต่อเฉพาะที่
+  // ประกอบจากอักขระ identifier ล้วน ๆ ชื่ออื่นแทนที่ทั้ง token ด้วย `""`
+
+  it("ทิศ ฝ (r18 MAJOR-1): ชื่อปลอมใน quoted identifier `\"x' FROM … ($1) 'y\"` — ข้อความในชื่อไม่ใช่การเรียก → ชื่อปลอม 0 ทั้งสองรูป (v15 = 1/1) · เจ้าของจริง 1 ทั้งสองรูป", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1217, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1217, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1217,
+        "STATEMENT",
+        `SELECT 1 AS "x' FROM public.complete_data_export_job($1) 'y"\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "\"x' FROM … ($1) 'y\" เป็นชื่อเดียว (§4.1.1) — ข้อความภายในชื่อไม่ใช่ keyword/การเรียก (r18 ตารางผลตรวจซ้ำ: v15 ได้ 1 เต็ม/STATEMENT-only)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "FROM ของเจ้าของจริงเป็นโค้ดนอก quoted identifier — ยัง match 1 ทั้งสองเวอร์ชัน (r18: v15/v14 ได้ 1/1)",
+    ).toHaveLength(1);
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: STATEMENT เป็นแหล่งเดียวก็ต้อง 0 — v15 รั่ย (r18 ตาราง: 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: เจ้าของจริงจาก STATEMENT เพียงแหล่งเดียว = 1",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ฟ (r18 MAJOR-2): รูป `\"x-- FROM … ($1)\"` ผลเดียวกันทั้งสองรูป record · ชื่อที่มีอักขระนอก identifier แทนที่ทั้ง token ด้วย `\"\"` — `\"pu'blic\"` ไม่ปลอมตัวเป็น schema public ได้", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const mk = (pid: number, aliasExpr: string) => [
+      hdr(pid, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(pid, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(pid, "STATEMENT", `SELECT 1 AS ${aliasExpr}\nFROM "public"."admin_revoke_role"($1)`),
+    ];
+    const dash = mk(1218, '"x-- FROM public.complete_data_export_job($1)"');
+    expect(
+      matchDbErrorBlocks(dash, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "`--` ในชื่อไม่เปิด comment และข้อความทั้งชื่อไม่ใช่การเรียก — รูปเต็มก็ต้อง 0 (r18: v15 ได้ 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(dash, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "เจ้าของจริงรูปเต็ม = 1 ทั้งสองเวอร์ชัน",
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks([dash[0], dash[2], dash[3]] as typeof dash, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: STATEMENT เพียงแหล่งเดียวต้อง 0 — v15 รั่ย (r18: อีกตัวอย่างที่ให้ผลเหมือนกัน)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks([dash[0], dash[2], dash[3]] as typeof dash, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: เจ้าของจริง = 1",
+    ).toHaveLength(1);
+    // ขอบเขตการแทนที่: แทนที่ "ทั้ง token" ไม่ใช่ตัดอักขระนอก identifier ทิ้ง —
+    // การตัดจะเย็น `"pu'blic"` เป็น `"public"` แล้ว `"public"."<rpc>"(` กลายเป็น
+    // จุดเรียกของ schema public (ปลอม) — แทนที่ทั้ง token ให้ `""` จึงเงียบ
+    const masquerade = [
+      hdr(1219, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1219, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(1219, "STATEMENT", `SELECT 1 AS "pu'blic"."complete_data_export_job"($1)`),
+    ];
+    expect(
+      matchDbErrorBlocks([masquerade[0], masquerade[2], masquerade[3]] as typeof masquerade, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "schema `\"pu'blic\"` ≠ public — ชื่อที่มีอักขระนอก identifier ต้องหายทั้ง token ไม่กลายเป็น `\"public\"` ในสายตา regex",
+    ).toHaveLength(0);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน

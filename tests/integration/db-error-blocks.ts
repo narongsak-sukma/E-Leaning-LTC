@@ -159,6 +159,13 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
  * identifier เดียว (PG 15 §4.1.2.4) — จึงต้องกิน identifier ทั้ง token (ทั้ง
  * แบบไร้ quote และแบบ `"…"` ที่ `""` = quote ในชื่อ) ออกมาก่อนแตะการตีความ
  * dollar-quote
+ * (v16): quoted identifier ที่ส่งต่อเป็นโค้ดต้องไม่รั่ย "ข้อความภายในชื่อ"
+ * (r18 พิสูจน์: v15 emit ข้อความตรง ๆ ทั้ง token ทำให้ `"x' FROM
+ * public.<rpc>($1) 'y"` — ชื่อเดียวตาม §4.1.1 — ถูก STATEMENT_CALL_RES
+ * จับเป็นจุดเรียกปลอม 1 ทั้งสองรูป record) — คลี่ escape `""` แล้วส่งชื่อ
+ * ต่อเฉพาะที่ประกอบจากอักขระ identifier ล้วน ๆ (ไม่มี `"` `.` `(` whitespace
+ * โดยนิยาม = ก่อรูปการเรียกไม่ได้เอง) ชื่ออื่นแทนที่ทั้ง token ด้วย `""`
+ * (identifier เปล่า — โครงสร้างคงเดิม ชื่อหาย = ไม่ให้หลักฐาน)
  */
 /** line comment `--{non_newline}*` — คืนตำแหน่งหลัง comment (ไม่กินตัวจบบรรทัด) */
 function lineCommentEnd(sql: string, p: number): number {
@@ -210,6 +217,18 @@ function skipQuoteContinueSeparator(sql: string, p: number): number {
   }
   return q;
 }
+
+/**
+ * (v16) ชื่อ quoted identifier ที่ "ส่งต่อเป็นโค้ด" ได้: ประกอบจากอักขระของ
+ * identifier ล้วน ๆ (ident_cont ของ scan.l — รวม `\$` และอักขระ non-ASCII) —
+ * ชื่อแบบนี้ไม่มี `"` `.` `(` หรือ whitespace โดยนิยาม จึงไม่มีทางก่อรูป
+ * `"public"\."<rpc>"(` หรือ `FROM|CALL … (` ขึ้นเองในสายตา STATEMENT_CALL_RES
+ * (r18: v15 ส่งข้อความตรง ๆ ต่อจนข้อความในชื่อกลายเป็นแหล่งจับการเรียกปลอม)
+ * · ชื่ออื่น (มีอักขระนอกชุดนี้แม้ตัวเดียวหลังคลี่ `""`) ถูกแทนที่ทั้ง token
+ * ด้วย `""` — `"pu'blic"` จึงไม่ปลอมตัวเป็น schema `public` ได้ (แทนที่ทั้ง
+ * token ไม่ใช่ตัดอักขระทิ้ง: การตัดจะเย็น `pu'blic` เป็น `public`)
+ */
+const QUOTED_IDENT_NAME_RE = /^[A-Za-z_\u0080-\uFFFF0-9$]*$/;
 
 function stripSqlDataParts(sql: string): string {
   let out = "";
@@ -309,10 +328,16 @@ function stripSqlDataParts(sql: string): string {
     }
     if (ch === '"') {
       // (v15) quoted identifier "…" — ชื่อใน quote จะมีอักขระใดก็ได้รวม "$" ("" =
-      // quote ในชื่อ) กินทั้ง token ออกมาเป็นโค้ด (ชื่อ RPC ใน STATEMENT เป็น
-      // รูปนี้) · v14 ปล่อย "$" ข้างในเข้า branch dollar-quote จน `"$tag$"` เปิด
-      // literal หา closer ไม่เจอแล้วกลืนโค้ดที่ตามมาทั้งหมด
+      // quote ในชื่อ) กินทั้ง token ออกมา (ชื่อ RPC ใน STATEMENT เป็นรูปนี้) ·
+      // v14 ปล่อย "$" ข้างในเข้า branch dollar-quote จน `"$tag$"` เปิด literal
+      // หา closer ไม่เจอแล้วกลืนโค้ดที่ตามมาทั้งหมด
+      // (v16) การส่งต่อเป็นโค้ดต้องไม่ปล่อยข้อความ "ภายในชื่อ" ออกไปให้
+      // STATEMENT_CALL_RES ตีความเป็น keyword/การเรียกฟังก์ชันได้ (r18: v15
+      // ส่งตรง ๆ จน `"x' FROM public.<rpc>($1) 'y"` กลายเป็นจุดเรียกปลอม) —
+      // คลี่ escape `""` เป็น `"` แล้วส่งชื่อต่อเฉพาะที่ประกอบจากอักขระ
+      // identifier ล้วน ๆ ไม่งั้นแทนที่ทั้ง token ด้วย `""`
       let j = i + 1;
+      let closed = false;
       while (j < sql.length) {
         if (sql[j] === '"') {
           if (sql[j + 1] === '"') {
@@ -320,11 +345,13 @@ function stripSqlDataParts(sql: string): string {
             continue;
           }
           j += 1;
+          closed = true;
           break;
         }
         j += 1;
       }
-      out += sql.slice(i, j);
+      const name = closed ? sql.slice(i + 1, j - 1).replace(/""/g, '"') : "";
+      out += QUOTED_IDENT_NAME_RE.test(name) ? `"${name}"` : '""';
       i = j;
       continue;
     }
