@@ -13,6 +13,8 @@
 
 เหตุผล: เกณฑ์ D90 ข้อ 1 ต้องการ "เวลา UTC, ID, StartedAt และ RestartCount ก่อน–หลัง" ต่อ battery — เมื่อทุกแถวมี identity ครบ คู่ battery-start/battery-end พิสูจน์ "container ID เดียว + counter คงเดิม" ได้จากไฟล์เดียวโดยไม่ต้องอ้างหลักฐานภายนอก
 
+Wave I เฟส 3 (DCR-PROD-BUILD-E2E.md): battery บน production runtime ส่ง `--container ltc-prod-app` (env `HEAP_CONTAINER` ผ่าน `scripts/battery-prod.sh`) — คู่ identity ผูกกับ **container ที่ e2e วัดจริง** ไม่ใช่ dev app
+
 ### E2 — dump logs ก่อนทำลาย/recreate container ทุกครั้ง (fail-closed)
 
 คำสั่งที่ทำลาย **หรือ recreate** container ต้องรัน `scripts/dump-app-logs.sh` ก่อนเสมอ สคริปต์เขียนสองไฟล์ต่อการ dump:
@@ -32,9 +34,11 @@
 
 ทางเข้าที่ Makefile ครอบ (สคริปต์เป็นบรรทัดแรก — `make` หยุดที่ exit ≠ 0 เพราะ `SHELL := /bin/sh` ไม่มี `-f`):
 
-- `make down` — ก่อน `docker compose down`
-- `make reset-db` — ก่อน `docker compose down -v`
+- `make down` — ก่อน `docker compose down` · **dump ทั้งสอง container** (down ไม่สน profile — ทำลาย `ltc-prod-app` ด้วย · เฟส 3 DCR-PROD-BUILD-E2E.md)
+- `make reset-db` — ก่อน `docker compose down -v` · **dump ทั้งสอง container** (เหตุผลเดียวกัน — down -v ไม่สน profile)
 - `make up` — ก่อน `docker compose up -d --build` (rebuild อาจ recreate app container = logs เดิมสูญ) · `make dev` ผ่าน dependency `dev: up` จึงครอบอัตโนมัติ
+- `make up-prod` — ก่อน `docker compose --profile prod up -d --build app-prod` (rebuild อาจ recreate `ltc-prod-app`) — dump ชี้ container ผ่าน `--container ltc-prod-app`
+- `make down-prod` — ก่อน `docker compose --profile prod rm -f -s app-prod` · ชี้ container ผ่าน `--container ltc-prod-app`
 
 กติกาสำหรับมือ: ก่อนเรียก `docker compose down [-v]` · `docker compose up -d --build` · `docker rm <container>` · หรือคำสั่งใดที่ recreate/remove app container ด้วยมือ ให้รัน `make dump-logs` ก่อนและอ่าน exit code ตามตารางข้างบน — เครื่องมืออื่นที่จะทำลาย container ต้องเรียกสคริปต์นี้แทนการเดา
 

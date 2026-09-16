@@ -3,8 +3,10 @@
 # โค้ดชุดเดียวกับ prod ต่างกันเฉพาะ env vars (brief §6) — prod: Vercel+Supabase Cloud+Cloudflare
 #
 #   make dev   = up + follow logs   |   make down   |   make ps   |   make psql
+#   make up-prod / down-prod = production-build runtime (profile "prod", :3001 — เฟส 3 D90)
 #
-# services: app (Next.js dev) · db · auth · rest · storage · imgproxy · kong · mailpit · db-migrate
+# services: app (Next.js dev) · app-prod (Next.js production, profile "prod") · db · auth ·
+#           rest · storage · imgproxy · kong · mailpit · db-migrate
 # ============================================================================
 name: ltc-elearning-dev
 
@@ -264,6 +266,58 @@ services:
       start_period: 60s
     networks: [ltc-dev]
 
+  # --------------------------------------------------------------- Next.js prod
+  # Wave I เฟส 3 [#94] (DCR-PROD-BUILD-E2E.md · verdict wavei-r3): production runtime
+  # เป็นพาหะวัด D90 — next dev มี memory-threshold self-restart (0.8×NODE_OPTIONS)
+  # ที่ฉีก module registry กลาง request ทำให้ battery e2e ล้มสุ่มตำแหน่ง (r36/r37)
+  # · `next start` ปฏิเสธการรันเมื่อไม่มี production build → service ที่ตอบ
+  # health 200 ได้ = กำลังเสิร์ฟ production build จริง (ชั้นที่ 0 ของ prod-proof)
+  # · profile "prod": ไม่ขึ้นกับ make up ปกติ — เรียกผ่าน make up-prod/down-prod
+  #   เท่านั้น (docker compose down ไม่สน profile และทำลาย container นี้ด้วย
+  #   → make down/reset-db dump ทั้งสอง container ก่อนเสมอ — E2)
+  # · NEXT_PUBLIC_* ฝังตอน build ใน container ด้วย env_file เดียวกับ dev → ตรงค่า
+  # · next_cache_prod แยกจาก next_cache ของ dev เด็ดขาด (รูปแบบ build ต่างกัน)
+  # · ไม่ใส่ CHOKIDAR/WATCHPACK (prod ไม่ watch) และไม่กำหนด NODE_OPTIONS
+  #   (ไม่มี dev memory-check · heap ใช้ default ของ Node)
+  app-prod:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    container_name: ltc-prod-app
+    profiles: ["prod"]
+    restart: unless-stopped
+    command: ["sh", "-c", "npm run build && npm start"]
+    depends_on:
+      db:
+        condition: service_healthy
+      kong:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # ---- override ปลายทางให้มองผ่าน compose network (มุมมอง host อยู่ใน .env) ----
+      SUPABASE_URL: http://kong:8000
+      SMTP_HOST: mailpit
+      SUPABASE_DB_POOLER_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      NODE_ENV: production
+    ports:
+      - "3001:3000"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - next_cache_prod:/app/.next
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || wget -qO- http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      # build ใน container ตอน boot กินเวลา — ให้เวลามากกว่า dev
+      start_period: 600s
+    networks: [ltc-dev]
+
   # ----------------------------------------------------------------- mailer
   # ทริกเกอร์ background worker ทั้งสองตัวของ dev (prod = Vercel Cron):
   #   1) email dispatch (D-p4-8)   → POST /api/internal/jobs/email-dispatch
@@ -328,3 +382,5 @@ volumes:
   mailpit_data:
   node_modules:
   next_cache:
+  # Wave I เฟส 3 [#94]: production build ของ app-prod — ห้ามแชร์กับ next_cache ของ dev
+  next_cache_prod:

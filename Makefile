@@ -3,7 +3,7 @@
 SHELL := /bin/sh
 COMPOSE := docker compose
 
-.PHONY: dev up down logs ps lint test psql migrate reset-db dump-logs
+.PHONY: dev up down logs ps lint test psql migrate reset-db dump-logs up-prod down-prod
 
 dev: up
 	$(COMPOSE) logs -f app
@@ -20,8 +20,10 @@ up:
 dump-logs:
 	sh scripts/dump-app-logs.sh
 
+# down ไม่สน profile — ทำลาย app-prod ด้วย → dump ทั้งสอง container ก่อน (E2 · DCR-PROD-BUILD-E2E.md ข้อ 3)
 down:
 	sh scripts/dump-app-logs.sh
+	sh scripts/dump-app-logs.sh --container ltc-prod-app
 	$(COMPOSE) down
 
 logs:
@@ -45,7 +47,23 @@ migrate:
 
 # ล้างฐานข้อมูล dev ทั้งหมด (ลบ volume) แล้ว up ใหม่ — migrations จะถูก apply ใหม่ตั้งแต่ต้น
 # บรรทัดแรก = dump logs ก่อน down -v เสมอ (D90 เกณฑ์ข้อ 3 — หลักฐานก่อนการทำลาย)
+# down -v ไม่สน profile — ทำลาย app-prod ด้วย → dump ทั้งสอง container (E2 · เฟส 3)
 reset-db:
 	sh scripts/dump-app-logs.sh
+	sh scripts/dump-app-logs.sh --container ltc-prod-app
 	$(COMPOSE) down -v
 	$(MAKE) up
+
+# ─── Wave I เฟส 3 [#94] (DCR-PROD-BUILD-E2E.md): production-build runtime ─────
+# app-prod = compose profile "prod" · build ใน container ตอน boot (ครั้งแรกนาน —
+# start_period 600s คลุม) · พอร์ต host 3001 · battery ผ่าน scripts/battery-prod.sh
+# dump ก่อนทำลาย/recreate เหมือนทางเข้าอื่น (E2) — dump ของ container ที่ไม่มี = exit 0
+up-prod:
+	@test -f .env || { echo "ยังไม่มี .env — รัน: cp .env.example .env แล้วลองใหม่"; exit 1; }
+	sh scripts/dump-app-logs.sh --container ltc-prod-app
+	$(COMPOSE) --profile prod up -d --build app-prod
+	$(COMPOSE) ps
+
+down-prod:
+	sh scripts/dump-app-logs.sh --container ltc-prod-app
+	$(COMPOSE) --profile prod rm -f -s app-prod

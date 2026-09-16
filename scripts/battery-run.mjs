@@ -17,6 +17,7 @@
  *   node scripts/battery-run.mjs --keep-going        # stage ล้มก็รันต่อ (เก็บผลทุก stage)
  *                                                     #  ยกเว้น health ล้ม = หยุดเสมอ (ห้ามปล่อย e2e ตอน app ไม่ 200 — gate waveh-r1 M4)
  *   node scripts/battery-run.mjs --stages unit,tsc   # subset ตามลำดับปกติ (ใช้ตอนพัฒนา)
+ *   sh scripts/battery-prod.sh                        # Wave I เฟส 3: battery บน production runtime
  *
  * ออก (stdout): [stage-id] START <iso-ts> / [stage-id] EXIT <code> <duration-ms> ทุก stage
  *   และสรุปท้าย: BATTERY <PASS|FAIL> stages=<ผ่าน>/<ทั้งหมด> rc=<0|1>
@@ -31,7 +32,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const BARRIER_DIR = path.join(REPO_ROOT, "tests", "barrier-proof");
-const HEALTH_URL = "http://127.0.0.1:3000/api/health";
+// Wave I เฟส 3 [#94] (DCR-PROD-BUILD-E2E.md ข้อ 2): runtime ที่ battery วัดกำหนดผ่าน env
+// สามตัว — default = dev app :3000 เหมือนเดิมทุกประการ (ย้อนหลังเข้ากันหมด) ·
+// scripts/battery-prod.sh ตั้งครบชุด (3001 · ltc-prod-app · 1) ให้ battery บน app-prod
+const E2E_ORIGIN = (process.env["E2E_BASE_URL"] ?? "http://127.0.0.1:3000").replace(/\/$/, "");
+const HEALTH_URL = `${E2E_ORIGIN}/api/health`;
+const HEAP_CONTAINER = process.env["HEAP_CONTAINER"] ?? "ltc-dev-app";
+const REQUIRE_PROD = process.env["E2E_REQUIRE_PROD"] === "1";
 const HEALTH_TIMEOUT_MS = 120_000;
 /** poll /api/health ทุก 1 วินาทีจนได้ 200 หรือหมดเวลา */
 const HEALTH_POLL_MS = 1_000;
@@ -39,7 +46,8 @@ const HEALTH_POLL_MS = 1_000;
 // ─── 1) ตาราง stage — ลำดับตายตัว (แก้ลำดับที่นี่ที่เดียว) ──────────────────
 
 const STAGES = [
-  { id: "heap-start", runId: undefined, file: "scripts/heap-sampler.sh", args: ["--label", "battery-start"] },
+  // heap คู่ identity ผูกกับ container ที่ e2e วัดจริง (เฟส 3 = ltc-prod-app ผ่าน HEAP_CONTAINER)
+  { id: "heap-start", runId: undefined, file: "scripts/heap-sampler.sh", args: ["--label", "battery-start", "--container", HEAP_CONTAINER] },
   { id: "owner-proof", runId: undefined, file: "node", args: ["scripts/window-owner-proof.mjs"] },
   {
     // โฟลเดอร์จะมีในภายหลัง — ยังไม่มีไฟล์ใดใน tests/barrier-proof/ = FAIL ชัดเจน (ห้ามผ่านปลอม)
@@ -70,7 +78,7 @@ const STAGES = [
     file: "node",
     args: ["scripts/audit-lifecycle-ledger.mjs", "--run-id", "e2e", "--expect-clean"],
   },
-  { id: "heap-end", runId: undefined, file: "scripts/heap-sampler.sh", args: ["--label", "battery-end"] },
+  { id: "heap-end", runId: undefined, file: "scripts/heap-sampler.sh", args: ["--label", "battery-end", "--container", HEAP_CONTAINER] },
 ];
 
 // ─── 2) CLI — --keep-going / --stages id1,id2 ────────────────────────────────
@@ -276,6 +284,20 @@ async function waitForHealth() {
       const res = await fetch(HEALTH_URL);
       if (res.status === 200) {
         process.stderr.write(`[health] ได้ 200 หลัง poll ${attempts} ครั้ง\n`);
+        // เฟส 3: 200 อย่างเดียวไม่พอ — ต้องพิสูจน์ก่อนว่า origin นี้เสิร์ฟ production build
+        // จริง (chunk Cache-Control immutable + BUILD_ID) ไม่ผ่าน = health ล้ม = หยุดก่อน e2e
+        if (REQUIRE_PROD) {
+          process.stderr.write(`[health] E2E_REQUIRE_PROD=1 — รัน prod-build-proof ก่อนปล่อย e2e\n`);
+          const proof = await spawnChild(
+            "node",
+            ["scripts/prod-build-proof.mjs", "--origin", E2E_ORIGIN, "--container", HEAP_CONTAINER],
+            undefined,
+          );
+          if (proof !== 0) {
+            process.stderr.write(`[health] prod-build-proof ไม่ผ่าน (exit ${proof}) — FAIL\n`);
+            return 1;
+          }
+        }
         return 0;
       }
     } catch {
