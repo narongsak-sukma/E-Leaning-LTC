@@ -150,6 +150,15 @@ function collectFirstGroups(re: RegExp, ln: string): string[] {
  * `[A-Za-z\200-\377_]` · dolq_cont = `[A-Za-z\200-\377_0-9]` ห้าม `$` ใน
  * tag (ต่างจาก ident_cont ที่มี `\$`) — `\200-\377` = byte สูง = อักขระ
  * non-ASCII ใด ๆ (ใน JS คือ code unit ≥ U+0080 รวม surrogate ครบทั้งคู่)
+ * (v15): "$" ที่ติดกับ identifier เป็น "ส่วนของชื่อ" ไม่ใช่ตัวเปิด dollar-quote
+ * (r17 พิสูจน์: v14 เปิด literal จาก `$tag$` ใน alias `a$tag$` — closer ไปเจอ
+ * ตัวเปิดจริง ชื่อ RPC ใน literal จริงจึงรั่ยเป็นจุดเรียก และตัวปิดจริงกลายเป็น
+ * opener เดินกลืน FROM ของเจ้าของ · รูป quoted identifier `"$tag$"` ก็โดนเช่นกัน)
+ * — scan.l ใช้ longest-match: {identifier} = ident_start{ident_cont}* โดย
+ * ident_cont = `[A-Za-z\200-\377_0-9\$]` มี `\$` ด้วย → `a$tag$` เป็น
+ * identifier เดียว (PG 15 §4.1.2.4) — จึงต้องกิน identifier ทั้ง token (ทั้ง
+ * แบบไร้ quote และแบบ `"…"` ที่ `""` = quote ในชื่อ) ออกมาก่อนแตะการตีความ
+ * dollar-quote
  */
 /** line comment `--{non_newline}*` — คืนตำแหน่งหลัง comment (ไม่กินตัวจบบรรทัด) */
 function lineCommentEnd(sql: string, p: number): number {
@@ -283,6 +292,40 @@ function stripSqlDataParts(sql: string): string {
         i += 1;
       }
       out += " ";
+      continue;
+    }
+    if (/[A-Za-z_\u0080-\uFFFF]/.test(ch ?? "")) {
+      // (v15) identifier ไร้ quote — กินทั้งชื่อออกมาเป็นโค้ดก่อนแตะ "$" ของ
+      // dollar-quote: scan.l ใช้ longest-match โดย ident_cont = [A-Za-z\200-
+      // \377_0-9\$] มี "$" ด้วย → `a$tag$` เป็น identifier เดียว ไม่ใช่ alias
+      // ตามด้วยตัวเปิด literal (r17: v14 เปิด literal จาก "$" ใน alias แล้ว
+      // closer ไปเจอตัวเปิดจริง ชื่อ RPC ใน literal จึงรั่ยเป็นจุดเรียก และ
+      // ตัวปิดจริงกลายเป็น opener กลืน FROM ของเจ้าของจริง)
+      let j = i + 1;
+      while (j < sql.length && /[A-Za-z_\u0080-\uFFFF0-9$]/.test(sql[j] ?? "")) j += 1;
+      out += sql.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '"') {
+      // (v15) quoted identifier "…" — ชื่อใน quote จะมีอักขระใดก็ได้รวม "$" ("" =
+      // quote ในชื่อ) กินทั้ง token ออกมาเป็นโค้ด (ชื่อ RPC ใน STATEMENT เป็น
+      // รูปนี้) · v14 ปล่อย "$" ข้างในเข้า branch dollar-quote จน `"$tag$"` เปิด
+      // literal หา closer ไม่เจอแล้วกลืนโค้ดที่ตามมาทั้งหมด
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === '"') {
+          if (sql[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      out += sql.slice(i, j);
+      i = j;
       continue;
     }
     if (ch === "$") {

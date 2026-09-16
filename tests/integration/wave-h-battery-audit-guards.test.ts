@@ -803,6 +803,86 @@ describe("M1 (waveh-r9→r10) · db error-block parser ผูกหลักฐ�
     ).toHaveLength(1);
   });
 
+  // ─── r17 (gate waveh-r17 MAJOR): "$" ที่ติดกับ identifier เป็น "ส่วนของชื่อ"
+  // ไม่ใช่ตัวเปิด dollar-quote — scan.l ใช้ longest-match: {identifier} =
+  // ident_start{ident_cont}* โดย ident_cont = [A-Za-z\200-\377_0-9\$] มี `\$` ด้วย
+  // → alias `a$tag$` เป็น identifier เดียว (PG 15 §4.1.2.4) — v14 เปิด literal จาก
+  // `$tag$` ใน alias: closer ไปเจอตัวเปิดจริง ชื่อ RPC ใน literal จริงจึงรั่ยเป็น
+  // จุดเรียก (ปลอม 1 ทั้งสองรูป record) และตัวปิดจริงกลายเป็น opener เดินกลืน
+  // FROM ของเจ้าของจริง (เจ้าของ STATEMENT-only 0) · รูป quoted identifier
+  // `"$tag$"` ก็โดนเช่นกัน: v14 ปล่อย `"` ผ่านแล้ว "$" ข้างในเข้า branch dollar-quote
+  // หา closer ไม่เจอ กลืนโค้ดที่เหลือทั้งหมด — v15 กิน identifier ทั้ง token (ทั้ง
+  // แบบไร้ quote และแบบ `"…"` ที่ `""` = quote ในชื่อ) ออกมาก่อนแตะการตีความ
+  // dollar-quote
+
+  it("ทิศ ป (r17 MAJOR-1): alias ผูก `$` — `a$tag$` เป็น identifier เดียว ตัวเปิด literal จริงคือ `$tag$` หลัง comma → ชื่อปลอม 0 (v14 = 1 ทั้งสองรูป) · เจ้าของจริง 1 ทั้งสองรูป (v14 STATEMENT-only = 0)", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const lines = [
+      hdr(1213, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(1213, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(
+        1213,
+        "STATEMENT",
+        `SELECT 1 AS a$tag$,\n$tag$ "public"."complete_data_export_job"($1) $tag$\nFROM "public"."admin_revoke_role"($1)`,
+      ),
+    ];
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ident_cont มี $ — `$tag$` ใน alias เป็นส่วนของชื่อ ไม่ใช่ตัวเปิด literal: literal จริงเริ่มที่ $tag$ หลัง comma ชื่อปลอมอยู่ใน literal = ข้อมูล (r17: v14 ได้ 1 ทั้งสองรูป)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(lines, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "FROM หลัง literal ที่ปิดที่ $tag$ ตัวปิดจริง = เจ้าของจริงต้อง match",
+    ).toHaveLength(1);
+    const stmtOnly = [lines[0], lines[2], lines[3]] as typeof lines;
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "complete_data_export_job", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: ชื่อปลอมจาก STATEMENT เพียงแหล่งเดียวก็ต้อง 0 — v14 รั่ย (r17 ตารางผลตรวจซ้ำ: 1)",
+    ).toHaveLength(0);
+    expect(
+      matchDbErrorBlocks(stmtOnly, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: v14 ตัวปิดจริงกลายเป็น opener กลืน FROM ของเจ้าของ (r17 ตารางผลตรวจซ้ำ: 1 → 0 กลับทิศ) — v15 ต้องกู้คืน 1",
+    ).toHaveLength(1);
+  });
+
+  it("ทิศ ผ (r17 MAJOR-2): quoted identifier `\"$tag$\"` และ alias `a$tag$` ไร้ literal — เจ้าของจริง STATEMENT-only 1 (v14 = 0) · quoted ident ที่มี `\"\"` ในชื่อก็จบที่ quote ปิดจริง", async () => {
+    const { matchDbErrorBlocks } = await import("./db-error-blocks");
+    const mk = (pid: number, aliasExpr: string) => [
+      hdr(pid, "ERROR", "ไม่พบบทบาทที่ยังใช้งานอยู่ของผู้ใช้นี้ (ERR-NF-001|role_not_found)"),
+      hdr(pid, "CONTEXT", "PL/pgSQL function admin_revoke_role(uuid,text,text,text) line 50 at RAISE"),
+      params("ref-x"),
+      hdr(pid, "STATEMENT", `SELECT 1 AS ${aliasExpr}\nFROM "public"."admin_revoke_role"($1)`),
+    ];
+    const unq = mk(1214, "a$tag$");
+    const quo = mk(1215, '"$tag$"');
+    // รูปเต็ม (CONTEXT มีชื่ออยู่แล้ว — ผ่านทั้งสองเวอร์ชัน)
+    expect(
+      matchDbErrorBlocks(unq, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks(quo, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+    ).toHaveLength(1);
+    // STATEMENT-only (ไร้ CONTEXT): v14 กลืน FROM ทั้งสองรูป (unq: alias `$tag$`
+    // เปิด literal หา closer ไม่เจอ · quo: "$" ใน quoted ident เปิด literal กลืน
+    // ทั้งบรรทัด) = 0 — v15 กิน identifier ทั้ง token ก่อน = 1
+    expect(
+      matchDbErrorBlocks([unq[0], unq[2], unq[3]] as typeof unq, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: `a$tag$` เป็น identifier เดียว — FROM เป็นโค้ด (r17 ตารางผลตรวจซ้ำ: v14 ได้ 0)",
+    ).toHaveLength(1);
+    expect(
+      matchDbErrorBlocks([quo[0], quo[2], quo[3]] as typeof quo, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "ไร้ CONTEXT: ชื่อใน quote มีอักขระใดก็ได้รวม $ — token จบที่ quote ปิด (r17 ตารางผลตรวจซ้ำ: v14 ได้ 0)",
+    ).toHaveLength(1);
+    // ขอบเขต quoted ident: `""` ในชื่อ = quote หนึ่งตัว — token ต้องจบที่ quote
+    // ปิดจริง ไม่ใช่ที่ `$tag$` แรกที่พบข้างใน (v14 กลืนทั้งบรรทัด = 0)
+    const dq = mk(1216, '"x""y$tag$"');
+    expect(
+      matchDbErrorBlocks([dq[0], dq[2], dq[3]] as typeof dq, { rpcName: "admin_revoke_role", requestRef: "ref-x" }),
+      "`\"\"` = quote ในชื่อ — quoted identifier กิน token เดียวจบที่ quote ปิดจริง FROM ยังเป็นโค้ด",
+    ).toHaveLength(1);
+  });
+
   it("ทิศ ก2 (รูปจริงจาก live stack 2026-09-15): genuine P0002 = ERROR+CONTEXT+parameters ไร้ STATEMENT → ยัง match 1", async () => {
     const { matchDbErrorBlocks } = await import("./db-error-blocks");
     // record จริงที่จับได้จาก container (probe-p0002-run2 / M1-r9 live): RAISE ผ่าน
