@@ -1760,9 +1760,8 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       // 2026-10-13 เครื่องสำรองช้า · DCR-GATEWAY-ERRBODY-REBASELINE amendment 5) ·
       // สามขาพิสูจน์สิ่งเดียวกัน: fence เห็น statement ที่ไม่ terminal = ปฏิเสธ ·
       // ถ้าถอนขา in-poll ออก จังหวะกลางหน้าต่างจะหล่นไปขา fail-closed CLF=0 ของ
-      // r8 (ข้อความอื่น) = เทสล้มอยู่ดี — regex จึงรับเฉพาะสามข้อความนี้ (ไม่รวม
-      // รูป tail ของ probe :658 — จังหวะนั้น X เริ่มหลัง probe คอมมิต ขา fence เดิม
-      // จับอยู่แล้ว)
+      // r8 (ข้อความอื่น) = เทสล้มอยู่ดี — regex จึงรับเฉพาะสามข้อความนี้ (ข้อความ
+      // probe ตรงทั้งรูป head :639 และ tail :658 — ทั้งคู่ปฏิเสธ fail-closed คลาสเดียวกัน)
       await expect(
         settleScenario(xlie, "guard-r7-queued-request-must-refuse-when-it-starts", () =>
           scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
