@@ -197,10 +197,26 @@ export async function loginAction(formData: FormData): Promise<void> {
     password: parsed.data.password,
   });
   if (error !== null) {
-    redirect(loginUrl(next, classifyLoginError(error)));
+    // DCR-LOGIN-MFA-FACTORSLIST จุด 2 (ครอบคลาสที่ถูกกลืนครบทุกทางออก ERR-SYS-001): grant 200
+    // แต้ SDK คืน error จากขั้นหลังตอบ (เช่น _saveSession) ก็เคยถูกกลืนเงียบทางนี้
+    const outcome = classifyLoginError(error);
+    if (outcome.error === "ERR-SYS-001") {
+      const statusNum =
+        typeof (error as { status?: unknown }).status === "number"
+          ? (error as { status: number }).status
+          : undefined;
+      loginActionLogger.warn(statusNum === undefined ? "fetch_error" : "non_2xx", {
+        route: "auth:login",
+        ...(statusNum === undefined ? {} : { status: statusNum }),
+      });
+    }
+    redirect(loginUrl(next, outcome));
   }
   const session = data.session;
   if (session === null) {
+    // จุดเดียวที่ยังไม่มีสาเหตุแปรผันให้ log (session หายหลัง grant ผ่าน — enum ไม่มีคำศัพท์นี้
+    // ใช้ bad_body ตามความหมาย "รูปคำตอบไม่เป็นไปตามสัญญา")
+    loginActionLogger.warn("bad_body", { route: "auth:login" });
     redirect(loginUrl(next, { error: "ERR-SYS-001" }));
   }
   // ตรวจ factor — fail-closed: ค้นล้มเหลว = กลับ /login (ERR-SYS-001) ไม่ปล่อยผ่าน
@@ -253,6 +269,10 @@ export async function loginAction(formData: FormData): Promise<void> {
       session.user.id,
     );
     if (stashId === null) {
+      // DCR-LOGIN-MFA-FACTORSLIST จุด 2 (เติมจากหลักฐานรอบ verify): ทางออกนี้คือที่ซ่อน
+      // ตัวจริงของคลัสเตอร์ B — stash ตายก่อน RPC ใด ๆ (เช่น LTC_MFA_PENDING_KEY ไม่ถูกตั้ง)
+      // โดยไม่มีเสียงใด ๆ มาก่อน — บันทึกด้วยคำศัพท์ stash_unavailable
+      loginActionLogger.warn("stash_unavailable", { route: "auth:login" });
       redirect(loginUrl(next, { error: "ERR-SYS-001" }));
     }
     const store = await cookies();
