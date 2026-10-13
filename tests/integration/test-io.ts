@@ -558,6 +558,15 @@ export async function authenticatorRoleBoundsOk(): Promise<boolean> {
  * — docs.postgrest.org/en/v12 configuration) → คืน 10_000 · ถ้ามี override ใด ๆ
  * ปรากฏ = ขอบเขตพิสูจน์ไม่ได้จาก default → โยน (fail-closed — ฟันซ์ใช้เลขนี้เป็น
  * เหตุผลของหน้าต่าง ห้ามเดาค่าที่ override ไว้)
+ * กลไกอ่าน (DCR-TEST-HARNESS-PORTABILITY จุด 3 · 2026-10-13): `docker inspect
+ * --format "{{range .Config.Env}}{{println .}}{{end}}" ltc-dev-rest` (array-form spawn
+ * ไม่ผ่าน shell) — image postgrest:v12.2.3 ที่ pull ใหม่ 2026-10-13 ไม่มี shell แล้ว
+ * `exec sh printenv` ใช้ไม่ได้ (image drift ของ upstream — tag เดิม content เปลี่ยน)
+ * อ่านแล้ว loud-fail ทุกทิศ: rc≠0/spawn error → throw (slice stderr) · stdout ว่าง/
+ * whitespace → throw ห้ามตีความเป็น 0 · ทุกบรรทัดไม่ว่างต้องผ่าน KEY=VALUE ไม่งั้น throw
+ * · tripwire ต้องเห็น PGRST_DB_URI (อ่านผิดตัว/ผิด container = จับได้ทันที) ·
+ * PGRST_DB_POOL* นับได้ >0 → throw — มีเพียง "อ่านครบถูกต้อง + นับได้ 0" เท่านั้นที่คืน
+ * 10_000 (green path เดิม — ห้ามเปลี่ยนเป็น throw)
  * ตรวจจริง 2026-09-15: `docker compose exec -T rest printenv | grep PGRST`
  * เห็นเฉพาะ URI/SCHEMAS/EXTRA_SEARCH_PATH/ANON_ROLE/JWT_SECRET/USE_LEGACY_GUCS/
  * API_MAX_ROWS/DB_AGGREGATES_ENABLED/LOG_LEVEL — ไม่มี PGRST_DB_POOL* (compose
@@ -566,31 +575,100 @@ export async function authenticatorRoleBoundsOk(): Promise<boolean> {
  * ช่องว่าง (~8s หลังตัวแรกถูกตัด) แล้วจบที่ ~16s — คิวมีขอบเขตจริง
  */
 export async function postgrestPoolAcquisitionBoundMs(): Promise<number> {
-  const r = await dockerCompose([
-    "exec",
-    "-T",
-    "rest",
-    "sh",
-    "-c",
-    "printenv | grep -c '^PGRST_DB_POOL' || true",
-  ]);
-  if (r.code !== 0) {
+  return postgrestPoolBoundFromEnv(await readRestContainerEnv());
+}
+
+/**
+ * parse+validate ผล `docker inspect --format "{{range .Config.Env}}{{println .}}{{end}}"`
+ * (แยกเป็นฟังก์ชันบริสุทธิ์เพื่อเทสทิศลบได้ไม่ต้องมี docker — เงื่อนไข binding ของ pm
+ * รอบ 1 · DCR-TEST-HARNESS-PORTABILITY): stdout ว่าง/whitespace → throw · ทุกบรรทัด
+ * ไม่ว่างต้องผ่านรูป KEY=VALUE ไม่งั้น throw — ห้ามตีความผลเบี้ยวเป็น "ไม่มี override"
+ * แบบเงียบ (qa พิสูจน์แล้ว: รูป bare {{.}} ตอบ rc=0 กับบรรทัดเดียวเบี้ยว)
+ */
+export function parseRestEnvInspect(stdout: string): Map<string, string> {
+  if (stdout.trim() === "") {
     throw new Error(
-      `postgrestPoolAcquisitionBoundMs: อ่าน env ของ rest ไม่ได้ (exit ${r.code}) — ขอบเขต pool พิสูจน์ไม่ได้`,
+      "postgrestPoolAcquisitionBoundMs: docker inspect คืน stdout ว่าง/whitespace — ห้ามตีความเป็น 0 (ขอบเขต pool พิสูจน์ไม่ได้)",
     );
   }
-  const count = Number.parseInt(r.stdout.trim(), 10);
-  if (!Number.isFinite(count) || r.stdout.trim() === "") {
+  const env = new Map<string, string>();
+  const kv = /^[A-Za-z_][A-Za-z0-9_]*=/;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.trim() === "") continue;
+    if (!kv.test(line)) {
+      throw new Error(
+        `postgrestPoolAcquisitionBoundMs: บรรทัดไม่ผ่านรูป KEY=VALUE → throw: ${JSON.stringify(line.slice(0, 120))} — ขอบเขต pool พิสูจน์ไม่ได้`,
+      );
+    }
+    const eq = line.indexOf("=");
+    env.set(line.slice(0, eq), line.slice(eq + 1));
+  }
+  if (env.size === 0) {
     throw new Error(
-      "postgrestPoolAcquisitionBoundMs: parse จำนวน PGRST_DB_POOL* ไม่ได้ — ขอบเขต pool พิสูจน์ไม่ได้",
+      "postgrestPoolAcquisitionBoundMs: ไม่มีบรรทัด KEY=VALUE ที่ถูกต้องเลย — ขอบเขต pool พิสูจน์ไม่ได้",
     );
   }
-  if (count > 0) {
+  return env;
+}
+
+/**
+ * ตัดสินขอบเขตจาก env ที่อ่านได้ (บริสุทธิ์ — เทสทิศลบได้): tripwire ต้องเห็น
+ * PGRST_DB_URI · PGRST_DB_POOL* >0 → throw · มีเพียงอ่านครบ + นับ 0 ที่คืน 10_000
+ */
+export function postgrestPoolBoundFromEnv(env: ReadonlyMap<string, string>): number {
+  if (!env.has("PGRST_DB_URI")) {
     throw new Error(
-      `postgrestPoolAcquisitionBoundMs: rest มี env PGRST_DB_POOL* ตั้งไว้ ${count} ตัว — ขอบเขต acquisition พิสูจน์ไม่ได้ (fail-closed จนกว่าจะตรวจ/ปรับ fence)`,
+      "postgrestPoolAcquisitionBoundMs: tripwire — ไม่เห็น PGRST_DB_URI ใน Config.Env ของ ltc-dev-rest (อ่านผิดตัว/ผิด container?) — ขอบเขต pool พิสูจน์ไม่ได้",
+    );
+  }
+  const overrides = [...env.keys()].filter((k) => k.startsWith("PGRST_DB_POOL"));
+  if (overrides.length > 0) {
+    throw new Error(
+      `postgrestPoolAcquisitionBoundMs: rest มี env PGRST_DB_POOL* ตั้งไว้ ${overrides.length} ตัว (${overrides.join(", ")}) — ขอบเขต acquisition พิสูจน์ไม่ได้ (fail-closed จนกว่าจะตรวจ/ปรับ fence)`,
     );
   }
   return 10_000; // v12 default db-pool-acquisition-timeout (ไม่มี override — ตรวจสด)
+}
+
+/** อ่าน Config.Env ของ ltc-dev-rest ผ่าน docker inspect (array-form spawn ตามแบบแผน restStartedAfter) */
+function readRestContainerEnv(): Promise<Map<string, string>> {
+  return new Promise<Map<string, string>>((resolve, reject) => {
+    const child = spawn(
+      "docker",
+      ["inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", "ltc-dev-rest"],
+      { cwd: REPO_ROOT },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c: Buffer) => {
+      stdout += String(c);
+    });
+    child.stderr.on("data", (c: Buffer) => {
+      stderr += String(c);
+    });
+    child.on("error", (err) => {
+      reject(
+        new Error(
+          `postgrestPoolAcquisitionBoundMs: spawn docker inspect ไม่ได้ (${String(err)}) — ขอบเขต pool พิสูจน์ไม่ได้`,
+        ),
+      );
+    });
+    child.on("close", (code) => {
+      if ((code ?? -1) !== 0) {
+        reject(
+          new Error(
+            `postgrestPoolAcquisitionBoundMs: docker inspect ltc-dev-rest failed (exit ${code ?? -1}): ${stderr.slice(0, 200)}`,
+          ),
+        );
+        return;
+      }
+      try {
+        resolve(parseRestEnvInspect(stdout));
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  });
 }
 
 async function restStartedAfter(iso: string): Promise<boolean> {
