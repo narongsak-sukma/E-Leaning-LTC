@@ -472,7 +472,8 @@ describe.skipIf(!DB_URL)(
       viewerAal2 = await mintAal2Token(viewer);
       learnerAal2 = await mintAal2Token(learner);
       try {
-        const probe = await fetch(APP_URL, { signal: AbortSignal.timeout(5_000) });
+        // BL-015: 5s โดน probe ล้มบนเครื่องสำรอง (ช้า 3-4 ทำให้ compile/ตอบเกินงบ) = 25 เทส skip ผิดเหตุผล
+        const probe = await fetch(APP_URL, { signal: AbortSignal.timeout(30_000) }); // เพดานตาม DCR-GATEWAY-ERRBODY-REBASELINE จุด 3 — ห้ามขยับโดยไม่วัดใหม่
         appReachable = probe.status < 500;
       } catch {
         appReachable = false;

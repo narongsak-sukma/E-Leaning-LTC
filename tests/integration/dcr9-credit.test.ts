@@ -1387,7 +1387,7 @@ describe.skipIf(!DB_URL)(
            and status = 'processed';
       `);
       expect(closedEvents[0]?.n).toBe(2);
-    }, 45_000);
+    }, 110_000); // BL-015: เพดานตาม DCR-GATEWAY-ERRBODY-REBASELINE จุด 3 — เครื่องสำรองช้า 3-4 เท่า (วัดแล้ว) ห้ามขยับขึ้นอีกโดยไม่มีการวัดใหม่
 
     // ─── เคส 13: poison event ไม่ลากทั้งคิวตาย (gate r4 BLOCKER-1) ───────────────
 

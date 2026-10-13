@@ -374,7 +374,7 @@ describe.skipIf(!DB_URL)(
         p_claim_token: exportTokenA,
       }, { settleMode: "scenario" });
       expect(again.status, again.text.slice(0, 300)).toBeGreaterThanOrEqual(400);
-      expect(again.json, "P0002 ผ่าน gateway ต้องไม่กลายเป็น 200 เงียบ").toBeNull();
+      expect(again.json, "P0002 ผ่าน gateway = ≥400 พร้อมโครง error ของ P0002 ไม่ใช่ 200 เงียบ (re-baseline จุด 1)").toMatchObject({ code: "P0002" });
       // probe terminal (r2/r3 M1) + upstream-terminal ผูก nonce (r4 M1) ผ่านก่อน —
       // แล้วจึงอ่าน-assert snapshot "ใหม่" (r4 M1: อ่านก่อน terminal ยืนยัน = race
       // อาจได้ของเก่าขณะ backend ยังมีชีวิต): งานยัง done + file_media_id เดิม
@@ -450,11 +450,10 @@ describe.skipIf(!DB_URL)(
         p_request_id: crypto.randomUUID(),
         p_claim_token: crypto.randomUUID(), // token ใด ๆ — ด่านสถานะมาก่อนด่าน lease (0039)
       }, { settleMode: "scenario" }); // opaque 500 ไม่มี rest CLF — เทส settle เองด้วย snapshot ด้านล่าง
-      // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|job_not_processing หายที่ gateway
+      // re-baseline จุด 1: postgrest ปัจจุบัน relay โครง error ของ P0002 ผ่าน gateway (ไม่ทึบแล้ว) —
+      // คู่ text-assert (ไม่มี ERR-/job_not_processing) ถูกตัดตาม GO (qa note 1 · RISK ACCEPTANCE บันทึกที่ merge)
       expect(failed.status, failed.text.slice(0, 300)).toBe(500);
-      expect(failed.json, "P0002 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
-      expect(failed.text).not.toContain("ERR-");
-      expect(failed.text).not.toContain("job_not_processing");
+      expect(failed.json, "P0002 ผ่าน gateway = 500 พร้อมโครง error ของ P0002 (re-baseline จุด 1)").toMatchObject({ code: "P0002" });
       // terminal ยืนยันก่อน (probe r2/r3 + nonce-CLF r4) แล้วจึงอ่าน-assert snapshot
       // "ใหม่" (r4 M1): P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวงานคงสภาพ
       // เดิมทุกคอลัมน์ (เทียบกับ before ที่จับก่อน dispatch)

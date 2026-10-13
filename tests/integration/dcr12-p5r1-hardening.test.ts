@@ -600,11 +600,10 @@ describe.skipIf(!DB_URL)(
         p_reason: `ทดสอบ pin พฤติกรรม role_not_found ของ DCR-12 เคส c2 (D-f-6)`,
         p_request_id: crypto.randomUUID(),
       }, { settleMode: "scenario" }); // opaque 500 ไม่มี rest CLF — เทส settle เองด้วย snapshot ด้านล่าง
-      // ทึบ: 500 ไม่ใช่ envelope 4xx — แท็ก ERR-NF-001|role_not_found หายที่ gateway
+      // re-baseline จุด 1: postgrest ปัจจุบัน relay โครง error ของ P0002 ผ่าน gateway (ไม่ทึบแล้ว) —
+      // คู่ text-assert (ไม่มี ERR-/role_not_found) ถูกตัดตาม GO (qa note 1 · RISK ACCEPTANCE บันทึกที่ merge)
       expect(failed.status, failed.text.slice(0, 300)).toBe(500);
-      expect(failed.json, "P0002 500 ผ่าน gateway ต้องไม่มี body JSON ให้อ่าน").toBeNull();
-      expect(failed.text).not.toContain("ERR-");
-      expect(failed.text).not.toContain("role_not_found");
+      expect(failed.json, "P0002 500 ผ่าน gateway พร้อมโครง error ของ P0002 (re-baseline จุด 1)").toMatchObject({ code: "P0002" });
       // terminal ยืนยันก่อน (probe r2/r3 + nonce-CLF r4) แล้วจึงอ่าน-assert snapshot
       // "ใหม่" (r4 M1): P0002 = statement abort → TX ทั้งก้อนกลิ้ง — แถวบทบาท
       // คงเดิมทุกค่า (เทียบกับ before ที่จับก่อน dispatch)

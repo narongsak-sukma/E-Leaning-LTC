@@ -98,7 +98,8 @@ services:
   # ----------------------------------------------------------------- PostgREST
   # แปลง schema public เป็น REST — ตรวจ JWT ด้วย secret เดียวกับ auth
   rest:
-    image: postgrest/postgrest:v12.2.3
+    # BL-015: pin digest กัน image drift ซ้ำ (tag v12.2.3 เดิม content เปลี่ยน upstream ระหว่าง 2026-09-15 → 2026-10-13)
+    image: postgrest/postgrest@sha256:729bf65c733b73f5b52777f0e4b853f22ed73aa67a22d38269d289779b0a8401
     container_name: ltc-dev-rest
     restart: unless-stopped
     depends_on:

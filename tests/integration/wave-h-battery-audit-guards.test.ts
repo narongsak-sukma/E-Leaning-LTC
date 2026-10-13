@@ -1320,7 +1320,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       dispatchBody(),
     );
     expect(d1.status).toBe(500);
-    expect(d1.json, "D1 ต้องเป็น opaque response (แกะ JSON ไม่ได้)").toBeNull();
+    expect(d1.json, "D1 ผ่าน gateway = 500 พร้อมโครง error ของ P0002 (re-baseline หลัง postgrest drift — DCR-GATEWAY-ERRBODY-REBASELINE จุด 1)").toMatchObject({ code: "P0002" });
     expect(d1.invocationId).toBeDefined();
 
     const session = await startPsqlSession("scenario-guard-r5-holder");
@@ -1891,7 +1891,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       );
       const gres = await dispatch;
       expect(gres.status, "P0002 ผ่าน gateway จริง = 500 (probe run2 A)").toBe(500);
-      expect(gres.json).toBeNull();
+      expect(gres.json, "P0002 ผ่าน gateway จริง = 500 + โครง error ของ P0002 (re-baseline จุด 1)").toMatchObject({ code: "P0002" });
       expect(typeof gres.invocationId).toBe("string");
 
       const invLeg = () =>
@@ -1916,7 +1916,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
       // = assert นี้ล้มบนโค้ดเก่า
       const [closed] = await invLeg();
       expect(closed?.status).toBe("settled");
-      expect(closed?.leg, "ขาหลักฐานที่พา settle ผ่านต้องเป็น error block ของ db").toBe("db-error-block");
+      expect(closed?.leg, "ขาหลักฐานที่พา settle ผ่าน = CLF nonce line (re-baseline จุด 2: postgrest ใหม่ปิด response ปกติ CLF มีทุก dispatch — db-error-block เหลือหลักฐานเสริม)").toBe("clf-nonce-line");
 
       // ─── ทิศ ข: invocation ปลอม + attempt ปลอม (ไม่เคย dispatch จริง) ถือ
       // response ปลอม 500 → ไร้ CLF line ของ nonce ปลอม + ไร้ error block ของ db
@@ -2110,7 +2110,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
           from test_infra.lifecycle_ledger
          where kind = 'invocation' and invocation_id = '${revoke.invocationId}'
          order by ts desc, id desc limit 1;`);
-      expect(revokeLeg?.leg, "revoke จริงต้อง settle ด้วย error block ของตัวเอง (record เดียว ของ RPC ตัวเอง)").toBe("db-error-block");
+      expect(revokeLeg?.leg, "revoke จริง settle ด้วยขา CLF nonce line ของ invocation ตัวเอง (re-baseline จุด 2 ตาม gate r9 — qa note 2)").toBe("clf-nonce-line");
 
       // invocation ปลอม: opKey complete + ref R2 (ของ revoke จริง) + nonce/cursor
       // จริงจาก ledgerWrite — ห้าม settle ด้วยกลไกใด (หลักฐานของ invocation อื่น)

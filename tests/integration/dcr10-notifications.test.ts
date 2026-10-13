@@ -1285,7 +1285,7 @@ describe.skipIf(!DB_URL)(
         }
       }
       expect(walk).toEqual([attempt3, attempt1, attempt2]);
-    }, 60_000);
+    }, 150_000); // BL-015: เพดานตาม DCR-GATEWAY-ERRBODY-REBASELINE จุด 3 — เครื่องสำรองช้า 3-4 เท่า (วัดแล้ว) ห้ามขยับขึ้นอีกโดยไม่มีการวัดใหม่
 
     // ─── เคส 11: renewal_reminder_scan — +7/+30 · dedupe · not_lawyer ──────────
 
@@ -1473,7 +1473,7 @@ describe.skipIf(!DB_URL)(
       });
       expect(complete.status, complete.text.slice(0, 300)).toBe(200);
       expect((complete.json as { sent: number }).sent).toBe(1);
-    }, 30_000);
+    }, 75_000); // BL-015: เพดานตาม DCR-GATEWAY-ERRBODY-REBASELINE จุด 3 — เครื่องสำรองช้า 3-4 เท่า (วัดแล้ว) ห้ามขยับขึ้นอีกโดยไม่มีการวัดใหม่
 
     // ─── เคส 14: grant→enqueue→revoke — claim ต้องปิดเป็น failed ไม่ส่ง (gate r1 B2) ──
 
@@ -1520,7 +1520,7 @@ describe.skipIf(!DB_URL)(
         (row) => row.id === E14_OUTBOX_REVOKE,
       );
       expect(mineAgain).toBeUndefined();
-    }, 30_000);
+    }, 75_000); // BL-015: เพดานตาม DCR-GATEWAY-ERRBODY-REBASELINE จุด 3 — เครื่องสำรองช้า 3-4 เท่า (วัดแล้ว) ห้ามขยับขึ้นอีกโดยไม่มีการวัดใหม่
 
     // ─── เคส 15: ประตูรายช่องทาง in_app/email แยกกัน (gate r1 B3 / NTF-005) ──────
 
