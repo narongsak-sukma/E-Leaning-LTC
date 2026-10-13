@@ -129,12 +129,14 @@ function runMarker(): string {
 /** หยุด container mailer (ยิง email-dispatch + pdpa-export ทุก 30 วินาที —
  *  pdpa-export จะ claim งานของเคส g/e ไปก่อน) ช่วงรัน suite */
 async function stopMailer(): Promise<void> {
-  await execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
+  // DCR-TEARDOWN-GUARD จุด 3: deadline 60s — เพดานกัน docker compose ลอย ไม่ใช่ค่าที่คาดว่าจะโดน
+  await execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT, timeout: 60_000 });
 }
 
 /** สตาร์ต mailer คืน (finally — ไม่ทิ้ง dev stack หยุดค้าง) */
 async function startMailer(): Promise<void> {
-  await execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+  // DCR-TEARDOWN-GUARD จุด 3: deadline 60s — เพดานกัน docker compose ลอย ไม่ใช่ค่าที่คาดว่าจะโดน
+  await execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT, timeout: 60_000 });
 }
 
 /** พัก cron จริง 4 ตัวช่วงรัน (idempotent) — tick กิน event data_export.ready ของเคส g */
@@ -294,14 +296,55 @@ describe.skipIf(!DB_URL)(
     }, 300_000);
 
     afterAll(async () => {
-      // คืน dev stack เสมอ (try/finally — cleanup ล้มห้ามทิ้ง cron พักเงียบ)
+      // คืน dev stack เสมอ — DCR-TEARDOWN-GUARD จุด 2: (ก) cleanupE17World แข่ง deadline
+      // 120s — หมดเวลา/ล้ม = จด warning greppable แล้วไปคืน stack ต่อ (cleanup
+      // idempotent รอบถัดไปตามคอมเมนต์ beforeAll) (ข) restore สองขาพยายามเสมอ
+      // (nested finally — ขาหนึ่งล้มห้ามข้ามอีกขา · เงื่อนไข qa binding) (ค) timeout
+      // ระบุเอง 300_000 = parity กับ beforeAll ของไฟล์นี้ ไม่ใช่บรรทัดฐาน hook อื่น
+      const cleanupDeadlineMs = 120_000;
+      let cleanupTimer: NodeJS.Timeout | undefined;
       try {
-        await cleanupE17World();
-      } finally {
-        await restoreCrons();
-        await startMailer();
+        try {
+          await Promise.race([
+            cleanupE17World(),
+            new Promise<never>((_, doom) => {
+              cleanupTimer = setTimeout(() => doom(new Error("cleanup-deadline")), cleanupDeadlineMs);
+            }),
+          ]);
+        } finally {
+          if (cleanupTimer !== undefined) clearTimeout(cleanupTimer);
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message === "cleanup-deadline") {
+          process.stderr.write(
+            `TEARDOWN-GUARD: cleanup deadline ${cleanupDeadlineMs}ms หมด (dcr12) — คืน stack ต่อ แถวค้างให้รอบถัดไปล้าง (idempotent)\n`,
+          );
+        } else {
+          process.stderr.write(
+            `TEARDOWN-GUARD: cleanupE17World ล้ม (${String(err).slice(0, 200)}) — คืน stack ต่อ (dcr12)\n`,
+          );
+        }
       }
-    });
+      const restoreErrors: unknown[] = [];
+      try {
+        await restoreCrons();
+      } catch (err) {
+        restoreErrors.push(err);
+      } finally {
+        try {
+          await startMailer();
+        } catch (err) {
+          restoreErrors.push(err);
+        }
+      }
+      if (restoreErrors.length > 0) {
+        throw new Error(
+          `TEARDOWN-GUARD: restore ล้ม ${restoreErrors.length} ขา (dcr12) — ${restoreErrors
+            .map((e) => String(e).slice(0, 200))
+            .join(" | ")}`,
+        );
+      }
+    }, 300_000);
 
     // ─── เคส g: export เต็มสาย → event → tick → email_outbox (B3 ฝั่ง SQL) ────
 

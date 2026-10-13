@@ -26,9 +26,14 @@ export const TEST_PASSWORD = process.env["TEST_USER_PASSWORD"] ?? "Integration#2
 
 /** รัน SQL ผ่าน psql ใน container `db` — คืน stdout (psql -At)
  * opts.quiet: เพิ่ม -q เพื่อตัด command tag (UPDATE n/INSERT n) ออกจาก stdout —
- * จำเป็นเมื่อ parse ผล UPDATE…RETURNING (ไม่งั้น "UPDATE 0\n" ทำให้เหมือนมีผลลัพธ์) */
-export function psql(sql: string, opts: { quiet?: boolean } = {}): Promise<string> {
+ * จำเป็นเมื่อ parse ผล UPDATE…RETURNING (ไม่งั้น "UPDATE 0\n" ทำให้เหมือนมีผลลัพธ์)
+ * opts.timeoutMs: kill timer ของ child (default 120_000) — DCR-TEARDOWN-GUARD จุด 1:
+ * side-channel ต้อง fail-loud เมื่อ docker exec ค้าง (หลักฐาน rb-dcr12 18627s)
+ * ไม่ใช่ปล่อยให้ถือ event loop ของ worker ไว้เงียบ ๆ — หมดเวลา = kill + reject
+ * ดังพร้อม sql ต้นทาง 40 ตัวแรก */
+export function psql(sql: string, opts: { quiet?: boolean; timeoutMs?: number } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
+    const timeoutMs = opts.timeoutMs ?? 120_000;
     const child = spawn(
       "docker",
       [
@@ -46,14 +51,31 @@ export function psql(sql: string, opts: { quiet?: boolean } = {}): Promise<strin
     );
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(
+        new Error(`psql side-channel timeout after ${timeoutMs}ms (killed): ${sql.slice(0, 40)}`),
+      );
+    }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += String(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += String(chunk);
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on("close", (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (code === 0) {
         resolve(stdout);
         return;
