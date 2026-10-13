@@ -1,39 +1,51 @@
-# DCR login-mfa-factorslist: listFactors ใน loginAction พึ่ง session ในหน่วยความจำของ SDK แล้วตายเงียบใน Next runtime — เปลี่ยนเป็น REST ตรงด้วย token ที่ถืออยู่ + บันทึก error ที่เคยถูกกลืน
+# DCR login-mfa-factorslist (ฉบับแก้หลัง qa objection รอบ 1): เลี่ยงพฤติกรรม session ในหน่วยความจำของ SDK ที่จุดตรวจ factor ด้วย getUser(jwt) overload + บันทึก error ที่เคยถูกกลืน
 
-Filing: ปิดคลัสเตอร์ B ที่เปิดค้างของ BL-015 ("rl-MFA ERR-SYS-001 deterministic · dcr14 ผ่าน isolated") · 2026-10-13 ~17:5xZ · ขอบเขต: **src/app/(auth)/actions.ts จุดเดียว (แขนขา factors-check ของขั้น password) — ไม่แตะ fence/คุกกามีอื่น · ไม่แตะ middleware/config · ไม่แตะเทส**
+Filing: ปิดคลัสเตอร์ B ที่เปิดค้างของ BL-015 · 2026-10-13 (ฉบับแรกถูก qa ค้าน 5 ข้อ — ทั้งหมดพับเข้าฉบับนี้ พร้อมการแก้กลไกตามหลักฐานใหม่ที่ qa ชี้) · ขอบเขต: **src/app/(auth)/actions.ts จุดเดียว + แก้ mock ตำแหน่งเดียวของ src/app/(auth)/actions.login-rate-limit.test.ts (อนุญาตเป็นการเฉพาะตาม qa blocker 5) — ไม่แตะ fence/คุกกามีอื่น · ไม่แตะ middleware/config**
 
-## หลักฐาน (decision-grade — วัดจากระบบจริงทั้งหมด · log ที่ .omc/artifacts/it-iso2-* + kong access log)
+## Severity (pm ยกระดับ — P0)
 
-1. **อาการเดียวกันเป๊ะสี่จุดสองรันไทม์ และ reproduce ได้นอก suite**: full-suite (16:22-17:03Z) ล้ม 4 เทส — dcr14 เคส c/f1 (`expected '/login?error=ERR-SYS-001' to be '/login/verify'`) + เคส d (`staffAal2.length=0` — aal2 mint ตายเพราะ flow เดียวกัน) + wave-g-login-ratelimit MFA · isolated คืนนี้ทั้งสองไฟล์ก็แดง (it-iso2-dcr14 58s · it-iso2-rl 89s) — **dcr14 พลิกจาก isolated-เขียว (เช้า) เป็น isolated-แดง (คืน)** · **ขับฟอร์ม login จริงด้วยมือ (parse action id จาก GET /login → multipart POST) กับ probe user + TOTP factor verified: ล้มบน :3000 dev (303→ERR-SYS-001 ใน 426ms) และ :3001 production build เหมือนกันเป๊ะ (156ms)** — เป็นบั๊กของ product บน production runtime ไม่ใช่ของ dev runtime
-2. **หลักฐานสายไฟ (Kong access log — จับซ้ำได้หลายครั้ง 17:01-17:22Z)**: ขั้น password ของ action = `POST /auth/v1/token?grant_type=password` **200** (2274-2390 bytes — session กลับมาครบ) → `GET /auth/v1/user` 200 (middleware) → **`GET /auth/v1/factors` ไม่เคยออกจาก container เลย** (grep ทั้งหน้าต่าง = 0 แถว) → action ตอบ 303 ERR-SYS-001 โดยไม่มี error ไหนถูก log ฝั่ง server — คือ `auth.auth.mfa.listFactors()` คืน error โดยไม่ยิง network (ตายใน SDK ระหว่าง `_useSession` หา session ในหน่วยความจำไม่เจอ) แล้ว action กลืน error นั้นเงียบ ๆ (ช่องว่าง observability)
-3. **การแยกส่วนพิสูจน์ว่า "ใน Next runtime" เป็นตัวแปร**: สคริปต์ bare-node ใน container เดียวกัน (`docker compose exec app node`) ใช้ @supabase/supabase-js 2.116.0 + env เดียวกัน + user เดียวกัน (factor verified) รัน **ลำดับเดียวกันเป๊ะ** createStandaloneAuthClient → signInWithPassword → mfa.listFactors = **ผ่าน** (listFactors 9ms · error null · เห็น egress ที่ kong) — ความตายเกิดเฉพาะเมื่อรันในกระบวนการ Next (dev และ prod build ล้มเหมือนกัน → ไม่ใช่ hot-reload/watcher)
-4. **ซอร์สนิ่ง**: actions.ts ไม่เปลี่ยนตั้งแต่ wave-G (f4b92a1) · แก้ CSRF (26e533d) แตะ middleware/config เท่านั้น และ grant ผ่าน = url/key ถูก · lockfile ไม่เปลี่ยนตั้งแต่ 1f93cdb (ยุคที่ battery r36/r37 เขียวบนเครื่องเดิม) — ตัวแปรที่เข้ามาใหม่คือ **เครื่อง+image สร้างใหม่หมด 2026-10-13**: `node:22-alpine` เป็น **tag-pin ลอยตัว** (วันนี้ได้ node 22.23.3 + undici 6.28.1) และ gotrue:v2.164.0 pull ใหม่ — ตระกูลเดียวกับ BL-015 H2 (image drift) · **สังเกตเพื่อนร่วมตระกูล**: คำตอบ enroll factor ของ gotrue ใหม่ = **410KB** เพราะ `totp.qr_code` เป็น SVG ทำ rect ทุกช่อง (4225 rect) — ยก digest-pin ค้างอยู่ที่ OQ ของ DCR-PROD-DEPLOY-DRAFT อยู่แล้ว (เพิ่มเติม: node:22-alpine ควรอยู่ในรายการ pin ด้วย)
+จุดตายอยู่ "ก่อน" การแยกสาย factor — `mfa.listFactors()` ถูกเรียกทุกการล็อกอินแบบฟอร์ม ไม่ว่าผู้ใช้จะมี factor หรือไม่ → **ทุกการล็อกอินผ่านฟอร์มบน stack นี้ตายหมด** (เฉพาะเคสที่ตายก่อนถึง listFactors เช่นรหัสผ่านผิดจึงเห็น error ตามปกติ) — บั๊กนี้บล็อก full-suite 35/35 · battery r38 (e2e สาย login) · UAT PF-1..PF-5 ทั้งกระบวนการ
 
-## ทางแก้ (2 จุด)
+## กลไกตามหลักฐาน (แก้ถูกต้องตามข้อค้นพบของ qa — ฉบับแรกเข้าใจผิดบางจุด)
+
+- **listFactors ของ SDK ไม่ได้เรียก GET /auth/v1/factors เลย**: `_listFactors()` (GoTrueClient.js:5010-5038) เรียก `this.getUser()` **แบบไม่มี argument** แล้วมาปั้นรายการ factor จาก `user.factors ของคำตอบ /auth/v1/user` — สายไฟจริงที่เห็นตลอด (grant 200 → getUser 200 → "ไม่มี factors egress") อธิบายได้ครบ: getUser แบบไม่มี jwt ต้องผ่าน `initializePromise` + lock + อ่าน session ในหน่วยความมความจำ (GoTrueClient.js:2677-2691) — ใน Next runtime มันหาไม่เจอ/ล้ม → error กลับมาโดยไม่มี network → action กลืน error เงียบ ๆ → 303 ERR-SYS-001
+- **เส้นทาง /auth/v1/factors (แบบ REST ตรงตามที่ฉบับแรกเสนอ) ถูกถอดออก**: หลักฐานใน repo เอง (probe จริง) — tests/integration/dcr14-mfa.test.ts:495 จดว่า GET /auth/v1/factors ระดับ user คืน **405** ใน GoTrue build นี้ · src/lib/auth/mfa.ts:18-20 echo ข้อจำกัดเดียวกัน · probe สดของ qa (ไม่มี bearer) ได้ 401 (route มีอยู่) — สอง artifact ขัดกันและ **ไม่มีใครวัดคำตอบแบบมี bearer เลย** = ไม่ decision-grade สำหรับประตู auth ที่ fail-closed → ห้ามใช้โดยไม่มี probe ใหม่บันทึกลง DCR
+- **การแยกส่วนที่ยืนยันแล้ว (จากฉบับแรก — ยังเก็บไว้)**: ลำดับเดียวกันเป๊ะใน bare-node ใน container เดียวกัน (SDK/env/user เดียวกัน รวม factor verified) **ผ่าน** — ความตายจำเพาะต่อการรันในกระบวนการ Next (dev :3000 และ prod build :3001 ล้มเหมือนกัน — reproduce นอก suite 426ms/156ms ด้วย probe user + verified TOTP factor) · ซอร์สนิ่งตั้งแต่ wave-G (f4b92a1) · lockfile นิ่งตั้งแต่ 1f93cdb (ยุค battery เขียวบนเครื่องเดิม) — ตัวแปรที่เข้ามาใหม่ = เครื่อง+image สร้างใหม่ 2026-10-13: node:22-alpine **tag-pin ลอยตัว** (node 22.23.3 + undici 6.28.1) + gotrue:v2.164.0 pull ใหม่ (คำตอบ enroll 410KB จาก SVG QR 4225 rect — ตระกูล BL-015 H2) — **node:22-alpine เข้ารายการ pin ของ DCR-PROD-DEPLOY OQ เพิ่ม**
+
+## ทางแก้ (2 จุด — ตามคำสั่ง pivot ภายใต้อำนาจ delegated + คำแนะนำของ qa เอง)
 
 | จุด | แก้ | ไฟล์:บรรทัด |
 |---|---|---|
-| 1 | **เลิกพึ่ง session ในหน่วยความจำของ SDK ตรงจุดตรวจ factor**: หลัง `signInWithPassword` คืน session (ถือ access_token อยู่ในมือแล้ว) — เรียก **REST ตรง** `GET {SUPABASE_URL}/auth/v1/factors` พร้อม `Authorization: Bearer session.access_token` + `apikey: <anon>` แล้วจับ firstVerifiedTotpFactor จาก response เดิม (id/factor_type/status จาก GoTrue — รูปเดียวกับที่ SDK คืน) · **semantics fail-closed คงเดิมทุกตัวอักษร**: fetch โยน / non-2xx / parse ไม่ได้ = 303 ERR-SYS-001 เหมือนเดิม · ใช้ url/key จาก getConfig() ทางเดียวกับ createStandaloneAuthClient (ผิวเดียวกัน ไม่เพิ่มช่อง env) | src/app/(auth)/actions.ts:201-206 (แขนขา listFactors ของ loginAction) |
-| 2 | **บันทึก error ที่เคยถูกกลืน**: บรรทัด structured log เดียวฝั่ง server เมื่อออกจากทาง ERR-SYS-001 (ชนิดความล้มเหลว + ขั้นที่ตาย) — คลาส "ตายเงียบไม่มีใครเห็น" นี้กินเวลาสอบสวนหลายชั่วโมงเพราะ action ไม่บอกอะไรเลย | จุดเดียวกัน (ก่อน redirect ทาง error) |
+| 1 | **Pivot: ใช้ `auth.auth.getUser(session.access_token)` — overload ที่รับ jwt ตรง ๆ** (GoTrueClient.js:2673-2675: `if (jwt) return await this._getUser(jwt)` — **ไม่แตะ initializePromise/lock/หน่วยความจำเลย = รอดพ้นคลาสพฤติกรรมที่พิสูจน์แล้วว่าตาย โดยการก่อสร้าง**) · อ่าน `data.user.factors` — **อาร์เรย์เดียวกับที่ `_listFactors` ของ SDK ปั้นผลลัพธ์ให้ `firstVerifiedTotpFactor` อยู่แล้ว** (SDK วน user.factors ตัวเดียวกัน :5024) · error/ผิดรูป = ERR-SYS-001 ตามกติกาเดิม · **กติการูปร่าง (qa blocker 4): `user` ไม่ใช่ object = bad_body → ERR-SYS-001 · `user.factors` เป็น undefined/null = "ไม่มี factor" ตามปกติของผู้ใช้ไร้ factor (ห้าม ERR-SYS-001 ไม่งั้น P0 ทุก login ตายซ้ำ) → เข้าสาย setSession เดิม · `user.factors` truthy แต่ไม่ใช่ array = bad_body → ERR-SYS-001 ก่อนถึง firstVerifiedTotpFactor เสมอ (ห้าม TypeError รั่วไป 500 digest)** | src/app/(auth)/actions.ts:201-206 |
+| 2 | **log line เดียวสำหรับคลาส error ที่เคยถูกกลืน** (qa blocker 3): `createLogger(getConfig().logLevel)` ตามแบบแผน src/lib/auth/logout-all.ts:22 · คำศัพท์ msg เป็น enum ตายตัว `fetch_error \| non_2xx \| bad_body \| timeout` · ฟิลด์ status = รหัส HTTP ตัวเลข · **ห้าม interpolate error.message/error-object/URL (allowlist SDS §6.2)** — บันทึกก่อน redirect ทาง ERR-SYS-001 ทุกทางออก | จุดเดียวกัน |
 
-## Test-first (RED มีอยู่แล้ว — ไม่ต้องเขียนเทสใหม่)
+- **เหตุผลที่ไม่มี AbortSignal ใหม่ (qa blocker 2 — บันทึบความคิดตามคำสั่ง)**: getUser(jwt) ไม่นำ fetch ดิบเข้ามาใหม่ — คำขอ network อยู่ใน SDK ภายใต้ global fetch ของ runtime เหมือนเดิม (เส้นทางเดียวกับ signInWithPassword ที่ทำงานอยู่จริง) · ทางออก fail-closed ระดับ action (catch ทุก rejection → ERR-SYS-001 + log) ครอบการค้างของ network อยู่แล้ว · ข้อกำหนด `AbortSignal.timeout(<ค่าที่ตั้งชื่อ>)` + `timeout` ในคำศัพท์ log เก็บไว้เป็นเงื่อนไข **เฉพาะ variant REST ดิบ** ซึ่งถูกถอดออกจากขอบเขตแล้ว
 
-1. **RED ปัจจุบัน (deterministic)**: dcr14 เคส c/f1 + เคส d (ตามา) + wave-g-login-ratelimit MFA — ล้มทั้ง isolated และ in-suite ด้วย signature เดียวกัน
-2. หลังแก้: isolated ทั้งสองไฟล์ต้องเขียว (dcr14 7/7 · rl ครบ) — พิสูจน์ทั้งทางแก้และไม่ถอยหลัง
-3. full-suite 35 ไฟล์ detached → ต้อง 35/35 + stack-integrity (cron 8 + mailer Up + app health) ตาม binding เดิม → qa gate → battery r38 → merge --no-ff + RISK ACCEPTANCE + baseline ceiling table
-4. (ทางเลือกตรวจเสริม ถ้า qa ขอ) e2e battery-prod บน :3001 เป็นตัวพิสูจน์ production runtime อยู่แล้วตามลำดับปกติ
+## Test-first (RED มีอยู่แล้ว — ระบุครบตาม qa blocker 5)
 
-## ทางเลือกอื่นที่พิจารณาแล้ว (เหตุผลที่ไม่เลือก)
+1. **RED inventory (ปัจจุบัน deterministic)**: (ก) integration — dcr14-mfa เคส c/f1 (ERR-SYS-001 แทน /login/verify) + เคส d (staffAal2 ว่าง — ตามาจาก flow เดียวกัน) + wave-g-login-ratelimit เคส MFA สองขั้น (ข) **unit — src/app/(auth)/actions.login-rate-limit.test.ts:65-81 mock อยู่บน seam เดียวกับที่เปลี่ยน (`mfa.listFactors`) และเคส :234-288 ผูกรูป mock นั้น — ต้องแก้พร้อมกัน** ไม่งั้น unit แตกเอง
+2. **สิ่งที่อนุญาตในไฟล์ unit (แคบสุด)**: re-point mock จาก listFactors เป็น **global-fetch stub คุมด้วย host จำลอง `supabase.test.local`** — ครอบ token grant + GET /user (คืน user พร้อม factors สามรูป: ไร้ factors / มี verified totp / factors ไม่ใช่ array) ให้ SDK จริงวิ่งบน fetch ต้ม — เทสย่อยเดิม (:234-288) คงความหมายทุกเคส · **implement + mock re-point + log line = commit เดียว (pm blocker 1)**
+3. หลังแก้: dcr14 **7/7** + wave-g-login-ratelimit เขียวแบบ isolated → full-suite 35 ไฟล์ 35/35 + stack-integrity → qa gate → battery r38 → merge --no-ff + RISK ACCEPTANCE + baseline ceiling table
+4. **ขั้นที่สอง (stage-2) mfa-actions.ts:81 — pm non-blocking**: ผูกกับประตูเดียวกัน (dcr14 7/7 isolated) — ถ้ายังแดงหลังแก้จุดนี้แล้ว เปิด **P1b addendum** แยกต่างหาก ไม่ยืด DCR นี้
 
-- **`auth.auth.setSession(session)` ก่อน listFactors**: พึ่ง SDK ต่อ (แค่ย้าย state) · setSession มีผลข้างเคียงกับ storage/refresh ที่ไม่ต้องการใน action ไร้ cookie · ยังผูกกับพฤติกรรมภายใน SDK ที่พิสูจน์แล้วว่าเปราะใน runtime นี้ · REST ตรงตัดการพึ่งพานั้นทั้งหมดโดยใช้ของที่มีอยู่แล้วในมือ (access_token)
-- **อัปเดก @supabase/supabase-js**: เดิมพันกับพฤติกรรม SDK เวอร์ชันอื่นที่ต้องทดสอบใหม่ทั้งสาย auth — กว้างเกินจุด และ lockfile นิ่งเป็นหลักคำสอนของเครื่องนี้
-- **แก้ที่ image (pin node:22-alone digest ย้อนกลับ)**: ถูกทางระยะยาว (ยกไป DCR-PROD-DEPLOY OQ แล้ว) แต่ไม่ถอดสภาพ "SDK ตายเงียบใน runtime หนึ่ง" ได้ — โค้ดควรทนทานต่อ runtime drift ที่จุด fail-closed สำคัญของ authentication โดยไม่พึ่ง state ในหน่วยความจำ
+## ทางเลือกอื่นที่พิจารณาแล้ว (ฉบับแรก + เพิ่มจากรอบ objection)
 
-## บทเรียนกระบวนการ (บันทึกตามข้อความ coordinator)
+- **REST ตรง GET /auth/v1/factors**: ถอด — endpoint ไม่ถูกวัด (405 ใน probe ของ repo เอง vs 401 ของ qa — ขัดกัน) และ SDK ก็ไม่ได้ใช้เส้นนี้ (qa material finding)
+- **REST ตรง GET /auth/v1/user ด้วย bearer**: ทำได้ (เส้น+รูปพิสูจน์แล้วโดยการทำงานจริงของ SDK) แต่ต้องพิสูจน์ wire contract เพิ่มเอง — getUser(jwt) ได้ของเดียวกันผ่าน SDK ที่ repo ใช้อยู่แล้ว โดยไม่เพิ่มชั้น fetch ใหม่ → เลือก overload
+- **`auth.auth.setSession(session)` ก่อน listFactors**: พึ่ง state ของ SDK ต่อ + ผลข้างเคียง storage/refresh ที่ไม่ต้องการใน action ไร้ cookie
+- **อัปเดก @supabase/supabase-js**: กว้างเกินจุด ต้องทดสอบสาย auth ใหม่ทั้งหมด
+- **แก้ที่ image (pin digest ย้อน)**: ถูกทางระยะยาว (ยกไป DCR-PROD-DEPLOY OQ แล้ว รวม node:22-alpine) แต่ไม่ถอดสภาพ "SDK ตายเงียบใน runtime หนึ่ง" — โค้ดต้องทน runtime drift ที่ประตู auth
 
-- **ชั้นวัดโกหก — ต้องตรวจสอบด้วยคำสั่งตรงเสมอก่อนเชื่อผล**: stack-integrity check ที่ฝังใน launcher (cmd.exe /c ครอบ docker exec psql "select ..." และ docker ps --format มี space) ถูก cmd.exe ตัดคำจน psql ได้ SQL หักกลาง ("unterminated quoted identifier") และ docker ps ปฏิเสธ format → สรุป cronOk=false/mailerUp=false ทั้งที่ stack จริงสะอาด (ตรวจซ้ำด้วย compose exec ตรง ๆ = cron 8/8 + mailer Up + app healthy) — ครั้งหน้าคำสั่ง check ใน launcher ต้อง spawn แบบ array-form ไม่ผ่าน cmd.exe /c รอบสอง
-- สอบสวนคลัสเตอร์นี้เร็วขึ้นมากเพราะ (1) ขับ surface จริงเองนอก suite (repro ในมือ) (2) สคริปต์ bare-node แยกตัวแปร "ใน Next" ออกจาก "SDK/env" — แบบแผนนี้ควรจดไว้ใช้กับบั๊ก "ตายเงียบ" รอบหน้า
+## บทเรียนกระบวนการ (คงจากฉบับแรก)
 
-## ฉันทามติ + GO (รอ)
+- **ชั้นวัดโกหก — ตรวจด้วยคำสั่งตรงก่อนเชื่อผล**: stack-integrity check ใน launcher (ผ่าน cmd.exe /c) ถูกตัดคำจน psql/docker ps พัง → สรุปผิดว่า stack เสีย ทั้งที่ตรวจตรง ๆ แล้วสะอาด — ครั้งหน้า check ใน launcher ต้อง spawn array-form ไม่ผ่าน cmd.exe /c
+- **อ่านซอร์สของ dependency ก่อนสรุป wire contract**: ฉบับแรกอ้าง listFactors→GET /factors จากเอกสาร/ความเข้าใจ แต่ SDK จริง derive จาก /user — qa จับได้เพราะอ่าน GoTrueClient.js ตรง ๆ (บทเรียน: หลักฐาน wire ต้องมาจากซอร์สติดตั้มจริงหรือ capture ไม่ใช่ความจำ)
+- repro นอก suite + bare-node แยกตัวแปร = แบบแผนมาตรฐานสำหรับบั๊ก "ตายเงียบ"
 
-- รอ **pm** (scope + แนวทาง: REST ตรงที่จุดเดียว พอรับไหม หรือชี้ทางเลือกอื่น) + **qa** (testability: fail-closed ครบทุกทิศของ REST ใหม่ + รูป log line) ผ่าน bridge
+## ฉันทามติ + GO
+
+- **pm CONSENT (ผ่าน bridge · 2026-10-13)**: แนวทาง + การคืนสถานะ acceptance รับรอง + ปลดบล็อก UAT PF-5 · ยกระดับ severity เป็น P0 (fail-close ยิงก่อนการแยกสาย factor = ทุก login ตาย) · blocker: implement + test ต้อง commit เดียว · non-blocking: stage-2 mfa-actions.ts:81 ผูกประตู dcr14-7/7-isolated (P1b ถ้ายังแดง) + node:22-alpine เข้ารายการ pin ของ deploy DCR
+- **qa OBJECTION รอบ 1 (5 blockers — พับครบในฉบับนี้)**: (1) pivot กลไก + ลบคำอ้างรูป response ของ /factors + แ
+ลบคำอ้างรูป response ของ /factors + แก้คำอธิบาย root cause (2) เงื่อนไข AbortSignal เฉพาะ variant REST (บันทึกเหตุผลไว้แล้วในหัวข้อทางแก้) (3) log line: createLogger(getConfig().logLevel) + enum msg ตายตัว + status ตัวเลข + ห้าม interpolate ตาม SDS §6.2 (4) shape-guard ครบสามทิศ รวม "factors หาย = ผู้ใช้ไร้ factor ตามปกติ" กัน P0 ซ้ำ (5) อนุญาตแก้ mock ของ actions.login-rate-limit.test.ts แคบสุด (global-fetch stub ที่ supabase.test.local) + ระบุไฟล์นี้ใน RED inventory
+
+- **รอ qa round-2 confirm ของ P1/P2 ฉบับแก้นี้** (pm consent ยืนอยู่ — ขอบเขตแนวทางคืนสถานะไม่เปลี่ยน) → GO (CTO) → implement สามส่วนใน commit เดียว (action fix + mock re-point + log line) → isolated dcr14 7/7 + rl → full-suite 35/35 → qa gate → battery r38 → merge --no-ff + RISK ACCEPTANCE + baseline ceiling table → UAT
