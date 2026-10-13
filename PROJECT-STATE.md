@@ -772,3 +772,11 @@
 - **DCR-GATEWAY-ERRBODY-REBASELINE (docs/09-dev/) เปิดแล้ว (doc-first รอ gate)**: จุด 1 re-baseline body 5 จุด (json null → code P0002 · คง 500 + snapshot) · จุด 2 evidence-leg 2 จุด (db-error-block → clf-nonce-line — CLF มีจริงทุก dispatch แล้ว) · จุด 3 budget (probe 5s→30s · timeout ×2.5 พร้อมเหตุผลจดในไฟล์) · จุด 4 compose pin digest postgrest ปัจจุบัน (kong/gotrue → OQ ของ DCR-PROD-DEPLOY ตามเดิม) · ขอบเขตคงที่: ไม่แตะ src/ ไม่แตะ fence/settle logic
 - **ยังเปิดใน BL-015 (ไม่บล็อก DCR)**: rl-MFA ERR-SYS-001 (deterministic isolated แต่ dcr14 ผ่าน isolated — wire trace: action หยุดหลัง password grant ไม่มี listFactors/stash ออก Kong) · dcr14 in-suite ล้ม-isolated ผ่าน · dcr9k12 สะอาด (กำลังรัน)
 - **สถานะกระบวนการคงเดิม**: merge โดนหน่วงจนกว่า full-suite เขียว (กติกา binding pm) — ลำดับถัดไป: gate DCR → implement → isolated เขียว → full-suite เขียว (detached) → qa gate → battery r38
+
+
+### DCR-GATEWAY-ERRBODY-REBASELINE — design gate จบ · GO (pm CONSENT + qa CONSENT ผ่าน bridge · 2026-10-13) · dcr9 สะอาด 13/13 (2026-10-13 ~14:2xZ)
+
+- **dcr9-full-clean (it-iso-dcr9k12-clean.log)**: **13/13 ผ่าน (198s)** — เคส 12 ผ่านบนเครื่องว่าง = in-suite timeout เป็นแบบ marginal-under-load (H1) สอดคล้อง budget-ceiling ที่ gate อนุมัติ
+- **design gate จบ**: pm **CONSENT** (scope test-infra+compose 1 บรรทัด · เงื่อนไข 4: บันทึก RISK ACCEPTANCE ตอน merge · full-suite green = ครบ 35 ไฟล์ · budget = เพดานห้ามขยับโดยไม่วัดใหม่ · digest-pin เฉพาะ postgrest) · qa **CONSENT** (ข้อกำหนด 4: ตัด text-assert สองคู่ 4 บรรทัด dcr11:456-457 + dcr12:606-607 · จุด leg ที่สอง = :2113 · precision ผิว gateway = ผู้ถือ apikey รวม anon key (kong.yml:47-50 · consumers :98-100) + ยกคำถาม prod-anon-key ไป DCR-PROD-DEPLOY OQ · เลข budget 45→110=×2.44 dcr9k12 เหนียวสุด full-suite เป็นตัวพิสูจน์)
+- **GO (CTO · 2026-10-13)**: ออก GO ทั้งสี่จุด · ลำดับ: implement → isolated เขียว → full-suite 35 ไฟล์ detached (log ที่ .omc/artifacts/) → qa gate → battery r38 → merge --no-ff + บันทึก RISK ACCEPTANCE (การตัด assert envelope เป็นการยอมรับความเสี่ยงแบบมีสติ — การซ่อนแท็กที่ gateway ด้วย Kong response-transform แยกเป็น ticket อนาคตถ้าต้องการ)
+- **ข้อสังเกตความปลอดภัย (ตาม qa)**: ผิว direct-gateway = ผู้ถือ apikey ทุกใบรวม anon key — ยกคำถาม "prod gateway ต้องไม่รับ anon key ในที่ที่ DB grants ห้ามอยู่แล้ว" เข้า OQ ของ DCR-PROD-DEPLOY-DRAFT ด้วย
