@@ -153,6 +153,28 @@ describe("loadConfig — เงื่อนไขข้ามฟิลด์ (SD
   });
 });
 
+describe("CSRF_TRUST_PROXY_HEADERS — ธง trust x-forwarded ของ CSRF (DCR-CSRF-ORIGIN-RESILIENCE)", () => {
+  // qa round-2 note 1 (binding): ห้าม z.coerce.boolean() — coerce ทุก string ที่ไม่ว่าง
+  // เป็น true รวมถึง "false" จะเปิด permissive mode เงียบ ๆ — ชุดนี้ pin พฤติกรรมไว้
+  it("ไม่ตั้ง → false (default = โหมดตรง เทียบ Origin กับ host header เท่านั้น)", () => {
+    expect(loadConfig(baseEnv()).csrfTrustProxyHeaders).toBe(false);
+  });
+
+  it("ตั้ง \"false\" ตรง ๆ → false (จุดที่ z.coerce.boolean() จะพัง — string ไม่ว่าง)", () => {
+    expect(loadConfig(baseEnv({ CSRF_TRUST_PROXY_HEADERS: "false" })).csrfTrustProxyHeaders).toBe(false);
+  });
+
+  it("ตั้ง \"true\" → true (เฉพาะ env ที่มี trusted proxy จริง)", () => {
+    expect(loadConfig(baseEnv({ CSRF_TRUST_PROXY_HEADERS: "true" })).csrfTrustProxyHeaders).toBe(true);
+  });
+
+  it("ค่าอื่น (0/yes/1/TRUE) → ConfigError (enum ปฏิเสธ ไม่เดาต่อ — fail-closed)", () => {
+    for (const bad of ["0", "yes", "1", "TRUE", "on"]) {
+      expect(() => loadConfig(baseEnv({ CSRF_TRUST_PROXY_HEADERS: bad })), bad).toThrow(ConfigError);
+    }
+  });
+});
+
 describe("CRON_SECRET — secret ของ cron email-dispatch (D-p4-8 · Wave E Phase 4)", () => {
   it("ไม่ตั้ง → cronSecret = null (route /api/internal/jobs/email-dispatch ตอบ 404 fail-closed เงียบ)", () => {
     expect(loadConfig(baseEnv()).cronSecret).toBeNull();

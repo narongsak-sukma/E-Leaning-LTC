@@ -29,6 +29,7 @@ function configStub(overrides: Partial<AppConfig> = {}): AppConfig {
     appEnv: "local",
     logLevel: "info",
     certPublicBaseUrl: null,
+    csrfTrustProxyHeaders: false,
     supabaseUrl: "https://stub.supabase.co",
     supabaseAnonKey: "stub-anon",
     supabaseServiceRoleKey: "stub-svc",

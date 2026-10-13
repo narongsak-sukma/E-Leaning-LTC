@@ -73,9 +73,90 @@ export function buildContentSecurityPolicy(nonce: string, isDev: boolean): strin
 }
 
 /**
+ * origin ของ request มุมมอง browser — สองชั้นตาม DCR-CSRF-ORIGIN-RESILIENCE
+ * (design gate GO 2026-10-13: pm consent + qa round-2 consent)
+ *
+ * เหตุผล: ค่าความจริงของ CSRF ต้องมาจาก header ที่ browser เป็นเจ้าของเอง ไม่ใช่
+ * request.nextUrl.origin ที่ Next ประกอบจาก hostname:port ภายใน runtime — เครื่อง
+ * เก่าเคยได้ 403 csrf_origin_mismatch deterministic บน production runtime :3001
+ * (e2e-04 spec:79) ในลักษณะที่ชี้ว่า nextUrl.origin เพี้ยนตามสภาพแวดล้อม (สมมติฐาน
+ * D-f-12 — ทำซ้ำไม่ได้บนเครื่องปัจจุบัน · probe ห้าทิศ + e2e-04 pre-fix 3/3 ผ่าน)
+ *
+ * ชั้น trust (qa round-1 finding 1): x-forwarded-* **ไม่ใช่ forbidden header** — JS
+ * ของหน้า cross-site ตั้งเองได้ → ห้ามเชื่อโดยไม่มีเงื่อนไข:
+ * - ธง `CSRF_TRUST_PROXY_HEADERS` **ปิด (default · dev/local/UAT)**: อ่านแค่ `host`
+ *   header (forbidden header จริง — browser ตั้งตาม URL แก้ไม่ได้จาก JS) · แนวทาง
+ *   เดียวกับ Django CSRF (Origin vs request host)
+ * - ธงเปิด (เฉพาะ env ที่มี platform proxy จริง — Vercel/Cloudflare เขียนทับ
+ *   x-forwarded-* ก่อนถึง app เสมอ): x-forwarded-host ชนะ host ·
+ *   x-forwarded-proto กำหนด scheme · comma-list เอา **ตัวสุดท้าย** (hop ที่เชื่อถือ
+ *   ได้ใกล้เราสุดเขียนทับไว้ — ค่าปลอมถูก append ไว้หน้าสุด · qa finding 2)
+ *
+ * fallback: ไม่มี host ที่ใช้ได้ / ค่าว่าง / parse ไม่ได้ / config พัง →
+ * nextUrl.origin (พฤติกรรมเดิมทุกประการ — มักลงที่ปฏิเสธ = fail-closed)
+ *
+ * threat model ไม่เปลี่ยน: CSRF กัน browser ที่ถูกหลอก — client ที่ปลอม header
+ * เองได้ (curl) ผ่านกฎเดิมมาตลอดแล้ว (Origin ตรง nextUrl หรือ Sec-Fetch-Site) ·
+ * กลุ่มนั้นเป็นหน้าที่ของ auth/RLS ไม่ใช่ของ CSRF
+ */
+function requestBrowserOrigin(request: NextRequest): string {
+  // config fail (ไม่ควรเกิด — boot ตรวจ fail-fast แล้ว) = อยู่โหมดเข้มงวด ไม่ใช่เปิดธง
+  let trustProxy = false;
+  try {
+    trustProxy = getConfig().csrfTrustProxyHeaders;
+  } catch {
+    trustProxy = false;
+  }
+
+  // comma-list ของ proxy chain เอาตัวสุดท้าย (qa round-1 finding 2) — ค่าเดี่ยว
+  // ผ่านฟังก์ชันนี้แล้วได้ตัวเอง (normalize เดียวกันทุกทาง)
+  const lastElement = (value: string): string => value.split(",").pop()?.trim() ?? "";
+
+  // host ฐานเทียบ: x-forwarded-host (เมื่อธงเปิด + ไม่ว่าง) ชนะ host header
+  let host = "";
+  if (trustProxy) {
+    const forwarded = request.headers.get("x-forwarded-host");
+    if (forwarded !== null) {
+      host = lastElement(forwarded);
+    }
+  }
+  if (host === "") {
+    const direct = request.headers.get("host");
+    if (direct !== null) {
+      host = lastElement(direct);
+    }
+  }
+  if (host === "") {
+    return request.nextUrl.origin;
+  }
+
+  // scheme: x-forwarded-proto (เมื่อธงเปิด + ไม่ว่าง) ไม่งั้น protocol ของ nextUrl
+  let protocol = request.nextUrl.protocol.replace(":", "");
+  if (trustProxy) {
+    const forwardedProto = request.headers.get("x-forwarded-proto");
+    if (forwardedProto !== null) {
+      const proto = lastElement(forwardedProto);
+      if (proto !== "") {
+        protocol = proto;
+      }
+    }
+  }
+
+  try {
+    // สองฝั่งของการเทียบ normalize ผ่าน URL.origin เหมือนกัน (default-port elision
+    // เช่น :443 · IPv6 วงเล็บ — qa round-2 note 4)
+    return new URL(`${protocol}://${host}`).origin;
+  } catch {
+    return request.nextUrl.origin;
+  }
+}
+
+/**
  * ตรวจ CSRF เชิงโครงสร้าง (SDS §5.4 — "ต่าง origin = ปฏิเสธ") — ทุก mutating request
- * - มี Origin → เทียบ origin เต็ม (scheme+host+port) กับ origin ของ request —
- *   เทียบเฉพาะ host ไม่พอ: Origin: http://x ต่อ request https://x เป็นคนละ origin
+ * - มี Origin → เทียบ origin เต็ม (scheme+host+port) กับ origin ของ request มุมมอง
+ *   browser (requestBrowserOrigin — ดู docblock ว่าทำไมไม่ใช่ nextUrl.origin) —
+ *   เทียบเฉพาะ host ไม่พอ: Origin: http://x ต่อ request https://x เป็นคนละ origin ·
+ *   คนละพอร์ตก็คนละ origin (3000 ≠ 3001)
  * - ไม่มี Origin → Sec-Fetch-Site ต้องเป็น same-origin / none เท่านั้น —
  *   same-site คือ subdomain อื่นของ site เดียวกัน = ต่าง origin ตาม §5.4 → ปฏิเสธ
  * - ไม่มีทั้งคู่ → ปฏิเสธ (fail-closed — พิสูจน์ไม่ได้ว่ามาจาก origin เดียวกัน)
@@ -84,7 +165,7 @@ export function isCsrfAllowed(request: NextRequest): boolean {
   const origin = request.headers.get("origin");
   if (origin !== null) {
     try {
-      return new URL(origin).origin === request.nextUrl.origin;
+      return new URL(origin).origin === requestBrowserOrigin(request);
     } catch {
       return false;
     }

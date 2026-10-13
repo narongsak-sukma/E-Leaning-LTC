@@ -64,6 +64,12 @@ const envSchema = z.object({
   // secret ของ cron ที่ยิง POST /api/internal/jobs/email-dispatch (header x-cron-secret) —
   // ไม่ตั้ง = endpoint ตอบ 404 fail-closed เงียบ ๆ (D-p4-8 · Wave E Phase 4)
   CRON_SECRET: optionalString,
+  // ธง trust x-forwarded-host/proto ของ CSRF (DCR-CSRF-ORIGIN-RESILIENCE §3) — เปิดเฉพาะ
+  // env ที่หน้า app มี platform proxy จริง (Vercel/Cloudflare) เขียนทับค่าพวกนี้ก่อนถึง
+  // app เสมอ · dev/local/UAT ปิด (โหมดตรง: เทียบ Origin กับ host header เท่านั้น)
+  // **ห้ามเปลี่ยนเป็น z.coerce.boolean()** — coerce ทุก string ที่ไม่ว่างเป็น true รวมถึง
+  // "false" จะเปิด permissive mode เงียบ ๆ (qa round-2 note 1 — pin ไว้ในโค้ดเลย)
+  CSRF_TRUST_PROXY_HEADERS: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   // — Rate limit (ค่า canonical ชุดเดียวทุก environment — API-SPEC §5 / SRS Appendix A) —
   RATE_LIMIT_AUTH_PER_MIN: intFromEnv(10, 1, 10000),
   RATE_LIMIT_OTP_PER_HOUR: intFromEnv(3, 1, 1000),
@@ -172,6 +178,14 @@ export interface AppConfig {
   appEnv: "local" | "prod";
   logLevel: "debug" | "info" | "warn" | "error";
   certPublicBaseUrl: string | null;
+  /**
+   * ธง trust x-forwarded-host/proto ของ CSRF origin check (env
+   * `CSRF_TRUST_PROXY_HEADERS` · DCR-CSRF-ORIGIN-RESILIENCE): true = ใช้
+   * x-forwarded-* เป็นความจริงฝั่ง origin (เฉพาะ env ที่มี trusted proxy เขียนทับ
+   * ก่อนถึง app — Vercel/Cloudflare) · false (default) = โหมดตรง เทียบกับ host
+   * header เท่านั้น · zod enum ไม่ใช่ coerce (ค่า "false" ต้องเป็น false จริง)
+   */
+  csrfTrustProxyHeaders: boolean;
   supabaseUrl: string;
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
@@ -249,6 +263,7 @@ function toConfig(env: EnvRaw): AppConfig {
     appEnv: env.APP_ENV,
     logLevel: env.LOG_LEVEL,
     certPublicBaseUrl: env.CERT_PUBLIC_BASE_URL ?? null,
+    csrfTrustProxyHeaders: env.CSRF_TRUST_PROXY_HEADERS,
     supabaseUrl: env.SUPABASE_URL,
     supabaseAnonKey: env.SUPABASE_ANON_KEY,
     supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,

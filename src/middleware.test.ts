@@ -15,10 +15,15 @@ vi.mock("@supabase/ssr", () => ({
   createServerClient: vi.fn(),
 }));
 
+// ธง trust ของ x-forwarded-* (DCR-CSRF-ORIGIN-RESILIENCE §3) — mutable เพื่อให้เทส
+// แต่ละเคสสลับโหมดได้ · beforeEach รีเซ็ตกลับ false (default = โหมดเข้มงวด)
+let csrfTrustProxyHeadersMock = false;
+
 vi.mock("./lib/config", () => ({
   getConfig: () => ({
     supabaseUrl: "https://auth.test.supabase.co",
     supabaseAnonKey: "anon-key-unit-test",
+    csrfTrustProxyHeaders: csrfTrustProxyHeadersMock,
   }),
 }));
 
@@ -62,6 +67,7 @@ function stubRefreshClient(refreshBatches: StubCookie[][] = []) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  csrfTrustProxyHeadersMock = false;
   stubRefreshClient();
 });
 
@@ -118,6 +124,137 @@ describe("CSRF — fail-closed ทุก non-safe method (SDS §5.4)", () => {
     });
     const res = await middleware(req);
     expect(res.status).toBe(403);
+  });
+
+  // — DCR-CSRF-ORIGIN-RESILIENCE §5 (แผน 8 เทส + เคส parity ของ qa note 4) ————————
+  // บริบท: `next start` หลัง port-map 3001→3000 อาจทำให้ nextUrl.origin เป็นพอร์ต
+  // ภายใน (สภาพแวดล้อมเครื่องเก่า · สมมติฐาน D-f-12) — CSRF ต้องเทียบ Origin กับ
+  // origin ที่ browser เป็นเจ้าของจริง (Host / x-forwarded-* เมื่อมีธง) ไม่ใช่ URL
+  // ภายในของ Next
+  it("(1) port-map: nextUrl :3000 + Origin/Host :3001 → ผ่าน (ธงปิด — host คือความจริง)", async () => {
+    const req = new NextRequest(
+      "http://localhost:3000/api/v1/courses/00000000-0000-0000-0000-000000000000/enroll",
+      { method: "POST", headers: { origin: "http://localhost:3001", host: "localhost:3001" } },
+    );
+    const res = await middleware(req);
+    expect(res.status).not.toBe(403);
+  });
+
+  it("(2) Origin คนละ host จาก Host header → 403 (fail-closed ไม่เปลี่ยน)", async () => {
+    const req = new NextRequest("http://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: { origin: "https://evil.example", host: "localhost:3001" },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { details: Record<string, string> } };
+    expect(body.error.details["reason"]).toBe("csrf_origin_mismatch");
+  });
+
+  it("(3) Origin คนละพอร์ตกับ Host header → 403 (3000 ≠ 3001 = ต่าง origin)", async () => {
+    const req = new NextRequest("http://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000", host: "localhost:3001" },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(403);
+  });
+
+  it("(4) ไม่มี Host/x-forwarded-host → ย้อนกลับเทียบ nextUrl.origin แบบเดิมทุกประการ", async () => {
+    const req = new NextRequest("http://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: { origin: "http://localhost:3000" },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(200);
+  });
+
+  it("(5) ธงเปิด: x-forwarded-host/proto ของ platform proxy ชนะ host ภายใน", async () => {
+    csrfTrustProxyHeadersMock = true;
+    const req = new NextRequest("http://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: {
+        origin: "https://ltc.example.com",
+        host: "internal:3000",
+        "x-forwarded-host": "ltc.example.com",
+        "x-forwarded-proto": "https",
+      },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(200);
+  });
+
+  it("(6) browser-forgery: ธงปิด (default) Origin/XFH/XFP ปลอมทั้งชุด → 403 · ธงเปิด = พฤติกรรมตามธงที่ document ไว้", async () => {
+    // x-forwarded-* ไม่ใช่ forbidden header — JS ของหน้า cross-site ตั้งเองได้ (qa finding 1)
+    // ธงจึงตั้งได้เฉพาะ env ที่ proxy จริงเขียนทับค่าพวกนี้ก่อนถึง app เสมอ
+    const forge = {
+      origin: "https://evil.example",
+      host: "localhost:3001",
+      "x-forwarded-host": "evil.example",
+      "x-forwarded-proto": "https",
+    };
+    const off = await middleware(
+      new NextRequest("http://localhost:3000/api/v1/courses", { method: "POST", headers: forge }),
+    );
+    expect(off.status).toBe(403);
+    csrfTrustProxyHeadersMock = true;
+    const on = await middleware(
+      new NextRequest("http://localhost:3000/api/v1/courses", { method: "POST", headers: forge }),
+    );
+    expect(on.status).toBe(200); // ทำงานตามธง — ห้ามตั้งธงนอก env ที่มี proxy เขียนทับ
+  });
+
+  it("(7) ธงเปิด comma-list เอาตัวสุดท้าย (hop ที่เชื่อถือได้ใกล้เราสุด) — ค่าปลอมถูก append ไว้หน้าสุด", async () => {
+    csrfTrustProxyHeadersMock = true;
+    const lastReal = await middleware(
+      new NextRequest("http://localhost:3000/api/v1/courses", {
+        method: "POST",
+        headers: {
+          origin: "https://ltc.example.com",
+          host: "internal:3000",
+          "x-forwarded-host": "evil.com, ltc.example.com",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+    expect(lastReal.status).toBe(200);
+    const lastEvil = await middleware(
+      new NextRequest("http://localhost:3000/api/v1/courses", {
+        method: "POST",
+        headers: {
+          origin: "https://ltc.example.com",
+          host: "internal:3000",
+          "x-forwarded-host": "ltc.example.com, evil.com",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+    expect(lastEvil.status).toBe(403);
+  });
+
+  it("(8) ธงเปิด + x-forwarded-host ว่าง → fallback ตามลำดับ (host ยังใช้ได้)", async () => {
+    csrfTrustProxyHeadersMock = true;
+    const req = new NextRequest("http://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: { origin: "http://localhost:3001", host: "localhost:3001", "x-forwarded-host": "" },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(200);
+  });
+
+  it("(9) [qa note 4] port-elision parity: XFH :443 + XFP https ↔ Origin ไม่มีพอร์ต — normalize สองฝั่งแล้วต้องตรง", async () => {
+    csrfTrustProxyHeadersMock = true;
+    const req = new NextRequest("http://localhost:3000/api/v1/courses", {
+      method: "POST",
+      headers: {
+        origin: "https://ltc.example.com",
+        host: "internal:3000",
+        "x-forwarded-host": "ltc.example.com:443",
+        "x-forwarded-proto": "https",
+      },
+    });
+    const res = await middleware(req);
+    expect(res.status).toBe(200);
   });
 
   it("POST ไม่มีทั้ง Origin และ Sec-Fetch-Site → 403 (fail-closed — พิสูจน์ origin ไม่ได้)", async () => {
