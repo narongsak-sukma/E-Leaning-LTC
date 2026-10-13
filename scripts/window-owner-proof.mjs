@@ -24,10 +24,16 @@ if (!existsSync(path.join(REPO_ROOT, TEST_FILE))) {
   process.exit(2);
 }
 
+// พอร์ตตะวิล (2026-10-13): npx บน Windows เป็น .cmd shim — spawn ตรง = ENOENT ต้องผ่าน shell
 const child = spawn(
   "npx",
   ["vitest", "run", "--config", "vitest.integration.config.ts", TEST_FILE],
-  { cwd: REPO_ROOT, stdio: "inherit", env: process.env },
+  {
+    cwd: REPO_ROOT,
+    stdio: "inherit",
+    env: process.env,
+    ...(process.platform === "win32" ? { shell: true } : {}),
+  },
 );
 child.on("error", (err) => {
   process.stderr.write(`window-owner-proof: spawn vitest ล้มเหลว: ${err.message}\n`);

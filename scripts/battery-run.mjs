@@ -222,7 +222,18 @@ function spawnChild(file, args, runId) {
   return new Promise((resolve) => {
     const env = { ...process.env };
     if (runId !== undefined) env["RUN_ID"] = runId;
-    const child = spawn(file, args, { cwd: REPO_ROOT, stdio: "inherit", env });
+    // พอร์ตตะวิล (2026-10-13 · ตามบทเรียน DCR-TEST-HARNESS-PORTABILITY): บน Windows
+    // spawn ไฟล์ .sh ตรง ๆ = EFTYPE — วิ่งผ่าน sh เสมอ (Linux เดิมก็ทำงานเหมือนเดิม)
+    const isSh = typeof file === "string" && file.endsWith(".sh");
+    // npm/npx บน Windows เป็น .cmd shim — spawn ตรง = ENOENT ต้องผ่าน shell ให้ PATH ชี้เจอ
+    // (ค่า args ของ battery เป็น flag คำเดียวทั้งหมด — การต่อผ่าน shell ปลอดภัย)
+    const winCmd = process.platform === "win32" && /^(npm|npx)$/.test(String(file));
+    const child = spawn(isSh ? "sh" : file, isSh ? [file, ...args] : args, {
+      cwd: REPO_ROOT,
+      stdio: "inherit",
+      env,
+      ...(winCmd ? { shell: true } : {}),
+    });
     let settled = false;
     const finish = (code, note) => {
       if (settled) return;
