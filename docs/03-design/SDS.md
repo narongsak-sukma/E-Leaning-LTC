@@ -378,6 +378,7 @@ sequenceDiagram
 | อีเมล | `EMAIL_PROVIDER=console\|smtp\|resend`, `SMTP_*`, `EMAIL_FROM` | dev default `console` (+Mailpit ถ้ารัน) |
 | Rate limit | `RATE_LIMIT_AUTH_*`, `RATE_LIMIT_EXAM_*`, `RATE_LIMIT_VERIFY_*`, `RATE_LIMIT_DEFAULT_*` | ค่าเดียวกันทั้งสอง env |
 | Session | `SESSION_ADMIN_IDLE_MINUTES` (15), `SESSION_ADMIN_ABSOLUTE_HOURS` (8), `LOGIN_LOCKOUT_ATTEMPTS` (5) | |
+| CSRF | `CSRF_TRUST_PROXY_HEADERS=true\|false` (default `false`) | ธง trust x-forwarded-host/proto ของ CSRF origin check — เปิดเฉพาะ env ที่มี trusted proxy เขียนทับก่อนถึง app (Vercel/Cloudflare) · dev/local/UAT ปิด (DCR-CSRF-ORIGIN-RESILIENCE) |
 | การเรียน | `VIDEO_HEARTBEAT_SEC` (15), `VIDEO_COMPLETE_PCT` (80 — รอยืนยัน Q6; = SRS Appendix A `video_complete_pct`), `DOC_MIN_DWELL_SEC` (30) | |
 
 ### 7.3 คำถามค้าง → พารามิเตอร์ (ทุกตัว config-driven + default + รอยืนยัน)
