@@ -24,6 +24,11 @@ import {
   stashPendingMfaTokens,
 } from "@/lib/auth/mfa";
 import { buildSignupConsents, SIGNUP_CONSENT_POLICY_VERSION } from "./signup-consents";
+import { getConfig } from "@/lib/config";
+import { createLogger } from "@/lib/logger";
+
+/** log ของ loginAction — ระดับตาม config (แบบแผน logout-all.ts) · คำศัพท์ msg เป็น enum ตายตัวตาม SDS §6.2 — ห้าม interpolate error.message/URL */
+const loginActionLogger = createLogger(getConfig().logLevel);
 
 /** ข้อความแจ้ง (ไม่ใช่ error code) สำหรับสถานะที่เอกสารกำหนดให้แจ้งผู้ใช้ */
 type LoginNotice = "registered" | "email_not_confirmed";
@@ -199,11 +204,40 @@ export async function loginAction(formData: FormData): Promise<void> {
     redirect(loginUrl(next, { error: "ERR-SYS-001" }));
   }
   // ตรวจ factor — fail-closed: ค้นล้มเหลว = กลับ /login (ERR-SYS-001) ไม่ปล่อยผ่าน
-  const { data: factorsData, error: factorsError } = await auth.auth.mfa.listFactors();
-  if (factorsError !== null) {
+  // DCR-LOGIN-MFA-FACTORSLIST: mfa.listFactors ของ SDK พึ่ง session ในหน่วยความจำของ
+  // client (no-arg getUser ผ่าน initializePromise/lock) ซึ่งพิสูจน์แล้วว่าตายเงียบใน
+  // Next runtime บน image ใหม่ (grant ผ่านแต่ไร้ network egress ถัดไป — P0 ทุก login) —
+  // ใช้ getUser(jwt) overload ที่รับ token ตรง (ไม่แตะ lock/หน่วยความจำเลย รอดพ้นคลาส
+  // พังโดยการก่อสร้าง) แล้วอ่าน user.factors อาร์เรย์เดียวกับที่ _listFactors ของ SDK
+  // ปั้นผลลัพธ์ให้ firstVerifiedTotpFactor อยู่แล้ว (SDK ก็วน user.factors ตัวนี้เอง)
+  const { data: userData, error: userError } = await auth.auth.getUser(
+    session.access_token,
+  );
+  if (userError !== null || userData?.user == null) {
+    // enum เต็มตาม DCR: fetch_error | non_2xx | bad_body | timeout (timeout เป็นคำศัพท์
+    // ของ variant REST ที่ถูกถอดออก — ทางนี้ครอบโดย fail-closed ระดับ action)
+    const statusNum =
+      typeof (userError as { status?: unknown } | null)?.status === "number"
+        ? (userError as { status: number }).status
+        : undefined;
+    loginActionLogger.warn(statusNum === undefined ? "fetch_error" : "non_2xx", {
+      route: "auth:login",
+      ...(statusNum === undefined ? {} : { status: statusNum }),
+    });
     redirect(loginUrl(next, { error: "ERR-SYS-001" }));
   }
-  const pendingFactor = factorsData === null ? null : firstVerifiedTotpFactor(factorsData.all);
+  // shape-guard สามทิศ (qa blocker 4): factors หาย = ผู้ใช้ไร้ factor ตามปกติ (เข้าสาย
+  // setSession เดิม — ห้าม fail-closed ไม่งั้นทุก login ไร้ factor ตายซ้ำ P0) · truthy
+  // แต่ไม่ใช่ array = bad_body → ERR-SYS-001 ก่อนถึง firstVerifiedTotpFactor เสมอ
+  // (กัน TypeError รั่วไป 500 digest)
+  const factorsRaw: unknown = (userData.user as { factors?: unknown }).factors;
+  if (factorsRaw !== null && factorsRaw !== undefined && !Array.isArray(factorsRaw)) {
+    loginActionLogger.warn("bad_body", { route: "auth:login" });
+    redirect(loginUrl(next, { error: "ERR-SYS-001" }));
+  }
+  const pendingFactor = firstVerifiedTotpFactor(
+    (factorsRaw ?? []) as readonly { factor_type: string; status: string; id: string }[],
+  );
   if (pendingFactor !== null) {
     // gate r1 F2/F5: token จริงหยุดอยู่ฝั่ง server — เข้ารหัส AES-256-GCM เก็บใน
     // mfa_pending_stash ผ่าน RPC (single-use · อายุ 300 วิบังคับที่ DB) · cookie
