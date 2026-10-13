@@ -1830,7 +1830,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
         process.stderr.write(`m1r7: startMailer ล้มใน finally — ต้องสตาร์ต mailer คืนด้วยมือ: ${String(err)}\n`);
       });
     }
-  }, 300_000);
+  }, 600_000); // DCR-SUITE-STABILITY-R2 Amendment 1: เพดานใหม่ตามการวัด — เขียวจริง 288,703ms (rr · 96.2% ของเพดานเดิม) · แดงที่ 300,022ms (rr2) · sibling สูงสุด waveh-r8 57.3% ของ 120s — ห้ามขยับอีกโดยไม่มีการวัดใหม่ (pm binding)
 
   // ─── M1 (gate waveh-r8): ขา CLF=0 ของ response-in-hand — ต้องมีหลักฐาน terminal ──
   // ผูก invocation จริง ห้ามอนุมานจบจากการไม่เห็น (fence v6) · verdict r8 M1: v5
