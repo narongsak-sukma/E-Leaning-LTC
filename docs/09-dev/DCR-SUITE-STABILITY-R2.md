@@ -29,3 +29,9 @@ Filing: ต่อจาก DCR-TEARDOWN-GUARD (จุด 3 mailer ops) + DCR-GAT
 ## ฉันทามติ + GO (รอ)
 
 - รอ pm (scope + หลัก budget ข้อ 3 ครบเงื่อนไข "วัดใหม่"?) + qa (จุด 1: การ bypass dependency-gating ยอมรับได้? · จุด 2: ตัวเลข/ขอบเขต 8 เคส) ผ่าน bridge
+
+## ฉันทามติ + GO (สมบูรณ์)
+
+- **pm CONSENT (ผ่าน bridge · 2026-10-13)**: scope ถูกต้อง · การวัดใหม่ (rr-dcr9: 6 timeout พอดี 30s ไร้ assertion fail · ผ่าน 13-47s) ครบเงื่อนไขข้อ 3 ของ DCR-GATEWAY-ERRBODY-REBASELINE ("ขยับ budget ได้เมื่อวัดใหม่") — **binding**: (1) ตอน merge บันทึกเพดานใหม่ใน PROJECT-STATE เป็น **baseline ceiling ตั้งแต่นี้**: dcr9 เคส 1,2,3,4,5,6,7,9 = 75s ×8 · เคส 12 = 110s · dcr10 = 150s — ห้ามขยับอีกโดยไม่มีการวัดใหม่ (หลักคำสอนเดิม) (2) เกณฑ์พิสูจน์จุด 1 ที่ binding ในแผนทดสอบ: `grep "startMailer ล้ม"` บน log ของ rerun ต้องได้ **ศูนย์แถว** (3) OQ carry: ต้นเหตุ healthcheck-flap (Next dev polling watchers บน bind mount Windows) ยกเข้า OQ ของ DCR-PROD-DEPLOY-DRAFT พร้อม dev-parity note (:3001 = next start ไร้ dev watcher)
+- **qa CONSENT (ผ่าน bridge · 2026-10-13)**: ตรวจครบทั้ง 15 จุด · อัตรา ×2.5 ตามแบบแผน · ไม่มี assertion fail ที่ถูก mask — **binding fold-in**: จุดที่ 13 จุดที่ยังไร้ deadline (ทั้งหมดนอกเหนือจาก dcr10:254 + dcr12:139) เติม `timeout: 60_000` ให้ครบระหว่างแก้บรรทัดเดียวกัน — "deadline 60s ครบทุกจุด" ของ DCR-TEARDOWN-GUARD จุด 3 ต้องเป็นจริงตามตัวอักษร · ข้อเสนอ (optional): เพิ่ม app health ใน stack-integrity greps หลังรัน · error-swallow เงียบของ window-coordinator :59-62 อนุโลมเลื่อนออกไปได้
+- **GO (CTO · 2026-10-13)**: ฉันทามติครบทั้งสองฝ่าย + เงื่อนไข binding ทั้งหมดพับเข้า spec ก่อน implement → **GO ทั้งสองจุด + เติม deadline 13 จุดตาม qa** · ลำดับ: implement → isolated dcr9 (13/13) + isolated waveh (เขียว + `grep -c "startMailer ล้ม"` = 0 + stack: cron 8 + mailer Up + app health) → full-suite 35 ไฟล์ detached + stack-integrity → qa gate → battery r38 → merge --no-ff + บันทึก baseline ceiling ใน PROJECT-STATE
