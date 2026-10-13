@@ -1749,19 +1749,24 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
         invocationId: invocationIdX,
         opKey: "rpc:complete_data_export_job:POST",
       } as const;
-      // การปฏิเสธ dirty settle นี้เกิดที่ขา "เห็น statement ของ RPC นี้" สองรูป
+      // การปฏิเสธ dirty settle นี้เกิดที่ขา "เห็น statement ของ RPC นี้" สามรูป
       // ตามจังหวะแข่งจริง: holders 10 ตัวเริ่ม statement ไม่พร้อมกัน (ต่างรอ pool)
       // ช่วงที่ตัวแรกถูก role bounds ตัด (~8s นับจากตัวแรกเริ่ม ไม่ใช่จาก busy=10
       // ครบ) อาจตรงกับหลัง busy=0 assert พอดี — X ได้ slot "ก่อน" settle เข้า fence
       // (ขา fail-fast "ยังรันอยู่" helpers.ts:418 — เกิดจริง battery r19) หรือ
-      // "ระหว่าง" หน้าต่างเฝ้า CLF (ขา in-poll helpers.ts:391 — เกิดจริง r13-r18) ·
-      // สองขาพิสูจน์สิ่งเดียวกัน: fence เห็น statement ที่เพิ่งเริ่ม = ไม่ terminal ·
+      // "ระหว่าง" หน้าต่างเฝ้า CLF (ขา in-poll helpers.ts:391 — เกิดจริง r13-r18) หรือ
+      // "ก่อนขา fence ทั้งคู่" — X เริ่ม statement ก่อน settle เข้า fence เลย ขา
+      // probe อันดับ 1 ของ settleScenario จับเอง (helpers.ts:639 — เกิดจริง rb-m1
+      // 2026-10-13 เครื่องสำรองช้า · DCR-GATEWAY-ERRBODY-REBASELINE amendment 5) ·
+      // สามขาพิสูจน์สิ่งเดียวกัน: fence เห็น statement ที่ไม่ terminal = ปฏิเสธ ·
       // ถ้าถอนขา in-poll ออก จังหวะกลางหน้าต่างจะหล่นไปขา fail-closed CLF=0 ของ
-      // r8 (ข้อความอื่น) = เทสล้มอยู่ดี — regex จึงรับเฉพาะสองข้อความนี้
+      // r8 (ข้อความอื่น) = เทสล้มอยู่ดี — regex จึงรับเฉพาะสามข้อความนี้ (ไม่รวม
+      // รูป tail ของ probe :658 — จังหวะนั้น X เริ่มหลัง probe คอมมิต ขา fence เดิม
+      // จับอยู่แล้ว)
       await expect(
         settleScenario(xlie, "guard-r7-queued-request-must-refuse-when-it-starts", () =>
           scenarioTerminalProbe("public.event_outbox", "complete_data_export_job")),
-      ).rejects.toThrow(/เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF|statement ของ invocation นี้ยังรันอยู่/);
+      ).rejects.toThrow(/เริ่มขึ้นระหว่างหน้าต่างเฝ้า CLF|statement ของ invocation นี้ยังรันอยู่|backend ยังรัน complete_data_export_job อยู่/);
       expect(await invStatusX()).toBe("running");
       await busyWatchX;
       expect(
