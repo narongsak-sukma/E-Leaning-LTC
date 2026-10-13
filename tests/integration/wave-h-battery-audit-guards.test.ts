@@ -1055,7 +1055,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // ด้วยชื่อ RPC จึงไม่แยก backend ของเทสกับของ worker (pattern M1-r7/8/9 ·
     // เจอจริง guards rerun รอบ r20 ที่ M1-r4)
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
     const dispatchBody = () => ({
       p_job_id: "00000000-0000-4000-8000-0000000000f3", // job ไม่มีอยู่ → P0002 opaque 500
@@ -1154,7 +1154,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // rerun r20 ที่ M1-r4 นี้เอง: backend ของ worker ค้าง lock อยู่ในนาม RPC เดียว
     // กับของเทส ทำให้ assert "backend ยัง active หลัง abort" นับตัวผิด)
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
     const jobId = "00000000-0000-4000-8000-0000000000f5"; // ไม่มีอยู่ → P0002 เมื่อได้วิ่ง
     const invocationId = crypto.randomUUID();
@@ -1288,7 +1288,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // กลไกเดียวกับที่เจอจริงที่ M1-r4 รอบ r20 — busyCount ไม่แยก backend ของ
     // เทสกับ dev worker ที่ยิง RPC เดียวกันเป็นรอบ)
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
     const jobId = "00000000-0000-4000-8000-0000000000f7"; // ไม่มีอยู่ → P0002 opaque 500
     const dispatchBody = () => ({
@@ -1420,7 +1420,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // กลไกเดียวกับที่เจอจริงที่ M1-r4 รอบ r20 — busyCount ไม่แยก backend ของ
     // เทสกับ dev worker ที่ยิง RPC เดียวกันเป็นรอบ)
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
     const jobId = "00000000-0000-4000-8000-0000000000fb"; // ไม่มีอยู่ → P0002 เมื่อได้วิ่ง
     const requestRef = crypto.randomUUID(); // หมุดผูก activity ราย invocation (r5)
@@ -1600,7 +1600,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // หยุด mailer กัน noise: dev worker ยิง complete_data_export_job เอง (probe P4
     // เห็น backend ของมันกิน pool slot ทำให้จำนวนตัวที่ค้างในคิวเพี้ยน) — dcr12 pattern
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
 
     const jobId = "00000000-0000-4000-8000-000000000101"; // ไม่มีอยู่ → P0002 เมื่อ X ได้วิ่ง
@@ -1870,7 +1870,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     // หยุด mailer กัน noise ของ busy guard — dev worker ยิง complete_data_export_job
     // เอง (pattern เดียวกับ M1-r7/dcr12)
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
     try {
       // ─── ทิศ ก: dispatch จริง P0002 (job ไม่มีอยู่) → 500 opaque ไร้ CLF line
@@ -2020,7 +2020,7 @@ describe.skipIf(!DB_URL)("M1 (waveh-r2) · settleScenario ต้องพิส�
     const { mintAal2Token } = await import("./helpers-aal2");
     // หยุด mailer กัน noise (pattern M1-r7/M1-r8/dcr12)
     const stopMailer = () => execFileAsync("docker", ["compose", "stop", "mailer"], { cwd: REPO_ROOT });
-    const startMailer = () => execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+    const startMailer = () => execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน depends_on app ใหม่ (healthcheck flap ทำ compose start ล้ม 7 จุดใน rr-waveh) + deadline 60s ครบทุกจุด (qa)
     await stopMailer();
     let admin: Awaited<ReturnType<typeof createTestUser>> | null = null;
     let target: Awaited<ReturnType<typeof createTestUser>> | null = null;

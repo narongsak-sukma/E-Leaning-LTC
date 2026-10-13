@@ -251,7 +251,7 @@ async function stopMailer(): Promise<void> {
 /** สตาร์ต mailer คืน (finally — ไม่ทิ้ง dev stack พัก) */
 async function startMailer(): Promise<void> {
   // DCR-TEARDOWN-GUARD จุด 3: deadline 60s — เพดานกัน docker compose ลอย ไม่ใช่ค่าที่คาดว่าจะโดน
-  await execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT, timeout: 60_000 });
+  await execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 }); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน deps ใหม่
 }
 
 /** พัก cron จริงที่เกี่ยวกับ suite ช่วงรัน (idempotent) — dispatch กิน event ทุกนาที */

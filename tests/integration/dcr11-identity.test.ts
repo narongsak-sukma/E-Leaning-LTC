@@ -141,7 +141,8 @@ async function stopMailer(): Promise<void> {
 
 /** สตาร์ต mailer คืน (finally — ไม่ทิ้ง dev stack หยุดค้าง) */
 async function startMailer(): Promise<void> {
-  await execFileAsync("docker", ["compose", "start", "mailer"], { cwd: REPO_ROOT });
+  // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง — compose start ประเมิน depends_on app ใหม่ (ล้มตอน app healthcheck flap) + deadline 60s ครบทุกจุด (qa)
+  await execFileAsync("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT, timeout: 60_000 });
 }
 /** พัก cron จริง 4 ตัวช่วงรัน (idempotent) — dispatch กิน event license.application.* */
 async function pauseCrons(): Promise<void> {

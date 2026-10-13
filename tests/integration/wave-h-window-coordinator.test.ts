@@ -56,9 +56,11 @@ describe("wave-h window coordinator (D89-2)", { timeout: 180_000 }, () => {
       await psql(`select cron.alter_job(jobid, active := true) from cron.job where active = false;`);
       const { spawn } = await import("node:child_process");
       await new Promise<void>((resolve) => {
-        const c = spawn("docker", ["compose", "start", "mailer"], { cwd: process.cwd() });
-        c.on("close", () => resolve());
-        c.on("error", () => resolve());
+        // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง (ไม่ประเมิน depends_on ใหม่) + deadline 60s (qa)
+        const c = spawn("docker", ["start", "ltc-dev-mailer"], { cwd: process.cwd() });
+        const guard = setTimeout(() => c.kill(), 60_000);
+        c.on("close", () => { clearTimeout(guard); resolve(); });
+        c.on("error", () => { clearTimeout(guard); resolve(); });
       });
     });
 

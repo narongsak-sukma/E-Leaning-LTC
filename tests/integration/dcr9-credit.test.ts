@@ -666,7 +666,7 @@ describe.skipIf(!DB_URL)(
          where user_id = '${mainUser.id}' and entry_type = 'accrual';
       `);
       expect(after[0]?.n).toBe(1);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 2: snapshot-at-grading + retire กลางคิว (โจทย์ข้อ 2) ───────────────
 
@@ -700,7 +700,7 @@ describe.skipIf(!DB_URL)(
       expect(ledger).toHaveLength(1);
       expect(ledger[0]?.amount).toBe(RULE_SNAP_CREDITS);
       expect(ledger[0]?.rule_id).toBe(snapRuleId);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 3: lazy cycle (โจทย์ข้อ 3) ─────────────────────────────────────────
 
@@ -740,7 +740,7 @@ describe.skipIf(!DB_URL)(
         select count(*)::int as n from public.renewal_cycles where user_id = '${cycleUser.id}';
       `);
       expect(count[0]?.n).toBe(1);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 4: citizen skip (โจทย์ข้อ 4) ───────────────────────────────────────
 
@@ -766,7 +766,7 @@ describe.skipIf(!DB_URL)(
         select count(*)::int as n from public.credit_ledger_entries where user_id = '${citizenUser.id}';
       `);
       expect(ledger[0]?.n).toBe(0);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 5: reversal idempotent + amount (โจทย์ข้อ 5) ───────────────────────
 
@@ -856,7 +856,7 @@ describe.skipIf(!DB_URL)(
          where user_id = '${mainUser.id}' and entry_type = 'reversal';
       `);
       expect(reversalCount[0]?.n).toBe(1);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 6: adjustment authz (โจทย์ข้อ 6) ───────────────────────────────────
 
@@ -948,7 +948,7 @@ describe.skipIf(!DB_URL)(
          where action = 'CREDIT_ADJUST' and entity_id::text = '${adjustments[0]?.id ?? ""}';
       `);
       expect(adjustAudit[0]?.n).toBe(1);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 7: append-only ledger (โจทย์ข้อ 7) ─────────────────────────────────
 
@@ -995,7 +995,7 @@ describe.skipIf(!DB_URL)(
       `);
       expect(rows[0]?.n).toBe(3); // accrual + reversal + adjustment
       expect(rows[0]?.amount).toBe(RULE_MAIN_CREDITS);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 8: summary math (โจทย์ข้อ 8) ───────────────────────────────────────
 
@@ -1083,7 +1083,7 @@ describe.skipIf(!DB_URL)(
         select count(*)::int as n from public.renewal_cycles where user_id = '${revokeUser.id}';
       `);
       expect(cycles[0]?.n).toBe(1);
-    });
+    }, 75_000); // DCR-SUITE-STABILITY-R2 จุด 2: เพดานใหม่ตามการวัด rr-dcr9 (เคสผ่าน 13-47s · 6 เคส timeout พอดี 30s ไร้ assertion fail) — baseline ceiling ห้ามขยับโดยไม่มีการวัดใหม่ (pm binding)
 
     // ─── เคส 10: anniversary lattice (gate r1 BLOCKER-5) ─────────────────────────
 

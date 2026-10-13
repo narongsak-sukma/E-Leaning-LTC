@@ -36,15 +36,17 @@ import { ledgerRead, ledgerWrite } from "./test-io";
 
 const DB_URL = process.env["TEST_DATABASE_URL"];
 
-function sh(cmd: string, args: string[]): Promise<{ code: number; out: string }> {
+function sh(cmd: string, args: string[], timeoutMs?: number): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
     const c = spawn(cmd, args);
+    // DCR-SUITE-STABILITY-R2 จุด 1 (qa): deadline สำหรับ mailer start — หมดเวลา kill child แล้ว resolve ตามรูปเดิม
+    const guard = timeoutMs === undefined ? null : setTimeout(() => c.kill(), timeoutMs);
     let out = "";
     c.stdout.on("data", (d: Buffer) => {
       out += String(d);
     });
-    c.on("error", () => resolve({ code: -1, out: "" }));
-    c.on("close", (code) => resolve({ code: code ?? -1, out }));
+    c.on("error", () => { if (guard !== null) clearTimeout(guard); resolve({ code: -1, out: "" }); });
+    c.on("close", (code) => { if (guard !== null) clearTimeout(guard); resolve({ code: code ?? -1, out }); });
   });
 }
 
@@ -72,7 +74,7 @@ describe("window-owner-proof O1-O18 (D89-2/D89-4)", { timeout: 300_000 }, () => 
       await psql(`delete from test_infra.worker_lease;
                   update test_infra.worker_gate set is_open = true, holders = '{}', updated_at = now() where id = 1;`);
       await psql(`select cron.alter_job(jobid, active := true) from cron.job where active = false;`);
-      await sh("docker", ["compose", "start", "mailer"]);
+      await sh("docker", ["start", "ltc-dev-mailer"], 60_000); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน deps ใหม่ + deadline 60s
     });
 
     afterEach(async () => {
@@ -80,7 +82,7 @@ describe("window-owner-proof O1-O18 (D89-2/D89-4)", { timeout: 300_000 }, () => 
       if (!gate.isOpen) {
         await psql(`update test_infra.worker_gate set is_open = true, holders = '{}', updated_at = now() where id = 1;`);
       }
-      await sh("docker", ["compose", "start", "mailer"]);
+      await sh("docker", ["start", "ltc-dev-mailer"], 60_000); // DCR-SUITE-STABILITY-R2 จุด 1: docker start ตรง ไม่ประเมิน deps ใหม่ + deadline 60s
     });
 
     it("O1-O3 pre-check ของจริง: pg_cron · cron.job · job_run_details มี row", async () => {
