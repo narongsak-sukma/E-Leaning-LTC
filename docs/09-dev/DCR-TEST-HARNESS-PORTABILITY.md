@@ -38,3 +38,5 @@ Filing: หลัง GO ของ DCR-CSRF-ORIGIN-RESILIENCE · gate integration
 - **ทางเลือกที่ปฏิเสธ**: `{shell:true}` แบบ wrapper — ใช้ได้แต่เพิ่มพื้นผิว parsing ของ args (รายการไฟล์จาก caller) โดยไม่จำเป็น · execPath+bin ชนะทุกด้านเมื่อ bin ชั่วตัว
 - **แผนพิสูจน์**: ไฟล์ barrier ที่เคยตายทั้งตระกูล 8e/8e2 เขียวแบบ isolated (เห็น child spawn จริง — marker ของ child ปรากฏ) → relaunch battery r38 → 13/13
 - **รอ**: pm (scope จุดเดียว + กลไก) + qa (testability) — fast round ตามคำสั่ง coordinator
+
+- **pm CONSENT + qa CONSENT (fast round ผ่าน bridge · 2026-10-14)**: สมมูลตรวจผ่านห่วง .bin shim ทั้งเก้า · contract ทั้งหมดอยู่ระดับ spawn-argument · พฤติกรรม kill ดีขึ้น (SIGKILL โดนตัว vitest ตรง ๆ) · **เงื่อนไข binding สามข้อ**: (1) แก้ args ที่ :633 พร้อมกัน — ตัดคำเลือก `"vitest"` นำหน้าออกให้ argv เริ่มที่ `"run"` (ห้ามเหลือคำ vitest หลงเหลือใน argv) (2) `FORCE_COLOR:"0"` ที่ :640 เป็นของ load-bearing ของ assertion stdout-contains — ห้ามแตะ (3) รอบพิสูจน์ต้องเห็น **child markers ใน output จริง** (ข้อความ marker ของ 8e/8e2 ไม่ใช่แค่ RC เขียว) ก่อน relaunch battery → **GO (CTO · 2026-10-14)** ตามแผนพิสูจน์ของ addendum นี้

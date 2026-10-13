@@ -22,6 +22,7 @@
  * dev-only ทั้งหมด · schema test_infra (runtime DDL idempotent — ไม่มีใน production)
  */
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -630,12 +631,16 @@ export async function childRun(
   files: readonly string[],
   opts: { bail?: number; timeoutMs?: number; extraEnv?: Record<string, string> } = {},
 ): Promise<ChildRunResult> {
-  const args = ["vitest", "run", "--config", "vitest.barrier-proof.config.ts", ...files];
+  // DCR-TEST-HARNESS-PORTABILITY Addendum 3 (pm+qa binding ข้อ 1): argv เริ่มที่ "run" —
+  // ตัวเลือกตัวรันย้ายไปเป็น bin path ของ spawn ด้านล่าง (ไม่มีคำ "vitest" หลงเหลือใน argv)
+  const args = ["run", "--config", "vitest.barrier-proof.config.ts", ...files];
   if (opts.bail !== undefined) {
     args.push("--bail", String(opts.bail));
   }
   return await new Promise<ChildRunResult>((resolve, reject) => {
-    const child = spawn("npx", args, {
+    // Addendum 3: node ตรง + vitest.mjs ตรง — ตัด npx ทั้งหมด (บน Windows npx เป็น .cmd shim
+    // ที่ bare-spawn ไม่เจอ = ENOENT ที่ฆ่าตระกูล child-launcher ทั้งหมดใน battery r38)
+    const child = spawn(process.execPath, [join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs"), ...args], {
       cwd: REPO_ROOT,
       env: { ...process.env, FORCE_COLOR: "0", BARRIER_CHILD: "1", ...opts.extraEnv },
     });
