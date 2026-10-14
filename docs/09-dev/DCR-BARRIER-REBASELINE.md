@@ -89,3 +89,25 @@ f2 ล้มที่แถว `cleanup-start ts=23:37:34.93` ซึ่งเป
 - **qa CONSENT (ผ่าน bridge · 2026-10-14)**: ตัวเลขทั้งหมดตรวจครบกับ timestamp จริงของ ledger · ข้อเสนอ stale-row พิสูจน์แล้ว · margin ของจุดที่ไม่ขยับคำนวณแล้ว — **binding fold-ins**: (ข้อ 2) เคลียร์แถวตาราง #17 ตอนก่อน implement · (ข้อ 3) แก้ line drift สองจุด (kk pg_sleep อยู่ :32 ไม่ใช่ :40 · fixture deadlineMs อยู่ :169 ไม่ใช่ :167) · (ข้อ 5) จุด 21 ขยายคลุม inline comment เดิม gg:35 + hh:24 ที่จัดการขัดแย้งกับแก้ #2/#6 + บันทึกว่าวลี "ทิ้ง hook จริงที่ 5s" ใน header ของ config เว่อร์สำหรับครอบครัวที่สเกล (แต่ config ไม่แตะ — 8c/8d ยังตัดที่ 5s จริง)
 - **watchpoint ที่ประกาศล่วงหน้า (qa arithmetic · จุด 16)**: killAfterMs 4s→10s เป็นการบวกเข้าตรง ๆ ในระยะเวลา end() — end ที่วัด 14.2s **รวม wait 4s เดิมอยู่แล้ว** ดังนั้นแบบใหม่ ≈ 20.2s อาจแปรงเพดานใหม่ 20s — 8i คือ watchpoint อันดับหนึ่งของรอบพิสูจน์: ถ้าแดงที่ toBeLessThan(20_000) นั่นคือเลขคณิตไม่ใช่ latency — **ทางเลือกที่ตัดสินด้วยการวัด ประกาศไว้ก่อน**: (ก) คง killAfterMs 4s เดิม (กลไก kill วัดเขียว — ที่แดงจริงคือเพดาน 8s เท่านั้น) หรือ (ข) ขยับเพดานตามแบบแผนด้วยตัวเลขที่วัดได้จากรอบพิสูจน์ — ห้ามตัดสินด้วยการเดา
 - **GO (CTO · 2026-10-14 ผ่าน bridge)**: ฉันทามติครบทั้งสองฝ่าย + fold-ins ข้อ 1-5 พับเข้า spec ก่อน implement → **GO ทั้ง 21 จุด** · ลำดับ: implement → tsc/eslint → สุขลักษณะ ledger (ข้อ 0) → clean-run เต็มชุด detached (61 เขียว + 13 self-skip + child markers จริง) → battery r38 detached 13/13 → merge --no-ff + RISK ACCEPTANCE + ตาราง baseline ceiling รวม barrier → BL-015 ปิด → UAT
+
+## ผลรอบพิสูจน์ #1 + การค้นพบกลางทางสองจุด (บันทึกก่อนแก้ · รอ ruling CTO ผ่าน bridge · 2026-10-14)
+
+**ผลรอบ** (it-barrier-rebaseline-run.log · detached · 18 นาที): **59 เขียว / 2 แดง / 13 skip ของ 74** — แดงเดิม 14 ตัวเขียวคืน 12 (8b×3 · 8e×2 · 8e2 · 8f×3 ยืนยันกลไก stale-row · 8h-1 · 8k · 8m) · แดงใหม่สองจุดคือการค้นพบใหม่ทั้งคู่ (ไม่ใช่ตัวเลขที่ GO ไว้พลาด):
+
+### การค้นพบ 1 — 8i: kill fallback ของ end() พังที่ชั้น host (ไม่ใช่เลขคณิต)
+
+- วัดจริง: `expected 36825 to be less than 20000` — end() รอจน query จบเอง (pg_sleep 37.5s หัก dispatch) ทั้งที่ส่ง SIGKILL ที่ 10s แล้ว
+- **probe ตัดสิน (node ตรง · 2026-10-14)**: spawn `docker compose exec` เหมือน startPsqlSession รัน pg_sleep(15) → `child.kill("SIGKILL")` คืน true ที่ 2028ms แต่ event `close` มาที่ **15388ms** พร้อม stdout ยังไหลถึง PROBE_DONE — Docker Desktop รุ่นนี้ถือ exec stream ไว้ที่ backend ของมันเอง ฆ่า docker.exe ที่ host ปิดท่อไม่ได้ · เครื่องเก่า (probe D-f-13 · 2026-09-15) ปิดได้ = Docker Desktop เปลี่ยนพฤติกรรม · ย้อนดูรอบ clean-run เดิม: end วัด 14.2s ≈ จบเองเช่นกัน (ผ่าน 8s ไม่ได้แต่ไม่เคยถูก kill จริง) — กลไก "client กลับมามีขอบเขต" (clause ก) พังที่ test-io.ts:end ไม่ใช่ที่ค่าคงที่ของเทส
+- ทางแก้ที่เสนอ (แคบที่สุด · ต้อง consent เพราะแตะ `tests/integration/test-io.ts` ซึ่งเป็น harness ร่วมของ 35 ไฟล์): end() แข่ง `close` กับเส้นทาง kill — เมื่อ kill แล้วผ่าน grace (เช่น 250ms) โดย close ยังไม่มา ให้ resolve เป็น exit code -1 (killed) · caller ทุกรายที่ close มาก่อน (ทุก session ปกติ) พฤติกรรมไม่เปลี่ยน · 8i ยัง assert code≠0 ได้ (-1) และเพดาน 20s กลับมามีความหมาย
+- ทางเลือกที่ตัดออก: ขยับเพดานไป 40s = ทำให้ assertion เกือบว่างเปล่า (end จบเองที่ ~37.5s ก็ผ่าน) — ขัดเจตนาของเทสโดยตรง
+
+### การค้นพบ 2 — 8o/mm: classifier ทาง (a)/(b) เป็น race ที่ขึ้นกับความเร็วเครื่อง (เลขคงที่แก้ไม่ได้)
+
+- หลักฐาน ledger รอบใหม่: ทั้งสาม attempt จบทาง (b) — `h8o-terminate-1 → blocked-backend (+0.74-0.89s)` ทุกครั้ง แล้ว settleN completed-evidenced → ครบ 3 attempt ไม่เคยได้ทาง (a) → `h8o observation-window-missed` (mm:238) → wrapper ตาม (ไม่เห็น designed-poison ใน stdout ลูก)
+- กลไก: observeAfterTerminate ถาม psql รอบแรก (~0.7-1s หลัง terminate เพราะต้องเขียน terminate-note ก่อน) แต่ retry ของ route (sleep 250ms ที่ src/lib/admin/users.ts:512 คงไม่แตะ src/) คิว lock ที่ ~0.6s — เครื่องนี้ probe แพ้ตลอด → (b) ตลอด · เครื่องเก่า probe (0.3s) ชนะ → (a) ทันที — classifier เป็นแข่ง timing ระดับร้อยมิลลิวินาที ไม่ใช่เพดานที่สเกลได้
+- ทางแก้ที่เสนอ (แคบที่สุด · ต้อง consent เพราะแตะตรรกะจัดหมวดของ mm หนึ่งจุด): เมื่อ observe เห็น waiter2 ให้ยืนยันด้วย `pidsBusy([waiter1Pid])` — ถ้า waiter1 หายแล้ว = ไม่มี ambiguity จริง (retry เป็น waiter ตัวเดียวที่มีชีวิต) → เดินต่อทาง (a) กับ pid ที่เห็น (abort client + settle-B ปฏิเสธ retry-capable · แถวหลักฐานเหมือนเดิม) · ถ้า waiter1 ยัง busy = (b) แท้ (termination ยังไม่กระจาย) → คงพฤติกรรมเดิม · บนเครื่องเร็วที่ observe เคยได้ clean พฤติกรรมไม่เปลี่ยน (ไม่แตะทางนั้น)
+- ทางเลือกที่ตัดออก: สเกล OBS_DEADLINE_MS — ไร้ผล เพราะปัญหาคือ probe "ช้าเกิน" ไม่ใช่ "เร็วเกิน" · แตะ retry 250ms ใน src/ — ห้าม (โค้ดผลิต)
+
+### watchpoint 8i (จุด 16) — คำวินิจฉัยตามที่ประกาศไว้
+
+- ตัวเลขวัด (36,825ms) ไม่ใช่เลขคณิต ~20.2s ที่ qa ทำนาย — การค้นพบ 1 ข้างบนคือคำอธิบายจริง · ทางเลือก (ก) คง 4s / (ข) ขยับเพดาน ทั้งคู่ไม่ถูกต้องเพราะกลไกเองพัง — ยกรอบเป็นการค้นพบ 1 ตามหลักฐาน ไม่ใช่การเดา
