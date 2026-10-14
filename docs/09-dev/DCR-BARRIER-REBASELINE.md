@@ -111,3 +111,15 @@ f2 ล้มที่แถว `cleanup-start ts=23:37:34.93` ซึ่งเป
 ### watchpoint 8i (จุด 16) — คำวินิจฉัยตามที่ประกาศไว้
 
 - ตัวเลขวัด (36,825ms) ไม่ใช่เลขคณิต ~20.2s ที่ qa ทำนาย — การค้นพบ 1 ข้างบนคือคำอธิบายจริง · ทางเลือก (ก) คง 4s / (ข) ขยับเพดาน ทั้งคู่ไม่ถูกต้องเพราะกลไกเองพัง — ยกรอบเป็นการค้นพบ 1 ตามหลักฐาน ไม่ใช่การเดา
+
+## Amendment 1 — end() แข่ง close กับ kill+grace (GO ผ่าน bridge · pm+qa CONSENT 2026-10-14)
+
+- **pm CONSENT**: สัญญาใหม่ของ end() ยอมรับได้ — close มาก่อน = exit code จริง · kill แล้วผ่าน grace โดยไม่มี close = คืน -1 (killed) · sweep ผู้เรียก: มีเพียง w8i:52/102 + smoke:79 ที่ consume ค่าคืน — ไม่มีใครอ่าน stdout หลัง kill · แบบแผน -1 สอดคล้องจุดที่มีอยู่ (:365/:904/:1001)
+- **qa CONSENT (binding 4 ข้อ พับครบ)**: (1) doc comment ของ PsqlSession.end (:825-830) เขียนสัญญาใหม่ครบ + บันทึก 250ms เป็น HEURISTIC พร้อมเลข probe + หมายเหตุ caller อนาคตที่ต้องการ killed-exit-code จริงต้องวัด grace ใหม่บนเครื่องเร็ว (2) grace timer ตั้งใน killer callback · clear ทั้ง killer และ grace ในทาง close (native single-resolve ทำให้ race ที่ขอบเขตก่อน/หลัง finish ปลอดภัยเอง) — แก้ตามนี้ครบ + ปิด hang แฝงของ close-before-end ด้วย (3) ตรวจ stdout contract ครบ (4) ทางเลือกเพดาน 40s ที่ตัดไป = ถูกต้อง (assertion ว่างเปล่า)
+- **การค้นพบแฝงที่ปิดพร้อมกัน**: รอบก่อนหน้า end() ที่ query ยังรันสามารถค้างเกินกว่า killAfterMs โดยไม่มีทางออก (close ไม่มาเลย) — สัญญาใหม่มีขอบเขตทุกทาง
+
+## Amendment 2 — mm จัดหมวด (a)/(b) ด้วยหลักฐานแทน timing (GO ผ่าน bridge · pm+qa CONSENT 2026-10-14)
+
+- **pm CONSENT**: การันต์ TOCTOU สองทิศ — ความตายของ backend เป็น monotone (ยืนยัน "หายแล้ว" ไม่พลิกกลับ) · pid-reuse ตกเป็นอนุรักษ์นิยม (วาล์ว (b)) · แถว settle-A/B byte-identical ผ่าน flow เดิม
+- **qa CONSENT (binding พับครบ)**: (3) ทางเบี่ยงคง handshake #2 และใช้ pid จาก handshake นั้นสำหรับ settle-B (ยืนยัน liveness ก่อน abort อีกชั้น + pid สด) · ข้าม settle-A ในทางเบี่ยง (หน้าต่าง clean ไม่มีอยู่ — settle-A เป็นของทาง clean เท่านั้น) (4) เขียน ledger note หนึ่งแถวบันทึกการตัดสินจัดหมวด (waiter1Pid + observed pid + ผลยืนยัน + classification) ตามวินัย scan-records-truth ของครอบครัว (5) หมายเหตุข้อจำกัดกรอบ lock_timeout 8s ของทางเบี่ยง (หน้าต่างเดียวกับทาง (a) เดิม — ไม่เปลี่ยน)
+- **ลงจริง**: mm — `h8o-observation-classification` note + วาล์ว (b) เดิมครบทั้งกระบวนเมื่อ waiter1 ยัง busy · ทางเบี่ยงเข้า handshake #2 → abort → settle-B ตาม binding

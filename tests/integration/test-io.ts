@@ -822,8 +822,14 @@ export interface PsqlSession {
   readonly identity: PsqlSessionIdentity;
   /** รัน SQL ใน session (stdin) เก็บผลลัพธ์ตอน prompt กลับ */
   exec(sql: string, opts?: { timeoutMs?: number }): Promise<string>;
-  /** จบ session (exit code จริงคืนมา) — ค้างเกิน killAfterMs (default 15s) = SIGKILL
-   *  fallback (8i: session ที่ backend ยุ่งอยู่กับ query ยาวต้องจบได้แบบมีขอบเขต) */
+  /** จบ session — สัญญาสองทาง (Amendment 1 ของ DCR-BARRIER-REBASELINE):
+   *  (1) close มาก่อน = คืน exit code จริง (session ปกติทุกราย)
+   *  (2) ค้างเกิน killAfterMs (default 15s) = SIGKILL แล้วรอ grace 250ms — ยังไม่ close ภายใน
+   *      grace = คืน -1 (killed) ทันที · ตัวเลข 250ms เป็น HEURISTIC จาก probe 2026-10-14:
+   *      Docker Desktop รุ่นปัจจุบันถือ exec stream ไว้ที่ backend ของมันเอง — ฆ่า docker.exe
+   *      ที่ host แล้ว event close ไม่ยอมมาจน query จบเอง (probe: kill@2028ms สำเร็จ แต่ close
+   *      @15388ms พร้อม stdout ยังไหล) — caller ที่ต้องการ killed-exit-code จริงต้องวัด grace
+   *      ใหม่บนเครื่องที่เร็วกว่า (8i: session ที่ backend ยุ่งอยู่กับ query ยาวต้องจบได้แบบมีขอบเขต) */
   end(opts?: { killAfterMs?: number }): Promise<number>;
 }
 
@@ -896,13 +902,22 @@ export async function startPsqlSession(label: string): Promise<PsqlSession> {
     end: async (opts?: { killAfterMs?: number }) => {
       const killAfterMs = opts?.killAfterMs ?? 15_000;
       return await new Promise<number>((resolve) => {
-        const killer = setTimeout(() => {
-          child.kill("SIGKILL");
-        }, killAfterMs);
-        child.on("close", (c) => {
+        let grace: NodeJS.Timeout | undefined;
+        let settled = false;
+        const finish = (code: number) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(killer);
-          resolve(c ?? -1);
-        });
+          if (grace !== undefined) clearTimeout(grace);
+          resolve(code);
+        };
+        const killer: NodeJS.Timeout = setTimeout(() => {
+          child.kill("SIGKILL");
+          // Amendment 1 (DCR-BARRIER-REBASELINE): close อาจไม่มา (probe 2026-10-14 —
+          // Docker Desktop ถือท่อไว้เอง) — เลย grace ให้คืน -1 (killed) ตามสัญญา doc ด้านบน
+          grace = setTimeout(() => finish(-1), 250);
+        }, killAfterMs);
+        child.on("close", (c) => finish(c ?? -1));
         child.stdin.end();
       });
     },

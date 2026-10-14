@@ -154,7 +154,28 @@ describe.skipIf(process.env.BARRIER_CHILD !== "1")("8o(ก) child — attempt lo
           if (obs.kind === "missed") {
             throw new Error(`h8o observation-window-missed (attempt ${attempt}): ไม่เห็น clean หรือ waiter-2 ภายใน ${OBS_DEADLINE_MS}ms`);
           }
+          let divertedViaConfirmation = false;
           if (obs.kind === "waiter2") {
+            // Amendment 2 (DCR-BARRIER-REBASELINE): เครื่องสำรองช้า — retry ของ route (sleep
+            // 250ms ที่ src/lib/admin/users.ts) คิว lock ที่ ~0.6s ก่อน probe รอบแรกของ observe
+            // ตอบกลับ (~0.7-1s) — จัดหมวดด้วยหลักฐานแทน timing ระดับร้อย ms: ยืนยัน waiter1
+            // หายจริง (pidsBusy ว่าง) = ไม่มี ambiguity (retry เป็น waiter ตัวเดียวที่มีชีวิต)
+            // ไปทาง (a) ผ่าน handshake #2 เดิม (ข้าม settle-A — หน้าต่าง clean ไม่มีอยู่แล้ว) ·
+            // waiter1 ยัง busy = (b) แท้ (termination ยังไม่กระจาย) — วาล์ว (b) เดิมทั้งกระบวน
+            // ข้อจำกัดกรอบเวลาของทางเบี่ยงเหมือนทาง (a) เดิม: handshake #2 + settle-B ต้องจบ
+            // ในหน้าต่าง lock_timeout 8s ของ retry INSERT ที่รอ lock อยู่ (ชนะก่อนถูกฆ่า)
+            const waiter1Gone = (await pidsBusy([waiter1.pid])).length === 0;
+            await ledgerWrite("note", {
+              event: "h8o-observation-classification",
+              attempt,
+              waiter1Pid: waiter1.pid,
+              observedWaiter2Pid: obs.pid,
+              waiter1ConfirmedGone: waiter1Gone,
+              classification: waiter1Gone ? "a-via-confirmation" : "b-ambiguous",
+            });
+            if (waiter1Gone) {
+              divertedViaConfirmation = true;
+            } else {
             // (b) ambiguous — ไม่ abort: ปล่อย lock → drain → settle จริง → รอบใหม่
             await ledgerWrite("note", { event: "blocked-backend", attempt, waiter2Pid: obs.pid });
             await coordinator.exec("commit;");
@@ -176,8 +197,10 @@ describe.skipIf(process.env.BARRIER_CHILD !== "1")("8o(ก) child — attempt lo
             expect(settleN.settled, `drain settle ของ attempt ${attempt} ต้องผ่าน`).toBe(true);
             expect(await userIsActive(fixture.targetId), "baseline ใหม่ — RPC commit แล้ว").toBe(false);
             continue; // attemptBegin รอบถัดไป (predecessor settled)
+            }
           }
 
+          if (!divertedViaConfirmation) {
           // (a) clean window → settle-A ทันที (blockerPids = waiter-1 ที่ตายแล้ว)
           const settleA = await settleHttpWithEvidence(opKey, {
             blockerPids: [waiter1.pid],
@@ -189,8 +212,11 @@ describe.skipIf(process.env.BARRIER_CHILD !== "1")("8o(ก) child — attempt lo
           const decisionsA = await ledgerRead({ invocationId: guard.invocationId, kinds: ["settle-decision"] });
           const rowA = decisionsA[decisionsA.length - 1];
           expect(rowA?.payload["scanClean"], "settle-A ต้องเห็น scan สะอาด (waiter-1 ถูก terminate แล้ว)").toBe(true);
+          }
 
           // handshake #2 — retry ของ users.ts หลัง sleep 250ms (= dispatch-after-sleep)
+          // (ทางเบี่ยง a-via-confirmation เข้าที่จุดนี้เช่นกัน — pid จาก handshake นี้ใช้ settle-B:
+          // ยืนยัน liveness ก่อน abort อีกชั้น + pid สด ตาม binding ของ qa)
           const waiter2 = await awaitStuckWaiter(
             {
               relation: "public.audit_logs",
