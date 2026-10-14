@@ -2,7 +2,10 @@
  * 8o(ก) wrapper — audit coverage ของ attempt loop child (r30 §2-D89-4 CC·8o ก):
  * spawn child (mm-attempt-loop) ผ่าน childRun → child ต้องออก RC≠0 ด้วยข้อความ
  * designed-poison → audit ledger ของ run นี้:
- *   (1) settle-decision 'settle-refused-retry-capable' scanClean=true = เอ๊ A เดียว
+ *   (1) หลักฐานฝั่ง A เอ๊เดียว จากสองแหล่งที่เป็นเอกสิทธิ์ร่วมกัน (Amendment 3):
+ *       settle-decision 'settle-refused-retry-capable' scanClean=true (ทาง clean)
+ *       หรือ note h8o-observation-classification a-via-confirmation
+ *       (ทางเบี่ยงของ A2 ข้าม settle-A — ความว่าง pidsBusy คือหลักฐาน clean เทียบเท่า)
  *   (2) settle-decision 'settle-refused-retry-capable' + busyPids = เอ๊ B เดียว
  *       — "ผ่านต่อเมื่อ audit เจอ decision row เดียวครบคู่" · drain settle
  *       ('completed-evidenced' ทาง b) บันทึกได้แต่ไม่ทดแทน
@@ -49,6 +52,11 @@ describe("8o(ก) wrapper — attempt loop ≤3: audit coverage + เคลี�
       const targetIdStr = targetUserId as string;
 
       // (1)+(2) settle-decision coverage — ครบคู่ เอ๊ละ
+      // (Amendment 3) หลักฐานฝั่ง A สองแหล่งเอกสิทธิ์ร่วมกัน:
+      // settle-A row (scanClean=true — ทาง clean) หรือ note h8o-observation-classification
+      // a-via-confirmation (ทางเบี่ยง A2 ข้าม settle-A) · note เขียนไร้ refs
+      // (op_key=NULL ตาม ledgerWrite ของ test-io.ts) จึงต้อง payload-scan บน notes ของ runId
+      // ตามแบบแผน h8o-child-fixture ข้างบน — ห้ามกรองด้วย opKey
       const decisions = (await ledgerRead({ runId, opKey: opKeyStr, kinds: ["settle-decision"] })) as LedgerRow[];
       const cleanA = decisions.filter(
         (d) => d.payload["decision"] === "settle-refused-retry-capable" && d.payload["scanClean"] === true,
@@ -59,7 +67,15 @@ describe("8o(ก) wrapper — attempt loop ≤3: audit coverage + เคลี�
           Array.isArray(d.payload["busyPids"]) &&
           (d.payload["busyPids"] as number[]).length > 0,
       );
-      expect(cleanA, `settle-A (scanClean=true) ต้องมีเอ๊เดียว — ได้ ${cleanA.length}`).toHaveLength(1);
+      const aViaConfirmation = notes.filter(
+        (n) =>
+          n.payload["event"] === "h8o-observation-classification" &&
+          n.payload["classification"] === "a-via-confirmation",
+      );
+      expect(
+        cleanA.length + aViaConfirmation.length,
+        `หลักฐานฝั่ง A ต้องมีเอ๊เดียว — settle-A row (scanClean=true) หรือ classification note (a-via-confirmation) — ได้ settle-A ${cleanA.length} + note ${aViaConfirmation.length}`,
+      ).toBe(1);
       expect(busyB, `settle-B (busyPids) ต้องมีเอ๊เดียว — ได้ ${busyB.length}`).toHaveLength(1);
       // drain settle (ทาง b) ได้แต่ไม่ทดแทนคู่ A/B
       const drains = decisions.filter((d) => d.payload["decision"] === "completed-evidenced");
