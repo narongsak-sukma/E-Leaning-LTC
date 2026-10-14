@@ -126,14 +126,170 @@ Feature: serial integration ladder บน GitHub Actions runner (.github/workflo
 
 ---
 
-## 5. การออกแบบ (เติมหลัง YAML — ระหว่างเขียน)
+## 5. การออกแบบ (ครบทุกหัวข้อ §1.3 ของ lane charter)
 
-<!-- WO-1 ขั้น 5: จะเติม section นี้ให้ครบทุกหัวข้อ §1.3 หลัง YAML ผ่าน parse + checklist -->
+### 5.1 ด่านไหนขึ้น runner ด่านไหนอยู่ local — ตาราง "อะไรรันบนไหน"
 
-## 10. ตาราง trace Gherkin → YAML (เติมหลัง YAML — ระหว่างเขียน)
+| ด่าน/ชุด | ที่รัน | เจ้าของไฟล์ | หมายเหตุ |
+| --- | --- | --- | --- |
+| lint · typecheck · unit test · build · gitleaks | **runner อยู่แล้ว** (`ci.yml` — pull_request/push/workflow_dispatch) | `.github/workflows/ci.yml` (ห้ามแก้ใน WO นี้) | คงเดิมทุกอย่าง — concurrency ของ ci.yml ไม่ถูกแตะ |
+| integration full-suite (อนุกรม) | **runner ใหม่** (`ci-integration.yml` — `workflow_dispatch` เท่านั้น Phase 1) | `.github/workflows/ci-integration.yml` (ใหม่) | ปั้น dev stack บน runner-hosted compose — รายละเอียด §5.2 |
+| mirror ท้องถิ่นของ 5 gates | local | `scripts/ci-local.sh` (อ่านอย่างเดียว) | ไม่เปลี่ยน — ยังเป็น pre-push ชั้นแรก |
+| battery (e2e 13 stages + identity) | **local ต่อไป** จนกว่า Phase 2 | close-ladder (เครื่องเป็นเจ้าของ) | ออกแบบไว้แล้วใน §7 แต่**ยังไม่สร้างไฟล์**ใน WO นี้ |
+| UAT/probe ห้าทิศ | local | close-ladder / PM | นอก scope |
 
-<!-- WO-1 ขั้น 4: แนบผล parse + checklist ที่นี่ -->
+ผลที่ต้องการของ retro #3 ตอบครบด้วยตารางนี้: suite ยาวที่ขึ้น runner แล้ว**ไม่แย่งคิวเครื่อง** · **ไม่โดนงานภายนอก**ของเครื่อง (คนละเครื่องกัน) · **รันคู่ขนานกับงานทีม**ได้ (dispatch ได้ทุกเมื่อ — คิวอนุกรมเฉพาะกัน runner เอง ตาม §5.3)
 
-## 11. ความเสี่ยง/ข้อจำกัด (เติมหลัง YAML — ระหว่างเขียน)
+### 5.2 วิธีปั้น stack บน runner (ตรวจกับ `vitest.integration.config.ts` + `docker-compose.yml` + `.env.example` จริง)
 
-<!-- ระหว่างเขียนตามขั้น 1.5 — หัวข้อถูกจองไว้ให้ครบโครงตั้งแต่ commit แรก -->
+รายการ service ที่ harness ต้องการ — **default-profile ครบ 9 ตัว** (เหตุผลรายตัวจากการอ่านเทสจริง §2/§3):
+
+| service | ทำไมต้องมี |
+| --- | --- |
+| `db` | `TEST_DATABASE_URL` 41 จุด · compose healthcheck `pg_isready` |
+| `auth` (GoTrue) | signup/login จริงของ helpers.ts (rate-limit email 1000/ชม. จาก compose อยู่แล้ว) |
+| `rest` (PostgREST) | `/rest/v1` ผ่าน kong · aggregates เปิดแล้วใน compose |
+| `storage` | d8-exam-cert-flow:1054 · dcr12:201/209 ยิง `/storage/v1/...` ผ่าน kong (kong.yml:61-98 route มาที่นี่) |
+| `imgproxy` | dependency ของ storage (compose:146) |
+| `kong` | ประตูเดียว `TEST_SUPABASE_URL=http://localhost:8000` · healthcheck `kong health` |
+| `mailpit` | dcr15/dcr16 อ่านอีเมลจาก `TEST_MAILPIT_URL=http://localhost:8025` · GoTrue SMTP ยิงมาที่นี่ |
+| `app` | 19 จุด `requireAppOrSkip` ใน 9 ไฟล์ BFF (TEST_APP_URL default :3000) — ไม่มี app = skip เงียบ |
+| `db-migrate` | migrations + seed idempotent — ต้องจบก่อนเทส (seed ขาด = integration ที่อ้าง seed ตายทั้งชุด ตาม migrate.sh comment) |
+
+ลำดับ command ที่ workflow ใช้ (ทั้งหมด `docker compose` ตรง ๆ — ไม่ผ่าน Makefile เพื่อคุมความหมายเชิง CI):
+
+1. `cp .env.example .env` — compose interpolation ต้องมี `POSTGRES_PASSWORD`/`SUPABASE_JWT_SECRET`/anon+service key — **ค่า placeholder local ทางการเท่านั้น** (ไฟล์ .env ที่เกิดบน runner ไม่ใช่การแก้ไฟล์ใน repo — เกิดใน workspace ของ run แล้วหายไปกับ run)
+2. `docker compose up -d --wait db auth rest storage imgproxy kong mailpit` — `--wait` ผูกกับ healthcheck ที่ compose มีอยู่จริง
+3. `docker compose run --rm db-migrate` — foreground, exit code ของ migration = exit ของ step (ลำดับ **"migration ก่อน app เสมอ"** สืบทอดจาก DCR-PROD-DEPLOY)
+4. `docker compose up -d --wait app` + poll `GET $TEST_APP_URL/api/health` ทุก 5 วิ นานสุด 300 วิ (evidence ของ AC (a)) — ไม่ผ่าน = dump `docker compose logs app` แล้ว fail
+5. `npm run test:integration` (หัวใจ ladder — §5.5 คือ step ใน YAML)
+6. teardown `docker compose down -v --remove-orphans` (`if: always()`)
+
+env รูปแบบที่ job ตั้งให้ vitest (ฝั่ง host) = ตาราง §3 ทั้งแปดตัว — ทุกค่าชี้ localhost-of-runner (`:54322/:8000/:3000/:8025` ตรง host-port mapping ของ compose เพราะ `.env.example` ตั้ง `POSTGRES_HOST_PORT=54322` ไว้แล้ว)
+
+### 5.3 Concurrency guards (หัวข้อ §1.3 ข้อ 5)
+
+- บน runner: `concurrency.group: serial-ladder` (string คงที่ — ข้าม branch ด้วย) + `cancel-in-progress: false` → รอบใหม่ **เข้าคิว ไม่ cancel** (AC (b)) — แปลตรงจาก BL-015 "ห้ามรันสวีทซ้อน" ให้เป็นกลไกของ runner
+- ไม่ทำลาย ci.yml: กลุ่มของ ci.yml คือ `ci-${{ github.event_name }}-${{ github.ref }}` — คนละชื่อ ไม่มีทางแชร์คิว/ยกเลิกกันโดยกลไก concurrency
+- กับ battery ของ CTO บนเครื่อง local: **คนละเครื่อง — ไม่เกี่ยวกันโดยสิ่งปลูกสร้าง** (runner เป็น VM ของ GitHub ไม่แชร์ CPU/ดิสก์/docker daemon กับเครื่องใด) — นี่คือจุดขายของ lane นี้ตาม retro #3 และถูกระบุไว้ชัดตาม charter §1.3 ข้อ 5
+
+### 5.4 Secrets matrix (หัวข้อ §1.3 ข้อ 3)
+
+| Phase | secret ที่ต้องตั้งใน GitHub | รายการ |
+| --- | --- | --- |
+| **Phase 1 (WO นี้)** | **ไม่มีเลย — เป้าหมาย "zero secrets" สำเร็จ** | workflow ไม่อ้าง `secrets.*` แม้แต่ตัวเดียว (checkout ใช้ implicit token ของ GHA เอง) · env ทั้งหมด = localhost + placeholder local ทางการ (ตาราง §3) · ตรวจแล้ว: `vitest.integration.config.ts` ต้องการเฉพาะ `TEST_*` — ยืนยัน A-2 แล้ว (ไม่ต้อง STOP) |
+| Phase 2+ (battery/e2e บน runner) | ยังไม่ต้องมี (เทสชี้ localhost ของ runner เช่นกัน) | เฉพาะถ้าต้องการ artifact upload ด้วย token อื่น — ยังไม่ใช่ตอนนี้ |
+| Phase 3 (deploy — **นอก scope WO นี้**) | ของสาย deploy ตาม DCR-PROD-DEPLOY §5.1/OQ-13 | `SUPABASE_ACCESS_TOKEN` + DB connection ของ staging/prod · `VERCEL_TOKEN` + org/project id — บันทึกส่งต่อเท่านั้น |
+
+กันหลง: ค่า canonical ของ prod (VA-PENTEST V14.2.x) **ห้าม**เข้า GitHub secrets หรือ YAML นี้เด็ดขาด (กฎ DCR-PROD-DEPLOY §1 แถว 2) — สิ่งที่อยู่ใน YAML คือ JWT dev placeholder สาธารณะของ `.env.example` ซึ่ง sign ด้วย dev JWT secret และใช้ได้เฉพาะ stack local เท่านั้น
+
+### 5.5 Cache strategy (หัวข้อ §1.3 ข้อ 4 — พร้อมเหตุผลเชิงนาที)
+
+| cache | สถานะ | นาทีที่ประหยัดได้จริง | เหตุผล/เงื่อนไข |
+| --- | --- | --- | --- |
+| npm (setup-node `cache: npm`) | **ใช้แล้วใน YAML** (รูปเดียวกับ ci.yml) | ~1–1.5 นาที/รอบ | มีของ ci.yml มาก่อน — ใช้ key เดียวกันฟรี |
+| `.next/cache` | **N/A Phase 1** | — | workflow นี้ไม่ build บน host (app = next dev ใน container) · หมายเหตุ: หลัง WO-3 อัป Turbopack ความเข้ากันของ cache ต้องพิสูจน์ใหม่ — ผูกกับ WO-3 แล้ว |
+| docker layer ของ image `app` (npm ci ใน Dockerfile.dev) | ยังไม่ทำ — future work (§12) | ~2–4 นาที/รอบ | ต้องใช้ buildx + `cache-from/to: type=gha` — เพิ่มความซับซ้อนครั้งแรก ไม่คุ้มตอนพิสูจน์ smoke · ทำเมื่อรอบนิ่งแล้ว |
+| Playwright `~/.cache/ms-playwright` | **Phase 2 เท่านั้น** (ci-battery.yml) | ~30 วิ–1 นาที/รอบ | key ตามเวอร์ชัน `@playwright/test` (package.json:36) — ยังไม่มี browser ใน workflow นี้ |
+
+### 5.6 แผน phase (PM เสนอ — CTO ตัดสิน; ตาม charter §1.3 ข้อ 6)
+
+- **Phase 1 (งาน WO นี้ — เสร็จใน branch นี้):** `ci-integration.yml` — integration full-suite อนุกรมบน runner-hosted compose · **trigger = `workflow_dispatch` อย่างเดียว** (A-1) จนกว่า CTO จะสั่งเปิด `pull_request` หลัง smoke แรกเขียว + owner ให้สัตยาบันค่าใช้จ่าย
+- **Phase 2 (post-close · CTO-gated — ออกแบบไว้ ยังไม่สร้างไฟล์):** `ci-battery.yml` — battery บน runner: `docker compose --profile prod up -d --wait app-prod` (:3001) → env trio ตาม DCR-PROD-BUILD-E2E (`E2E_BASE_URL=http://localhost:3001` · `HEAP_CONTAINER=ltc-prod-app` · `E2E_REQUIRE_PROD=1` + `scripts/prod-build-proof.mjs`) → `bash scripts/battery-prod.sh` · Playwright cache ตาม §5.5 · เรื่อง artifact/หลักฐาน E2E และ D90 จะต้องมี DCR ของตัวเอง (ผูกกับ EVIDENCE-PRESERVATION ที่อยู่เครื่อง local — runner ต้องออกแบบการเก็บ evidence ใหม่) — ไฟล์นี้ถูกสร้างเมื่อ CTO สั่งเท่านั้น
+- **Phase 3 (นอก scope):** สาย deploy-staging/deploy-prod — ของ DCR-PROD-DEPLOY §5.1 รอบ implement · WO นี้อ้างส่งต่อได้ถึงเท่านั้น (§5.4)
+
+### 5.7 Node version pin (หัวข้อ §1.3 ข้อ 7 — A-3)
+
+`node-version: 22` บน host (setup-node) — ตรง ci.yml ปัจจุบันและคำวินิจฉัย OQ-11 (Node 22 ทุกชั้น) · ฝั่ง container ของ `app` ใช้ image `node:22-alpine` จาก `docker/Dockerfile.dev:3` อยู่แล้ว — สองชั้นเป็น 22 ตรงกันโดยไม่แตะ docker/ แม้แต่บรรทัดเดียว
+
+---
+
+## 6. Budget นาทีโดยประมาณ (จาก ground truth retro §1 — ตัวเลขวัดบนเครื่องหลัก)
+
+| ขั้น (บน runner) | ประมาณ | ฐานวัดจริง/ที่มา |
+| --- | --- | --- |
+| checkout + setup-node + npm ci | 1–3 นาที | ci.yml ใช้รูปเดียวกัน |
+| pull images ครบ stack (ครั้งแรก) | 3–6 นาที | 8 images รวม supabase/postgres (~2.5GB) |
+| stack up --wait + db-migrate + app health | 2–5 นาที | healthcheck ของ compose จริง (db 30s start period · app 60s) |
+| integration full-suite (อนุกรม) | **40 นาที–2 ชม.** | local: 2189–2461 วิ (~36–41 นาที) — สมมติ runner ช้ากว่า ≤3× (บทเรียน BL-015 H1: เครื่องช้า 3–4× มีผลจริง) |
+| teardown | <1 นาที | down -v |
+| **รวมคาดหวัง / เพดาน** | **~50 นาที–2.5 ชม. / 120 นาที (timeout ของ job)** | `timeout-minutes: 120` — ถ้าชนเพดาน = runner ช้าเกินสมมติฐาน → รายงาน CTO พิจารณาแยก job ต่อชุด (charter แนะนำไว้แล้ว) |
+
+แยกจาก ci.yml ทุกนาที: workflow นี้ไม่รัน lint/typecheck/unit/build/gitleaks ซ้ำ (เป็นของ ci.yml อยู่แล้ว) — จ่ายเฉพาะ integration
+
+---
+
+## 7. หน้าตา Phase 2 (บันทึกออกแบบ — **ยังไม่สร้างไฟล์ใด** ตาม fence WO-1)
+
+- ไฟล์เป้าหมาย: `.github/workflows/ci-battery.yml` (ชื่อไม่ชน ci.yml/ci-integration.yml) · trigger `workflow_dispatch` เช่นกัน
+- โครง: compose `--profile prod` (app-prod :3001 ตาม DCR-PROD-BUILD-E2E) → proof (`scripts/prod-build-proof.mjs` — อ่าน BUILD_ID จาก container) → `bash scripts/battery-prod.sh` (env trio) → เก็บ log แบบ timestamped
+- cache: Playwright browser ตาม §5.5 · ประเด็นที่ต้อง DCR ของตัวเอง: evidence E2E (dump ทำลาย · timestamped logs) เดิมผูกกับเครื่อง local — runner ต้องออกแบบการเก็บคืนมาเป็น artifact ให้ได้คุณภาพเดียวกันก่อนถึงจะนับ battery บน runner ได้
+- D90: การนับ/ยกเลิก anchor เป็นอำนาจ CTO (ตามชี้ขาด gate r1 + คำวินิจฉัย A-7 ของ Sprint 2) — workflow นี้ไม่ตัดสินเอง
+
+---
+
+## 8. ความเสี่ยง/ข้อจำกัด
+
+| # | ความเสี่ยง | การรับมือที่ออกแบบไว้ |
+| --- | --- | --- |
+| R1 | runner 2 คอร์ช้ากว่าเครื่องหลัก → race window เพี้ยนแบบคลัสเตอร์ B/C/D ของ BL-015 (H1 พิสูจน์แล้วว่าเครื่องช้ามีผลจริง) | trigger มือเท่านั้น — รอบแรก ๆ CTO ตัดสิน verdict เอง · **ห้ามตัดสินเป็น flake** ตามกติกา two-strike ของ BL-015 · `testTimeout` 30 วิ/`hookTimeout` 60 วิ เป็นค่าของ config จริง (อยู่นอกเขตแก้ของ WO นี้ — ถ้าต้องปรับ = ตั๋วแยกผ่าน gate) |
+| R2 | image drift: compose อ้าง tag ลอย (kong:2.8.1 ฯลฯ) — runner pull ได้ digest ใหม่กว่าเครื่อง local | นี่คือของ DCR-GATEWAY-ERRBODY-REBASELINE (BL-015 ข้อสรุป A=H2 สั่ง pin digest) — workflow นี้อ้าง compose เดิม ไม่ pin เอง (ห้ามแก้ docker-compose.yml) · บันทึกส่งต่อ |
+| R3 | `docker compose` v2 semantics (`--wait`, `run --rm`) ต่างเวอร์ชันเล็กน้อยตาม runner image | ใช้ flag มาตรฐาน v2 · smoke แรก (post-close) เป็นผู้พิสูจน์ — ถ้าต้องปรับ = แก้เฉพาะ workflow นี้ ไม่กระทบ repo อื่น |
+| R4 | หน่วยความจำ: app container ตั้ง heap 4096 (compose:254) + stack รวม ~3-4 GB | ต้องการ runner ≥8 GB ว่าง — ubuntu-latest มีเพียงพอตาม spec สาธารณะ · smoke แรกยืนยันจริง |
+| R5 | port ชนบน runner (54322/8000/8025/3000/5432) | runner สดไม่มี service ครองพอร์ตเหล่านี้ — ไม่มีมาตรการเพิ่ม |
+| R6 | เขียวลอยจาก silent-skip (config skip ทั้งชุดเมื่อไม่มี TEST_DATABASE_URL) | ออกแบบกันไว้ 2 ชั้น: `TEST_REQUIRE_APP=1` (app ไม่พร้อม = fail) + silent-skip guard ตรวจ "0 passed" (AC เสริมข้อ 1) |
+
+---
+
+## 9. สิ่งที่ "ไม่" เปลี่ยน (fence ของ WO-1)
+
+- `.github/workflows/ci.yml` ทั้งไฟล์ — ทุกบรรทัดคงเดิม (implementation-in-waiting หมายถึงไฟล์ใหม่เท่านั้น)
+- ไม่แตะ `tests/` · `src/` · `docker/` · `docker-compose.yml` · `.env*` · `scripts/` · `Makefile` — ศูนย์ไฟล์
+- ไม่ author สาย deploy · ไม่เปิด trigger อัตโนมัติใด · ไม่มีค่าจริง/canonical ในไฟล์ที่ส่งมอบ
+- ไม่ implement sharding หลาย compose project (retro #8 — "ทำ #3 แล้วค่อยว่า") — บันทึกเป็น future work §12
+
+---
+
+## 10. ตาราง trace Gherkin → YAML + หลักฐาน validation
+
+### 10.1 trace ทีละ Scenario (§4 ของเอกสารนี้ → บรรทัดของ `.github/workflows/ci-integration.yml`)
+
+| Scenario | จุดพิสูจน์ใน YAML |
+| --- | --- |
+| (a) ครบทุกไฟล์ อนุกรม เขียว | step "Start dev stack core" (9 services ตาม §5.2) → step "Apply migrations + seed" (`docker compose run --rm db-migrate` — exit code เป็น exit ของ step) → step "Start app + รอ health 200" (poll `$TEST_APP_URL/api/health` 300 วิ) → step "Integration full-suite" รัน `npm run test:integration` (include ทุกไฟล์จาก config จริง · `fileParallelism: false` อยู่ใน `vitest.integration.config.ts` โดยไม่ต้องตั้งใน YAML) · summary รายงาน "N passed" + บรรทัด "Test Files" |
+| (b) เข้าคิว ไม่ cancel | `concurrency.group: serial-ladder` + `cancel-in-progress: false` |
+| (c) ศูนย์ secret จริง | ไฟล์ไม่มี `secrets.*` เลย (regex ตรวจ = 0 จุด — checklist ข้อ 10) · env job = ตาราง §3 ครบทุกตัว · ไม่มี step upload artifact |
+| (d) trigger = workflow_dispatch เท่านั้น | `on:` มี key เดียว `workflow_dispatch` (parsed: `{"workflow_dispatch": null}` — checklist ข้อ 2/13) |
+| (e) fail บอกไฟล์แดง | block `if [ "$status" -ne 0 ]` → `grep FAIL` ดึง `tests/integration/*.test.ts` unique+sort → เขียนลง `$GITHUB_STEP_SUMMARY` · `exit "$status"` ≠ 0 |
+| เสริม 1: silent-skip guard | block `n=... if [ -z "$n" ] || [ "$n" -eq 0 ]` → `::error::...silent-skip guard...` + status=1 |
+| เสริม 2: app ล้ม = fail ไม่ skip | `TEST_REQUIRE_APP: "1"` ใน job env (semantics จาก `requireAppOrSkip` ของเทสเอง) |
+| เสริม 3: teardown always | step "Teardown stack" มี `if: always()` + `down -v --remove-orphans` |
+
+### 10.2 หลักฐาน validation (ขั้น §1.5.4 · เครื่องนี้ไม่มี actionlint/yamllint/yq — ตรวจแล้ว)
+
+1. **Parse ด้วย worktree-local npx js-yaml** (เครื่องมือ: js-yaml 5.4.3 บน node v24.20.0 · คำสั่ง `npx --yes js-yaml .github/workflows/ci-integration.yml`):
+   - `ci-integration.yml` → **exit 0, stderr ว่าง** · parsed แสดงโครงตรงตามออกแบบ: `on: {workflow_dispatch: null}` · `permissions: {contents: read}` · `concurrency: {group: serial-ladder, cancel-in-progress: false}` · `defaults.run.shell: bash` · job `integration` (ubuntu-latest, timeout 120) · 9 steps มี `name` ครบทุก step
+   - `ci.yml` (parity เทียบ) → **exit 0**
+2. **รีวิวเชิงโครงสร้างตาม checklist §1.5.4 ข้อ (2)** — ตรวจอัตโนมัติบนผล parse + regex บน raw file: **17/17 PASS**
+   (`on:` มี · `on: = workflow_dispatch อย่างเดียว` · `permissions:` · `concurrency:` group+no-cancel · `defaults:` bash · jobs มี · `timeout-minutes` ทุก job = 120 · `runs-on` ทุก job · ทุก step (9) มี `name` · ไม่มี `secrets.*` ใน raw · checkout pin full SHA 40 หลักเดิม · setup-node v4 + node 22 + cache npm · ไม่มี pull_request/push/schedule · `TEST_REQUIRE_APP=1` · env เป็น localhost/placeholder · teardown `if: always()` · timeout ≥ 120)
+3. ข้อจำกัดที่ยอมรับ: js-yaml parse ได้ "syntax + โครง" เท่านั้น ไม่ใช่ schema ของ GitHub Actions (actionlint ไม่มีบนเครื่อง) — ชั้นพิสูจน์ถัดไปคือ smoke run แรกจริงบน runner (post-close · CTO-gated) ตาม DoD ฝั่ง deferred
+
+---
+
+## 11. ลำดับดำเนินงาน (จริง · ตาม test-first ของ WO-1 §1.5)
+
+1. สร้าง worktree `D:/LTC-w1` จาก `develop@65fbac9` (คำสั่ง §0.1) · อ่าน grounding §2 ทั้งหมด (read-only) — เจอข้อเท็จจริง 19 จุด `requireAppOrSkip` + mailpit + storage → ปรับรายการ service เป็น 9 ตัว
+2. ตรวจ A-2 กับ `vitest.integration.config.ts` + เทสจริง → **ยืนยัน** (§3) — ไม่ต้อง STOP
+3. **เขียน DCR ส่วน Acceptance criteria (Gherkin) ก่อน** → commit `4d99e52` (YAML ยังไม่มีอยู่ใน tree ณ commit นี้ — history เป็นพยาน)
+4. เขียน `.github/workflows/ci-integration.yml` ตาม Gherkin
+5. validate: parse + checklist (§10.2) — ผ่านทั้งสองชั้น
+6. เติม DCR ครบ §5–§12 + แนบหลักฐาน (commit ถัดไป)
+7. รายงานผู้สั่ง — รอ CTO gate (merge/trigger จริง = deferred)
+
+## 12. Future work (บันทึก — ไม่ใช่งาน WO นี้)
+
+- sharding หลาย compose project บน runner (retro #8: "ทำ #3 แล้วค่อยว่า") — ห้าม implement จนกว่า retro #3 ปิดจริง
+- docker build cache (`cache-from/to: type=gha`) ของ image app — ประหยัด ~2–4 นาที/รอบ เมื่อรอบนิ่งแล้ว
+- digest pinning ของ images — ของ DCR-GATEWAY-ERRBODY-REBASELINE (BL-015/A=H2)
+- artifact policy ของ evidence (log timestamped / screenshots) เมื่อ Phase 2 มา — ต้องมี DCR ของตัวเอง
+- เปิด trigger `pull_request` เมื่อ smoke นิ่ง + owner สัตยาบัน (ตาม §5.1 ของ DCR-PROD-DEPLOY)
