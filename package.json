@@ -4,7 +4,7 @@
   "private": true,
   "description": "ระบบฝึกอบรมออนไลน์ สภาทนายความแห่งประเทศไทย (LTC E-Learning)",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9"
   },
   "scripts": {
     "dev": "next dev",
