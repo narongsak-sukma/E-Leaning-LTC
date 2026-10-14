@@ -1,0 +1,187 @@
+# =============================================================================
+# LTC E-Learning — CI integration serial ladder (Phase 1 · WO-1 · Lane J-CI)
+# -----------------------------------------------------------------------------
+# Design record: docs/09-dev/DCR-GH-ACTIONS-CI.md (Gherkin AC เขียนก่อนไฟล์นี้ —
+# commit 4d99e52 ของ branch feat/sprint2-j-ci เป็นพยานลำดับ; ตาราง trace อยู่ §10)
+#
+# สถานะ: implementation-in-waiting (A-1) — trigger = workflow_dispatch อย่างเดียว
+#   ห้ามเปิด pull_request/push/schedule จนกว่า CTO สั่งหลัง owner ให้สัตยาบัน
+#   ค่าใช้จ่าย runner (retro #3) · ห้าม merge เข้า develop ก่อน CTO gate
+#
+# รูปแบบสืบทอดจาก .github/workflows/ci.yml (B-04) ทุกข้อ:
+#   permissions contents:read · defaults.run.shell: bash · checkout pin full SHA
+#   เดิม (v4.2.2) · setup-node 22 + cache npm · env placeholder เท่านั้น
+#
+# สิ่งที่ตั้งใจต่างจาก ci.yml (เหตุผลใน DCR §5):
+#   - concurrency กลุ่มเดียวทั้ง workflow "serial-ladder" + cancel-in-progress: false
+#     (BL-015: ห้ามรันสวีทซ้อน — บน runner แปลเป็นคิวอนุกรม รอบใหม่เข้าคิวไม่ cancel)
+#   - timeout 120 นาที (ground truth: full-suite 2189–2461 วิ บนเครื่องหลัก — runner
+#     2 คอร์อาจช้ากว่า · DCR §6)
+#   - ไม่มี gitleaks (เป็น gate ของ ci.yml อยู่แล้ว) — workflow นี้จึงไม่อ้าง
+#     secrets.* เลยแม้แต่ตัวเดียว (AC (c))
+# =============================================================================
+
+name: ci-integration
+
+on:
+  workflow_dispatch: # A-1 — trigger มือเท่านั้นในสถานะ implementation-in-waiting
+
+# สิทธิ์น้อยที่สุด — อ่าน repo อย่างเดียว (รูปเดียวกับ ci.yml)
+permissions:
+  contents: read
+
+# BL-015 ("ห้ามรันสวีทซ้อน") บน runner: กลุ่มเดียวทั้ง workflow — รอบใหม่เข้าคิว
+# เสมอ ไม่มีการ cancel รอบที่กำลังรัน (AC (b)) · ชื่อกลุ่มคนละตัวกับ ci.yml
+# จึงไม่กระทบ concurrency เดิมของ ci.yml ทุกกรณี
+concurrency:
+  group: serial-ladder
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash # = bash --noprofile --norc -eo pipefail {0} (fail ตาม exit code เสมอ)
+
+jobs:
+  integration:
+    name: integration full-suite (serial · runner-hosted dev stack)
+    runs-on: ubuntu-latest
+    # ground truth retro §1: full-suite 2189–2461 วิ (~36–41 นาที) บนเครื่องหลัก —
+    # กันกรณี runner ช้ากว่า ~3 เท่า (บทเรียน BL-015 H1) = 120 นาที (DCR §6)
+    timeout-minutes: 120
+
+    env:
+      # ---- runner-host stack (ฝั่ง vitest) — ทุกค่าเป็น localhost หรือ placeholder
+      # local ทางการจาก .env.example เท่านั้น (ไม่มี secret จริง · ไม่มี canonical
+      # V14.2.x — DCR-GH-ACTIONS-CI §3 · กฎ DCR-PROD-DEPLOY §1 แถว 2) ----
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:54322/postgres
+      TEST_SUPABASE_URL: http://localhost:8000
+      TEST_SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzU2ODk2MDAsImV4cCI6MTg5MzQ1NjAwMH0.3jsTHD6cIxwRFtwetOAvCHSIQ0Z1xBxfki6n38cwPvk
+      TEST_SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTczNTY4OTYwMCwiZXhwIjoxODkzNDU2MDAwfQ.4m7tXPHtzmhd8_oafj7Xt0PDZFXn0I1WkNXrxJzwYtQ
+      TEST_USER_PASSWORD: Integration#2026
+      TEST_APP_URL: http://localhost:3000
+      TEST_MAILPIT_URL: http://localhost:8025
+      # semantics ของเทสเอง (battery §2.4): app ไม่พร้อม = fail ห้าม skip เงียบ —
+      # CI ปั้น app เองจึงต้องรับผิดชอบ (DCR §3 · AC เสริมข้อ 2)
+      TEST_REQUIRE_APP: "1"
+
+    steps:
+      - name: Checkout (pin SHA เดียวกับ ci.yml · fetch-depth 0 ตามรูปเดิม)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # parity กับ ci.yml (workflow นี้ไม่มี gitleaks — แค่รูปเดียวกัน)
+
+      - name: Setup Node 22 LTS + cache npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22 # A-3 (OQ-11: Node 22 ทุกชั้น)
+          cache: npm
+
+      - name: Install dependencies (ฝั่ง host — สำหรับ vitest)
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Start dev stack core (db auth rest storage imgproxy kong mailpit)
+        run: |
+          set -euo pipefail
+          # placeholder local ทางการเท่านั้น — compose interpolation อ่านจากไฟล์นี้
+          # (POSTGRES_PASSWORD / SUPABASE_JWT_SECRET / anon+service key ของ dev)
+          cp .env.example .env
+          # --wait = รอ healthcheck ของ db/kong/mailpit (รูป compose จริง) ก่อนขั้นถัดไป
+          docker compose up -d --wait db auth rest storage imgproxy kong mailpit
+
+      - name: Apply migrations + seed (db-migrate · one-shot idempotent)
+        run: |
+          set -euo pipefail
+          # run แบบ foreground — exit code ของ migration เป็น exit ของ step เอง
+          # (AC (a): migration จบ exit 0 ก่อนเทสเริ่ม — ลำดับ "migration ก่อน app เสมอ")
+          docker compose run --rm db-migrate
+
+      - name: Start app (next dev container) + รอ health 200
+        run: |
+          set -euo pipefail
+          docker compose up -d --wait app
+          ok=0
+          for i in $(seq 1 60); do
+            if curl -fsS "$TEST_APP_URL/api/health" >/dev/null 2>&1; then
+              echo "app health: 200 (attempt $i)"
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::app ไม่ตอบ health ที่ $TEST_APP_URL ภายใน 300 วินาที"
+            docker compose logs app --tail 100 || true
+            exit 1
+          fi
+
+      # ---- หัวใจของ ladder: full-suite อนุกรม (fileParallelism: false ใน config จริง) ----
+      - name: "Integration full-suite — npm run test:integration (serial)"
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/integration.log"
+          status=0
+          npm run test:integration 2>&1 | tee "$log" || status=$?
+
+          passed="$(grep -Eo '[0-9]+ passed' "$log" | tail -1 || true)"
+          files_line="$(grep -E 'Test Files' "$log" | tail -1 || true)"
+
+          {
+            echo "## Integration full-suite (serial) — ${{ github.event_name }} \`${{ github.ref_name }}\`"
+            echo ""
+            echo "| รายการ | ผล |"
+            echo "| ------ | ---- |"
+            echo "| vitest (จำนวนเทสผ่าน) | ${passed:-ไม่พบบรรทัดสรุป passed} |"
+            echo "| vitest (ไฟล์) | ${files_line:-ไม่พบบรรทัดสรุป Test Files} |"
+            echo "| โหมด | fileParallelism: false (อนุกรม) · TEST_REQUIRE_APP=1 (ห้าม skip เงียบ) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # silent-skip guard (AC เสริมข้อ 1): config skip ทั้งชุดเมื่อไม่มี
+          # TEST_DATABASE_URL แล้ว "เขียว" ได้ — เขียวแบบ 0 passed จึงถือว่าล้ม
+          n="$(printf '%s' "$passed" | grep -Eo '^[0-9]+' || true)"
+          if [ -z "$n" ] || [ "$n" -eq 0 ]; then
+            echo "::error::integration รายงาน 0 passed (หรือไม่พบสรุป) — silent-skip guard ตัดสิน fail"
+            status=1
+          fi
+
+          if [ "$status" -ne 0 ]; then
+            red="$(grep -E 'FAIL' "$log" | grep -oE 'tests/integration/[A-Za-z0-9._-]+\.test\.ts' | sort -u || true)"
+            {
+              echo ""
+              echo "**ผลรวม: ไม่ผ่าน — ไฟล์ที่แดง (AC (e))**"
+              echo ""
+              if [ -n "$red" ]; then
+                echo '```'
+                echo "$red"
+                echo '```'
+              else
+                echo "(ไม่พบรายชื่อไฟล์ FAIL ใน log — ดู step log ด้านบนเป็นหลักฐาน)"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo ""
+              echo "**ผลรวม: ผ่าน — full-suite serial เขียวบน runner** (N>0 ตาม AC (a))"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+
+      # ---- hygiene ของ runner — ทำงานไม่ว่าผลรอบจะเป็นอะไร (AC เสริมข้อ 3) ----
+      - name: Teardown stack (down -v · if always())
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans || true
+
+      - name: Final summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "**ผลรวม: integration serial ladder ผ่าน** (trigger มือ — ยังไม่ผูก PR/push จนกว่า CTO สั่งตาม A-1)"
+            else
+              echo "**ผลรวม: ไม่ผ่าน** — ดูรายชื่อไฟล์แดงใน summary และ log ของ step integration"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
