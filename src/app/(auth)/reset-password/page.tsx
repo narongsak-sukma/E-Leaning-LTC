@@ -10,6 +10,11 @@ import type { Metadata } from "next";
 
 import { ResetPasswordClient } from "./reset-password-client";
 
+// DCR-FORGOT-STATIC-CSP: หน้านี้เคยถูกตรวจเป็น static prerender — HTML ไม่มี nonce ทำให้ CSP
+// strict-dynamic บลอก hydration ทั้งหน้าบน production build (ฟอร์มตาย ไม่ส่งอีเมล)
+export const dynamic = "force-dynamic";
+
+
 export const metadata: Metadata = {
   title: "ตั้งรหัสผ่านใหม่ — สภาทนายความแห่งประเทศไทย",
   description: "ตั้งรหัสผ่านใหม่จากลิงก์ในอีเมลของระบบฝึกอบรมออนไลน์ สภาทนายความแห่งประเทศไทย",

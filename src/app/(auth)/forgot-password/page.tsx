@@ -13,6 +13,9 @@ import Link from "next/link";
 import { PASSWORD_RESET_REQUEST_MESSAGE } from "@/lib/auth/password-reset";
 
 import { ForgotPasswordForm } from "./forgot-password-form";
+// DCR-FORGOT-STATIC-CSP: static prerender ทำให้ CSP nonce บลอก hydration บน production build
+export const dynamic = "force-dynamic";
+
 
 export const metadata: Metadata = {
   title: "ลืมรหัสผ่าน — สภาทนายความแห่งประเทศไทย",
