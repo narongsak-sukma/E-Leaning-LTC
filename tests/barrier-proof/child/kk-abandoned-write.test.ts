@@ -1,6 +1,6 @@
 /**
  * 8h h1 (ลำคู่ kk) — child file ที่ "ตัวเทส" ถูก runner ตัดที่ 5s กลาง pg_sleep
- * แล้ว body ที่ถูกทิ้งตื่นมา "หลัง release จบ" (~8s) แล้วพยายามเขียนผ่าน
+ * แล้ว body ที่ถูกทิ้งตื่นมา "หลัง release จบ" (~21s ตาม DCR-BARRIER-REBASELINE) แล้วพยายามเขียนผ่าน
  * guardedMarkerInsert — primitive ต้องโยนก่อนแตะ marker (phase ปิดแล้ว) + ledger
  * event 'mutation-rejected' — write หลุดหลังหน้าต่างไม่มีทางลงเงียบๆ
  */
@@ -22,14 +22,14 @@ describe.skipIf(process.env.BARRIER_CHILD !== "1")("8h-kk body ที่ถู�
   }, 20_000);
 
   afterAll(async () => {
-    // teardown เต็มสายรันทันทีหลัง body ถูกตัด (~5.1s) — release จบก่อน body ตื่น
+    // teardown เต็มสายรันทันทีหลัง body ถูกตัด (~5.1s) — release จบก่อน body ตื่น (~21s)
     await guardedAfterAll(KK_FILE, "8h-kk teardown ก่อน body ตื่น", { lifecycleId });
   }, 20_000);
 
   it(
-    "8h-kk body ค้าง pg_sleep 8s — ตัดที่ 5s · ตื่นที่ ~8s แล้วเขียนต้องถูกปฏิเสธ",
+    "8h-kk body ค้าง pg_sleep 20s — ตัดที่ 5s · ตื่นที่ ~21s แล้วเขียนต้องถูกปฏิเสธ",
     async () => {
-      await psql("select pg_sleep(8);", { quiet: true });
+      await psql("select pg_sleep(20);", { quiet: true });
       // —— runner ทิ้งเราไปแล้ว และ release ของไฟล์นี้จบไปแล้วด้วย ——
       let refused: unknown = null;
       try {

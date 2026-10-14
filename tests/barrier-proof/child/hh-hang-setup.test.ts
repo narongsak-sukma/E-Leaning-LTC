@@ -5,11 +5,11 @@
  * ต่างจาก 8e: setup ไม่มีวันเซ็ตเทิล — หลักฐานคือ phase ค้าง setup-running จน
  * afterAll หมด budget แล้ว poison ด้วยเหตุผล setup-settle-budget-exceeded
  *
- * ลำดับเวลา:
- *   t≈0.3s  fileBegin (phase setup-running) → ค้างใน await ตลอดกาล
- *   t≈5.0s  runner ตัด beforeAll
- *   t≈5.2s  afterAll → guardedAfterAll → awaitFileSettled (budget 8s)
- *   t≈13.2s budget หมด → filePoison(setup-settle-budget-exceeded) + โยน
+ * ลำดับเวลา (สเกลเครื่องสำรองตาม DCR-BARRIER-REBASELINE — จุดตัด 5s → per-hook 12.5s):
+ *   t≈4.5s  fileBegin กลับมือ (phase setup-running) → ค้างใน await ตลอดกาล
+ *   t≈12.5s runner ตัด beforeAll
+ *   t≈12.7s afterAll → guardedAfterAll → awaitFileSettled (budget 8s คงเดิม)
+ *   t≈23s   budget หมด → filePoison(setup-settle-budget-exceeded) + โยน
  *           FileSettleError → hook ล้ม (ภายใน timeout 15s ที่ให้ไว้)
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
@@ -21,11 +21,13 @@ export const HH_FILE = "8e2-hh-hang-setup";
 describe.skipIf(process.env.BARRIER_CHILD !== "1")("8e2-hh setup ไม่จบเลย (child)", () => {
   let lifecycleId = "";
 
-  // ห้ามใส่ timeout — ต้องโดนตัดที่ 5s (แล้ว promise ค้างตลอดกาล — ไม่ถือ event loop)
+  // per-hook timeout 12.5s (DCR-BARRIER-REBASELINE) — ต้องโดนตัดหลัง lifecycleId
+  // กลับมือแน่ (config 5s เดิมตัดก่อน fileBegin จบบนเครื่องสำรอง · แล้ว promise ที่ถูกทิ้ง
+  // ค้างตลอดกาลต่อไป — ไม่ถือ event loop)
   beforeAll(async () => {
     lifecycleId = await fileBegin(HH_FILE, "8e2-hh setup ที่ไม่มีวันจบ");
     await new Promise<never>(() => {}); // hang ตลอดกาลโดยตั้งใจ
-  });
+  }, 12_500);
 
   it("8e2-hh body ต้องไม่รัน", () => {
     throw new Error("8e2-hh: body ห้ามรันเมื่อ setup ค้าง");

@@ -1,10 +1,10 @@
 /**
- * 8e — wrapper: setup ที่ถูก runner ทิ้ง (hookTimeout 5s) ยังวิ่งจนจบจริง (F56)
+ * 8e — wrapper: setup ที่ถูก runner ทิ้ง (per-hook timeout 12.5s ตาม DCR-BARRIER-REBASELINE) ยังวิ่งจนจบจริง (F56)
  * และ cleanup ของ afterAll "รอ" ให้ setup เซ็ตเทิลก่อนเริ่ม — พิสูจน์ด้วยลำดับ
  * เวลาใน ledger: ts(setup-complete) < ts(cleanup-start) เสมอ
  *
- * child gg: pg_sleep(12) กลาง setup → runner ตัดที่ 5s → แทรก marker ช้า +
- * setup-complete + setup-settled ที่ ~12.4s (โดย promise ที่ถูกทิ้ง) → afterAll
+ * child gg: pg_sleep(30) กลาง setup → runner ตัดที่ 12.5s → แทรก marker ช้า +
+ * setup-complete + setup-settled ที่ ~35s (โดย promise ที่ถูกทิ้ง) → afterAll
  * ที่รออยู่ปลดล็อก → cleanup TX ลบ marker ช้าด้วย (สร้างก่อน cleanup-start =
  * โดนลบถูกต้อง ไม่ใช่รอดออกมา)
  */
@@ -33,7 +33,7 @@ describe("8e setup ที่ถูกทิ้งยังเซ็ตเทิ�
   }, 60_000);
 
   it(
-    "8e-1 child (gg) ล้ม RC≠0 — beforeAll โดนตัดที่ 5s จริง",
+    "8e-1 child (gg) ล้ม RC≠0 — beforeAll โดนตัดที่ 12.5s จริง (กลาง pg_sleep)",
     async () => {
       const result = await childRun(["tests/barrier-proof/child/gg-abandoned-setup.test.ts"], {
         timeoutMs: 120_000,

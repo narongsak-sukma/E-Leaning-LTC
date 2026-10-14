@@ -166,7 +166,7 @@ export async function parkedPatchOrRetry(input: {
           relation: "public.audit_logs",
           mode: "RowExclusiveLock",
           blockerPids: [input.coordinatorPid],
-          deadlineMs: 10_000,
+          deadlineMs: 25_000,
         },
         `${input.handshakeLabel}-d${tryNo}`,
       );

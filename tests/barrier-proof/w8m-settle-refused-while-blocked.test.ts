@@ -78,7 +78,12 @@ describe("8m settle กลาง lock-wait ต้องปฏิเสธ — �
         );
 
         const waiter = await awaitStuckWaiter(
-          { relation: "public.question_options", mode: "RowExclusiveLock", blockerPids: [coordinator.identity.pid] },
+          {
+            relation: "public.question_options",
+            mode: "RowExclusiveLock",
+            blockerPids: [coordinator.identity.pid],
+            deadlineMs: 25_000,
+          },
           "h8m-handshake",
         );
 

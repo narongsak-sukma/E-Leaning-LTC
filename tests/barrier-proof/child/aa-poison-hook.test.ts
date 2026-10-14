@@ -34,7 +34,7 @@ describe.skipIf(process.env.BARRIER_CHILD !== "1")("8b-aa poison ผ่าน ho
       });
       await insertMarkers(AA_FILE, "aa-setup", 3, "ก่อน drain ล้ม");
     });
-  }, 60_000);
+  }, 150_000);
 
   afterAll(async () => {
     await guardedAfterAll(AA_FILE, "8b-aa afterAll: drain ล้มเพราะ lease ของตัวเอง → poison", {

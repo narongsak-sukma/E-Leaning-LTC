@@ -81,7 +81,12 @@ describe("8k qb PATCH — RPC commit หลัง abort + row คง running จ
         // handshake กลาง — waiter คือ backend ของ RPC (INSERT ติดคิวหลัง SRE ของเรา)
         // 8k ไม่ track pid ต่อ: หลัง abort ไม่มี settle ใด จบด้วย budget poison
         await awaitStuckWaiter(
-          { relation: "public.question_options", mode: "RowExclusiveLock", blockerPids: [coordinator.identity.pid] },
+          {
+            relation: "public.question_options",
+            mode: "RowExclusiveLock",
+            blockerPids: [coordinator.identity.pid],
+            deadlineMs: 25_000,
+          },
           "h8k-handshake",
         );
         await sleep(1_000); // abort 1 วิหลังเห็น waiter

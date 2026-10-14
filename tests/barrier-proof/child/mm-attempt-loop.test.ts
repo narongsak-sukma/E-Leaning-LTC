@@ -192,7 +192,12 @@ describe.skipIf(process.env.BARRIER_CHILD !== "1")("8o(ก) child — attempt lo
 
           // handshake #2 — retry ของ users.ts หลัง sleep 250ms (= dispatch-after-sleep)
           const waiter2 = await awaitStuckWaiter(
-            { relation: "public.audit_logs", mode: "RowExclusiveLock", blockerPids: [coordinator.identity.pid] },
+            {
+              relation: "public.audit_logs",
+              mode: "RowExclusiveLock",
+              blockerPids: [coordinator.identity.pid],
+              deadlineMs: 25_000,
+            },
             `h8o-hs2-a${attempt}`,
           );
 
