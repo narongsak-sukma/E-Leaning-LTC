@@ -1,6 +1,6 @@
 # DCR barrier-rebaseline: สเกลเส้นเวลา scenario ของ barrier-proof suite ตามเครื่องวัดจริง (ตัดลูกต้องตกกลาง sleep หลังจดทะเบียน · เพดาน deadline ตามอัตรา ×2.5 ของแบบแผน)
 
-Filing: ต่อจาก DCR-TEST-HARNESS-PORTABILITY Addendum 3 (ลูกสปอร์นได้แล้วผ่าน process.execPath+vitest.mjs) และ DCR-SUITE-STABILITY-R2 / DCR-GATEWAY-ERRBODY-REBASELINE (หลักคำสอน "เพดาน = ตัวเลขวัด ขยับได้ด้วยการวัดใหม่เท่านั้น อัตรา ~×2.5 ครอบครัวเดียวกัน") · 2026-10-14 · ขอบเขตแคบ: **ไฟล์เทส barrier-proof เท่านั้น (children 4 ไฟล์ + wrapper 3 ไฟล์ + fixture 1 ไฟล์) — ไม่แตะ `src/` · ไม่แตะ `barrier-harness.ts` (ค่า default ทั้งหมดคงเดิม) · ไม่แตะ `vitest.barrier-proof.config.ts` (hookTimeout 5_000 + testTimeout 30_000 คงเดิม — 8c/8d เขียวอยู่กับค่านี้)**
+Filing: ต่อจาก DCR-TEST-HARNESS-PORTABILITY Addendum 3 (ลูกสปอร์นได้แล้วผ่าน process.execPath+vitest.mjs) และ DCR-SUITE-STABILITY-R2 / DCR-GATEWAY-ERRBODY-REBASELINE (หลักคำสอน "เพดาน = ตัวเลขวัด ขยับได้ด้วยการวัดใหม่เท่านั้น อัตรา ~×2.5 ครอบครัวเดียวกัน") · 2026-10-14 · ขอบเขตแคบ: **ไฟล์เทส barrier-proof เท่านั้น — 11 ไฟล์ (children 6: aa/gg/hh/kk/ll/mm · wrappers 3: w8k/w8m/w8i · fixture 1: user-active-fixture · w8e อีกไฟล์แก้ comment อย่างเดียว = แก้ค่าคงที่จริง 10 ไฟล์) — ไม่แตะ `src/` · ไม่แตะ `barrier-harness.ts` (ค่า default ทั้งหมดคงเดิม) · ไม่แตะ `vitest.barrier-proof.config.ts` (hookTimeout 5_000 + testTimeout 30_000 คงเดิม — 8c/8d เขียวอยู่กับค่านี้)**
 
 สถานะ ground truth: **it-barrier-clean-run.log (RUN_ID='pre-it' battery-identical · 07:44:19 local · 1220.56s) = 14 แดง / 47 เขียว / 13 skip ของ 74** — ชุดนี้ไม่เคยถูก re-baseline บนเครื่องสำรองเลย (battery r38 สองรอบแรกตายที่ชั้น spawn ก่อนถึงตัวเทส) ทุกแดงอยู่ในคลาสเครื่องช้าที่วัดไว้แล้ว (psql side-channel 0.5-1.4s/ครั้ง · child vitest boot ~2s · docker op หลายวินาที)
 
@@ -40,22 +40,21 @@ f2 ล้มที่แถว `cleanup-start ts=23:37:34.93` ซึ่งเป
 | 4 | child/gg-abandoned-setup.test.ts:52 | `setupBudgetMs: 25_000` | `62_500` | afterAll เริ่ม ~12.7s · abandoned promise เซ็ตเทิล ~39s → ต้องมี ≥26.3s+poll lag · 25s เดิมไม่พอ · 62.5s = ×2.5 |
 | 5 | child/gg-abandoned-setup.test.ts:54 | `}, 30_000);` (afterAll) | `}, 75_000);` | 12.7 + budget 62.5 คร่อมเพดานเดิม 30s |
 | 6 | child/hh-hang-setup.test.ts:26 | beforeAll ไร้ timeout (ตก config 5s) | `}, 12_500);` | hang เริ่ม ~4.5s → 12.5s ตัดกลาง hang หลัง lifecycleId กลับมือแน่นอน |
-| 7 | child/kk-abandoned-write.test.ts:40 | `pg_sleep(8)` | `pg_sleep(20)` | ตื่นต้องช้ากว่า teardown-settled (~5.2s+6-14s=11.2-19.2s) → ตื่นที่ ~21s มี margin ~2s เท่า design เดิม (9s ตื่น vs 7.1s settle) |
+| 7 | child/kk-abandoned-write.test.ts:32 | `pg_sleep(8)` | `pg_sleep(20)` | ตื่นต้องช้ากว่า teardown-settled (~5.2s+6-14s=11.2-19.2s) → ตื่นที่ ~21s มี margin ~2s เท่า design เดิม (9s ตื่น vs 7.1s settle) |
 | 8 | child/ll-hold-open.test.ts:9 | `9_000` hold | `22_500` | กระบวนการต้องมีชีวิตเกินตื่นของ kk (~21s) — หน้าที่เดิมของ ll |
 | 9 | child/ll-hold-open.test.ts:11 | `}, 15_000);` | `}, 37_500);` | คร่อม hold ใหม่ |
 | 10 | w8k-qb-patch-commit-after-abort.test.ts:83-86 | awaitStuckWaiter ไร้ deadline (default 10s) | เพิ่ม `deadlineMs: 25_000` | วัดล้ม 10s (11.4s ไม่เห็น) · default ของ harness ไม่ขยับ |
 | 11 | w8m-settle-refused-while-blocked.test.ts:80-83 | รูปเดียวกัน | เพิ่ม `deadlineMs: 25_000` | วัดล้ม 10s สาย app เดียวกัน |
-| 12 | user-active-fixture.ts:167 | `deadlineMs: 10_000` | `deadlineMs: 25_000` | วัดล้ม (h8o-hs1-a1-d1 ที่ 19.3s) · ใช้ร่วมโดย 8o/mm |
+| 12 | user-active-fixture.ts:169 | `deadlineMs: 10_000` | `deadlineMs: 25_000` | วัดล้ม (h8o-hs1-a1-d1 ที่ 19.3s) · ใช้ร่วมโดย 8o/mm |
 | 13 | child/mm-attempt-loop.test.ts:194-198 | awaitStuckWaiter ไร้ deadline | เพิ่ม `deadlineMs: 25_000` | handshake#2 = retry INSERT สาย app เดียวกับจุด 12 (คำนวณ ~10-15s) |
 | 14 | w8i-held-session-end.test.ts:33 | `pg_sleep(15)` | `pg_sleep(37.5)` | รักษาความหมายเพดานใหม่ 20s (< sleep เสมอ = พิสูจน์ว่าไม่รอ query จบ) |
 | 15 | w8i-held-session-end.test.ts:39 | `activeDeadline + 5_000` | `+ 12_500` | poll findBackendByNonce ก้าวละ ~1.4s — 5s ได้แค่ ~3 รอบ ชิด |
 | 16 | w8i-held-session-end.test.ts:52 | `killAfterMs: 4_000` | `10_000` | kill-path วัด ~9-14s |
-| 17 | w8i-held-session-end.test.ts:55 | `toBe
 | 17 | w8i-held-session-end.test.ts:55 | `toBeLessThan(8_000)` | `toBeLessThan(20_000)` | วัดจริง 14229ms · 20s = ×2.5 |
 | 18 | w8i-held-session-end.test.ts:60 | `graceDeadline + 3_000` | `+ 7_500` | ×2.5 ครอบครัวเดียวกัน |
 | 19 | w8i-held-session-end.test.ts:82 | `goneDeadline + 5_000` | `+ 12_500` | poll หลัง terminate ก้าวละ ~1.4s |
 | 20 | w8i-held-session-end.test.ts:97 | `}, 60_000);` | `}, 90_000);` | worst-case คำนวณใต้ค่าใหม่ ~59s — headroom 1.0x ขัดหลักคำสอน · 90s = 1.5x worst |
-| 21 | header comments ของ child/gg · hh · kk · ll + w8e · w8i | timeline เดิม 5s/12s/8s/9s | อัปเดตเป็นเส้นเวลาใหม่ | comment คือบันทึก design — ต้องตรงตัวเลขจริง |
+| 21 | header comments ของ child/gg · hh · kk · ll + w8e · w8i · inline comment gg:35 + hh:24 ("ห้ามใส่ timeout — หัวใจของ 8e" เดิม) | timeline เดิม 5s/12s/8s/9s | อัปเดตเป็นเส้นเวลาใหม่ + เหตุผล per-hook 12.5s แทน config 5s | comment คือบันทึก design — ต้องตรงตัวเลขจริง · หมายเหตุ: วลี "ทิ้ง hook จริงที่ 5s" ใน header ของ vitest.barrier-proof.config.ts เว่อร์สำหรับครอบครัวที่สเกลแล้ว (config เองไม่ถูกแตะ — 8c/8d ยังตัดที่ 5s จริง) — บันทึกไว้ที่นี่โดยไม่แก้ไฟล์ config |
 
 **จุดที่พิจารณาแล้วไม่ขยับ (มีเหตุผลจดไว้):** config `hookTimeout: 5_000` (หัวใจของ 8c — budget 8s ของ cc ต้องชนะ cut ที่ 5s · 8c/8d เขียวอยู่) · `setupBudgetMs: 8_000` ของ hh (เส้นตายเชิง scenario "budget ต้องเป็น deadline" — margin คำนวณ: poison ตก ~23.6s < afterAll 15s ครบที่ 27.7s) · afterAll 20s ของ aa/kk · childRun/wrapper timeout ทั้งหมด (150s/200s/240s — วัดแล้วไม่โดน) · default ทั้งสามของ barrier-harness.ts (fnBudget 60s · settle 30s · awaitStuckWaiter 10s — จุดที่เขียวอยู่กับ default ไม่แตะ) · 8f ทั้งไฟล์ (ดูการค้นพบกลางทาง) · 8b-4 (cascade — ในกลไกที่ซ่อมแล้วโลก settle ก่อน 8b-1 คืนค่า · คำนวณ ~10s < 30s)
 
@@ -83,3 +82,10 @@ f2 ล้มที่แถว `cleanup-start ts=23:37:34.93` ซึ่งเป
 ## ฉันทามติ + GO (รอ)
 
 - รอ pm (scope test-infra แคบ + หลัก "ขยับได้เมื่อวัดใหม่" ครบเงื่อนไขไหม + การค้นพบ 8f: ไม่แก้เทส แก้ขั้นตอน) + qa (จุด ×2.5 ทั้ง 20 + รายการ "ไม่ขยับ" ยอมรับไหม + แผนพิสูจน์ครบไหม) ผ่าน bridge — fast round
+
+## ฉันทามติ + GO (สมบูรณ์)
+
+- **pm CONSENT (ผ่าน bridge · 2026-10-14)**: scope ถูกต้อง (test-infra แคบ · ไม่แตะ harness/config/src) · การวัดใหม่ครบเงื่อนไขหลัก "ขยับได้เมื่อวัดใหม่" · การค้นพบ 8f (ledger ปนเปื้อนข้ามรัน · battery มีกันชนอยู่แล้ว) ยอมรับทางแก้ "แก้ขั้นตอน ไม่แก้เทส" — **binding fold-in ข้อ 1**: แก้เลขขอบเขตใน header ให้ตรงจริง (11 ไฟล์ · แก้ค่าคงที่จริง 10 · w8e comment-only)
+- **qa CONSENT (ผ่าน bridge · 2026-10-14)**: ตัวเลขทั้งหมดตรวจครบกับ timestamp จริงของ ledger · ข้อเสนอ stale-row พิสูจน์แล้ว · margin ของจุดที่ไม่ขยับคำนวณแล้ว — **binding fold-ins**: (ข้อ 2) เคลียร์แถวตาราง #17 ตอนก่อน implement · (ข้อ 3) แก้ line drift สองจุด (kk pg_sleep อยู่ :32 ไม่ใช่ :40 · fixture deadlineMs อยู่ :169 ไม่ใช่ :167) · (ข้อ 5) จุด 21 ขยายคลุม inline comment เดิม gg:35 + hh:24 ที่จัดการขัดแย้งกับแก้ #2/#6 + บันทึกว่าวลี "ทิ้ง hook จริงที่ 5s" ใน header ของ config เว่อร์สำหรับครอบครัวที่สเกล (แต่ config ไม่แตะ — 8c/8d ยังตัดที่ 5s จริง)
+- **watchpoint ที่ประกาศล่วงหน้า (qa arithmetic · จุด 16)**: killAfterMs 4s→10s เป็นการบวกเข้าตรง ๆ ในระยะเวลา end() — end ที่วัด 14.2s **รวม wait 4s เดิมอยู่แล้ว** ดังนั้นแบบใหม่ ≈ 20.2s อาจแปรงเพดานใหม่ 20s — 8i คือ watchpoint อันดับหนึ่งของรอบพิสูจน์: ถ้าแดงที่ toBeLessThan(20_000) นั่นคือเลขคณิตไม่ใช่ latency — **ทางเลือกที่ตัดสินด้วยการวัด ประกาศไว้ก่อน**: (ก) คง killAfterMs 4s เดิม (กลไก kill วัดเขียว — ที่แดงจริงคือเพดาน 8s เท่านั้น) หรือ (ข) ขยับเพดานตามแบบแผนด้วยตัวเลขที่วัดได้จากรอบพิสูจน์ — ห้ามตัดสินด้วยการเดา
+- **GO (CTO · 2026-10-14 ผ่าน bridge)**: ฉันทามติครบทั้งสองฝ่าย + fold-ins ข้อ 1-5 พับเข้า spec ก่อน implement → **GO ทั้ง 21 จุด** · ลำดับ: implement → tsc/eslint → สุขลักษณะ ledger (ข้อ 0) → clean-run เต็มชุด detached (61 เขียว + 13 self-skip + child markers จริง) → battery r38 detached 13/13 → merge --no-ff + RISK ACCEPTANCE + ตาราง baseline ceiling รวม barrier → BL-015 ปิด → UAT
