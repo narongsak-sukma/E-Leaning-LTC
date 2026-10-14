@@ -156,6 +156,25 @@ function dockerCompose(args: string[]): Promise<{ code: number; stderr: string }
   });
 }
 
+/** DCR-SUITE-STABILITY-R2 จุด 1 (Amendment 2 — sweep completion): docker start ตรง
+ * ไม่ผ่าน compose start ซึ่งประเมิน depends_on app:service_healthy ใหม่
+ * (กลไก L797 — app flap ตอนแบกโหลด battery ทำให้ start ล้ม) · deadline 60s ตาม binding
+ * คืน exit code — nonzero = ผู้เรียกจ่ายเสียง startMailer-loud ตามแบบแผนของจุดที่เรียก (ทั้งสองจุดใช้ literal token เดียวกัน) */
+function dockerStartMailer(): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn("docker", ["start", "ltc-dev-mailer"], { cwd: REPO_ROOT });
+    const guard = setTimeout(() => child.kill(), 60_000);
+    child.on("error", () => {
+      clearTimeout(guard);
+      resolve(-1);
+    });
+    child.on("close", (code) => {
+      clearTimeout(guard);
+      resolve(code ?? -1);
+    });
+  });
+}
+
 async function containerRunning(container: string): Promise<boolean> {
   return new Promise((resolve) => {
     const child = spawn("docker", ["inspect", "--format", "{{.State.Running}}", container], { cwd: REPO_ROOT });
@@ -410,7 +429,13 @@ export async function openIsolatedWindow(opts: {
       });
       // restore best-effort แล้วโยน — ผู้เรียกไม่ได้ window
       await resumeCronJobs(activeIds).catch(() => undefined);
-      if (mailerWasRunning) await dockerCompose(["start", "mailer"]);
+      if (mailerWasRunning) {
+        // Amendment 2: ทางเบี่ยงกลับโลกหลัง drain-timeout — เสียง grep ได้แต่ไม่โยนทับ WindowError หลัก
+        const code = await dockerStartMailer();
+        if (code !== 0) {
+          await ledgerWrite("note", { event: "startMailer-loud", site: "openIsolatedWindow-drain-fail-restore", code });
+        }
+      }
       await psql(`update test_infra.worker_gate set is_open = true, updated_at = now() where id = 1;`);
       await windowSet("open", `${opts.label}-drain-fail-restore`);
       await releaseHolder(opts.holderId);
@@ -441,8 +466,14 @@ export async function releaseWindow(handle: WindowHandle): Promise<ReleaseResult
   await resumeCronJobs(restoreIds);
   let mailerRestored = false;
   if (handle.mailerWasRunning) {
-    const start = await dockerCompose(["start", "mailer"]);
-    mailerRestored = start.code === 0;
+    // Amendment 2: docker start ตรง + fail-loud — nonzero เขียน note ก่อนแล้วโยน
+    // (ลำดับ binding: การโยนข้ามหาง releaseWindow ที่ afterEach + beforeEach ถัดไป + stack-integrity คลุมอยู่)
+    const code = await dockerStartMailer();
+    if (code !== 0) {
+      await ledgerWrite("note", { event: "startMailer-loud", site: "releaseWindow", code });
+      throw new Error(`startMailer-loud: docker start ltc-dev-mailer ล้ม (code=${code}) — ปิด release ก่อนเปิด gate`);
+    }
+    mailerRestored = true;
   } else {
     mailerRestored = true; // เดิมก็ไม่รัน — "คืนตาม snapshot" สำเร็จโดยนิยาม
   }

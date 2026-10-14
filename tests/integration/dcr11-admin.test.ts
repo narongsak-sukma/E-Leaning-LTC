@@ -642,6 +642,6 @@ describe.skipIf(!DB_URL)(
                 'entity_id','context','request_id');
       `);
       expect(cols.length).toBe(9); // ชุดคอลัมน์ที่ endpoint คืนมีจริงในตาราง
-    }, 90_000);
+    }, 225_000); // DCR-SUITE-STABILITY-R2 Amendment 3: เพดาน 90s→225s (×2.5) — แกนวัด battery self-load ×2.24 (r38 ล้มที่ 90s พอดีไร้ assertion fail)
   },
 );
