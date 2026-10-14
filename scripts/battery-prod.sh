@@ -13,4 +13,10 @@ export HEAP_CONTAINER="${HEAP_CONTAINER:-ltc-prod-app}"
 export E2E_REQUIRE_PROD="${E2E_REQUIRE_PROD:-1}"
 
 echo "battery-prod: E2E_BASE_URL=${E2E_BASE_URL} HEAP_CONTAINER=${HEAP_CONTAINER} E2E_REQUIRE_PROD=${E2E_REQUIRE_PROD}"
+# (PM-2 binding · battery-rate-override amendment) เสียงสะท้อนค่า rate-limit ที่ instance
+# ทำงานอยู่จริงตอนเริ่ม battery — re-up โดยไม่ส่ง PROD_RATE_LIMIT_* จะเห็นทันทีว่ากลับ
+# เป็น default (10/5) = คลาสแดงกลับมา ไม่เงียบ
+EFF_AUTH=$(docker exec ltc-prod-app printenv RATE_LIMIT_AUTH_PER_MIN 2>/dev/null || echo "?")
+EFF_PWD=$(docker exec ltc-prod-app printenv RATE_LIMIT_PWD_RESET_PER_HOUR 2>/dev/null || echo "?")
+echo "battery-prod: effective RATE_LIMIT_AUTH_PER_MIN=${EFF_AUTH} RATE_LIMIT_PWD_RESET_PER_HOUR=${EFF_PWD} (battery expects 60/60 — default 10/5 = self-saturation class returns)"
 exec node scripts/battery-run.mjs "$@"
