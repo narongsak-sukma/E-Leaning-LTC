@@ -18,5 +18,7 @@ echo "battery-prod: E2E_BASE_URL=${E2E_BASE_URL} HEAP_CONTAINER=${HEAP_CONTAINER
 # เป็น default (10/5) = คลาสแดงกลับมา ไม่เงียบ
 EFF_AUTH=$(docker exec ltc-prod-app printenv RATE_LIMIT_AUTH_PER_MIN 2>/dev/null || echo "?")
 EFF_PWD=$(docker exec ltc-prod-app printenv RATE_LIMIT_PWD_RESET_PER_HOUR 2>/dev/null || echo "?")
-echo "battery-prod: effective RATE_LIMIT_AUTH_PER_MIN=${EFF_AUTH} RATE_LIMIT_PWD_RESET_PER_HOUR=${EFF_PWD} (battery expects 60/60 — default 10/5 = self-saturation class returns)"
+EFF_PBU=$(docker exec ltc-prod-app printenv PUBLIC_BASE_URL 2>/dev/null || echo "?")
+EFF_CERT=$(docker exec ltc-prod-app printenv CERT_PUBLIC_BASE_URL 2>/dev/null || echo "?")
+echo "battery-prod: effective RATE_LIMIT_AUTH_PER_MIN=${EFF_AUTH} RATE_LIMIT_PWD_RESET_PER_HOUR=${EFF_PWD} PUBLIC_BASE_URL=${EFF_PBU} CERT_PUBLIC_BASE_URL=${EFF_CERT} (battery expects 60/60 + :3001/:3001 — defaults 10/5 or :3000 = red classes return)"
 exec node scripts/battery-run.mjs "$@"

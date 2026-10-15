@@ -62,7 +62,7 @@ services:
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@db:5432/postgres
       GOTRUE_SITE_URL: http://localhost:3000
-      GOTRUE_URI_ALLOW_LIST: http://localhost:3000/**
+      GOTRUE_URI_ALLOW_LIST: http://localhost:3000/**,http://localhost:3001/**
       GOTRUE_DISABLE_SIGNUP: "false"
       GOTRUE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?set in .env}
       GOTRUE_JWT_EXP: "3600"
@@ -300,23 +300,26 @@ services:
         required: false
     environment:
       # ---- override ปลายทางให้มองผ่าน compose network (มุมมอง host อยู่ใน .env) ----
-      # (battery-rate-override amendment) รายการ environment: นี้ OUTRANK env_file (.env)
-      # สำหรับสองตัวแปรนี้เท่านั้น — ค่า default = prod parity (10 และ 5)
-      # การส่ง PROD_RATE_LIMIT_* ตอน up -d จะยกให้เฉพาะ instance นี้ (battery)
+      # (battery-rate-override + PBU-port-alignment amendments) รายการ environment:
+      # นี้ OUTRANK env_file (.env) สำหรับสี่ตัวแปรที่ระบุเจตนี้ (rate สอง + base-url สอง)
+      # — ค่า default = มุมมอง parity ของ instance นี้เอง (หลังจัดแนวพอร์ต 3001:3001 ค่า :3000 = origin ตาย)
       RATE_LIMIT_AUTH_PER_MIN: "${PROD_RATE_LIMIT_AUTH_PER_MIN:-10}"
       RATE_LIMIT_PWD_RESET_PER_HOUR: "${PROD_RATE_LIMIT_PWD_RESET_PER_HOUR:-5}"
+      PUBLIC_BASE_URL: "${PROD_PUBLIC_BASE_URL:-http://localhost:3001}"
+      CERT_PUBLIC_BASE_URL: "${PROD_CERT_PUBLIC_BASE_URL:-http://localhost:3001}"
+      PORT: 3001
       SUPABASE_URL: http://kong:8000
       SMTP_HOST: mailpit
       SUPABASE_DB_POOLER_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
       NODE_ENV: production
     ports:
-      - "3001:3000"
+      - "3001:3001"
     volumes:
       - .:/app
       - node_modules:/app/node_modules
       - next_cache_prod:/app/.next
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || wget -qO- http://127.0.0.1:3000/"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/health || wget -qO- http://127.0.0.1:3001/"]
       interval: 15s
       timeout: 10s
       retries: 10
