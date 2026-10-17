@@ -1,0 +1,8 @@
+{
+  "name": "LTC E-Learning — สภาทนายความแห่งประเทศไทย",
+  "description": "ระบบ E-Learning และ Credit Bank สภาทนายความในพระบรมราชูปถัมภ์ อบรมความรู้กฎหมายสำหรับประชาชนและทนายความเพื่อการต่อใบอนุญาตว่าความ",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

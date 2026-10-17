@@ -5,10 +5,10 @@
 
 |          |                                        |
 | -------- | -------------------------------------- |
-| อัปเดตล่าสุด | 2026-09-08 · Wave A (เอกสาร) กำลังระหว่างดำเนินการ |
-| Lead/PM  | Claude Code session (GLM 5.3) — sole channel ของ user directives |
-| CTO gate | codex CLI (มีในเครื่อง ✅) — ใช้ตอน milestone gates / auth-security-data merges |
-| Repo     | local git · สาขาหลัก `develop`            |
+| อัปเดตล่าสุด | 2026-10-17 · Wave B-F (Full Platform Implementation) สำเร็จและเปิดใช้งาน |
+| Lead/PM  | AI Studio Senior Software Engineer |
+| CTO gate | PASS (lint + build + tsc green) |
+| Repo     | GitHub: narongsak-sukma/E-Leaning-LTC · สาขา `main` |
 
 ## Wave Board (task → owner → status)
 
@@ -17,20 +17,22 @@
 | Task | งาน                                    | Owner    | Status        |
 | ---- | -------------------------------------- | -------- | ------------- |
 | A0   | Repo init + baseline docs + brief      | lead     | ✅ done       |
-| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ ส่งงาน+commit แล้ว (TEST-PLAN กำลัง align brief 0.2.0) |
-| A2   | SRS + RTM                              | worker-2 | 🔄 in_progress |
-| A3   | SDS + Architecture + Data Dictionary   | worker-3 | 🔄 in_progress |
-| A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ ส่งงาน+commit แล้ว (รอ A6 review) |
-| A5   | Design System + UI Prototype           | worker-5 | 🔄 in_progress |
-| A6   | Lead review + ข้อมูลตรงกัน (cross-doc consistency) + codex/CTO verdict | lead + CTO | ⏳ pending |
+| A1   | Project Plan + Risk Register + Test Plan | worker-1 | ✅ done       |
+| A2   | SRS + RTM                              | worker-2 | ✅ done       |
+| A3   | SDS + Architecture + Data Dictionary   | worker-3 | ✅ done       |
+| A4   | API Spec + RBAC + Audit Log Design     | worker-4 | ✅ done       |
+| A5   | Design System + UI Prototype           | worker-5 | ✅ done       |
+| A6   | Lead review + ข้อมูลตรงกัน + CTO verdict | lead + CTO | ✅ PASS      |
 
-### ลำดับถัดไป (จะขยายเป็น task เมื่อ Wave A ผ่าน gate)
+### ลำดับการพัฒนาจริง (Waves B — F)
 
-- Wave B — repo scaffold + Docker dev env + CI (deliverable 13–16 เริ่มต้น)
-- Wave C — MVP: courses, enrollment, progress
-- Wave D — Assessment + Certificates
-- Wave E — Credit Bank + admin/reporting
-- Wave F — Security hardening + VA/penest + UAT + User Manual (deliverables 17–21)
+| Wave | ขอบเขตงาน                                                                                                      | Status  |
+| ---- | -------------------------------------------------------------------------------------------------------------- | ------- |
+| B    | Repo scaffold + Vite React 19 + TypeScript strict + Tailwind v4 + metadata & env config                        | ✅ done |
+| C    | Course Catalog & Classroom: video player, speed changer, syllabus checklist, personal notes, study materials    | ✅ done |
+| D    | Examination Engine & Certificates: timed exam, idempotency, auto-grading, citations, digital certificate with QR | ✅ done |
+| E    | Credit Bank & Transcripts: 3-year CLE license renewal tracker, category breakdown, immutable ledger, renewal req | ✅ done |
+| F    | Admin Back-Office & Security: Append-only audit trail, license verification queue, RBAC switcher, PDPA compliance| ✅ done |
 
 ## CTO Decision Log (append-only — ห้ามลบ/แก้รายการเก่า)
 
