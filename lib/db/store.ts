@@ -1866,6 +1866,9 @@ export function writeDb(db: LtcDatabase): void {
   } catch {
     // Ignore filesystem errors in restricted containers
   }
+  import("@/lib/supabase/server")
+    .then((mod) => mod.pushDbStateToSupabase(db))
+    .catch(() => {});
 }
 
 export function resetDbToSeed(): LtcDatabase {

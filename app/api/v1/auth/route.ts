@@ -15,6 +15,11 @@ import {
   writeDb,
 } from "@/lib/db/store";
 import { hasBackofficeAccess, requiresMfa } from "@/lib/domain/ltc-logic";
+import {
+  authenticateWithSupabaseAuth,
+  ensureSupabaseSeeded,
+  upsertSupabaseAuthUser,
+} from "@/lib/supabase/server";
 
 const EMAIL_ALIASES: Record<string, string> = {
   "lawyer@ltc.or.th": "thanakorn@ltc.or.th",
@@ -25,6 +30,7 @@ const EMAIL_ALIASES: Record<string, string> = {
 
 export async function GET(req: NextRequest) {
   const db = readDb();
+  const supabaseStatus = await ensureSupabaseSeeded(db);
   const session = await resolveServerSession(req, db);
 
   const demoPersonas = db.profiles.map((p) => {
@@ -46,6 +52,7 @@ export async function GET(req: NextRequest) {
       authenticated: false,
       session: null,
       demoPersonas,
+      supabaseStatus,
     });
   }
 
@@ -77,6 +84,7 @@ export async function GET(req: NextRequest) {
       notifications: unreadNotifications,
     },
     demoPersonas,
+    supabaseStatus,
   });
 }
 
@@ -175,6 +183,13 @@ export async function POST(req: NextRequest) {
     const needsMfa = requiresMfa(roles);
     const token = createSessionRecord(db, matchedProfile.id, portal, "aal1");
 
+    // Authenticate & verify JWT against SUPABASE_JWKS_URL
+    await ensureSupabaseSeeded(db);
+    const supaAuth = await authenticateWithSupabaseAuth(
+      matchedProfile.email,
+      matchedProfile.passwordHash || "Password123!",
+    );
+
     appendAuditLog(db, {
       eventType: portal === "backoffice" ? "BACKOFFICE_LOGIN" : "FRONTOFFICE_LOGIN",
       actorUserId: matchedProfile.id,
@@ -182,7 +197,7 @@ export async function POST(req: NextRequest) {
       actorRole: roles.join(","),
       targetTable: "sessions",
       targetId: matchedProfile.id,
-      summaryTh: `เข้าสู่ระบบผ่านพอร์ทัล ${portal === "backoffice" ? "Backoffice (เจ้าหน้าที่/ผู้สอน)" : "Frontoffice (ผู้เรียน)"}`,
+      summaryTh: `เข้าสู่ระบบผ่านพอร์ทัล ${portal === "backoffice" ? "Backoffice (เจ้าหน้าที่/ผู้สอน)" : "Frontoffice (ผู้เรียน)"}${supaAuth.ok ? ` · ยืนยัน Supabase JWT (kid: ${supaAuth.jwksKid})` : ""}`,
     });
     writeDb(db);
 
@@ -192,6 +207,8 @@ export async function POST(req: NextRequest) {
       portal,
       requiresMfaStepUp: needsMfa,
       mfaHintCode: needsMfa ? "123456" : null,
+      supabaseJwtVerified: supaAuth.ok,
+      supabaseJwksKid: supaAuth.jwksKid ?? null,
       user: {
         id: matchedProfile.id,
         displayName: matchedProfile.displayName,
@@ -398,6 +415,13 @@ export async function POST(req: NextRequest) {
     }
 
     const token = createSessionRecord(db, newUserId, "frontoffice", "aal1");
+    await upsertSupabaseAuthUser({
+      email,
+      password,
+      displayName,
+      ltcProfileId: newUserId,
+      roles: ["citizen"],
+    });
     writeDb(db);
 
     const res = NextResponse.json({
