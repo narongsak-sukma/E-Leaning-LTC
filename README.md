@@ -1,41 +1,59 @@
-# LTC E-Learning — ระบบ E-Learning สภาทนายความแห่งประเทศไทย
+# LTC E-Learning — ระบบอีเลิร์นนิ่งและคลังหน่วยกิตดิจิทัล สภาทนายความ ในพระบรมราชูปถัมภ์
 
-E-Learning platform for the **Lawyers Council of Thailand (สภาทนายความแห่งประเทศไทย)** —
-การเรียนรู้ออนไลน์ระดับมาตรฐานสากล (Coursera / university-LMS grade) สำหรับ:
+แพลตฟอร์มการเรียนรู้ออนไลน์ การสอบวัดผลปลายหลักสูตร การตรวจสอบใบอนุญาตว่าความ (ทล.) และระบบคลังหน่วยกิตดิจิทัล (CPE Credit Bank) สำหรับ **สภาทนายความ ในพระบรมราชูปถัมภ์ (Lawyers Council of Thailand)** พัฒนาตามสถาปัตยกรรม **Next.js 15 App Router + BFF API-Only Security Architecture** แยกส่วนพอร์ทัลผู้เรียน (Frontoffice) และพอร์ทัลบริหารจัดการ (Backoffice) เชื่อมต่อฐานข้อมูลกลางชุดเดียวกันผ่าน API ที่มีระบบตรวจสอบสิทธิ์ (RBAC 8 บทบาท + MFA Step-Up AAL2)
 
-- 🎓 ประชาชนทั่วไป — หลักสูตรเพิ่มความรู้กฎหมาย
-- ⚖️ ทนายความ — การอบรมเพิ่มพูนความรู้ + สอบรับประกาศนียบัตรเพื่อต่อใบอนุญาตว่าความ
-- 🏦 Credit Bank — ติดตาม/สะสมคุณวุฒิตามรอบต่ออายุใบอนุญาต
-- 🛠️ เจ้าหน้าที่ — ระบบบริหารจัดการหลักสูตร การสอบ ผู้ใช้ และรายงาน
+---
 
-## Stack (ตัดสินแล้ว ดู `docs/00-baseline/PROJECT-BRIEF.md`)
+## 1. สถาปัตยกรรม 2 เว็บพอร์ทัล (Dual Web Interfaces)
 
-| Layer     | เทคโนโลยี                                                |
-| --------- | ------------------------------------------------------- |
-| Frontend  | Next.js 15 (App Router) + TypeScript strict + Tailwind |
-| API/BFF   | Next.js Route Handlers + Server Actions + zod           |
-| Data/Auth | Supabase (PostgreSQL + Auth + Storage + RLS ทุกตาราง)   |
-| Dev       | 100% local Docker (Supabase local stack)                |
-| Prod      | 100% cloud — Vercel + Supabase Cloud + Cloudflare       |
+### 1.1 พอร์ทัลผู้เรียนและประชาชน (Frontoffice Learner Portal)
+- **หน้าเข้าสู่ระบบและลงทะเบียนผู้เรียน (`/login`)**: รองรับทั้ง **ทนายความ (Lawyer)** และ **ประชาชนทั่วไป (Citizen)** พร้อมการให้ความยินยอมคุ้มครองข้อมูลส่วนบุคคล (PDPA Consent)
+- **หน้าแรกและแคตตาล็อกหลักสูตร (`/` และ `/courses/[id]`)**: ค้นหา กรองตามหมวดหมู่/กลุ่มเป้าหมาย (`all` หรือ `lawyer_only`) และดูโครงสร้างบทเรียนพร้อมเกณฑ์หน่วยกิต CPE
+- **แดชบอร์ดผู้เรียน (`/my/courses`)**: ติดตามความคืบหน้าการเรียนรายหลักสูตร, แถบวัดความคืบหน้าหน่วยกิตสะสมรอบปี พ.ศ. 2569 (`8 / 12 หน่วยกิต CPE`), และทางลัดเข้าห้องเรียน/ห้องสอบ
+- **ห้องเรียนออนไลน์ (`/courses/[id]/learn`)**: รองรับบทเรียนวิดีทัศน์ (Video Lecture), เอกสารประกอบและคำพิพากษาศาลฎีกา (Legal Document), และแบบฝึกหัดท้ายโมดูล (Knowledge Check) พร้อมบันทึกความคืบหน้าลงฐานข้อมูลจริง
+- **ห้องสอบวัดผลปลายหลักสูตร (`/courses/[id]/exam`)**: ระบบสุ่มชุดข้อสอบ บันทึกคำตอบอัตโนมัติ ติดธงทบทวน ตรวจให้คะแนนรายโมดูล (Module Breakdown) เปิดเฉลยตามนโยบาย `after_final_attempt` (Invariant D84) และออกใบประกาศนียบัตรพร้อมบันทึกหน่วยกิต CPE อัตโนมัติ
+- **สมุดสะสมหน่วยกิต (`/my/credits`)**: แสดงรายการเดินบัญชีหน่วยกิตแบบ Append-only (`accrual`, `adjustment`, `reversal`, `expiry`)
+- **ประกาศนียบัตรดิจิทัล (`/my/certificates`)**: แสดงใบประกาศนียบัตรดิจิทัลพร้อมรหัสตรวจสอบ `LTC-YYYY-XXXXXX`
+- **ยื่นตรวจสอบใบอนุญาตว่าความ (`/my/license`)**: สำหรับผู้เรียนที่ต้องการยื่นเลขใบอนุญาตทนายความ (ทล.) เพื่อให้นายทะเบียนตรวจสอบและยกระดับบทบาทเป็น `lawyer`
+- **ประวัติการสอบ (`/my/attempts`) และข้อมูลส่วนตัว & PDPA (`/my/profile`)**
+- **ระบบตรวจสอบใบประกาศนียบัตรสาธารณะ (`/verify` และ `/verify/[code]`)**: ตรวจสอบความถูกต้องของใบประกาศนียบัตร (`Valid` / `Revoked` / `Not Found`) โดยปกปิดข้อมูลส่วนบุคคลตามหลัก PDPA
 
-## โครงสร้างเอกสาร (doc-first)
+### 1.2 พอร์ทัลบริหารจัดการสำหรับเจ้าหน้าที่และผู้สอน (Backoffice Management Portal)
+- **หน้าเข้าสู่ระบบบุคลากรและผู้สอน (`/backoffice/login`)**: แยกออกจากหน้าล็อกอินผู้เรียนอย่างชัดเจน บังคับใช้การยืนยันตัวตนสองชั้น (**2-Step MFA / TOTP 6 หลัก ระดับ `aal2`**) สำหรับบุคลากรและผู้สอนทุกบทบาท
+- **ภาพรวมระบบบริหารจัดการ (`/admin/dashboard`)**: แสดง KPI หลัก, คิวหลักสูตรรออนุมัติเผยแพร่ (`pending_review`), คิวตรวจสอบใบอนุญาตทนายความของนายทะเบียน, การตั้งค่า Feature Flag (`cert_auto_issue`), และบันทึกเหตุการณ์ความปลอดภัยล่าสุด (Immutable Security Audit Log)
+- **จัดการหลักสูตร (`/admin/courses`)**: สร้างหลักสูตรใหม่ ส่งตรวจ (`pending_review`) อนุมัติและเผยแพร่สู่พอร์ทัลผู้เรียน (`published`) หรือระงับการเผยแพร่ (`archived`)
+- **คลังข้อสอบและเกณฑ์สอบ (`/admin/question-bank`)**: เพิ่มข้อสอบรายข้อพร้อมคำอธิบายข้อกฎหมาย และกำหนดเกณฑ์คะแนนผ่านขั้นต่ำ (`passPct`) / จำนวนครั้งที่สอบได้ (`maxAttempts`)
+- **ตรวจสอบใบอนุญาตทนายความ (`/admin/licenses`)**: นายทะเบียน (`staff:registrar`) อนุมัติหรือปฏิเสธคำขอใบอนุญาตว่าความ (การอนุมัติจะผูกใบอนุญาตและมอบบทบาท `lawyer` แบบ Atomic พร้อมบันทึก Audit Log)
+- **ทะเบียนใบประกาศนียบัตร (`/admin/certificates`)**: ออกใบประกาศนียบัตรเพิ่มเติม (Manual Issue) หรือเพิกถอนใบประกาศนียบัตร (`revoked`) ซึ่งจะสร้างรายการหักลบหน่วยกิต (`reversal`) ในสมุดบัญชีหน่วยกิตโดยอัตโนมัติ
+- **เกณฑ์และสมุดบัญชีหน่วยกิต (`/admin/credits`)**: ปรับปรุงหน่วยกิตพิเศษ (`adjustment`) พร้อมระบุเหตุผลตามระเบียบสภาทนายความ
+- **ผู้ใช้งานและสิทธิ์ RBAC (`/admin/users`)**: มอบหรือเพิกถอนบทบาททั้ง 8 บทบาท (`citizen`, `lawyer`, `instructor`, `viewer`, `staff:content`, `staff:exam`, `staff:registrar`, `super_admin`)
+- **รายงานและ Audit Log (`/admin/reports`)**: ตรวจสอบบันทึกเหตุการณ์ความปลอดภัยแบบแก้ไขย้อนหลังไม่ได้ (Immutable Audit Log)
 
+---
+
+## 2. ความปลอดภัยและการเชื่อมต่อฐานข้อมูลผ่าน BFF API เท่านั้น (Secure-by-Default)
+
+- **ห้ามฝั่ง Client เข้าถึงฐานข้อมูลโดยตรง**: ทุกหน้าใน `app/` เรียกใช้งานข้อมูลผ่าน Next.js Route Handlers ภายใต้ `/api/v1/*` เท่านั้น:
+  - `GET / POST /api/v1/auth` — จัดการเซสชัน, การเข้าสู่ระบบแยกพอร์ทัล (`frontoffice` vs `backoffice`), และการยืนยันตัวตนสองชั้น (`verify_mfa` สู่ระดับ `aal2`)
+  - `GET /api/v1/catalog` — ข้อมูลหลักสูตรที่เผยแพร่แล้ว (`published`) สำหรับหน้าสาธารณะและแคตตาล็อกผู้เรียน
+  - `GET / POST /api/v1/learner` — API เฉพาะผู้เรียน (ตรวจสอบสิทธิ์การลงทะเบียน, บันทึกความคืบหน้าบทเรียน, สอบวัดผลและซ่อนคำตอบที่ถูกต้องระหว่างสอบตามกฎ RBAC §3.5, ยื่นใบอนุญาตว่าความ)
+  - `GET / POST /api/v1/backoffice` — API เฉพาะบุคลากรหลังบ้านและผู้สอน (บล็อกผู้เรียนทั่วไปด้วย `403 Forbidden`, ตรวจสอบสิทธิ์รายคำสั่งด้วย `verifyGuardPermission` และบังคับ `aal2` MFA)
+  - `GET /api/v1/verify` — API สาธารณะสำหรับตรวจสอบความถูกต้องของใบประกาศนียบัตรดิจิทัลโดยไม่เปิดเผย PII
+
+---
+
+## 3. การรันระบบและทดสอบ (Development & Verification)
+
+```bash
+# ติดตั้งแพ็กเกจ
+npm install
+
+# รันชุดทดสอบตรรกะโดเมน (RBAC, Exam Grading, Credit Bank Ledger, PDPA Redaction)
+node --experimental-strip-types --test lib/domain/ltc-logic.test.ts
+
+# รันเซิร์ฟเวอร์พัฒนา (พอร์ต 3000)
+npm run dev
+
+# ตรวจสอบการคอมไพล์ Production Build
+npm run build
 ```
-docs/
-├── 00-baseline/      # ขอบเขต + คำศัพท์ (source of truth)
-├── 01-management/    # Project Plan, Risk Register
-├── 02-requirements/  # SRS, RTM
-├── 03-design/        # SDS, Architecture, Data Dictionary
-├── 04-api-security/  # API Spec, RBAC, Audit Log Design
-├── 05-ui/            # Design System + UI Prototype
-└── 06-testing/       # Test Plan
-```
-
-สถานะโครงการและ wave board: `PROJECT-STATE.md`
-
-## กฎการทำงาน
-
-- Doc-first: เอกสารคือ source of truth — โค้ดขัดกับเอกสาร → ยื่น DCR ก่อนแก้
-- TypeScript strict, ข้อความผู้ใช้ Thai-first, Conventional Commits
-- ห้าม commit secrets, ห้าม log ข้อมูลส่วนบุคคลทุก environment
-- No fake completion — ทุก completion ต้องมี evidence
