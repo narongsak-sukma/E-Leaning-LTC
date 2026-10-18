@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build && cp -r .next dist",
+    "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit"
   },

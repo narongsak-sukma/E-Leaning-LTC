@@ -19,6 +19,7 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+  distDir: process.env.VERCEL ? 'dist' : '.next',
   output: process.env.VERCEL ? undefined : 'standalone',
   transpilePackages: ['motion'],
   webpack: (config, {dev}) => {
